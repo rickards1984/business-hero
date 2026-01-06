@@ -1,4 +1,5 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
+import { config } from "@/config/env";
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
@@ -7,12 +8,27 @@ async function throwIfResNotOk(res: Response) {
   }
 }
 
+/**
+ * Resolves a URL for backend API calls.
+ * If the URL starts with /v1/ or v1/, prepends the API base URL.
+ * Otherwise, returns the URL as-is (for relative URLs like /api/...).
+ */
+function resolveApiUrl(url: string): string {
+  if (url.startsWith("/v1/") || url.startsWith("v1/")) {
+    // Ensure we have the leading slash for proper URL construction
+    const path = url.startsWith("/") ? url : `/${url}`;
+    return `${config.apiBaseUrl}${path}`;
+  }
+  return url;
+}
+
 export async function apiRequest(
   method: string,
   url: string,
   data?: unknown | undefined,
 ): Promise<Response> {
-  const res = await fetch(url, {
+  const resolvedUrl = resolveApiUrl(url);
+  const res = await fetch(resolvedUrl, {
     method,
     headers: data ? { "Content-Type": "application/json" } : {},
     body: data ? JSON.stringify(data) : undefined,
@@ -29,7 +45,9 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const res = await fetch(queryKey.join("/") as string, {
+    const url = queryKey.join("/") as string;
+    const resolvedUrl = resolveApiUrl(url);
+    const res = await fetch(resolvedUrl, {
       credentials: "include",
     });
 
