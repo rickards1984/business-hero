@@ -1,4 +1,4 @@
-Frontend: wire Vite env vars + API base URL routing/**
+/**
  * Environment configuration module.
  * Centralizes all environment variable access with runtime validation.
  */
