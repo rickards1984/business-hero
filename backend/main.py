@@ -22,7 +22,8 @@ from schemas import (
     BriefingResponse, HealthResponse,
     ChatRequest, ChatResponse, ChatBusinessInfo,
     BusinessSettingsResponse, BusinessSettingsUpdate,
-    IntegrationResponse, IntegrationListResponse, IntegrationUpdate
+    IntegrationResponse, IntegrationListResponse, IntegrationUpdate,
+    LogoUploadResponse, LogoUpdateRequest
 )
 from auth import verify_master_key, get_current_business, get_access_token
 from openai_utils import generate_call_summary
