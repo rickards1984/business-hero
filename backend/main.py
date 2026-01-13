@@ -28,7 +28,44 @@ from schemas import (
 from auth import verify_master_key, get_current_business, get_access_token
 from openai_utils import generate_call_summary
 from supabase_auth import verify_supabase_token
-from assistant_chat import process_chat_message
+from assistant_chat import process_chat_message, get_business_for_user
+
+
+async def get_current_user_business(
+    token: str = Depends(get_access_token),
+    session: Session = Depends(get_session)
+) -> Business:
+    """Get current business from Supabase JWT token.
+    
+    For user-facing endpoints (dashboard, mobile app) that use Supabase auth.
+    Validates JWT and looks up user's business via business_members table.
+    """
+    user = await verify_supabase_token(token)
+    
+    try:
+        business_ctx = get_business_for_user(user.id)
+    except ValueError as e:
+        args = e.args
+        if len(args) >= 2:
+            error_type, message = args[0], args[1]
+            if error_type == "NO_BUSINESS":
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
+            elif error_type == "FORBIDDEN":
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=message)
+            elif error_type == "NOT_FOUND":
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    
+    statement = select(Business).where(Business.id == business_ctx.id)
+    business = session.exec(statement).first()
+    
+    if not business:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Business not found"
+        )
+    
+    return business
 
 
 @asynccontextmanager
@@ -219,7 +256,7 @@ async def list_businesses(session: Session = Depends(get_session)):
 
 
 @app.get("/v1/me", response_model=BusinessProfile, tags=["Business"])
-async def get_my_profile(business: Business = Depends(get_current_business)):
+async def get_my_profile(business: Business = Depends(get_current_user_business)):
     """Get current business profile."""
     return BusinessProfile(
         id=str(business.id),
@@ -231,7 +268,7 @@ async def get_my_profile(business: Business = Depends(get_current_business)):
 
 @app.get("/v1/business/settings", response_model=BusinessSettingsResponse, tags=["Business"])
 async def get_business_settings(
-    business: Business = Depends(get_current_business),
+    business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
     """Get business settings. Returns default empty settings if not yet created."""
@@ -260,7 +297,7 @@ async def get_business_settings(
 @app.put("/v1/business/settings", response_model=BusinessSettingsResponse, tags=["Business"])
 async def update_business_settings(
     data: BusinessSettingsUpdate,
-    business: Business = Depends(get_current_business),
+    business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
     """Update business settings. Creates settings if they don't exist."""
@@ -293,7 +330,7 @@ async def update_business_settings(
 
 @app.get("/v1/business/integrations", response_model=IntegrationListResponse, tags=["Business"])
 async def get_business_integrations(
-    business: Business = Depends(get_current_business),
+    business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
     """Get all integrations for the current business."""
@@ -320,7 +357,7 @@ async def get_business_integrations(
 async def update_business_integration(
     integration_type: str,
     data: IntegrationUpdate,
-    business: Business = Depends(get_current_business),
+    business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
     """Update or create an integration for the current business."""
@@ -363,10 +400,12 @@ async def update_business_integration(
 
 @app.post("/v1/business/logo/upload-url", response_model=LogoUploadResponse, tags=["Business"])
 async def get_logo_upload_url(
-    business: Business = Depends(get_current_business)
+    business: Business = Depends(get_current_user_business)
 ):
     """
     Generate a signed upload URL for business logo.
+    
+    Requires: Supabase JWT auth (Authorization: Bearer <access_token>)
     
     Note: The frontend should use Supabase Storage client directly to upload.
     This endpoint returns the path where the logo should be uploaded.
@@ -392,10 +431,13 @@ async def get_logo_upload_url(
 @app.put("/v1/business/logo", response_model=BusinessProfile, tags=["Business"])
 async def update_business_logo(
     data: LogoUpdateRequest,
-    business: Business = Depends(get_current_business),
+    business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
-    """Update the logo URL for the current business."""
+    """Update the logo URL for the current business.
+    
+    Requires: Supabase JWT auth (Authorization: Bearer <access_token>)
+    """
     business.logo_url = data.logo_url if data.logo_url else None
     session.add(business)
     session.commit()
@@ -412,7 +454,7 @@ async def update_business_logo(
 @app.post("/v1/tasks", response_model=TaskResponse, tags=["Tasks"])
 async def create_task(
     data: TaskCreate,
-    business: Business = Depends(get_current_business),
+    business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
     """Create a new task."""
@@ -448,7 +490,7 @@ async def list_tasks(
     due_before: Optional[datetime] = Query(None, description="Filter tasks due before this datetime"),
     due_after: Optional[datetime] = Query(None, description="Filter tasks due after this datetime"),
     limit: int = Query(50, le=100, description="Maximum number of tasks to return"),
-    business: Business = Depends(get_current_business),
+    business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
     """List tasks for the current business."""
@@ -484,7 +526,7 @@ async def list_tasks(
 @app.post("/v1/tasks/{task_id}/complete", response_model=TaskResponse, tags=["Tasks"])
 async def complete_task(
     task_id: str,
-    business: Business = Depends(get_current_business),
+    business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
     """Mark a task as done."""
@@ -518,7 +560,7 @@ async def complete_task(
 async def snooze_task(
     task_id: str,
     data: SnoozeRequest,
-    business: Business = Depends(get_current_business),
+    business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
     """Snooze a task. Provide either 'minutes' or 'until'."""
@@ -561,7 +603,7 @@ async def snooze_task(
 @app.post("/v1/calls", response_model=CallResponse, tags=["Calls"])
 async def create_call(
     data: CallCreate,
-    business: Business = Depends(get_current_business),
+    business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
     """
@@ -619,7 +661,7 @@ async def create_call(
 @app.get("/v1/calls", response_model=List[CallResponse], tags=["Calls"])
 async def list_calls(
     limit: int = Query(50, le=100, description="Maximum number of calls to return"),
-    business: Business = Depends(get_current_business),
+    business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
     """List recent call events for the current business."""
@@ -651,7 +693,7 @@ async def list_calls(
 
 @app.get("/v1/briefing/today", response_model=BriefingResponse, tags=["Briefing"])
 async def get_today_briefing(
-    business: Business = Depends(get_current_business),
+    business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
     """Get today's briefing including tasks and recent calls."""
