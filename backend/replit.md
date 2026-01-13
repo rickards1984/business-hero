@@ -66,10 +66,19 @@ A multi-tenant backend API for AI Admin Assistant built with FastAPI and Postgre
 - AI Assistant uses Supabase JWT auth (not API keys)
 
 ## Authentication
-Three methods supported depending on endpoint:
-- **Custom headers**: `x-master-key` / `x-api-key` headers (admin/business API)
-- **Bearer auth with API key**: `Authorization: Bearer <api_key>` (GPT Actions compatible)
-- **Bearer auth with Supabase JWT**: `Authorization: Bearer <access_token>` (Assistant chat)
+Two auth strategies based on endpoint type:
+
+**1. Supabase JWT (User-facing endpoints)**
+- Header: `Authorization: Bearer <supabase_access_token>`
+- For: Dashboard, mobile app, logged-in users
+- Routes: `/v1/me`, `/v1/business/*`, `/v1/tasks/*`, `/v1/calls/*`, `/v1/briefing/*`, `/v1/assistant/*`
+
+**2. Master Key (Admin endpoints)**
+- Header: `x-master-key: <MASTER_ADMIN_KEY>` or `Authorization: Bearer <master_key>`
+- For: Admin operations only
+- Routes: `/v1/admin/*`
+
+**API Key auth (`get_current_business`)** is available for webhook/external integrations but NOT used by default user endpoints.
 
 ## AI Assistant Chat
 - Endpoint: `POST /v1/assistant/chat`
