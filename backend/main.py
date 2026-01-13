@@ -14,13 +14,15 @@ from sqlmodel import Session, select
 import pytz
 
 from db import init_db, get_session
-from models import Business, Task, Call
+from models import Business, Task, Call, BusinessSettings, Integration
 from schemas import (
     BusinessCreate, BusinessResponse, BusinessListItem, BusinessProfile,
     TaskCreate, TaskResponse, SnoozeRequest,
     CallCreate, CallResponse,
     BriefingResponse, HealthResponse,
-    ChatRequest, ChatResponse, ChatBusinessInfo
+    ChatRequest, ChatResponse, ChatBusinessInfo,
+    BusinessSettingsResponse, BusinessSettingsUpdate,
+    IntegrationResponse, IntegrationListResponse, IntegrationUpdate
 )
 from auth import verify_master_key, get_current_business, get_access_token
 from openai_utils import generate_call_summary
@@ -189,7 +191,188 @@ async def get_my_profile(business: Business = Depends(get_current_business)):
     return BusinessProfile(
         id=str(business.id),
         name=business.name,
-        timezone=business.timezone
+        timezone=business.timezone,
+        logo_url=business.logo_url
+    )
+
+
+@app.get("/v1/business/settings", response_model=BusinessSettingsResponse, tags=["Business"])
+async def get_business_settings(
+    business: Business = Depends(get_current_business),
+    session: Session = Depends(get_session)
+):
+    """Get business settings. Returns default empty settings if not yet created."""
+    statement = select(BusinessSettings).where(BusinessSettings.business_id == business.id)
+    settings = session.exec(statement).first()
+    
+    if not settings:
+        # Return default settings if not found
+        return BusinessSettingsResponse(
+            id="",
+            business_id=str(business.id),
+            settings={},
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
+        )
+    
+    return BusinessSettingsResponse(
+        id=str(settings.id),
+        business_id=str(settings.business_id),
+        settings=settings.settings,
+        created_at=settings.created_at,
+        updated_at=settings.updated_at
+    )
+
+
+@app.put("/v1/business/settings", response_model=BusinessSettingsResponse, tags=["Business"])
+async def update_business_settings(
+    data: BusinessSettingsUpdate,
+    business: Business = Depends(get_current_business),
+    session: Session = Depends(get_session)
+):
+    """Update business settings. Creates settings if they don't exist."""
+    statement = select(BusinessSettings).where(BusinessSettings.business_id == business.id)
+    settings = session.exec(statement).first()
+    
+    if not settings:
+        # Create new settings
+        settings = BusinessSettings(
+            business_id=business.id,
+            settings=data.settings
+        )
+        session.add(settings)
+    else:
+        # Update existing settings
+        settings.settings = data.settings
+        settings.updated_at = datetime.utcnow()
+    
+    session.commit()
+    session.refresh(settings)
+    
+    return BusinessSettingsResponse(
+        id=str(settings.id),
+        business_id=str(settings.business_id),
+        settings=settings.settings,
+        created_at=settings.created_at,
+        updated_at=settings.updated_at
+    )
+
+
+@app.get("/v1/business/integrations", response_model=IntegrationListResponse, tags=["Business"])
+async def get_business_integrations(
+    business: Business = Depends(get_current_business),
+    session: Session = Depends(get_session)
+):
+    """Get all integrations for the current business."""
+    statement = select(Integration).where(Integration.business_id == business.id)
+    integrations = session.exec(statement).all()
+    
+    return IntegrationListResponse(
+        integrations=[
+            IntegrationResponse(
+                id=str(i.id),
+                business_id=str(i.business_id),
+                integration_type=i.integration_type,
+                is_enabled=i.is_enabled,
+                config=i.config,
+                created_at=i.created_at,
+                updated_at=i.updated_at
+            )
+            for i in integrations
+        ]
+    )
+
+
+@app.put("/v1/business/integrations/{integration_type}", response_model=IntegrationResponse, tags=["Business"])
+async def update_business_integration(
+    integration_type: str,
+    data: IntegrationUpdate,
+    business: Business = Depends(get_current_business),
+    session: Session = Depends(get_session)
+):
+    """Update or create an integration for the current business."""
+    statement = select(Integration).where(
+        Integration.business_id == business.id,
+        Integration.integration_type == integration_type
+    )
+    integration = session.exec(statement).first()
+    
+    if not integration:
+        # Create new integration
+        integration = Integration(
+            business_id=business.id,
+            integration_type=integration_type,
+            is_enabled=data.is_enabled if data.is_enabled is not None else False,
+            config=data.config if data.config is not None else {}
+        )
+        session.add(integration)
+    else:
+        # Update existing integration
+        if data.is_enabled is not None:
+            integration.is_enabled = data.is_enabled
+        if data.config is not None:
+            integration.config = data.config
+        integration.updated_at = datetime.utcnow()
+    
+    session.commit()
+    session.refresh(integration)
+    
+    return IntegrationResponse(
+        id=str(integration.id),
+        business_id=str(integration.business_id),
+        integration_type=integration.integration_type,
+        is_enabled=integration.is_enabled,
+        config=integration.config,
+        created_at=integration.created_at,
+        updated_at=integration.updated_at
+    )
+
+
+@app.post("/v1/business/logo/upload-url", response_model=LogoUploadResponse, tags=["Business"])
+async def get_logo_upload_url(
+    business: Business = Depends(get_current_business)
+):
+    """
+    Generate a signed upload URL for business logo.
+    
+    Note: The frontend should use Supabase Storage client directly to upload.
+    This endpoint returns the path where the logo should be uploaded.
+    The actual upload should be done via Supabase Storage client in the frontend.
+    """
+    import uuid
+    from datetime import datetime, timedelta
+    
+    # Generate unique filename: {business_id}/logo_{timestamp}.{ext}
+    # The extension will be determined by the frontend based on file type
+    timestamp = int(datetime.utcnow().timestamp())
+    logo_path = f"{business.id}/logo_{timestamp}"
+    
+    # Return the path - frontend will use Supabase Storage client to upload
+    # The signed URL generation is handled by Supabase client in the frontend
+    return LogoUploadResponse(
+        upload_url="",  # Frontend will generate this using Supabase client
+        logo_path=logo_path,
+        expires_at=datetime.utcnow() + timedelta(hours=1)
+    )
+
+
+@app.put("/v1/business/logo", response_model=BusinessProfile, tags=["Business"])
+async def update_business_logo(
+    data: LogoUpdateRequest,
+    business: Business = Depends(get_current_business),
+    session: Session = Depends(get_session)
+):
+    """Update the logo URL for the current business."""
+    business.logo_url = data.logo_url if data.logo_url else None
+    session.add(business)
+    session.commit()
+    session.refresh(business)
+    
+    return BusinessProfile(
+        id=str(business.id),
+        name=business.name,
+        timezone=business.timezone,
+        logo_url=business.logo_url
     )
 
 

@@ -1,0 +1,16 @@
+<svg width="200" height="60" viewBox="0 0 200 60" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#1976d2;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#42a5f5;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- Shield/Star Icon -->
+  <path d="M20 30 L30 10 L40 30 L30 25 L20 30 Z" fill="url(#gradient)" stroke="#1976d2" stroke-width="2"/>
+  <circle cx="30" cy="20" r="3" fill="#fff"/>
+  <!-- Text -->
+  <text x="50" y="25" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#1976d2">Business</text>
+  <text x="50" y="42" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#42a5f5">Hero</text>
+</svg>
+
+

@@ -20,6 +20,7 @@ export interface Business {
   name: string;
   timezone: string;
   api_key: string;
+  logo_url: string | null;
   created_at: string;
 }
 

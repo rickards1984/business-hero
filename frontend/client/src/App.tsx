@@ -7,6 +7,7 @@ import Login from '@/pages/Login';
 import AdminDashboard from '@/pages/AdminDashboard';
 import BusinessDashboard from '@/pages/BusinessDashboard';
 import ConfirmEmail from '@/pages/ConfirmEmail';
+import BrandingSettings from '@/pages/BrandingSettings';
 
 const theme = createTheme({
   palette: {
@@ -61,6 +62,7 @@ function App() {
               <Route path="/login" element={<Login />} />
               <Route path="/admin" element={<AdminDashboard />} />
               <Route path="/app" element={<BusinessDashboard />} />
+              <Route path="/app/settings/branding" element={<BrandingSettings />} />
               <Route path="/confirm" element={<ConfirmEmail />} />
               <Route path="/" element={<Navigate to="/login" replace />} />
               <Route path="*" element={<Navigate to="/login" replace />} />

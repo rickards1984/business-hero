@@ -1,7 +1,7 @@
 """Pydantic schemas for request/response models."""
 
 from datetime import datetime
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Dict
 from pydantic import BaseModel, Field
 
 
@@ -32,6 +32,19 @@ class BusinessProfile(BaseModel):
     id: str
     name: str
     timezone: str
+    logo_url: Optional[str] = None
+
+
+class LogoUploadResponse(BaseModel):
+    """Schema for logo upload URL response."""
+    upload_url: str
+    logo_path: str
+    expires_at: datetime
+
+
+class LogoUpdateRequest(BaseModel):
+    """Schema for updating business logo URL."""
+    logo_url: Optional[str] = None
 
 
 class TaskCreate(BaseModel):
@@ -135,3 +148,39 @@ class ChatResponse(BaseModel):
     business_id: str = Field(..., description="Business ID used for context")
     business: ChatBusinessInfo = Field(..., description="Business context details")
     conversation_id: Optional[str] = Field(None, description="Conversation ID")
+
+
+class BusinessSettingsResponse(BaseModel):
+    """Schema for business settings response."""
+    id: str
+    business_id: str
+    settings: Dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+class BusinessSettingsUpdate(BaseModel):
+    """Schema for updating business settings."""
+    settings: Dict[str, Any] = Field(..., description="Settings JSON object")
+
+
+class IntegrationResponse(BaseModel):
+    """Schema for integration response."""
+    id: str
+    business_id: str
+    integration_type: str
+    is_enabled: bool
+    config: Dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+class IntegrationListResponse(BaseModel):
+    """Schema for list of integrations."""
+    integrations: List[IntegrationResponse]
+
+
+class IntegrationUpdate(BaseModel):
+    """Schema for updating an integration."""
+    is_enabled: Optional[bool] = None
+    config: Optional[Dict[str, Any]] = None

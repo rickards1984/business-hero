@@ -127,15 +127,17 @@ export default function Login() {
           <Box
             sx={{
               display: 'flex',
+              flexDirection: 'column',
               alignItems: 'center',
-              gap: 1,
+              gap: 2,
               mb: 3,
             }}
           >
-            <BusinessIcon sx={{ fontSize: 40, color: 'primary.main' }} />
-            <Typography variant="h4" component="h1" fontWeight="bold">
-              Business Hero
-            </Typography>
+            <img
+              src="/business-hero-logo.svg"
+              alt="Business Hero"
+              style={{ height: '60px', width: 'auto' }}
+            />
           </Box>
 
           <Tabs

@@ -233,9 +233,18 @@ export default function BusinessDashboard() {
         ) : (
           <>
             <Paper sx={{ p: 3, mb: 3 }} elevation={1}>
-              <Typography variant="h5" gutterBottom>
-                Business Profile
-              </Typography>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h5">
+                  Business Profile
+                </Typography>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => navigate('/app/settings/branding')}
+                >
+                  Branding Settings
+                </Button>
+              </Box>
               <Divider sx={{ mb: 2 }} />
               <Grid container spacing={3}>
                 <Grid size={{ xs: 12, md: 4 }}>
