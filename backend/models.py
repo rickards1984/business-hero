@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from uuid import UUID
 from sqlmodel import SQLModel, Field, Relationship
-from sqlalchemy import Column
+from sqlalchemy import Column, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 import secrets
 
