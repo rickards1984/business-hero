@@ -130,13 +130,18 @@ export default function Login() {
               flexDirection: 'column',
               alignItems: 'center',
               gap: 2,
-              mb: 3,
+              mb: 4,
             }}
           >
             <img
-              src="/business-hero-logo.svg"
+              src="/business-hero-logo.jpg"
               alt="Business Hero"
-              style={{ height: '60px', width: 'auto' }}
+              style={{
+                maxWidth: '280px',
+                width: '100%',
+                height: 'auto',
+                objectFit: 'contain',
+              }}
             />
           </Box>
 
