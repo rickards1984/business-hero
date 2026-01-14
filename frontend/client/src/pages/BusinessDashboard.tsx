@@ -24,6 +24,7 @@ import {
   Tabs,
   Tab,
   Divider,
+  Avatar,
 } from '@mui/material';
 import {
   Business as BusinessIcon,
@@ -36,7 +37,29 @@ import {
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type Business, type Task, type Call, type BusinessMember } from '@/lib/supabase';
+import { useMe } from '@/hooks/useMe';
 import DebugPanel from '@/components/DebugPanel';
+
+/**
+ * Get the public URL for a logo path stored in Supabase Storage
+ */
+function getLogoUrl(logoPath: string | null): string | null {
+  if (!logoPath) return null;
+  const { data } = supabase.storage.from('logos').getPublicUrl(logoPath);
+  return data.publicUrl;
+}
+
+/**
+ * Get business initials from name
+ */
+function getBusinessInitials(name: string): string {
+  return name
+    .split(' ')
+    .map(word => word[0])
+    .join('')
+    .toUpperCase()
+    .slice(0, 2);
+}
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -56,6 +79,7 @@ function TabPanel(props: TabPanelProps) {
 export default function BusinessDashboard() {
   const navigate = useNavigate();
   const { user, signOut, loading: authLoading } = useAuth();
+  const { data: businessProfile, isLoading: profileLoading } = useMe();
   
   const [tabValue, setTabValue] = useState(0);
   const [membership, setMembership] = useState<BusinessMember | null>(null);
@@ -64,6 +88,8 @@ export default function BusinessDashboard() {
   const [calls, setCalls] = useState<Call[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  
+  const logoUrl = businessProfile?.logo_url ? getLogoUrl(businessProfile.logo_url) : null;
 
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
@@ -201,10 +227,36 @@ export default function BusinessDashboard() {
     <Box sx={{ minHeight: '100vh', bgcolor: 'grey.100' }}>
       <AppBar position="static">
         <Toolbar>
-          <BusinessIcon sx={{ mr: 1 }} />
-          <Typography variant="h6" sx={{ flexGrow: 1 }}>
-            {business?.name || 'Business Dashboard'}
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexGrow: 1 }}>
+            {logoUrl ? (
+              <img
+                src={logoUrl}
+                alt={businessProfile?.name || 'Business Logo'}
+                style={{
+                  height: '32px',
+                  width: 'auto',
+                  maxWidth: '120px',
+                  objectFit: 'contain',
+                }}
+              />
+            ) : businessProfile?.name ? (
+              <Avatar
+                sx={{
+                  width: 32,
+                  height: 32,
+                  bgcolor: 'primary.main',
+                  fontSize: '0.875rem',
+                }}
+              >
+                {getBusinessInitials(businessProfile.name)}
+              </Avatar>
+            ) : (
+              <BusinessIcon sx={{ mr: 1 }} />
+            )}
+            <Typography variant="h6">
+              {businessProfile?.name || business?.name || 'Business Dashboard'}
+            </Typography>
+          </Box>
           <Typography variant="body2" sx={{ mr: 2 }}>
             {user?.email}
           </Typography>
@@ -246,13 +298,48 @@ export default function BusinessDashboard() {
                 </Button>
               </Box>
               <Divider sx={{ mb: 2 }} />
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
+                {logoUrl ? (
+                  <img
+                    src={logoUrl}
+                    alt={businessProfile?.name || business?.name || 'Business Logo'}
+                    style={{
+                      height: '64px',
+                      width: 'auto',
+                      maxWidth: '200px',
+                      objectFit: 'contain',
+                    }}
+                  />
+                ) : businessProfile?.name || business?.name ? (
+                  <Avatar
+                    sx={{
+                      width: 64,
+                      height: 64,
+                      bgcolor: 'primary.main',
+                      fontSize: '1.5rem',
+                    }}
+                  >
+                    {getBusinessInitials(businessProfile?.name || business?.name || '')}
+                  </Avatar>
+                ) : (
+                  <BusinessIcon sx={{ fontSize: 64, color: 'text.disabled' }} />
+                )}
+                <Box>
+                  <Typography variant="h6" data-testid="text-business-name">
+                    {businessProfile?.name || business.name}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Business Logo
+                  </Typography>
+                </Box>
+              </Box>
               <Grid container spacing={3}>
                 <Grid size={{ xs: 12, md: 4 }}>
                   <Typography variant="caption" color="text.secondary" display="block">
                     Business Name
                   </Typography>
-                  <Typography variant="body1" fontWeight="medium" data-testid="text-business-name">
-                    {business.name}
+                  <Typography variant="body1" fontWeight="medium">
+                    {businessProfile?.name || business.name}
                   </Typography>
                 </Grid>
                 <Grid size={{ xs: 12, md: 4 }}>
