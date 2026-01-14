@@ -7,14 +7,18 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Request, status
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlmodel import Session, select
 import pytz
+import csv
+import io
+from datetime import date as date_type
+from decimal import Decimal
 
 from db import init_db, get_session
-from models import Business, Task, Call, BusinessSettings, Integration
+from models import Business, Task, Call, BusinessSettings, Integration, Invoice
 from schemas import (
     BusinessCreate, BusinessResponse, BusinessListItem, BusinessProfile,
     TaskCreate, TaskResponse, SnoozeRequest,
@@ -23,7 +27,8 @@ from schemas import (
     ChatRequest, ChatResponse, ChatBusinessInfo,
     BusinessSettingsResponse, BusinessSettingsUpdate,
     IntegrationResponse, IntegrationListResponse, IntegrationUpdate,
-    LogoUploadResponse, LogoUpdateRequest
+    LogoUploadResponse, LogoUpdateRequest,
+    Invoice as InvoiceSchema, InvoiceListResponse, ImportResponse, ChaseDraftResponse
 )
 from auth import verify_master_key, get_current_business, get_access_token
 from openai_utils import generate_call_summary
@@ -822,6 +827,367 @@ async def assistant_chat(
             timezone=result["business"]["timezone"]
         ),
         conversation_id=result.get("conversation_id")
+    )
+
+
+# ============================================================================
+# INVOICE ENDPOINTS
+# ============================================================================
+
+def normalize_column_name(name: str) -> str:
+    """Normalize CSV column names for matching."""
+    return name.lower().strip().replace('_', '').replace('-', '').replace(' ', '')
+
+
+def parse_date(value: str) -> Optional[date_type]:
+    """Parse date from string, trying common formats."""
+    if not value or not value.strip():
+        return None
+    value = value.strip()
+    formats = ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%Y/%m/%d', '%d-%m-%Y', '%m-%d-%Y']
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def parse_amount(value: str) -> Optional[float]:
+    """Parse amount from string, removing currency symbols."""
+    if not value or not value.strip():
+        return None
+    value = value.strip().replace('£', '').replace('$', '').replace(',', '').replace('€', '')
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+@app.get("/v1/invoices", response_model=InvoiceListResponse, tags=["Invoices"])
+async def list_invoices(
+    status: Optional[str] = Query(default="unpaid", description="Filter by status"),
+    overdue: Optional[bool] = Query(default=None, description="Filter overdue invoices"),
+    limit: int = Query(default=50, ge=1, le=500, description="Maximum number of invoices to return"),
+    business: Business = Depends(get_current_user_business),
+    session: Session = Depends(get_session)
+):
+    """List invoices for the current business.
+    
+    Authentication: Bearer token (Supabase access token) in Authorization header.
+    """
+    from datetime import date as date_type
+    
+    statement = select(Invoice).where(Invoice.business_id == business.id)
+    
+    if status:
+        statement = statement.where(Invoice.status == status)
+    
+    if overdue is True:
+        today = date_type.today()
+        statement = statement.where(Invoice.due_date < today).where(Invoice.status != 'paid')
+    elif overdue is False:
+        today = date_type.today()
+        statement = statement.where(
+            (Invoice.due_date >= today) | (Invoice.status == 'paid')
+        )
+    
+    statement = statement.order_by(Invoice.due_date.asc()).limit(limit)
+    
+    invoices = session.exec(statement).all()
+    
+    def invoice_to_response(inv: Invoice) -> InvoiceSchema:
+        return InvoiceSchema(
+            id=str(inv.id),
+            business_id=str(inv.business_id),
+            invoice_number=inv.invoice_number,
+            customer_name=inv.customer_name,
+            customer_email=inv.customer_email,
+            issue_date=inv.issue_date,
+            due_date=inv.due_date,
+            amount=float(inv.amount),
+            currency=inv.currency,
+            status=inv.status,
+            paid_date=inv.paid_date,
+            last_chased_at=inv.last_chased_at,
+            chase_stage=inv.chase_stage,
+            source=inv.source,
+            source_ref=inv.source_ref,
+            created_at=inv.created_at,
+            updated_at=inv.updated_at
+        )
+    
+    return InvoiceListResponse(
+        invoices=[invoice_to_response(inv) for inv in invoices],
+        total=len(invoices)
+    )
+
+
+@app.post("/v1/invoices/import/csv", response_model=ImportResponse, tags=["Invoices"])
+async def import_invoices_csv(
+    file: UploadFile = File(...),
+    business: Business = Depends(get_current_user_business),
+    session: Session = Depends(get_session)
+):
+    """Import invoices from CSV file.
+    
+    Authentication: Bearer token (Supabase access token) in Authorization header.
+    
+    CSV should have headers. Common column names are automatically mapped:
+    - invoice_number, invoice, invoice_no, inv_number
+    - customer_name, customer, client_name, client
+    - customer_email, email, client_email
+    - issue_date, issued_date, date_issued
+    - due_date, due, payment_due
+    - amount, total, invoice_amount
+    - status, payment_status
+    """
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="File must be a CSV")
+    
+    content = await file.read()
+    text_content = content.decode('utf-8-sig')  # Handle BOM
+    reader = csv.DictReader(io.StringIO(text_content))
+    
+    # Map common column names
+    column_map = {}
+    for col in reader.fieldnames or []:
+        normalized = normalize_column_name(col)
+        if normalized in ['invoicenumber', 'invoice', 'invoiceno', 'invnumber']:
+            column_map['invoice_number'] = col
+        elif normalized in ['customername', 'customer', 'clientname', 'client']:
+            column_map['customer_name'] = col
+        elif normalized in ['customeremail', 'email', 'clientemail']:
+            column_map['customer_email'] = col
+        elif normalized in ['issuedate', 'issueddate', 'dateissued']:
+            column_map['issue_date'] = col
+        elif normalized in ['duedate', 'due', 'paymentdue']:
+            column_map['due_date'] = col
+        elif normalized in ['amount', 'total', 'invoiceamount']:
+            column_map['amount'] = col
+        elif normalized in ['status', 'paymentstatus']:
+            column_map['status'] = col
+    
+    if 'invoice_number' not in column_map or 'due_date' not in column_map or 'amount' not in column_map:
+        raise HTTPException(
+            status_code=400,
+            detail="CSV must contain invoice_number, due_date, and amount columns"
+        )
+    
+    imported = 0
+    updated = 0
+    errors = []
+    
+    for row_num, row in enumerate(reader, start=2):  # Start at 2 (header is row 1)
+        try:
+            invoice_number = row.get(column_map.get('invoice_number', ''), '').strip()
+            if not invoice_number:
+                errors.append(f"Row {row_num}: Missing invoice_number")
+                continue
+            
+            customer_name = row.get(column_map.get('customer_name', ''), '').strip()
+            if not customer_name:
+                errors.append(f"Row {row_num}: Missing customer_name")
+                continue
+            
+            customer_email = row.get(column_map.get('customer_email', ''), '').strip() or None
+            issue_date = parse_date(row.get(column_map.get('issue_date', ''), ''))
+            due_date = parse_date(row.get(column_map.get('due_date', ''), ''))
+            if not due_date:
+                errors.append(f"Row {row_num}: Invalid or missing due_date")
+                continue
+            
+            amount = parse_amount(row.get(column_map.get('amount', ''), ''))
+            if amount is None:
+                errors.append(f"Row {row_num}: Invalid or missing amount")
+                continue
+            
+            status = row.get(column_map.get('status', ''), '').strip().lower() or 'unpaid'
+            if status not in ['paid', 'unpaid', 'overdue', 'cancelled']:
+                status = 'unpaid'
+            
+            # Check if invoice exists
+            existing = session.exec(
+                select(Invoice).where(
+                    Invoice.business_id == business.id,
+                    Invoice.invoice_number == invoice_number
+                )
+            ).first()
+            
+            if existing:
+                # Update existing
+                existing.customer_name = customer_name
+                existing.customer_email = customer_email
+                existing.issue_date = issue_date
+                existing.due_date = due_date
+                existing.amount = Decimal(str(amount))
+                existing.status = status
+                existing.source = 'csv'
+                session.add(existing)
+                updated += 1
+            else:
+                # Create new
+                invoice = Invoice(
+                    business_id=business.id,
+                    invoice_number=invoice_number,
+                    customer_name=customer_name,
+                    customer_email=customer_email,
+                    issue_date=issue_date,
+                    due_date=due_date,
+                    amount=Decimal(str(amount)),
+                    currency='GBP',
+                    status=status,
+                    source='csv'
+                )
+                session.add(invoice)
+                imported += 1
+        except Exception as e:
+            errors.append(f"Row {row_num}: {str(e)}")
+    
+    session.commit()
+    
+    return ImportResponse(imported=imported, updated=updated, errors=errors)
+
+
+@app.post("/v1/invoices/{invoice_id}/mark-chased", response_model=InvoiceSchema, tags=["Invoices"])
+async def mark_invoice_chased(
+    invoice_id: str,
+    business: Business = Depends(get_current_user_business),
+    session: Session = Depends(get_session)
+):
+    """Mark an invoice as chased (increment chase stage and update last_chased_at).
+    
+    Authentication: Bearer token (Supabase access token) in Authorization header.
+    """
+    invoice = session.exec(
+        select(Invoice).where(
+            Invoice.id == invoice_id,
+            Invoice.business_id == business.id
+        )
+    ).first()
+    
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    
+    invoice.last_chased_at = datetime.utcnow()
+    invoice.chase_stage = invoice.chase_stage + 1
+    
+    session.add(invoice)
+    session.commit()
+    session.refresh(invoice)
+    
+    return InvoiceSchema(
+        id=str(invoice.id),
+        business_id=str(invoice.business_id),
+        invoice_number=invoice.invoice_number,
+        customer_name=invoice.customer_name,
+        customer_email=invoice.customer_email,
+        issue_date=invoice.issue_date,
+        due_date=invoice.due_date,
+        amount=float(invoice.amount),
+        currency=invoice.currency,
+        status=invoice.status,
+        paid_date=invoice.paid_date,
+        last_chased_at=invoice.last_chased_at,
+        chase_stage=invoice.chase_stage,
+        source=invoice.source,
+        source_ref=invoice.source_ref,
+        created_at=invoice.created_at,
+        updated_at=invoice.updated_at
+    )
+
+
+@app.post("/v1/invoices/{invoice_id}/chase-draft", response_model=ChaseDraftResponse, tags=["Invoices"])
+async def get_chase_draft(
+    invoice_id: str,
+    business: Business = Depends(get_current_user_business),
+    session: Session = Depends(get_session)
+):
+    """Get email draft for chasing an invoice.
+    
+    Authentication: Bearer token (Supabase access token) in Authorization header.
+    
+    Returns email subject and body based on chase stage (0-3).
+    Does NOT send the email.
+    """
+    invoice = session.exec(
+        select(Invoice).where(
+            Invoice.id == invoice_id,
+            Invoice.business_id == business.id
+        )
+    ).first()
+    
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    
+    stage = min(invoice.chase_stage, 3)  # Cap at stage 3
+    
+    # Email templates based on stage
+    templates = {
+        0: {
+            'subject': f'Payment Reminder: Invoice {invoice.invoice_number}',
+            'body': f'''Dear {invoice.customer_name},
+
+This is a friendly reminder that payment for invoice {invoice.invoice_number} in the amount of {invoice.currency} {invoice.amount:.2f} is now due.
+
+Please arrange payment at your earliest convenience.
+
+Thank you for your business.
+
+Best regards,
+{business.name}'''
+        },
+        1: {
+            'subject': f'Second Notice: Invoice {invoice.invoice_number} - Payment Overdue',
+            'body': f'''Dear {invoice.customer_name},
+
+We have not yet received payment for invoice {invoice.invoice_number} in the amount of {invoice.currency} {invoice.amount:.2f}, which was due on {invoice.due_date.strftime("%d %B %Y")}.
+
+Please arrange payment immediately to avoid further action.
+
+If you have already made payment, please disregard this notice.
+
+Best regards,
+{business.name}'''
+        },
+        2: {
+            'subject': f'Final Notice: Invoice {invoice.invoice_number} - Urgent Payment Required',
+            'body': f'''Dear {invoice.customer_name},
+
+This is our final notice regarding invoice {invoice.invoice_number} in the amount of {invoice.currency} {invoice.amount:.2f}, which is now significantly overdue.
+
+Payment was due on {invoice.due_date.strftime("%d %B %Y")} and we have not received payment despite previous reminders.
+
+Please arrange payment immediately. If payment is not received within 7 days, we may need to take further action.
+
+If you have any queries or concerns, please contact us immediately.
+
+Best regards,
+{business.name}'''
+        },
+        3: {
+            'subject': f'URGENT: Invoice {invoice.invoice_number} - Immediate Payment Required',
+            'body': f'''Dear {invoice.customer_name},
+
+This is an urgent final notice regarding invoice {invoice.invoice_number} in the amount of {invoice.currency} {invoice.amount:.2f}.
+
+This invoice is now {invoice.due_date.strftime("%d %B %Y")} days overdue and we have sent multiple reminders without response.
+
+We require immediate payment. If payment is not received within 3 business days, we will have no choice but to escalate this matter, which may include legal action.
+
+Please contact us immediately to discuss payment arrangements.
+
+Best regards,
+{business.name}'''
+        }
+    }
+    
+    template = templates[stage]
+    
+    return ChaseDraftResponse(
+        subject=template['subject'],
+        body=template['body'],
+        chase_stage=invoice.chase_stage
     )
 
 

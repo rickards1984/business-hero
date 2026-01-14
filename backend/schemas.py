@@ -1,6 +1,6 @@
 """Pydantic schemas for request/response models."""
 
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, Any, List, Dict
 from pydantic import BaseModel, Field
 
@@ -184,3 +184,44 @@ class IntegrationUpdate(BaseModel):
     """Schema for updating an integration."""
     is_enabled: Optional[bool] = None
     config: Optional[Dict[str, Any]] = None
+
+
+class Invoice(BaseModel):
+    """Schema for invoice response."""
+    id: str
+    business_id: str
+    invoice_number: str
+    customer_name: str
+    customer_email: Optional[str] = None
+    issue_date: Optional[date] = None
+    due_date: date
+    amount: float
+    currency: str
+    status: str
+    paid_date: Optional[date] = None
+    last_chased_at: Optional[datetime] = None
+    chase_stage: int
+    source: str
+    source_ref: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class InvoiceListResponse(BaseModel):
+    """Schema for list of invoices."""
+    invoices: List[Invoice]
+    total: int
+
+
+class ImportResponse(BaseModel):
+    """Schema for CSV import response."""
+    imported: int
+    updated: int
+    errors: List[str] = Field(default_factory=list)
+
+
+class ChaseDraftResponse(BaseModel):
+    """Schema for chase email draft response."""
+    subject: str
+    body: str
+    chase_stage: int

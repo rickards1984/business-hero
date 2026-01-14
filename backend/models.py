@@ -1,11 +1,11 @@
 """SQLModel database models for AI Admin Assistant."""
 
 import uuid as uuid_module
-from datetime import datetime
+from datetime import datetime, date, date
 from typing import Optional, Dict, Any
 from uuid import UUID
 from sqlmodel import SQLModel, Field, Relationship
-from sqlalchemy import Column, UniqueConstraint
+from sqlalchemy import Column, UniqueConstraint, Date, Numeric
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 import secrets
 
@@ -146,6 +146,37 @@ class OAuthToken(SQLModel, table=True):
     expires_at: Optional[datetime] = None
     token_type: str = Field(default="Bearer", max_length=50)
     scope: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    business: Optional[Business] = Relationship()
+
+
+class Invoice(SQLModel, table=True):
+    """Invoice entity - for invoice chasing functionality."""
+    __tablename__ = "invoices"
+    __table_args__ = (
+        UniqueConstraint('business_id', 'invoice_number', name='uq_invoice_business_number'),
+    )
+    
+    id: UUID = Field(
+        default_factory=generate_uuid,
+        sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid)
+    )
+    business_id: UUID = Field(foreign_key="businesses.id", index=True)
+    invoice_number: str = Field(index=True)
+    customer_name: str
+    customer_email: Optional[str] = None
+    issue_date: Optional[date] = Field(default=None, sa_column=Column(Date))
+    due_date: date = Field(sa_column=Column(Date))
+    amount: float = Field(sa_column=Column(Numeric(12, 2)))
+    currency: str = Field(default="GBP")
+    status: str = Field(default="unpaid", index=True)
+    paid_date: Optional[date] = Field(default=None, sa_column=Column(Date))
+    last_chased_at: Optional[datetime] = None
+    chase_stage: int = Field(default=0)
+    source: str = Field(default="csv")
+    source_ref: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     

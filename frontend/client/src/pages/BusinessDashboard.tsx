@@ -25,6 +25,17 @@ import {
   Tab,
   Divider,
   Avatar,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Drawer,
+  List,
+  ListItem,
+  ListItemText,
+  Snackbar,
 } from '@mui/material';
 import {
   Business as BusinessIcon,
@@ -34,10 +45,17 @@ import {
   CheckCircle as CheckCircleIcon,
   Logout as LogoutIcon,
   AccessTime as AccessTimeIcon,
+  Receipt as ReceiptIcon,
+  CloudUpload as CloudUploadIcon,
+  Email as EmailIcon,
+  CheckCircleOutline as CheckCircleOutlineIcon,
+  Close as CloseIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type Business, type Task, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
 import { useMe } from '@/hooks/useMe';
+import { apiRequest } from '@/lib/queryClient';
+import { config } from '@/config/env';
 import DebugPanel from '@/components/DebugPanel';
 
 /**
@@ -86,6 +104,31 @@ export default function BusinessDashboard() {
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDescription, setTaskDescription] = useState('');
   const [savingTask, setSavingTask] = useState(false);
+
+  // Invoice state
+  interface Invoice {
+    id: string;
+    invoice_number: string;
+    customer_name: string;
+    customer_email: string | null;
+    issue_date: string | null;
+    due_date: string;
+    amount: number;
+    currency: string;
+    status: string;
+    paid_date: string | null;
+    last_chased_at: string | null;
+    chase_stage: number;
+    source: string;
+    source_ref: string | null;
+  }
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [invoicesLoading, setInvoicesLoading] = useState(false);
+  const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
+  const [invoiceDrawerOpen, setInvoiceDrawerOpen] = useState(false);
+  const [chaseDraft, setChaseDraft] = useState<{ subject: string; body: string; chase_stage: number } | null>(null);
+  const [csvUploading, setCsvUploading] = useState(false);
+  const [successMessage, setSuccessMessage] = useState('');
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -205,6 +248,98 @@ export default function BusinessDashboard() {
     await signOut();
     navigate('/login');
   };
+
+  // Invoice functions
+  const fetchInvoices = async () => {
+    if (!business) return;
+    setInvoicesLoading(true);
+    try {
+      const response = await apiRequest('GET', `/v1/invoices?status=unpaid&overdue=true`);
+      const data = await response.json();
+      setInvoices(data.invoices || []);
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch invoices');
+    } finally {
+      setInvoicesLoading(false);
+    }
+  };
+
+  const handleCsvUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !business) return;
+
+    setCsvUploading(true);
+    setError('');
+    setSuccessMessage('');
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch(`${config.apiBaseUrl}/v1/invoices/import/csv`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}`,
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to import CSV');
+      }
+
+      const result = await response.json();
+      setSuccessMessage(`Successfully imported ${result.imported} invoices, updated ${result.updated} invoices`);
+      
+      // Refetch invoices
+      await fetchInvoices();
+      
+      // Clear file input
+      e.target.value = '';
+    } catch (err: any) {
+      setError(err.message || 'Failed to upload CSV');
+    } finally {
+      setCsvUploading(false);
+    }
+  };
+
+  const handleInvoiceClick = (invoice: Invoice) => {
+    setSelectedInvoice(invoice);
+    setInvoiceDrawerOpen(true);
+    setChaseDraft(null);
+  };
+
+  const handleGetChaseDraft = async () => {
+    if (!selectedInvoice) return;
+    try {
+      const response = await apiRequest('POST', `/v1/invoices/${selectedInvoice.id}/chase-draft`);
+      const data = await response.json();
+      setChaseDraft(data);
+    } catch (err: any) {
+      setError(err.message || 'Failed to get chase draft');
+    }
+  };
+
+  const handleMarkChased = async () => {
+    if (!selectedInvoice) return;
+    try {
+      const response = await apiRequest('POST', `/v1/invoices/${selectedInvoice.id}/mark-chased`);
+      const data = await response.json();
+      setSelectedInvoice(data);
+      await fetchInvoices();
+      setSuccessMessage('Invoice marked as chased');
+    } catch (err: any) {
+      setError(err.message || 'Failed to mark invoice as chased');
+    }
+  };
+
+  // Fetch invoices when invoices tab is selected
+  useEffect(() => {
+    if (tabValue === 2 && business) {
+      fetchInvoices();
+    }
+  }, [tabValue, business]);
 
   if (authLoading || loading) {
     return (
@@ -404,6 +539,12 @@ export default function BusinessDashboard() {
                     label={`Calls (${calls.length})`}
                     data-testid="tab-calls"
                   />
+                  <Tab
+                    icon={<ReceiptIcon />}
+                    iconPosition="start"
+                    label={`Invoices (${invoices.length})`}
+                    data-testid="tab-invoices"
+                  />
                 </Tabs>
               </Box>
 
@@ -507,10 +648,215 @@ export default function BusinessDashboard() {
                   </Grid>
                 )}
               </TabPanel>
+
+              <TabPanel value={tabValue} index={2}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+                  <Box sx={{ display: 'flex', gap: 2 }}>
+                    <Card variant="outlined" sx={{ p: 2, minWidth: 150 }}>
+                      <Typography variant="caption" color="text.secondary">Overdue</Typography>
+                      <Typography variant="h5" color="error">
+                        {invoices.filter(inv => new Date(inv.due_date) < new Date() && inv.status !== 'paid').length}
+                      </Typography>
+                    </Card>
+                    <Card variant="outlined" sx={{ p: 2, minWidth: 150 }}>
+                      <Typography variant="caption" color="text.secondary">Due in 7 days</Typography>
+                      <Typography variant="h5" color="warning.main">
+                        {invoices.filter(inv => {
+                          const dueDate = new Date(inv.due_date);
+                          const today = new Date();
+                          const daysDiff = Math.ceil((dueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+                          return daysDiff >= 0 && daysDiff <= 7 && inv.status !== 'paid';
+                        }).length}
+                      </Typography>
+                    </Card>
+                    <Card variant="outlined" sx={{ p: 2, minWidth: 150 }}>
+                      <Typography variant="caption" color="text.secondary">Unpaid Total</Typography>
+                      <Typography variant="h5">
+                        {invoices
+                          .filter(inv => inv.status !== 'paid')
+                          .reduce((sum, inv) => sum + inv.amount, 0)
+                          .toLocaleString('en-GB', { style: 'currency', currency: 'GBP' })}
+                      </Typography>
+                    </Card>
+                  </Box>
+                  <input
+                    accept=".csv"
+                    style={{ display: 'none' }}
+                    id="csv-upload-input"
+                    type="file"
+                    onChange={handleCsvUpload}
+                    disabled={csvUploading}
+                  />
+                  <label htmlFor="csv-upload-input">
+                    <Button
+                      variant="contained"
+                      component="span"
+                      startIcon={csvUploading ? <CircularProgress size={20} /> : <CloudUploadIcon />}
+                      disabled={csvUploading}
+                    >
+                      {csvUploading ? 'Uploading...' : 'Upload CSV'}
+                    </Button>
+                  </label>
+                </Box>
+
+                {invoicesLoading ? (
+                  <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+                    <CircularProgress />
+                  </Box>
+                ) : invoices.length === 0 ? (
+                  <Box sx={{ textAlign: 'center', py: 4 }}>
+                    <ReceiptIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
+                    <Typography color="text.secondary">No invoices found</Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                      Upload a CSV file to import invoices
+                    </Typography>
+                  </Box>
+                ) : (
+                  <TableContainer>
+                    <Table>
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Invoice #</TableCell>
+                          <TableCell>Customer</TableCell>
+                          <TableCell>Due Date</TableCell>
+                          <TableCell align="right">Amount</TableCell>
+                          <TableCell>Status</TableCell>
+                          <TableCell>Chase Stage</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {invoices.map((invoice) => (
+                          <TableRow
+                            key={invoice.id}
+                            hover
+                            onClick={() => handleInvoiceClick(invoice)}
+                            sx={{ cursor: 'pointer' }}
+                          >
+                            <TableCell>{invoice.invoice_number}</TableCell>
+                            <TableCell>{invoice.customer_name}</TableCell>
+                            <TableCell>{new Date(invoice.due_date).toLocaleDateString()}</TableCell>
+                            <TableCell align="right">
+                              {invoice.amount.toLocaleString('en-GB', { style: 'currency', currency: invoice.currency || 'GBP' })}
+                            </TableCell>
+                            <TableCell>
+                              <Chip
+                                label={invoice.status}
+                                size="small"
+                                color={invoice.status === 'paid' ? 'success' : invoice.status === 'overdue' ? 'error' : 'warning'}
+                              />
+                            </TableCell>
+                            <TableCell>{invoice.chase_stage}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                )}
+              </TabPanel>
             </Paper>
           </>
         )}
       </Container>
+
+      {/* Invoice Detail Drawer */}
+      <Drawer
+        anchor="right"
+        open={invoiceDrawerOpen}
+        onClose={() => {
+          setInvoiceDrawerOpen(false);
+          setSelectedInvoice(null);
+          setChaseDraft(null);
+        }}
+        PaperProps={{ sx: { width: { xs: '100%', sm: 500 } } }}
+      >
+        {selectedInvoice && (
+          <Box sx={{ p: 3 }}>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+              <Typography variant="h6">Invoice Details</Typography>
+              <IconButton onClick={() => setInvoiceDrawerOpen(false)}>
+                <CloseIcon />
+              </IconButton>
+            </Box>
+            
+            <Divider sx={{ mb: 2 }} />
+            
+            <List>
+              <ListItem>
+                <ListItemText primary="Invoice Number" secondary={selectedInvoice.invoice_number} />
+              </ListItem>
+              <ListItem>
+                <ListItemText primary="Customer" secondary={selectedInvoice.customer_name} />
+              </ListItem>
+              {selectedInvoice.customer_email && (
+                <ListItem>
+                  <ListItemText primary="Email" secondary={selectedInvoice.customer_email} />
+                </ListItem>
+              )}
+              <ListItem>
+                <ListItemText primary="Due Date" secondary={new Date(selectedInvoice.due_date).toLocaleDateString()} />
+              </ListItem>
+              <ListItem>
+                <ListItemText 
+                  primary="Amount" 
+                  secondary={selectedInvoice.amount.toLocaleString('en-GB', { style: 'currency', currency: selectedInvoice.currency || 'GBP' })} 
+                />
+              </ListItem>
+              <ListItem>
+                <ListItemText primary="Status" secondary={selectedInvoice.status} />
+              </ListItem>
+              <ListItem>
+                <ListItemText primary="Chase Stage" secondary={selectedInvoice.chase_stage} />
+              </ListItem>
+              {selectedInvoice.last_chased_at && (
+                <ListItem>
+                  <ListItemText 
+                    primary="Last Chased" 
+                    secondary={new Date(selectedInvoice.last_chased_at).toLocaleString()} 
+                  />
+                </ListItem>
+              )}
+            </List>
+
+            <Divider sx={{ my: 2 }} />
+
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <Button
+                variant="outlined"
+                startIcon={<EmailIcon />}
+                onClick={handleGetChaseDraft}
+                fullWidth
+              >
+                Draft Email (Stage {Math.min(selectedInvoice.chase_stage + 1, 4)})
+              </Button>
+              
+              <Button
+                variant="contained"
+                startIcon={<CheckCircleOutlineIcon />}
+                onClick={handleMarkChased}
+                fullWidth
+              >
+                Mark Chased
+              </Button>
+            </Box>
+
+            {chaseDraft && (
+              <Box sx={{ mt: 3, p: 2, bgcolor: 'grey.100', borderRadius: 1 }}>
+                <Typography variant="subtitle2" gutterBottom>Email Draft:</Typography>
+                <Typography variant="body2" fontWeight="bold" gutterBottom>{chaseDraft.subject}</Typography>
+                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{chaseDraft.body}</Typography>
+              </Box>
+            )}
+          </Box>
+        )}
+      </Drawer>
+
+      {/* Success Snackbar */}
+      <Snackbar
+        open={!!successMessage}
+        autoHideDuration={6000}
+        onClose={() => setSuccessMessage('')}
+        message={successMessage}
+      />
 
       <Dialog open={taskDialogOpen} onClose={() => setTaskDialogOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Create Task</DialogTitle>
