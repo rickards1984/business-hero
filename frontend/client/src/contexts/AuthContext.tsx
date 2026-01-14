@@ -35,17 +35,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return false;
       }
       
+      // Use maybeSingle() instead of single() to avoid 406 errors when no rows exist
       const { data, error } = await supabase
         .from('platform_admins')
         .select('user_id')
         .eq('user_id', currentUser.id)
-        .single();
+        .maybeSingle();
       
-      console.log('Admin check result:', { userId: currentUser.id, data, error });
-      
+      // maybeSingle() returns null for data when no rows found (no error)
+      // Only treat it as an error if there's an actual error (not a 406)
       const adminStatus = !error && !!data;
       setIsAdmin(adminStatus);
       return adminStatus;
+    } catch (err) {
+      // Handle any unexpected errors gracefully
+      setIsAdmin(false);
+      return false;
     } finally {
       setAdminLoading(false);
     }

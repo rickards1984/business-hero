@@ -13,10 +13,9 @@ import {
 } from '@mui/material';
 import { ArrowBack, CloudUpload, Delete } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase } from '@/lib/supabase';
+import { supabase, resolveLogoSrc, type Business } from '@/lib/supabase';
 import { apiRequest } from '@/lib/queryClient';
 import { config } from '@/config/env';
-import type { Business } from '@/lib/supabase';
 
 export default function BrandingSettings() {
   const navigate = useNavigate();
@@ -59,26 +58,13 @@ export default function BrandingSettings() {
 
       // Load preview if logo exists
       if (businessData.logo_url) {
-        loadLogoPreview(businessData.logo_url);
+        const resolvedUrl = resolveLogoSrc(businessData.logo_url);
+        setPreviewUrl(resolvedUrl);
       }
     } catch (err: any) {
       setError(err.message || 'Failed to fetch business data');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const loadLogoPreview = async (logoUrl: string) => {
-    try {
-      // If it's a Supabase Storage URL, get public URL
-      if (logoUrl.startsWith('logos/')) {
-        const { data } = supabase.storage.from('logos').getPublicUrl(logoUrl);
-        setPreviewUrl(data.publicUrl);
-      } else {
-        setPreviewUrl(logoUrl);
-      }
-    } catch (err) {
-      console.error('Failed to load logo preview:', err);
     }
   };
 

@@ -36,18 +36,9 @@ import {
   AccessTime as AccessTimeIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase, type Business, type Task, type Call, type BusinessMember } from '@/lib/supabase';
+import { supabase, type Business, type Task, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
 import { useMe } from '@/hooks/useMe';
 import DebugPanel from '@/components/DebugPanel';
-
-/**
- * Get the public URL for a logo path stored in Supabase Storage
- */
-function getLogoUrl(logoPath: string | null): string | null {
-  if (!logoPath) return null;
-  const { data } = supabase.storage.from('logos').getPublicUrl(logoPath);
-  return data.publicUrl;
-}
 
 /**
  * Get business initials from name
@@ -89,7 +80,7 @@ export default function BusinessDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   
-  const logoUrl = businessProfile?.logo_url ? getLogoUrl(businessProfile.logo_url) : null;
+  const logoUrl = resolveLogoSrc(businessProfile?.logo_url);
 
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
@@ -226,24 +217,25 @@ export default function BusinessDashboard() {
   return (
     <Box sx={{ minHeight: '100vh', bgcolor: 'grey.100' }}>
       <AppBar position="static">
-        <Toolbar>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexGrow: 1 }}>
+        <Toolbar sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          {/* Logo/Avatar - Fixed size */}
+          <Box sx={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
             {logoUrl ? (
               <img
                 src={logoUrl}
                 alt={businessProfile?.name || 'Business Logo'}
                 style={{
-                  height: '32px',
-                  width: 'auto',
-                  maxWidth: '120px',
+                  width: '40px',
+                  height: '40px',
                   objectFit: 'contain',
+                  display: 'block',
                 }}
               />
             ) : businessProfile?.name ? (
               <Avatar
                 sx={{
-                  width: 32,
-                  height: 32,
+                  width: 40,
+                  height: 40,
                   bgcolor: 'primary.main',
                   fontSize: '0.875rem',
                 }}
@@ -251,18 +243,49 @@ export default function BusinessDashboard() {
                 {getBusinessInitials(businessProfile.name)}
               </Avatar>
             ) : (
-              <BusinessIcon sx={{ mr: 1 }} />
+              <BusinessIcon sx={{ fontSize: 40 }} />
             )}
-            <Typography variant="h6">
+          </Box>
+          
+          {/* Business Name - Flexible with text overflow */}
+          <Box
+            sx={{
+              flex: 1,
+              minWidth: 0,
+              overflow: 'hidden',
+              display: 'flex',
+              alignItems: 'center',
+            }}
+          >
+            <Typography
+              variant="h6"
+              sx={{
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
               {businessProfile?.name || business?.name || 'Business Dashboard'}
             </Typography>
           </Box>
-          <Typography variant="body2" sx={{ mr: 2 }}>
-            {user?.email}
-          </Typography>
-          <IconButton color="inherit" onClick={handleSignOut} data-testid="button-signout">
-            <LogoutIcon />
-          </IconButton>
+          
+          {/* Right side - User email and logout */}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+            <Typography
+              variant="body2"
+              sx={{
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                maxWidth: { xs: '120px', sm: '200px', md: 'none' },
+              }}
+            >
+              {user?.email}
+            </Typography>
+            <IconButton color="inherit" onClick={handleSignOut} data-testid="button-signout">
+              <LogoutIcon />
+            </IconButton>
+          </Box>
         </Toolbar>
       </AppBar>
 

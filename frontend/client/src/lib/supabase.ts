@@ -15,6 +15,30 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
+/**
+ * Resolves a logo URL to a public URL for display.
+ * 
+ * - Returns null if logoUrl is empty/null/undefined
+ * - Returns logoUrl unchanged if it already starts with "http" (full URL)
+ * - Otherwise treats logoUrl as a Supabase Storage path in bucket "logos"
+ *   and converts it to a public URL
+ * 
+ * @param logoUrl - The logo URL from the database (can be a storage path or full URL)
+ * @returns The resolved public URL or null
+ */
+export function resolveLogoSrc(logoUrl: string | null | undefined): string | null {
+  if (!logoUrl) return null;
+  
+  // If it's already a full URL (http/https), return as-is
+  if (logoUrl.startsWith('http://') || logoUrl.startsWith('https://')) {
+    return logoUrl;
+  }
+  
+  // Otherwise, treat it as a Supabase Storage path in the "logos" bucket
+  const { data } = supabase.storage.from('logos').getPublicUrl(logoUrl);
+  return data.publicUrl;
+}
+
 export interface Business {
   id: string;
   name: string;
