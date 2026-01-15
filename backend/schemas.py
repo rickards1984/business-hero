@@ -225,3 +225,97 @@ class ChaseDraftResponse(BaseModel):
     subject: str
     body: str
     chase_stage: int
+
+
+class EmailConnectionPublic(BaseModel):
+    """Public email connection settings (no password)."""
+    id: str
+    business_id: str
+    provider: str
+    smtp_host: str
+    smtp_port: int
+    smtp_username: str
+    from_email: str
+    from_name: Optional[str] = None
+    use_tls: bool
+    use_ssl: bool
+    is_enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class EmailConnectionUpsert(BaseModel):
+    """Schema for creating/updating email connection settings."""
+    provider: str = "smtp"
+    smtp_host: str
+    smtp_port: int
+    smtp_username: str
+    smtp_password: str
+    from_email: str
+    from_name: Optional[str] = None
+    use_tls: bool = True
+    use_ssl: bool = False
+    is_enabled: bool = True
+
+
+class EmailTestResponse(BaseModel):
+    """Schema for email test response."""
+    success: bool
+    message: str
+    outbox_id: Optional[str] = None
+
+
+class SendChaseRequest(BaseModel):
+    """Schema for sending chase email."""
+    subject: Optional[str] = None
+    body: Optional[str] = None
+    chase_stage: Optional[int] = None
+    dry_run: bool = False
+
+
+class SendChaseResponse(BaseModel):
+    """Schema for chase email send response."""
+    invoice_id: str
+    subject: str
+    body: str
+    chase_stage: int
+    status: str
+    error_message: Optional[str] = None
+    outbox_id: Optional[str] = None
+    dry_run: bool = False
+
+
+class BulkSendRequest(BaseModel):
+    """Schema for bulk chase email send."""
+    invoice_ids: List[str]
+    chase_stage: Optional[int] = None
+    dry_run: bool = False
+
+
+class BulkSendResponse(BaseModel):
+    """Schema for bulk chase email send response."""
+    total: int
+    sent: int
+    failed: int
+    results: List[SendChaseResponse]
+
+
+class EmailOutboxItem(BaseModel):
+    """Schema for email outbox item."""
+    id: str
+    business_id: str
+    invoice_id: Optional[str] = None
+    to_email: str
+    subject: str
+    body: str
+    chase_stage: Optional[int] = None
+    status: str
+    error_message: Optional[str] = None
+    sent_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class EmailOutboxListResponse(BaseModel):
+    """Schema for list of outbox emails."""
+    emails: List[EmailOutboxItem]
+    total: int

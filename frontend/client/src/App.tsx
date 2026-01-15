@@ -8,6 +8,8 @@ import AdminDashboard from '@/pages/AdminDashboard';
 import BusinessDashboard from '@/pages/BusinessDashboard';
 import ConfirmEmail from '@/pages/ConfirmEmail';
 import BrandingSettings from '@/pages/BrandingSettings';
+import EmailSettings from '@/pages/EmailSettings';
+import EmailOutbox from '@/pages/EmailOutbox';
 
 const theme = createTheme({
   palette: {
@@ -63,6 +65,8 @@ function App() {
               <Route path="/admin" element={<AdminDashboard />} />
               <Route path="/app" element={<BusinessDashboard />} />
               <Route path="/app/settings/branding" element={<BrandingSettings />} />
+              <Route path="/app/settings/email" element={<EmailSettings />} />
+              <Route path="/app/email/outbox" element={<EmailOutbox />} />
               <Route path="/confirm" element={<ConfirmEmail />} />
               <Route path="/" element={<Navigate to="/login" replace />} />
               <Route path="*" element={<Navigate to="/login" replace />} />

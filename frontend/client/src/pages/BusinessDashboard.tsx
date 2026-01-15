@@ -36,6 +36,13 @@ import {
   ListItem,
   ListItemText,
   Snackbar,
+  Checkbox,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  FormControlLabel,
+  Switch,
 } from '@mui/material';
 import {
   Business as BusinessIcon,
@@ -50,6 +57,10 @@ import {
   Email as EmailIcon,
   CheckCircleOutline as CheckCircleOutlineIcon,
   Close as CloseIcon,
+  Settings as SettingsIcon,
+  Outbox as OutboxIcon,
+  Send as SendIcon,
+  Preview as PreviewIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type Business, type Task, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
@@ -129,6 +140,11 @@ export default function BusinessDashboard() {
   const [chaseDraft, setChaseDraft] = useState<{ subject: string; body: string; chase_stage: number } | null>(null);
   const [csvUploading, setCsvUploading] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
+  const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<string[]>([]);
+  const [invoiceStage, setInvoiceStage] = useState(1);
+  const [dryRunSend, setDryRunSend] = useState(false);
+  const [bulkPreviewOpen, setBulkPreviewOpen] = useState(false);
+  const [bulkPreview, setBulkPreview] = useState<{ invoice_id: string; subject: string; body: string; status: string; error_message?: string }[]>([]);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -308,6 +324,7 @@ export default function BusinessDashboard() {
     setSelectedInvoice(invoice);
     setInvoiceDrawerOpen(true);
     setChaseDraft(null);
+    setInvoiceStage(Math.min((invoice.chase_stage || 0) + 1, 4));
   };
 
   const handleGetChaseDraft = async () => {
@@ -321,6 +338,26 @@ export default function BusinessDashboard() {
     }
   };
 
+  const handleSendChaseEmail = async () => {
+    if (!selectedInvoice) return;
+    try {
+      const response = await apiRequest('POST', `/v1/invoices/${selectedInvoice.id}/send-chase`, {
+        chase_stage: invoiceStage - 1,
+        dry_run: dryRunSend,
+      });
+      const data = await response.json();
+      if (dryRunSend) {
+        setChaseDraft({ subject: data.subject, body: data.body, chase_stage: data.chase_stage });
+        setSuccessMessage('Preview generated (dry run)');
+        return;
+      }
+      await fetchInvoices();
+      setSuccessMessage('Chase email sent');
+    } catch (err: any) {
+      setError(err.message || 'Failed to send chase email');
+    }
+  };
+
   const handleMarkChased = async () => {
     if (!selectedInvoice) return;
     try {
@@ -331,6 +368,58 @@ export default function BusinessDashboard() {
       setSuccessMessage('Invoice marked as chased');
     } catch (err: any) {
       setError(err.message || 'Failed to mark invoice as chased');
+    }
+  };
+
+  const toggleInvoiceSelection = (invoiceId: string) => {
+    setSelectedInvoiceIds((prev) =>
+      prev.includes(invoiceId) ? prev.filter((id) => id !== invoiceId) : [...prev, invoiceId]
+    );
+  };
+
+  const toggleSelectAllInvoices = () => {
+    if (selectedInvoiceIds.length === invoices.length) {
+      setSelectedInvoiceIds([]);
+    } else {
+      setSelectedInvoiceIds(invoices.map((inv) => inv.id));
+    }
+  };
+
+  const handleBulkPreview = async () => {
+    if (selectedInvoiceIds.length === 0) {
+      setError('Select at least one invoice');
+      return;
+    }
+    try {
+      const response = await apiRequest('POST', `/v1/invoices/send-chase/bulk`, {
+        invoice_ids: selectedInvoiceIds,
+        chase_stage: 0,
+        dry_run: true,
+      });
+      const data = await response.json();
+      setBulkPreview(data.results || []);
+      setBulkPreviewOpen(true);
+    } catch (err: any) {
+      setError(err.message || 'Failed to preview bulk send');
+    }
+  };
+
+  const handleBulkSend = async () => {
+    if (selectedInvoiceIds.length === 0) return;
+    try {
+      const response = await apiRequest('POST', `/v1/invoices/send-chase/bulk`, {
+        invoice_ids: selectedInvoiceIds,
+        chase_stage: 0,
+        dry_run: false,
+      });
+      const data = await response.json();
+      setBulkPreview(data.results || []);
+      await fetchInvoices();
+      setSuccessMessage(`Bulk send complete: ${data.sent} sent, ${data.failed} failed`);
+      setSelectedInvoiceIds([]);
+      setBulkPreviewOpen(false);
+    } catch (err: any) {
+      setError(err.message || 'Failed to send bulk emails');
     }
   };
 
@@ -447,13 +536,31 @@ export default function BusinessDashboard() {
                 <Typography variant="h5">
                   Business Profile
                 </Typography>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={() => navigate('/app/settings/branding')}
-                >
-                  Branding Settings
-                </Button>
+                <Box sx={{ display: 'flex', gap: 1 }}>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    startIcon={<SettingsIcon />}
+                    onClick={() => navigate('/app/settings/email')}
+                  >
+                    Email Settings
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    startIcon={<OutboxIcon />}
+                    onClick={() => navigate('/app/email/outbox')}
+                  >
+                    Email Outbox
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={() => navigate('/app/settings/branding')}
+                  >
+                    Branding Settings
+                  </Button>
+                </Box>
               </Box>
               <Divider sx={{ mb: 2 }} />
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
@@ -679,24 +786,34 @@ export default function BusinessDashboard() {
                       </Typography>
                     </Card>
                   </Box>
-                  <input
-                    accept=".csv"
-                    style={{ display: 'none' }}
-                    id="csv-upload-input"
-                    type="file"
-                    onChange={handleCsvUpload}
-                    disabled={csvUploading}
-                  />
-                  <label htmlFor="csv-upload-input">
+                  <Box sx={{ display: 'flex', gap: 1 }}>
                     <Button
-                      variant="contained"
-                      component="span"
-                      startIcon={csvUploading ? <CircularProgress size={20} /> : <CloudUploadIcon />}
-                      disabled={csvUploading}
+                      variant="outlined"
+                      startIcon={<SendIcon />}
+                      disabled={selectedInvoiceIds.length === 0}
+                      onClick={handleBulkPreview}
                     >
-                      {csvUploading ? 'Uploading...' : 'Upload CSV'}
+                      Send stage 1
                     </Button>
-                  </label>
+                    <input
+                      accept=".csv"
+                      style={{ display: 'none' }}
+                      id="csv-upload-input"
+                      type="file"
+                      onChange={handleCsvUpload}
+                      disabled={csvUploading}
+                    />
+                    <label htmlFor="csv-upload-input">
+                      <Button
+                        variant="contained"
+                        component="span"
+                        startIcon={csvUploading ? <CircularProgress size={20} /> : <CloudUploadIcon />}
+                        disabled={csvUploading}
+                      >
+                        {csvUploading ? 'Uploading...' : 'Upload CSV'}
+                      </Button>
+                    </label>
+                  </Box>
                 </Box>
 
                 {invoicesLoading ? (
@@ -716,6 +833,13 @@ export default function BusinessDashboard() {
                     <Table>
                       <TableHead>
                         <TableRow>
+                          <TableCell padding="checkbox">
+                            <Checkbox
+                              indeterminate={selectedInvoiceIds.length > 0 && selectedInvoiceIds.length < invoices.length}
+                              checked={invoices.length > 0 && selectedInvoiceIds.length === invoices.length}
+                              onChange={toggleSelectAllInvoices}
+                            />
+                          </TableCell>
                           <TableCell>Invoice #</TableCell>
                           <TableCell>Customer</TableCell>
                           <TableCell>Due Date</TableCell>
@@ -732,6 +856,12 @@ export default function BusinessDashboard() {
                             onClick={() => handleInvoiceClick(invoice)}
                             sx={{ cursor: 'pointer' }}
                           >
+                            <TableCell padding="checkbox" onClick={(e) => e.stopPropagation()}>
+                              <Checkbox
+                                checked={selectedInvoiceIds.includes(invoice.id)}
+                                onChange={() => toggleInvoiceSelection(invoice.id)}
+                              />
+                            </TableCell>
                             <TableCell>{invoice.invoice_number}</TableCell>
                             <TableCell>{invoice.customer_name}</TableCell>
                             <TableCell>{new Date(invoice.due_date).toLocaleDateString()}</TableCell>
@@ -819,18 +949,53 @@ export default function BusinessDashboard() {
 
             <Divider sx={{ my: 2 }} />
 
+            <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
+              <FormControl size="small" fullWidth>
+                <InputLabel id="invoice-stage-label">Stage</InputLabel>
+                <Select
+                  labelId="invoice-stage-label"
+                  label="Stage"
+                  value={invoiceStage}
+                  onChange={(e) => setInvoiceStage(Number(e.target.value))}
+                >
+                  <MenuItem value={1}>Stage 1</MenuItem>
+                  <MenuItem value={2}>Stage 2</MenuItem>
+                  <MenuItem value={3}>Stage 3</MenuItem>
+                  <MenuItem value={4}>Stage 4</MenuItem>
+                </Select>
+              </FormControl>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={dryRunSend}
+                    onChange={(e) => setDryRunSend(e.target.checked)}
+                  />
+                }
+                label="Dry run"
+              />
+            </Box>
+
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
               <Button
                 variant="outlined"
-                startIcon={<EmailIcon />}
+                startIcon={<PreviewIcon />}
                 onClick={handleGetChaseDraft}
                 fullWidth
               >
-                Draft Email (Stage {Math.min(selectedInvoice.chase_stage + 1, 4)})
+                Preview chase email
               </Button>
               
               <Button
                 variant="contained"
+                startIcon={<EmailIcon />}
+                onClick={handleSendChaseEmail}
+                fullWidth
+              >
+                Send chase email
+              </Button>
+
+              <Button
+                variant="outlined"
                 startIcon={<CheckCircleOutlineIcon />}
                 onClick={handleMarkChased}
                 fullWidth
@@ -849,6 +1014,48 @@ export default function BusinessDashboard() {
           </Box>
         )}
       </Drawer>
+
+      {/* Bulk Send Preview Dialog */}
+      <Dialog open={bulkPreviewOpen} onClose={() => setBulkPreviewOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle>Review bulk send (Stage 1)</DialogTitle>
+        <DialogContent>
+          {bulkPreview.length === 0 ? (
+            <Typography color="text.secondary">No preview available.</Typography>
+          ) : (
+            <List>
+              {bulkPreview.map((preview) => (
+                <ListItem key={preview.invoice_id} alignItems="flex-start">
+                  <ListItemText
+                    primary={`Invoice ${preview.invoice_id}`}
+                    secondary={
+                      <>
+                        <Typography variant="body2" fontWeight="bold">{preview.subject}</Typography>
+                        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+                          {preview.body}
+                        </Typography>
+                        {preview.error_message && (
+                          <Typography variant="caption" color="error">{preview.error_message}</Typography>
+                        )}
+                      </>
+                    }
+                  />
+                </ListItem>
+              ))}
+            </List>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBulkPreviewOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            startIcon={<SendIcon />}
+            onClick={handleBulkSend}
+            disabled={bulkPreview.length === 0}
+          >
+            Send now
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Success Snackbar */}
       <Snackbar

@@ -5,4 +5,5 @@ description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=2.11.0",
+    "cryptography",
 ]

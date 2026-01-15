@@ -181,3 +181,53 @@ class Invoice(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
     business: Optional[Business] = Relationship()
+
+
+class EmailConnection(SQLModel, table=True):
+    """Email connection configuration for SMTP sending."""
+    __tablename__ = "email_connections"
+    __table_args__ = (
+        UniqueConstraint('business_id', name='uq_email_connection_business'),
+    )
+
+    id: UUID = Field(
+        default_factory=generate_uuid,
+        sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid)
+    )
+    business_id: UUID = Field(foreign_key="businesses.id", index=True)
+    provider: str = Field(default="smtp")
+    smtp_host: str
+    smtp_port: int
+    smtp_username: str
+    smtp_password_encrypted: str
+    from_email: str
+    from_name: Optional[str] = None
+    use_tls: bool = Field(default=True)
+    use_ssl: bool = Field(default=False)
+    is_enabled: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    business: Optional[Business] = Relationship()
+
+
+class EmailOutbox(SQLModel, table=True):
+    """Email outbox for queued/sent/failed email records."""
+    __tablename__ = "email_outbox"
+
+    id: UUID = Field(
+        default_factory=generate_uuid,
+        sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid)
+    )
+    business_id: UUID = Field(foreign_key="businesses.id", index=True)
+    invoice_id: Optional[UUID] = Field(default=None, foreign_key="invoices.id")
+    to_email: str
+    subject: str
+    body: str
+    chase_stage: Optional[int] = None
+    status: str = Field(default="queued", index=True)
+    error_message: Optional[str] = None
+    sent_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    business: Optional[Business] = Relationship()

@@ -3,6 +3,7 @@
 import os
 import json
 import copy
+import smtplib
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
@@ -11,6 +12,8 @@ from fastapi import FastAPI, Depends, HTTPException, Query, Request, status, Upl
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlmodel import Session, select
+from sqlalchemy import text, func
+from email.message import EmailMessage
 import pytz
 import csv
 import io
@@ -18,7 +21,7 @@ from datetime import date as date_type
 from decimal import Decimal
 
 from db import init_db, get_session
-from models import Business, Task, Call, BusinessSettings, Integration, Invoice
+from models import Business, Task, Call, BusinessSettings, Integration, Invoice, EmailConnection, EmailOutbox
 from schemas import (
     BusinessCreate, BusinessResponse, BusinessListItem, BusinessProfile,
     TaskCreate, TaskResponse, SnoozeRequest,
@@ -28,12 +31,16 @@ from schemas import (
     BusinessSettingsResponse, BusinessSettingsUpdate,
     IntegrationResponse, IntegrationListResponse, IntegrationUpdate,
     LogoUploadResponse, LogoUpdateRequest,
-    Invoice as InvoiceSchema, InvoiceListResponse, ImportResponse, ChaseDraftResponse
+    Invoice as InvoiceSchema, InvoiceListResponse, ImportResponse, ChaseDraftResponse,
+    EmailConnectionPublic, EmailConnectionUpsert, EmailTestResponse,
+    SendChaseRequest, SendChaseResponse, BulkSendRequest, BulkSendResponse,
+    EmailOutboxItem, EmailOutboxListResponse
 )
 from auth import verify_master_key, get_current_business, get_access_token
 from openai_utils import generate_call_summary
 from supabase_auth import verify_supabase_token
 from assistant_chat import process_chat_message, get_business_for_user
+from email_utils import encrypt_secret, decrypt_secret
 
 
 async def get_current_user_business(
@@ -71,6 +78,39 @@ async def get_current_user_business(
         )
     
     return business
+
+
+async def get_current_user_and_business(
+    token: str = Depends(get_access_token),
+    session: Session = Depends(get_session)
+):
+    """Get current Supabase user and business from JWT token."""
+    user = await verify_supabase_token(token)
+
+    try:
+        business_ctx = get_business_for_user(user.id)
+    except ValueError as e:
+        args = e.args
+        if len(args) >= 2:
+            error_type, message = args[0], args[1]
+            if error_type == "NO_BUSINESS":
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
+            elif error_type == "FORBIDDEN":
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=message)
+            elif error_type == "NOT_FOUND":
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    statement = select(Business).where(Business.id == business_ctx.id)
+    business = session.exec(statement).first()
+
+    if not business:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Business not found"
+        )
+
+    return user, business
 
 
 @asynccontextmanager
@@ -864,6 +904,122 @@ def parse_amount(value: str) -> Optional[float]:
         return None
 
 
+def is_platform_admin_user(user_id: str, session: Session) -> bool:
+    """Check if user is a platform admin."""
+    result = session.exec(
+        text("SELECT 1 FROM platform_admins WHERE user_id = :user_id LIMIT 1"),
+        {"user_id": user_id}
+    ).first()
+    return result is not None
+
+
+def get_business_member_role(user_id: str, business_id: str, session: Session) -> Optional[str]:
+    """Get business member role for a user in a business."""
+    result = session.exec(
+        text(
+            "SELECT role FROM business_members "
+            "WHERE user_id = :user_id AND business_id = :business_id AND is_active = true "
+            "LIMIT 1"
+        ),
+        {"user_id": user_id, "business_id": business_id}
+    ).first()
+    return result[0] if result else None
+
+
+def ensure_email_manager_role(user_id: str, business_id: str, session: Session) -> None:
+    """Ensure user has role to manage email settings."""
+    if is_platform_admin_user(user_id, session):
+        return
+    role = get_business_member_role(user_id, business_id, session)
+    if role not in {"owner", "manager", "admin"}:
+        raise HTTPException(status_code=403, detail="Insufficient permissions for email settings")
+
+
+def send_email_smtp(connection: EmailConnection, to_email: str, subject: str, body: str) -> None:
+    """Send email using SMTP connection settings."""
+    password = decrypt_secret(connection.smtp_password_encrypted)
+    msg = EmailMessage()
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    if connection.from_name:
+        msg["From"] = f"{connection.from_name} <{connection.from_email}>"
+    else:
+        msg["From"] = connection.from_email
+    msg.set_content(body)
+
+    if connection.use_ssl:
+        server = smtplib.SMTP_SSL(connection.smtp_host, connection.smtp_port, timeout=10)
+    else:
+        server = smtplib.SMTP(connection.smtp_host, connection.smtp_port, timeout=10)
+    try:
+        if connection.use_tls and not connection.use_ssl:
+            server.starttls()
+        server.login(connection.smtp_username, password)
+        server.send_message(msg)
+    finally:
+        server.quit()
+
+
+def generate_chase_email(invoice: Invoice, business: Business, stage: int) -> Dict[str, str]:
+    """Generate chase email subject/body based on stage."""
+    stage = min(max(stage, 0), 3)
+    amount_text = f"{invoice.currency} {float(invoice.amount):.2f}"
+    due_date = invoice.due_date.strftime("%d %B %Y")
+
+    templates = {
+        0: {
+            "subject": f"Payment Reminder: Invoice {invoice.invoice_number}",
+            "body": (
+                f"Dear {invoice.customer_name},\n\n"
+                f"This is a friendly reminder that payment for invoice {invoice.invoice_number} "
+                f"in the amount of {amount_text} is now due.\n\n"
+                "Please arrange payment at your earliest convenience.\n\n"
+                "Thank you for your business.\n\n"
+                f"Best regards,\n{business.name}"
+            ),
+        },
+        1: {
+            "subject": f"Second Notice: Invoice {invoice.invoice_number} - Payment Overdue",
+            "body": (
+                f"Dear {invoice.customer_name},\n\n"
+                f"We have not yet received payment for invoice {invoice.invoice_number} "
+                f"in the amount of {amount_text}, which was due on {due_date}.\n\n"
+                "Please arrange payment immediately to avoid further action.\n\n"
+                "If you have already made payment, please disregard this notice.\n\n"
+                f"Best regards,\n{business.name}"
+            ),
+        },
+        2: {
+            "subject": f"Final Notice: Invoice {invoice.invoice_number} - Urgent Payment Required",
+            "body": (
+                f"Dear {invoice.customer_name},\n\n"
+                f"This is our final notice regarding invoice {invoice.invoice_number} "
+                f"in the amount of {amount_text}, which is now significantly overdue.\n\n"
+                f"Payment was due on {due_date} and we have not received payment despite previous reminders.\n\n"
+                "Please arrange payment immediately. If payment is not received within 7 days, "
+                "we may need to take further action.\n\n"
+                "If you have any queries or concerns, please contact us immediately.\n\n"
+                f"Best regards,\n{business.name}"
+            ),
+        },
+        3: {
+            "subject": f"URGENT: Invoice {invoice.invoice_number} - Immediate Payment Required",
+            "body": (
+                f"Dear {invoice.customer_name},\n\n"
+                f"This is an urgent final notice regarding invoice {invoice.invoice_number} "
+                f"in the amount of {amount_text}.\n\n"
+                f"This invoice is now overdue since {due_date}, and we have sent multiple reminders without response.\n\n"
+                "We require immediate payment. If payment is not received within 3 business days, "
+                "we will have no choice but to escalate this matter, which may include legal action.\n\n"
+                "Please contact us immediately to discuss payment arrangements.\n\n"
+                f"Best regards,\n{business.name}"
+            ),
+        },
+    }
+
+    return templates[stage]
+
+
 @app.get("/v1/invoices", response_model=InvoiceListResponse, tags=["Invoices"])
 async def list_invoices(
     status: Optional[str] = Query(default="unpaid", description="Filter by status"),
@@ -1120,74 +1276,449 @@ async def get_chase_draft(
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
     
-    stage = min(invoice.chase_stage, 3)  # Cap at stage 3
-    
-    # Email templates based on stage
-    templates = {
-        0: {
-            'subject': f'Payment Reminder: Invoice {invoice.invoice_number}',
-            'body': f'''Dear {invoice.customer_name},
+    template = generate_chase_email(invoice, business, invoice.chase_stage)
 
-This is a friendly reminder that payment for invoice {invoice.invoice_number} in the amount of {invoice.currency} {invoice.amount:.2f} is now due.
-
-Please arrange payment at your earliest convenience.
-
-Thank you for your business.
-
-Best regards,
-{business.name}'''
-        },
-        1: {
-            'subject': f'Second Notice: Invoice {invoice.invoice_number} - Payment Overdue',
-            'body': f'''Dear {invoice.customer_name},
-
-We have not yet received payment for invoice {invoice.invoice_number} in the amount of {invoice.currency} {invoice.amount:.2f}, which was due on {invoice.due_date.strftime("%d %B %Y")}.
-
-Please arrange payment immediately to avoid further action.
-
-If you have already made payment, please disregard this notice.
-
-Best regards,
-{business.name}'''
-        },
-        2: {
-            'subject': f'Final Notice: Invoice {invoice.invoice_number} - Urgent Payment Required',
-            'body': f'''Dear {invoice.customer_name},
-
-This is our final notice regarding invoice {invoice.invoice_number} in the amount of {invoice.currency} {invoice.amount:.2f}, which is now significantly overdue.
-
-Payment was due on {invoice.due_date.strftime("%d %B %Y")} and we have not received payment despite previous reminders.
-
-Please arrange payment immediately. If payment is not received within 7 days, we may need to take further action.
-
-If you have any queries or concerns, please contact us immediately.
-
-Best regards,
-{business.name}'''
-        },
-        3: {
-            'subject': f'URGENT: Invoice {invoice.invoice_number} - Immediate Payment Required',
-            'body': f'''Dear {invoice.customer_name},
-
-This is an urgent final notice regarding invoice {invoice.invoice_number} in the amount of {invoice.currency} {invoice.amount:.2f}.
-
-This invoice is now {invoice.due_date.strftime("%d %B %Y")} days overdue and we have sent multiple reminders without response.
-
-We require immediate payment. If payment is not received within 3 business days, we will have no choice but to escalate this matter, which may include legal action.
-
-Please contact us immediately to discuss payment arrangements.
-
-Best regards,
-{business.name}'''
-        }
-    }
-    
-    template = templates[stage]
-    
     return ChaseDraftResponse(
-        subject=template['subject'],
-        body=template['body'],
+        subject=template["subject"],
+        body=template["body"],
         chase_stage=invoice.chase_stage
+    )
+
+
+# ============================================================================
+# EMAIL SETTINGS ENDPOINTS
+# ============================================================================
+
+@app.get("/v1/email/connection", response_model=EmailConnectionPublic, tags=["Email"])
+async def get_email_connection(
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session)
+):
+    """Get email connection settings for the current business."""
+    _, business = user_business
+    connection = session.exec(
+        select(EmailConnection).where(EmailConnection.business_id == business.id)
+    ).first()
+
+    if not connection:
+        raise HTTPException(status_code=404, detail="Email connection not found")
+
+    return EmailConnectionPublic(
+        id=str(connection.id),
+        business_id=str(connection.business_id),
+        provider=connection.provider,
+        smtp_host=connection.smtp_host,
+        smtp_port=connection.smtp_port,
+        smtp_username=connection.smtp_username,
+        from_email=connection.from_email,
+        from_name=connection.from_name,
+        use_tls=connection.use_tls,
+        use_ssl=connection.use_ssl,
+        is_enabled=connection.is_enabled,
+        created_at=connection.created_at,
+        updated_at=connection.updated_at
+    )
+
+
+@app.put("/v1/email/connection", response_model=EmailConnectionPublic, tags=["Email"])
+async def upsert_email_connection(
+    data: EmailConnectionUpsert,
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session)
+):
+    """Create or update email connection settings."""
+    user, business = user_business
+    ensure_email_manager_role(user.id, str(business.id), session)
+
+    encrypted_password = encrypt_secret(data.smtp_password)
+
+    connection = session.exec(
+        select(EmailConnection).where(EmailConnection.business_id == business.id)
+    ).first()
+
+    if connection:
+        connection.provider = data.provider
+        connection.smtp_host = data.smtp_host
+        connection.smtp_port = data.smtp_port
+        connection.smtp_username = data.smtp_username
+        connection.smtp_password_encrypted = encrypted_password
+        connection.from_email = data.from_email
+        connection.from_name = data.from_name
+        connection.use_tls = data.use_tls
+        connection.use_ssl = data.use_ssl
+        connection.is_enabled = data.is_enabled
+    else:
+        connection = EmailConnection(
+            business_id=business.id,
+            provider=data.provider,
+            smtp_host=data.smtp_host,
+            smtp_port=data.smtp_port,
+            smtp_username=data.smtp_username,
+            smtp_password_encrypted=encrypted_password,
+            from_email=data.from_email,
+            from_name=data.from_name,
+            use_tls=data.use_tls,
+            use_ssl=data.use_ssl,
+            is_enabled=data.is_enabled
+        )
+        session.add(connection)
+
+    session.commit()
+    session.refresh(connection)
+
+    return EmailConnectionPublic(
+        id=str(connection.id),
+        business_id=str(connection.business_id),
+        provider=connection.provider,
+        smtp_host=connection.smtp_host,
+        smtp_port=connection.smtp_port,
+        smtp_username=connection.smtp_username,
+        from_email=connection.from_email,
+        from_name=connection.from_name,
+        use_tls=connection.use_tls,
+        use_ssl=connection.use_ssl,
+        is_enabled=connection.is_enabled,
+        created_at=connection.created_at,
+        updated_at=connection.updated_at
+    )
+
+
+@app.post("/v1/email/test", response_model=EmailTestResponse, tags=["Email"])
+async def send_test_email(
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session)
+):
+    """Send a test email to the logged-in user's email address."""
+    user, business = user_business
+    if not user.email:
+        raise HTTPException(status_code=400, detail="User email not found")
+
+    connection = session.exec(
+        select(EmailConnection).where(EmailConnection.business_id == business.id)
+    ).first()
+
+    if not connection or not connection.is_enabled:
+        raise HTTPException(status_code=400, detail="Email connection not configured or disabled")
+
+    subject = "Business Hero - Test Email"
+    body = f"Hello,\n\nThis is a test email from {business.name} via Business Hero.\n\nBest regards,\n{business.name}"
+
+    outbox = EmailOutbox(
+        business_id=business.id,
+        invoice_id=None,
+        to_email=user.email,
+        subject=subject,
+        body=body,
+        chase_stage=None,
+        status="queued"
+    )
+    session.add(outbox)
+    session.commit()
+    session.refresh(outbox)
+
+    try:
+        send_email_smtp(connection, user.email, subject, body)
+        outbox.status = "sent"
+        outbox.sent_at = datetime.utcnow()
+        session.add(outbox)
+        session.commit()
+        return EmailTestResponse(success=True, message="Test email sent", outbox_id=str(outbox.id))
+    except Exception as exc:
+        outbox.status = "failed"
+        outbox.error_message = str(exc)
+        session.add(outbox)
+        session.commit()
+        return EmailTestResponse(success=False, message=str(exc), outbox_id=str(outbox.id))
+
+
+@app.get("/v1/email/outbox", response_model=EmailOutboxListResponse, tags=["Email"])
+async def list_email_outbox(
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    limit: int = Query(default=50, ge=1, le=200),
+    business: Business = Depends(get_current_user_business),
+    session: Session = Depends(get_session)
+):
+    """List email outbox records for the current business."""
+    statement = select(EmailOutbox).where(EmailOutbox.business_id == business.id)
+    if status_filter:
+        statement = statement.where(EmailOutbox.status == status_filter)
+    statement = statement.order_by(EmailOutbox.created_at.desc()).limit(limit)
+    rows = session.exec(statement).all()
+
+    items = [
+        EmailOutboxItem(
+            id=str(row.id),
+            business_id=str(row.business_id),
+            invoice_id=str(row.invoice_id) if row.invoice_id else None,
+            to_email=row.to_email,
+            subject=row.subject,
+            body=row.body,
+            chase_stage=row.chase_stage,
+            status=row.status,
+            error_message=row.error_message,
+            sent_at=row.sent_at,
+            created_at=row.created_at
+        )
+        for row in rows
+    ]
+
+    return EmailOutboxListResponse(emails=items, total=len(items))
+
+
+# ============================================================================
+# INVOICE CHASE SEND ENDPOINTS
+# ============================================================================
+
+@app.post("/v1/invoices/{invoice_id}/send-chase", response_model=SendChaseResponse, tags=["Invoices"])
+async def send_chase_email(
+    invoice_id: str,
+    data: SendChaseRequest,
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session)
+):
+    """Send a chase email for a single invoice."""
+    _, business = user_business
+    invoice = session.exec(
+        select(Invoice).where(
+            Invoice.id == invoice_id,
+            Invoice.business_id == business.id
+        )
+    ).first()
+
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+    stage = data.chase_stage if data.chase_stage is not None else invoice.chase_stage
+    template = generate_chase_email(invoice, business, stage)
+    subject = data.subject or template["subject"]
+    body = data.body or template["body"]
+
+    if data.dry_run:
+        return SendChaseResponse(
+            invoice_id=str(invoice.id),
+            subject=subject,
+            body=body,
+            chase_stage=stage,
+            status="dry_run",
+            dry_run=True
+        )
+
+    connection = session.exec(
+        select(EmailConnection).where(EmailConnection.business_id == business.id)
+    ).first()
+    if not connection or not connection.is_enabled:
+        raise HTTPException(status_code=400, detail="Email connection not configured or disabled")
+
+    outbox = EmailOutbox(
+        business_id=business.id,
+        invoice_id=invoice.id,
+        to_email=invoice.customer_email or "",
+        subject=subject,
+        body=body,
+        chase_stage=stage,
+        status="queued"
+    )
+    session.add(outbox)
+    session.commit()
+    session.refresh(outbox)
+
+    if not invoice.customer_email:
+        outbox.status = "failed"
+        outbox.error_message = "Customer email not set"
+        session.add(outbox)
+        session.commit()
+        return SendChaseResponse(
+            invoice_id=str(invoice.id),
+            subject=subject,
+            body=body,
+            chase_stage=stage,
+            status="failed",
+            error_message="Customer email not set",
+            outbox_id=str(outbox.id)
+        )
+
+    try:
+        send_email_smtp(connection, invoice.customer_email, subject, body)
+        outbox.status = "sent"
+        outbox.sent_at = datetime.utcnow()
+        session.add(outbox)
+
+        invoice.last_chased_at = datetime.utcnow()
+        invoice.chase_stage = invoice.chase_stage + 1
+        session.add(invoice)
+
+        session.commit()
+        return SendChaseResponse(
+            invoice_id=str(invoice.id),
+            subject=subject,
+            body=body,
+            chase_stage=stage,
+            status="sent",
+            outbox_id=str(outbox.id)
+        )
+    except Exception as exc:
+        outbox.status = "failed"
+        outbox.error_message = str(exc)
+        session.add(outbox)
+        session.commit()
+        return SendChaseResponse(
+            invoice_id=str(invoice.id),
+            subject=subject,
+            body=body,
+            chase_stage=stage,
+            status="failed",
+            error_message=str(exc),
+            outbox_id=str(outbox.id)
+        )
+
+
+@app.post("/v1/invoices/send-chase/bulk", response_model=BulkSendResponse, tags=["Invoices"])
+async def send_chase_bulk(
+    data: BulkSendRequest,
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session)
+):
+    """Send chase emails for multiple invoices."""
+    _, business = user_business
+    results: List[SendChaseResponse] = []
+    sent = 0
+    failed = 0
+
+    invoices = session.exec(
+        select(Invoice).where(
+            Invoice.business_id == business.id,
+            Invoice.id.in_(data.invoice_ids)
+        )
+    ).all()
+    invoice_map = {str(inv.id): inv for inv in invoices}
+
+    if not data.dry_run:
+        connection = session.exec(
+            select(EmailConnection).where(EmailConnection.business_id == business.id)
+        ).first()
+        if not connection or not connection.is_enabled:
+            raise HTTPException(status_code=400, detail="Email connection not configured or disabled")
+
+    window_start = datetime.utcnow() - timedelta(minutes=1)
+    recent_count = session.exec(
+        select(func.count())
+        .select_from(EmailOutbox)
+        .where(
+            EmailOutbox.business_id == business.id,
+            EmailOutbox.created_at >= window_start
+        )
+    ).one()
+    sent_in_window = int(recent_count or 0)
+
+    for invoice_id in data.invoice_ids:
+        invoice = invoice_map.get(invoice_id)
+        if not invoice:
+            failed += 1
+            results.append(SendChaseResponse(
+                invoice_id=invoice_id,
+                subject="",
+                body="",
+                chase_stage=data.chase_stage or 0,
+                status="failed",
+                error_message="Invoice not found"
+            ))
+            continue
+
+        stage = data.chase_stage if data.chase_stage is not None else invoice.chase_stage
+        template = generate_chase_email(invoice, business, stage)
+        subject = template["subject"]
+        body = template["body"]
+
+        if data.dry_run:
+            results.append(SendChaseResponse(
+                invoice_id=str(invoice.id),
+                subject=subject,
+                body=body,
+                chase_stage=stage,
+                status="dry_run",
+                dry_run=True
+            ))
+            continue
+
+        if sent_in_window >= 30:
+            failed += 1
+            results.append(SendChaseResponse(
+                invoice_id=str(invoice.id),
+                subject=subject,
+                body=body,
+                chase_stage=stage,
+                status="failed",
+                error_message="Rate limit exceeded"
+            ))
+            continue
+
+        if not invoice.customer_email:
+            failed += 1
+            results.append(SendChaseResponse(
+                invoice_id=str(invoice.id),
+                subject=subject,
+                body=body,
+                chase_stage=stage,
+                status="failed",
+                error_message="Customer email not set"
+            ))
+            continue
+
+        outbox = EmailOutbox(
+            business_id=business.id,
+            invoice_id=invoice.id,
+            to_email=invoice.customer_email,
+            subject=subject,
+            body=body,
+            chase_stage=stage,
+            status="queued"
+        )
+        session.add(outbox)
+        session.commit()
+        session.refresh(outbox)
+
+        try:
+            send_email_smtp(connection, invoice.customer_email, subject, body)
+            outbox.status = "sent"
+            outbox.sent_at = datetime.utcnow()
+            session.add(outbox)
+
+            invoice.last_chased_at = datetime.utcnow()
+            invoice.chase_stage = invoice.chase_stage + 1
+            session.add(invoice)
+
+            session.commit()
+            sent += 1
+            sent_in_window += 1
+            results.append(SendChaseResponse(
+                invoice_id=str(invoice.id),
+                subject=subject,
+                body=body,
+                chase_stage=stage,
+                status="sent",
+                outbox_id=str(outbox.id)
+            ))
+        except Exception as exc:
+            outbox.status = "failed"
+            outbox.error_message = str(exc)
+            session.add(outbox)
+            session.commit()
+            failed += 1
+            results.append(SendChaseResponse(
+                invoice_id=str(invoice.id),
+                subject=subject,
+                body=body,
+                chase_stage=stage,
+                status="failed",
+                error_message=str(exc),
+                outbox_id=str(outbox.id)
+            ))
+
+    return BulkSendResponse(
+        total=len(data.invoice_ids),
+        sent=sent,
+        failed=failed,
+        results=results
     )
 
 
