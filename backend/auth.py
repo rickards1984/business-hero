@@ -2,11 +2,13 @@
 
 import os
 from typing import Optional
-from fastapi import Header, HTTPException, Depends, status
+from fastapi import Header, HTTPException, Depends, Request, Query, status
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from sqlmodel import Session, select
 from db import get_session
 from models import Business
+from supabase_auth import verify_supabase_token
+from assistant_chat import get_business_for_user
 
 api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
 master_key_header = APIKeyHeader(name="x-master-key", auto_error=False)
@@ -87,6 +89,34 @@ async def get_access_token(
             detail="Missing Authorization header"
         )
     return credentials.credentials
+
+
+async def get_user_business_context(
+    request: Request,
+    token: str = Depends(get_access_token),
+    business_id: Optional[str] = Query(default=None),
+) -> dict:
+    """Return user_id and business_id from a Supabase JWT.
+
+    If business_id is provided, verify user membership for that business.
+    """
+    user = await verify_supabase_token(token)
+    try:
+        business_ctx = get_business_for_user(user.id, requested_business_id=business_id)
+    except ValueError as exc:
+        args = exc.args
+        if len(args) >= 2:
+            error_type, message = args[0], args[1]
+            if error_type == "NO_BUSINESS":
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
+            if error_type == "FORBIDDEN":
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=message)
+            if error_type == "NOT_FOUND":
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    request.state.user_email = user.email
+    return {"user_id": user.id, "business_id": business_ctx.id}
 
 
 async def get_current_business(

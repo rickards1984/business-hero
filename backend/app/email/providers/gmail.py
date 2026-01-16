@@ -1,0 +1,37 @@
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+from .base import BaseEmailProvider, ProviderMessage, ProviderSendResult, ProviderSyncResult
+
+
+class GmailProvider(BaseEmailProvider):
+    """Gmail provider stub; inbox sync not implemented yet."""
+
+    def send_email(
+        self,
+        *,
+        account: Any,
+        to_emails: list[str],
+        subject: str,
+        body_text: Optional[str] = None,
+        body_html: Optional[str] = None,
+        in_reply_to: Optional[str] = None,
+    ) -> ProviderSendResult:
+        raise NotImplementedError("Gmail send_email not implemented")
+
+    def sync_inbox_changes(
+        self,
+        *,
+        account: Any,
+        cursor: Dict[str, Any],
+    ) -> ProviderSyncResult:
+        return ProviderSyncResult(messages=[], cursor=cursor)
+
+    def fetch_message(
+        self,
+        *,
+        account: Any,
+        provider_message_id: str,
+    ) -> Optional[ProviderMessage]:
+        return None

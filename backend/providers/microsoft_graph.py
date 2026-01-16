@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from email_utils import decrypt_str
+from .oauth_utils import get_valid_access_token
 from .base import BaseEmailProvider, ProviderSendResult, ProviderSyncResult, ProviderMessage
 
 
@@ -17,13 +17,6 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-
-
-def _get_access_token(account: Any) -> str:
-    token_ciphertext = getattr(account, "token_ciphertext", None)
-    if not token_ciphertext:
-        raise RuntimeError("Microsoft Graph access token not configured")
-    return decrypt_str(token_ciphertext)
 
 
 def _get_read_scope(account: Any) -> str:
@@ -88,7 +81,7 @@ class MicrosoftGraphProvider(BaseEmailProvider):
         body_html: str | None = None,
         in_reply_to: str | None = None,
     ) -> ProviderSendResult:
-        access_token = _get_access_token(account)
+        access_token = get_valid_access_token(account)
         url = f"{GRAPH_BASE_URL}/me/sendMail"
         content_type = "HTML" if body_html else "Text"
         body_content = body_html or body_text or ""
@@ -119,7 +112,7 @@ class MicrosoftGraphProvider(BaseEmailProvider):
         account: Any,
         cursor: Dict[str, Any],
     ) -> ProviderSyncResult:
-        access_token = _get_access_token(account)
+        access_token = get_valid_access_token(account)
         headers = {"Authorization": f"Bearer {access_token}"}
         read_scope = _get_read_scope(account)
 
