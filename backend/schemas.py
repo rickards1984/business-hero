@@ -319,3 +319,87 @@ class EmailOutboxListResponse(BaseModel):
     """Schema for list of outbox emails."""
     emails: List[EmailOutboxItem]
     total: int
+
+
+class EmailMessageItem(BaseModel):
+    """Schema for cached email message."""
+    id: str
+    business_id: str
+    email_account_id: str
+    provider_message_id: str
+    provider_thread_id: Optional[str] = None
+    folder: str
+    from_email: Optional[str] = None
+    from_name: Optional[str] = None
+    to_emails: Optional[List[str]] = None
+    cc_emails: Optional[List[str]] = None
+    subject: Optional[str] = None
+    snippet: Optional[str] = None
+    received_at: Optional[datetime] = None
+    is_unread: bool
+    has_attachments: bool
+    labels: Optional[List[str]] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class EmailMessageListResponse(BaseModel):
+    """Schema for list of cached email messages."""
+    messages: List[EmailMessageItem]
+    total: int
+
+
+class EmailSyncRunResponse(BaseModel):
+    """Schema for sync run response."""
+    email_account_id: str
+    synced: bool
+    message_count: int
+    cursor: Dict[str, Any]
+
+
+class EmailBriefingRequest(BaseModel):
+    """Schema for generating an email briefing."""
+    hours: int = Field(default=24, ge=1, le=168)
+    email_account_id: Optional[str] = None
+
+
+class EmailBriefingResponse(BaseModel):
+    """Schema for email briefing response."""
+    id: str
+    business_id: str
+    user_id: str
+    email_account_id: Optional[str] = None
+    period_start: datetime
+    period_end: datetime
+    briefing_markdown: str
+    created_at: datetime
+
+
+class EmailDraftRequest(BaseModel):
+    """Schema for generating an email draft."""
+    email_message_id: str
+    to_emails: Optional[List[str]] = None
+
+
+class EmailDraftResponse(BaseModel):
+    """Schema for email draft response."""
+    id: str
+    business_id: str
+    email_message_id: str
+    to_emails: List[str]
+    subject: str
+    body_text: Optional[str] = None
+    body_html: Optional[str] = None
+    status: str
+    provider_message_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class EmailDraftSendResponse(BaseModel):
+    """Schema for sending a draft."""
+    success: bool
+    message: str
+    outbox_id: Optional[str] = None
+    provider_message_id: Optional[str] = None
+    status: Optional[str] = None

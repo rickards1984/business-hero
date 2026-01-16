@@ -26,13 +26,13 @@ def decrypt_secret(enc: str) -> str:
     except InvalidToken as exc:
         raise ValueError("Invalid encrypted secret") from exc
     return plain.decode("utf-8")
-{
-  "cells": [],
-  "metadata": {
-    "language_info": {
-      "name": "python"
-    }
-  },
-  "nbformat": 4,
-  "nbformat_minor": 2
-}
+
+
+def encrypt_str(value: str) -> str:
+    """Encrypt a string using EMAIL_ENCRYPTION_KEY."""
+    return encrypt_secret(value)
+
+
+def decrypt_str(value: str) -> str:
+    """Decrypt a string using EMAIL_ENCRYPTION_KEY."""
+    return decrypt_secret(value)

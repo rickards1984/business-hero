@@ -10,6 +10,8 @@ import ConfirmEmail from '@/pages/ConfirmEmail';
 import BrandingSettings from '@/pages/BrandingSettings';
 import EmailSettings from '@/pages/EmailSettings';
 import EmailOutbox from '@/pages/EmailOutbox';
+import Inbox from '@/pages/Inbox';
+import Briefings from '@/pages/Briefings';
 
 const theme = createTheme({
   palette: {
@@ -66,7 +68,12 @@ function App() {
               <Route path="/app" element={<BusinessDashboard />} />
               <Route path="/app/settings/branding" element={<BrandingSettings />} />
               <Route path="/app/settings/email" element={<EmailSettings />} />
+              <Route path="/app/inbox" element={<Inbox />} />
+              <Route path="/app/briefings" element={<Briefings />} />
               <Route path="/app/email/outbox" element={<EmailOutbox />} />
+              <Route path="/settings/email" element={<Navigate to="/app/settings/email" replace />} />
+              <Route path="/inbox" element={<Navigate to="/app/inbox" replace />} />
+              <Route path="/briefings" element={<Navigate to="/app/briefings" replace />} />
               <Route path="/confirm" element={<ConfirmEmail />} />
               <Route path="/" element={<Navigate to="/login" replace />} />
               <Route path="*" element={<Navigate to="/login" replace />} />

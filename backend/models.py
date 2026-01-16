@@ -2,11 +2,11 @@
 
 import uuid as uuid_module
 from datetime import datetime, date, date
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from uuid import UUID
 from sqlmodel import SQLModel, Field, Relationship
-from sqlalchemy import Column, UniqueConstraint, Date, Numeric
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
+from sqlalchemy import Column, UniqueConstraint, Date, Numeric, Text
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB, ARRAY
 import secrets
 
 
@@ -220,14 +220,18 @@ class EmailOutbox(SQLModel, table=True):
         sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid)
     )
     business_id: UUID = Field(foreign_key="businesses.id", index=True)
-    invoice_id: Optional[UUID] = Field(default=None, foreign_key="invoices.id")
-    to_email: str
-    subject: str
-    body: str
+    email_account_id: UUID = Field(foreign_key="email_accounts.id", index=True)
+    invoice_id: Optional[UUID] = Field(default=None, foreign_key="invoices.id", index=True)
     chase_stage: Optional[int] = None
+    to_emails: List[str] = Field(sa_column=Column(ARRAY(Text), nullable=False))
+    subject: str
+    body_preview: str
+    provider_message_id: Optional[str] = None
     status: str = Field(default="queued", index=True)
-    error_message: Optional[str] = None
+    error: Optional[str] = None
     sent_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     business: Optional[Business] = Relationship()
+    email_account: Optional["EmailAccount"] = Relationship()
+    invoice: Optional[Invoice] = Relationship()

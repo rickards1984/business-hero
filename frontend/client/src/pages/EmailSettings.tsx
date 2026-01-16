@@ -12,10 +12,13 @@ import {
   Alert,
   Container,
   Snackbar,
+  Chip,
+  Divider,
 } from '@mui/material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { apiRequest } from '@/lib/queryClient';
+import { config } from '@/config/env';
 
 interface EmailConnection {
   id: string;
@@ -30,6 +33,12 @@ interface EmailConnection {
   is_enabled: boolean;
 }
 
+interface ConnectedAccount {
+  provider: string;
+  email_address: string;
+  capabilities: Record<string, any>;
+}
+
 export default function EmailSettings() {
   const navigate = useNavigate();
   const { user, loading: authLoading } = useAuth();
@@ -39,6 +48,7 @@ export default function EmailSettings() {
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [hasAccess, setHasAccess] = useState(false);
+  const [accounts, setAccounts] = useState<ConnectedAccount[]>([]);
 
   // Form state
   const [smtpHost, setSmtpHost] = useState('');
@@ -94,6 +104,16 @@ export default function EmailSettings() {
       setUseTls(data.use_tls);
       setUseSsl(data.use_ssl);
       setIsEnabled(data.is_enabled);
+
+      if (data.from_email) {
+        setAccounts([
+          {
+            provider: 'smtp',
+            email_address: data.from_email,
+            capabilities: { send: true },
+          },
+        ]);
+      }
     } catch (err: any) {
       if (err.message?.includes('404')) {
         // No existing connection, that's ok
@@ -159,6 +179,11 @@ export default function EmailSettings() {
     }
   };
 
+  const startOAuth = (provider: 'google' | 'microsoft', mode: 'read_basic' | 'read_full') => {
+    const url = `${config.apiBaseUrl}/v1/oauth/${provider}?mode=${mode}`;
+    window.location.href = url;
+  };
+
   if (loading || authLoading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
@@ -180,10 +205,55 @@ export default function EmailSettings() {
 
   return (
     <Container maxWidth="md" sx={{ py: 4 }}>
-      <Paper sx={{ p: 3 }}>
-        <Typography variant="h6" gutterBottom>Email Settings</Typography>
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Typography variant="h6" gutterBottom>Email Accounts</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-          Configure your SMTP settings for sending invoice chase emails.
+          Connect Google or Microsoft accounts for inbox sync and briefings, or configure SMTP for sending.
+        </Typography>
+
+        <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 2 }}>
+          <Button variant="outlined" onClick={() => startOAuth('google', 'read_basic')}>
+            Connect Google (Briefings)
+          </Button>
+          <Button variant="outlined" onClick={() => startOAuth('google', 'read_full')}>
+            Connect Google (Draft replies)
+          </Button>
+          <Button variant="outlined" onClick={() => startOAuth('microsoft', 'read_basic')}>
+            Connect Microsoft (Briefings)
+          </Button>
+          <Button variant="outlined" onClick={() => startOAuth('microsoft', 'read_full')}>
+            Connect Microsoft (Draft replies)
+          </Button>
+        </Box>
+
+        <Divider sx={{ my: 2 }} />
+
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Connected accounts</Typography>
+        {accounts.length === 0 && (
+          <Typography color="text.secondary">No connected accounts yet.</Typography>
+        )}
+        {accounts.map((account) => (
+          <Box
+            key={`${account.provider}-${account.email_address}`}
+            sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', py: 1 }}
+          >
+            <Box>
+              <Typography variant="body2">{account.email_address}</Typography>
+              <Typography variant="caption" color="text.secondary">{account.provider}</Typography>
+            </Box>
+            <Chip
+              size="small"
+              label={account.capabilities.send ? 'Send enabled' : 'Read only'}
+              color={account.capabilities.send ? 'success' : 'default'}
+            />
+          </Box>
+        ))}
+      </Paper>
+
+      <Paper sx={{ p: 3 }}>
+        <Typography variant="h6" gutterBottom>SMTP Settings</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+          Configure SMTP for sending invoice chase emails.
         </Typography>
 
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
