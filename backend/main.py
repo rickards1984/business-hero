@@ -3,6 +3,7 @@
 import os
 import json
 import copy
+import secrets
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
@@ -431,13 +432,95 @@ async def get_business_integrations(
                 business_id=str(i.business_id),
                 integration_type=i.integration_type,
                 is_enabled=i.is_enabled,
-                config=i.config,
+                config=(
+                    {k: v for k, v in (i.config or {}).items() if k != "webhook_secret"}
+                    if i.integration_type == "awaz"
+                    else i.config
+                ),
                 created_at=i.created_at,
                 updated_at=i.updated_at
             )
             for i in integrations
         ]
     )
+
+
+@app.get("/v1/integrations/awaz", tags=["Integrations"])
+async def get_awaz_integration_status(
+    request: Request,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    integration = ensure_awaz_integration(auth_ctx["business_id"], session)
+    config = integration.config or {}
+    last_received_at = config.get("last_received_at")
+    last_received_dt = _parse_iso_datetime(last_received_at)
+    connected = False
+    if last_received_dt:
+        connected = last_received_dt >= datetime.utcnow() - timedelta(days=30)
+
+    return {
+        "webhook_url": _build_awaz_webhook_url(request, config.get("webhook_secret", "")),
+        "connected": connected,
+        "last_received_at": last_received_at,
+        "last_error": config.get("last_error"),
+        "receptionist_name": config.get("receptionist_name"),
+        "phone_number": config.get("phone_number"),
+    }
+
+
+@app.post("/v1/integrations/awaz/rotate-secret", tags=["Integrations"])
+async def rotate_awaz_webhook_secret(
+    request: Request,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    integration = ensure_awaz_integration(auth_ctx["business_id"], session)
+    config = integration.config or {}
+    config["webhook_secret"] = secrets.token_urlsafe(32)
+    integration.config = config
+    integration.updated_at = datetime.utcnow()
+    session.add(integration)
+    session.commit()
+
+    return {
+        "webhook_url": _build_awaz_webhook_url(request, config["webhook_secret"]),
+    }
+
+
+@app.post("/v1/integrations/awaz/test", tags=["Integrations"])
+async def test_awaz_integration(
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    business = session.exec(
+        select(Business).where(Business.id == auth_ctx["business_id"])
+    ).first()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    integration = ensure_awaz_integration(auth_ctx["business_id"], session)
+    config = integration.config or {}
+
+    payload = CallCreate(
+        caller_number=config.get("phone_number") or "+440000000000",
+        caller_name=config.get("receptionist_name") or "Awaz Test",
+        started_at=datetime.utcnow(),
+        ended_at=datetime.utcnow(),
+        transcript="Test call from Awaz integration.",
+        intent="test",
+        create_follow_up_task=True,
+    )
+    response = await _create_call_record(payload, business, session)
+
+    config["last_received_at"] = datetime.utcnow().isoformat()
+    config["last_error"] = None
+    integration.config = config
+    integration.updated_at = datetime.utcnow()
+    session.add(integration)
+    session.commit()
+
+    return {"call_id": response.id}
 
 
 @app.put("/v1/business/integrations/{integration_type}", response_model=IntegrationResponse, tags=["Business"])
@@ -704,6 +787,7 @@ async def _create_call_record(
     data: CallCreate,
     business: Business,
     session: Session,
+    source: str = "Awaz",
 ) -> CallResponse:
     summary = data.summary
     if not summary and data.transcript:
@@ -711,7 +795,7 @@ async def _create_call_record(
 
     call_event = Call(
         business_id=business.id,
-        source="Awaz",
+        source=source,
         caller_number=data.caller_number,
         caller_name=data.caller_name,
         started_at=data.started_at,
@@ -767,10 +851,42 @@ async def get_awaz_business(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication. Use x-api-key header, Authorization: Bearer <key>, or api_key query param",
         )
+    integration = session.exec(
+        select(Integration).where(
+            Integration.integration_type == "awaz",
+            text("config ->> 'webhook_secret' = :token"),
+        ),
+        {"token": token},
+    ).first()
+    if integration:
+        business = session.exec(
+            select(Business).where(Business.id == integration.business_id)
+        ).first()
+        if not business:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook secret")
+        integration.config = integration.config or {}
+        integration.config["last_received_at"] = datetime.utcnow().isoformat()
+        integration.config["last_error"] = None
+        integration.updated_at = datetime.utcnow()
+        session.add(integration)
+        session.commit()
+        return business
+
+    # TODO(2026-01-31): Remove legacy business api key fallback for Awaz webhook.
     statement = select(Business).where(Business.api_key == token)
     business = session.exec(statement).first()
     if not business:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+        session.exec(
+            text(
+                "UPDATE integrations "
+                "SET config = jsonb_set(coalesce(config, '{}'::jsonb), '{last_error}', to_jsonb(:err::text), true), "
+                "updated_at = NOW() "
+                "WHERE integration_type = 'awaz' AND config ->> 'webhook_secret' = :token"
+            ),
+            {"err": "Invalid webhook secret", "token": token},
+        )
+        session.commit()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook secret")
     return business
 
 
@@ -781,7 +897,7 @@ async def awaz_calls_webhook(
     session: Session = Depends(get_session),
 ):
     """Handle Awaz calls webhook using business API key auth."""
-    return await _create_call_record(data, business, session)
+    return await _create_call_record(data, business, session, source="awaz")
 
 
 @app.get("/v1/calls", response_model=List[CallResponse], tags=["Calls"])
@@ -977,6 +1093,67 @@ def parse_date(value: str) -> Optional[date_type]:
 def parse_amount(value: str) -> Optional[float]:
     """Parse amount from string, removing currency symbols."""
     if not value or not value.strip():
+        return None
+
+
+def ensure_awaz_integration(business_id: str, session: Session) -> Integration:
+    """Ensure Awaz integration row exists with a webhook secret."""
+    integration = session.exec(
+        select(Integration).where(
+            Integration.business_id == business_id,
+            Integration.integration_type == "awaz",
+        )
+    ).first()
+    if integration:
+        return integration
+
+    config = {
+        "webhook_secret": secrets.token_urlsafe(32),
+        "last_received_at": None,
+        "last_error": None,
+        "receptionist_name": None,
+        "phone_number": None,
+    }
+    integration = Integration(
+        business_id=business_id,
+        integration_type="awaz",
+        is_enabled=False,
+        config=config,
+    )
+    session.add(integration)
+    session.commit()
+    session.refresh(integration)
+    return integration
+
+
+def get_awaz_integration(business_id: str, session: Session) -> Dict[str, Any]:
+    """Return Awaz integration id + config."""
+    integration = session.exec(
+        select(Integration).where(
+            Integration.business_id == business_id,
+            Integration.integration_type == "awaz",
+        )
+    ).first()
+    if not integration:
+        raise HTTPException(status_code=404, detail="Awaz integration not found")
+    return {"id": str(integration.id), "config": integration.config or {}}
+
+
+def _build_awaz_webhook_url(request: Request, webhook_secret: str) -> str:
+    base_url = os.getenv("PUBLIC_BASE_URL")
+    if base_url:
+        base = base_url.rstrip("/")
+    else:
+        base = str(request.base_url).rstrip("/")
+    return f"{base}/v1/webhooks/awaz/calls?api_key={webhook_secret}"
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
         return None
     value = value.strip().replace('£', '').replace('$', '').replace(',', '').replace('€', '')
     try:
