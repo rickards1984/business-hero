@@ -20,6 +20,7 @@ import {
   Typography,
 } from '@mui/material';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import { useAuth } from '@/contexts/AuthContext';
 import { apiRequest } from '@/lib/queryClient';
 
@@ -140,6 +141,16 @@ export default function AwazSettings() {
 
   return (
     <Container maxWidth="md" sx={{ py: 4 }}>
+      <Box sx={{ display: 'flex', justifyContent: 'flex-start', mb: 2 }}>
+        <Button
+          variant="outlined"
+          startIcon={<ArrowBackIcon />}
+          onClick={() => navigate('/app')}
+          fullWidth={{ xs: true, sm: false }}
+        >
+          Back to Dashboard
+        </Button>
+      </Box>
       <Paper sx={{ p: 3 }}>
         <Typography variant="h6" gutterBottom>Awaz Settings</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>

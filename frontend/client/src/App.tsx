@@ -13,6 +13,7 @@ import EmailOutbox from '@/pages/EmailOutbox';
 import Inbox from '@/pages/Inbox';
 import Briefings from '@/pages/Briefings';
 import AwazSettings from '@/pages/AwazSettings';
+import AssistantChat from '@/pages/AssistantChat';
 
 const theme = createTheme({
   palette: {
@@ -70,6 +71,7 @@ function App() {
               <Route path="/app/settings/branding" element={<BrandingSettings />} />
               <Route path="/app/settings/email" element={<EmailSettings />} />
               <Route path="/app/settings/awaz" element={<AwazSettings />} />
+              <Route path="/app/assistant/chat" element={<AssistantChat />} />
               <Route path="/app/inbox" element={<Inbox />} />
               <Route path="/app/briefings" element={<Briefings />} />
               <Route path="/app/email/outbox" element={<EmailOutbox />} />

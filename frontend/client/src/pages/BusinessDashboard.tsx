@@ -62,6 +62,7 @@ import {
   Send as SendIcon,
   Preview as PreviewIcon,
   Link as LinkIcon,
+  SmartToy as SmartToyIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type Business, type Task, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
@@ -496,6 +497,15 @@ export default function BusinessDashboard() {
           
           {/* Right side - User email and logout */}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<SmartToyIcon />}
+              onClick={() => navigate('/app/assistant/chat')}
+              sx={{ color: 'inherit', borderColor: 'rgba(255,255,255,0.4)' }}
+            >
+              AI Admin
+            </Button>
             <Typography
               variant="body2"
               sx={{
@@ -1113,7 +1123,7 @@ export default function BusinessDashboard() {
         </DialogActions>
       </Dialog>
 
-      <DebugPanel />
+      {import.meta.env.DEV && <DebugPanel />}
     </Box>
   );
 }

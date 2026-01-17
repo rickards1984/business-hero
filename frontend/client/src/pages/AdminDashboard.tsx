@@ -525,7 +525,7 @@ export default function AdminDashboard() {
         </DialogActions>
       </Dialog>
 
-      <DebugPanel />
+      {import.meta.env.DEV && <DebugPanel />}
     </Box>
   );
 }
