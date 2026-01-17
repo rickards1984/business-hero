@@ -193,6 +193,23 @@ If `create_follow_up_task` is `true` OR `intent` is `"new_lead"`, a follow-up ta
 
 If `OPENAI_API_KEY` is configured and no summary is provided, one will be auto-generated.
 
+### Awaz Webhook
+
+```bash
+curl -X POST "http://localhost:3000/v1/webhooks/awaz/calls" \
+  -H "x-api-key: sk_abc123..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "caller_number": "+44123456789",
+    "caller_name": "John Smith",
+    "started_at": "2024-12-14T14:30:00Z",
+    "ended_at": "2024-12-14T14:35:00Z",
+    "transcript": "Hi, I am interested in your services...",
+    "intent": "new_lead",
+    "create_follow_up_task": true
+  }'
+```
+
 ### List Calls
 
 ```bash

@@ -3,18 +3,16 @@
 import os
 import json
 import copy
-import smtplib
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
 from sqlmodel import Session, select
 from sqlalchemy import text, func
-from email.message import EmailMessage
-from openai import OpenAI
 import pytz
 import csv
 import io
@@ -58,14 +56,15 @@ from auth import verify_master_key, get_current_business, get_access_token, get_
 from openai_utils import generate_call_summary
 from supabase_auth import verify_supabase_token
 from assistant_chat import process_chat_message, get_business_for_user
-from email_utils import encrypt_secret, decrypt_secret
-from providers.google_gmail import GoogleGmailProvider
-from providers.microsoft_graph import MicrosoftGraphProvider
-from providers.smtp import SMTPProvider
-from app.email.router import router as email_router
-
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+from app.email.service import (
+    get_or_create_smtp_account,
+    send_email_smtp,
+)
+from app.email.router import (
+    router as email_router,
+    build_google_oauth_start_url,
+    build_microsoft_oauth_start_url,
+)
 
 
 async def get_current_user_business(
@@ -102,15 +101,6 @@ async def get_current_user_business(
             detail="Business not found"
         )
     
-    return business
-
-
-def get_business_by_id(session: Session, business_id: str) -> Business:
-    """Fetch business by ID or raise 404."""
-    statement = select(Business).where(Business.id == business_id)
-    business = session.exec(statement).first()
-    if not business:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business not found")
     return business
 
 
@@ -209,6 +199,22 @@ app.include_router(email_router)
 async def health_check():
     """Health check endpoint."""
     return HealthResponse(ok=True)
+
+
+@app.get("/v1/oauth/google")
+async def oauth_google_start(
+    mode: Optional[str] = Query(default=None),
+    auth_ctx=Depends(get_user_business_context),
+):
+    return RedirectResponse(url=build_google_oauth_start_url(auth_ctx, mode))
+
+
+@app.get("/v1/oauth/microsoft")
+async def oauth_microsoft_start(
+    mode: Optional[str] = Query(default=None),
+    auth_ctx=Depends(get_user_business_context),
+):
+    return RedirectResponse(url=build_microsoft_oauth_start_url(auth_ctx, mode))
 
 
 @app.get("/openapi-action.json", include_in_schema=False)
@@ -691,12 +697,18 @@ async def create_call(
     Create a call event from Awaz webhook or other sources.
     Optionally auto-creates a follow-up task.
     """
-    raw_payload = json.dumps(data.model_dump(mode="json"))
-    
+    return await _create_call_record(data, business, session)
+
+
+async def _create_call_record(
+    data: CallCreate,
+    business: Business,
+    session: Session,
+) -> CallResponse:
     summary = data.summary
     if not summary and data.transcript:
         summary = await generate_call_summary(data.transcript)
-    
+
     call_event = Call(
         business_id=business.id,
         source="Awaz",
@@ -706,10 +718,10 @@ async def create_call(
         ended_at=data.ended_at,
         transcript=data.transcript,
         summary=summary,
-        intent=data.intent
+        intent=data.intent,
     )
     session.add(call_event)
-    
+
     if data.create_follow_up_task or data.intent == "new_lead":
         caller_info = data.caller_name or data.caller_number or "Unknown"
         follow_up_task = Task(
@@ -717,13 +729,13 @@ async def create_call(
             title=f"Follow up call: {caller_info}",
             description=f"Follow up on call from {caller_info}. Intent: {data.intent or 'not specified'}",
             source="awaz",
-            status="open"
+            status="open",
         )
         session.add(follow_up_task)
-    
+
     session.commit()
     session.refresh(call_event)
-    
+
     return CallResponse(
         id=str(call_event.id),
         business_id=str(call_event.business_id),
@@ -735,8 +747,41 @@ async def create_call(
         transcript=call_event.transcript,
         summary=call_event.summary,
         intent=call_event.intent,
-        created_at=call_event.created_at
+        created_at=call_event.created_at,
     )
+
+
+_awaz_api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
+_awaz_bearer_auth = HTTPBearer(auto_error=False)
+
+
+async def get_awaz_business(
+    api_key: Optional[str] = Query(default=None, description="Business API key for Awaz webhooks"),
+    x_api_key: Optional[str] = Depends(_awaz_api_key_header),
+    authorization: Optional[HTTPAuthorizationCredentials] = Depends(_awaz_bearer_auth),
+    session: Session = Depends(get_session),
+) -> Business:
+    token = api_key or x_api_key or (authorization.credentials if authorization else None)
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication. Use x-api-key header, Authorization: Bearer <key>, or api_key query param",
+        )
+    statement = select(Business).where(Business.api_key == token)
+    business = session.exec(statement).first()
+    if not business:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+    return business
+
+
+@app.post("/v1/webhooks/awaz/calls", response_model=CallResponse, tags=["Webhooks"])
+async def awaz_calls_webhook(
+    data: CallCreate,
+    business: Business = Depends(get_awaz_business),
+    session: Session = Depends(get_session),
+):
+    """Handle Awaz calls webhook using business API key auth."""
+    return await _create_call_record(data, business, session)
 
 
 @app.get("/v1/calls", response_model=List[CallResponse], tags=["Calls"])
@@ -938,258 +983,6 @@ def parse_amount(value: str) -> Optional[float]:
         return float(value)
     except ValueError:
         return None
-
-
-def is_platform_admin_user(user_id: str, session: Session) -> bool:
-    """Check if user is a platform admin."""
-    result = session.exec(
-        text("SELECT 1 FROM platform_admins WHERE user_id = :user_id LIMIT 1"),
-        {"user_id": user_id}
-    ).first()
-    return result is not None
-
-
-def get_business_member_role(user_id: str, business_id: str, session: Session) -> Optional[str]:
-    """Get business member role for a user in a business."""
-    result = session.exec(
-        text(
-            "SELECT role FROM business_members "
-            "WHERE user_id = :user_id AND business_id = :business_id AND is_active = true "
-            "LIMIT 1"
-        ),
-        {"user_id": user_id, "business_id": business_id}
-    ).first()
-    return result[0] if result else None
-
-
-def ensure_email_manager_role(user_id: str, business_id: str, session: Session) -> None:
-    """Ensure user has role to manage email settings."""
-    if is_platform_admin_user(user_id, session):
-        return
-    role = get_business_member_role(user_id, business_id, session)
-    if role not in {"owner", "manager", "admin"}:
-        raise HTTPException(status_code=403, detail="Insufficient permissions for email settings")
-
-
-def send_email_smtp(connection: EmailConnection, to_email: str, subject: str, body: str) -> None:
-    """Send email using SMTP connection settings."""
-    password = decrypt_secret(connection.smtp_password_encrypted)
-    msg = EmailMessage()
-    msg["To"] = to_email
-    msg["Subject"] = subject
-    if connection.from_name:
-        msg["From"] = f"{connection.from_name} <{connection.from_email}>"
-    else:
-        msg["From"] = connection.from_email
-    msg.set_content(body)
-
-    if connection.use_ssl:
-        server = smtplib.SMTP_SSL(connection.smtp_host, connection.smtp_port, timeout=10)
-    else:
-        server = smtplib.SMTP(connection.smtp_host, connection.smtp_port, timeout=10)
-    try:
-        if connection.use_tls and not connection.use_ssl:
-            server.starttls()
-        server.login(connection.smtp_username, password)
-        server.send_message(msg)
-    finally:
-        server.quit()
-
-
-def get_provider_for_account(account: EmailAccount):
-    """Return provider implementation based on account provider type."""
-    provider = (account.provider or "").lower()
-    if provider == "google":
-        return GoogleGmailProvider()
-    if provider == "microsoft":
-        return MicrosoftGraphProvider()
-    if provider == "smtp":
-        return SMTPProvider()
-    raise HTTPException(status_code=400, detail=f"Unsupported provider: {account.provider}")
-
-
-def get_default_email_account(session: Session, business: Business) -> EmailAccount:
-    """Fetch default email account for a business (fallback to any account)."""
-    account = session.exec(
-        select(EmailAccount).where(
-            EmailAccount.business_id == business.id,
-            EmailAccount.is_default == True,
-        )
-    ).first()
-    if not account:
-        account = session.exec(
-            select(EmailAccount).where(EmailAccount.business_id == business.id)
-        ).first()
-    if not account:
-        raise HTTPException(status_code=404, detail="Email account not configured")
-    return account
-
-
-def get_or_create_smtp_account(
-    session: Session,
-    business: Business,
-    user_id: str,
-    connection: EmailConnection,
-) -> EmailAccount:
-    """Create a shadow SMTP account so email_outbox can link to an account."""
-    account = session.exec(
-        select(EmailAccount).where(
-            EmailAccount.business_id == business.id,
-            EmailAccount.email_address == connection.from_email,
-            EmailAccount.provider == "smtp",
-        )
-    ).first()
-    if account:
-        return account
-
-    has_default = session.exec(
-        select(EmailAccount).where(
-            EmailAccount.business_id == business.id,
-            EmailAccount.is_default == True,
-        )
-    ).first()
-
-    account = EmailAccount(
-        business_id=business.id,
-        user_id=user_id,
-        provider="smtp",
-        email_address=connection.from_email,
-        display_name=connection.from_name,
-        is_default=has_default is None,
-        smtp_config={
-            "host": connection.smtp_host,
-            "port": connection.smtp_port,
-            "username": connection.smtp_username,
-            "use_tls": connection.use_tls,
-            "use_ssl": connection.use_ssl,
-            "from_email": connection.from_email,
-            "from_name": connection.from_name,
-        },
-    )
-    session.add(account)
-    session.commit()
-    session.refresh(account)
-    return account
-
-
-def _text_to_html(text: str) -> str:
-    safe = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return safe.replace("\n", "<br>")
-
-
-def generate_email_briefing_markdown(
-    messages: List[EmailMessage],
-    business: Business,
-) -> str:
-    """Generate a markdown briefing for recent emails."""
-    if not messages:
-        return "No recent emails in the selected period."
-
-    fallback_lines = [
-        f"# Email Briefing for {business.name}",
-        "",
-        f"Total messages: {len(messages)}",
-        "",
-        "## Recent Emails",
-    ]
-    for msg in messages[:20]:
-        subject = msg.subject or "(no subject)"
-        sender = msg.from_email or "Unknown sender"
-        fallback_lines.append(f"- {subject} — {sender}")
-    fallback_text = "\n".join(fallback_lines)
-
-    if not OPENAI_API_KEY:
-        return fallback_text
-
-    try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        items = []
-        for msg in messages[:50]:
-            items.append(
-                f"From: {msg.from_email or 'Unknown'}\n"
-                f"Subject: {msg.subject or '(no subject)'}\n"
-                f"Snippet: {msg.snippet or ''}\n"
-            )
-        prompt = "\n---\n".join(items)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Write a concise, action-oriented email briefing in markdown. "
-                        "Do not hallucinate. If details are missing, say so explicitly."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Summarize these emails for {business.name}. "
-                        "Include key actions, deadlines, and suggested next steps:\n\n"
-                        f"{prompt}"
-                    ),
-                },
-            ],
-            max_tokens=800,
-            temperature=0.2,
-        )
-        return response.choices[0].message.content or fallback_text
-    except Exception:
-        return fallback_text
-
-
-def generate_email_reply_draft(message: EmailMessage, business: Business) -> Dict[str, str]:
-    """Generate a suggested reply for a message."""
-    subject = message.subject or "Your email"
-    reply_subject = f"Re: {subject}"
-    fallback_body = (
-        f"Hi {message.from_name or 'there'},\n\n"
-        "Thanks for your email. I will review and get back to you shortly.\n\n"
-        f"Best regards,\n{business.name}"
-    )
-
-    if not OPENAI_API_KEY:
-        return {"subject": reply_subject, "body_text": fallback_body, "body_html": _text_to_html(fallback_body)}
-
-    try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        prompt = (
-            f"From: {message.from_email or 'Unknown'}\n"
-            f"Subject: {message.subject or '(no subject)'}\n"
-            f"Snippet: {message.snippet or ''}\n"
-            f"Body:\n{message.body_text or ''}"
-        )
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Draft a concise, action-oriented reply. "
-                        "Do not hallucinate. If details are missing, say so. "
-                        "Return JSON with keys: subject, body_text, body_html."
-                    ),
-                },
-                {"role": "user", "content": f"Draft a reply to this email:\n\n{prompt}"},
-            ],
-            max_tokens=400,
-            temperature=0.3,
-        )
-        content = response.choices[0].message.content or ""
-        body_text = fallback_body
-        body_html = _text_to_html(fallback_body)
-        if content:
-            try:
-                data = json.loads(content)
-                reply_subject = data.get("subject") or reply_subject
-                body_text = data.get("body_text") or fallback_body
-                body_html = data.get("body_html") or _text_to_html(body_text)
-            except json.JSONDecodeError:
-                body_text = content
-                body_html = _text_to_html(content)
-        return {"subject": reply_subject, "body_text": body_text, "body_html": body_html}
-    except Exception:
-        return {"subject": reply_subject, "body_text": fallback_body, "body_html": _text_to_html(fallback_body)}
 
 
 def generate_chase_email(invoice: Invoice, business: Business, stage: int) -> Dict[str, str]:
@@ -1518,661 +1311,6 @@ async def get_chase_draft(
 
 
 # ============================================================================
-# EMAIL SETTINGS ENDPOINTS
-# ============================================================================
-
-@app.get("/v1/email/connection", response_model=EmailConnectionPublic, tags=["Email"])
-async def get_email_connection(
-    auth_ctx=Depends(get_user_business_context),
-    session: Session = Depends(get_session),
-):
-    """Get email connection settings for the current business."""
-    business = get_business_by_id(session, auth_ctx["business_id"])
-    connection = session.exec(
-        select(EmailConnection).where(EmailConnection.business_id == business.id)
-    ).first()
-
-    if not connection:
-        raise HTTPException(status_code=404, detail="Email connection not found")
-
-    return EmailConnectionPublic(
-        id=str(connection.id),
-        business_id=str(connection.business_id),
-        provider=connection.provider,
-        smtp_host=connection.smtp_host,
-        smtp_port=connection.smtp_port,
-        smtp_username=connection.smtp_username,
-        from_email=connection.from_email,
-        from_name=connection.from_name,
-        use_tls=connection.use_tls,
-        use_ssl=connection.use_ssl,
-        is_enabled=connection.is_enabled,
-        created_at=connection.created_at,
-        updated_at=connection.updated_at
-    )
-
-
-@app.put("/v1/email/connection", response_model=EmailConnectionPublic, tags=["Email"])
-async def upsert_email_connection(
-    data: EmailConnectionUpsert,
-    auth_ctx=Depends(get_user_business_context),
-    session: Session = Depends(get_session),
-):
-    """Create or update email connection settings."""
-    business = get_business_by_id(session, auth_ctx["business_id"])
-    ensure_email_manager_role(auth_ctx["user_id"], str(business.id), session)
-
-    encrypted_password = encrypt_secret(data.smtp_password)
-
-    connection = session.exec(
-        select(EmailConnection).where(EmailConnection.business_id == business.id)
-    ).first()
-
-    if connection:
-        connection.provider = data.provider
-        connection.smtp_host = data.smtp_host
-        connection.smtp_port = data.smtp_port
-        connection.smtp_username = data.smtp_username
-        connection.smtp_password_encrypted = encrypted_password
-        connection.from_email = data.from_email
-        connection.from_name = data.from_name
-        connection.use_tls = data.use_tls
-        connection.use_ssl = data.use_ssl
-        connection.is_enabled = data.is_enabled
-    else:
-        connection = EmailConnection(
-            business_id=business.id,
-            provider=data.provider,
-            smtp_host=data.smtp_host,
-            smtp_port=data.smtp_port,
-            smtp_username=data.smtp_username,
-            smtp_password_encrypted=encrypted_password,
-            from_email=data.from_email,
-            from_name=data.from_name,
-            use_tls=data.use_tls,
-            use_ssl=data.use_ssl,
-            is_enabled=data.is_enabled
-        )
-        session.add(connection)
-
-    session.commit()
-    session.refresh(connection)
-
-    return EmailConnectionPublic(
-        id=str(connection.id),
-        business_id=str(connection.business_id),
-        provider=connection.provider,
-        smtp_host=connection.smtp_host,
-        smtp_port=connection.smtp_port,
-        smtp_username=connection.smtp_username,
-        from_email=connection.from_email,
-        from_name=connection.from_name,
-        use_tls=connection.use_tls,
-        use_ssl=connection.use_ssl,
-        is_enabled=connection.is_enabled,
-        created_at=connection.created_at,
-        updated_at=connection.updated_at
-    )
-
-
-@app.post("/v1/email/test", response_model=EmailTestResponse, tags=["Email"])
-async def send_test_email(
-    request: Request,
-    auth_ctx=Depends(get_user_business_context),
-    session: Session = Depends(get_session),
-):
-    """Send a test email to the logged-in user's email address."""
-    business = get_business_by_id(session, auth_ctx["business_id"])
-    user_email = getattr(request.state, "user_email", None)
-    if not user_email:
-        raise HTTPException(status_code=400, detail="User email not found")
-
-    connection = session.exec(
-        select(EmailConnection).where(EmailConnection.business_id == business.id)
-    ).first()
-
-    if not connection or not connection.is_enabled:
-        raise HTTPException(status_code=400, detail="Email connection not configured or disabled")
-
-    subject = "Business Hero - Test Email"
-    body = f"Hello,\n\nThis is a test email from {business.name} via Business Hero.\n\nBest regards,\n{business.name}"
-
-    account = get_or_create_smtp_account(session, business, auth_ctx["user_id"], connection)
-    outbox = EmailOutbox(
-        business_id=business.id,
-        email_account_id=account.id,
-        invoice_id=None,
-        chase_stage=None,
-        to_emails=[user_email],
-        subject=subject,
-        body_preview=body,
-        status="queued",
-    )
-    session.add(outbox)
-    session.commit()
-    session.refresh(outbox)
-
-    try:
-        send_email_smtp(connection, user_email, subject, body)
-        outbox.status = "sent"
-        outbox.sent_at = datetime.utcnow()
-        session.add(outbox)
-        session.commit()
-        return EmailTestResponse(success=True, message="Test email sent", outbox_id=str(outbox.id))
-    except Exception as exc:
-        outbox.status = "failed"
-        outbox.error = str(exc)
-        session.add(outbox)
-        session.commit()
-        return EmailTestResponse(success=False, message=str(exc), outbox_id=str(outbox.id))
-
-
-@app.get("/v1/email/outbox", response_model=EmailOutboxListResponse, tags=["Email"])
-async def list_email_outbox(
-    status_filter: Optional[str] = Query(default=None, alias="status"),
-    limit: int = Query(default=50, ge=1, le=200),
-    auth_ctx=Depends(get_user_business_context),
-    session: Session = Depends(get_session)
-):
-    """List email outbox records for the current business."""
-    business = get_business_by_id(session, auth_ctx["business_id"])
-    statement = select(EmailOutbox).where(EmailOutbox.business_id == business.id)
-    if status_filter:
-        statement = statement.where(EmailOutbox.status == status_filter)
-    statement = statement.order_by(EmailOutbox.created_at.desc()).limit(limit)
-    rows = session.exec(statement).all()
-
-    items = [
-        EmailOutboxItem(
-            id=str(row.id),
-            business_id=str(row.business_id),
-            invoice_id=str(row.invoice_id) if row.invoice_id else None,
-            to_email=", ".join(row.to_emails or []),
-            subject=row.subject,
-            body=row.body_preview,
-            chase_stage=row.chase_stage,
-            status=row.status,
-            error_message=row.error,
-            sent_at=row.sent_at,
-            created_at=row.created_at
-        )
-        for row in rows
-    ]
-
-    return EmailOutboxListResponse(emails=items, total=len(items))
-
-
-@app.get("/v1/email/messages", response_model=EmailMessageListResponse, tags=["Email"])
-async def list_email_messages(
-    email_account_id: Optional[str] = Query(default=None),
-    folder: Optional[str] = Query(default="INBOX"),
-    unread_only: Optional[bool] = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=200),
-    auth_ctx=Depends(get_user_business_context),
-    session: Session = Depends(get_session),
-):
-    """List cached email messages for the current business."""
-    business = get_business_by_id(session, auth_ctx["business_id"])
-    statement = select(EmailMessage).where(EmailMessage.business_id == business.id)
-    if email_account_id:
-        statement = statement.where(EmailMessage.email_account_id == email_account_id)
-    if folder:
-        statement = statement.where(EmailMessage.folder == folder)
-    if unread_only is True:
-        statement = statement.where(EmailMessage.is_unread == True)
-    statement = statement.order_by(EmailMessage.received_at.desc()).limit(limit)
-    rows = session.exec(statement).all()
-
-    items = [
-        EmailMessageItem(
-            id=str(row.id),
-            business_id=str(row.business_id),
-            email_account_id=str(row.email_account_id),
-            provider_message_id=row.provider_message_id,
-            provider_thread_id=row.provider_thread_id,
-            folder=row.folder,
-            from_email=row.from_email,
-            from_name=row.from_name,
-            to_emails=row.to_emails,
-            cc_emails=row.cc_emails,
-            subject=row.subject,
-            snippet=row.snippet,
-            received_at=row.received_at,
-            is_unread=row.is_unread,
-            has_attachments=row.has_attachments,
-            labels=row.labels,
-            created_at=row.created_at,
-            updated_at=row.updated_at,
-        )
-        for row in rows
-    ]
-
-    return EmailMessageListResponse(messages=items, total=len(items))
-
-
-@app.post("/v1/email/sync/inbox", response_model=EmailSyncRunResponse, tags=["Email"])
-async def sync_email_inbox(
-    auth_ctx=Depends(get_user_business_context),
-    session: Session = Depends(get_session),
-):
-    """Sync inbox for the default email account."""
-    business = get_business_by_id(session, auth_ctx["business_id"])
-    account = get_default_email_account(session, business)
-    provider = get_provider_for_account(account)
-
-    sync_state = session.exec(
-        select(EmailSyncState).where(EmailSyncState.email_account_id == account.id)
-    ).first()
-    if not sync_state:
-        sync_state = EmailSyncState(email_account_id=account.id, cursor={})
-        session.add(sync_state)
-        session.commit()
-        session.refresh(sync_state)
-
-    try:
-        result = provider.sync_inbox_changes(account=account, cursor=sync_state.cursor or {})
-    except Exception as exc:
-        sync_state.last_error = str(exc)
-        session.add(sync_state)
-        session.commit()
-        raise HTTPException(status_code=500, detail=str(exc))
-
-    message_count = 0
-    for msg in result.messages:
-        existing = session.exec(
-            select(EmailMessage).where(
-                EmailMessage.email_account_id == account.id,
-                EmailMessage.provider_message_id == msg.provider_message_id,
-            )
-        ).first()
-        if existing:
-            existing.provider_thread_id = msg.provider_thread_id
-            existing.folder = msg.folder
-            existing.from_email = msg.from_email
-            existing.from_name = msg.from_name
-            existing.to_emails = msg.to_emails
-            existing.cc_emails = msg.cc_emails
-            existing.subject = msg.subject
-            existing.snippet = msg.snippet
-            existing.received_at = msg.received_at
-            existing.is_unread = msg.is_unread
-            existing.has_attachments = msg.has_attachments
-            existing.labels = msg.labels
-            existing.body_text = msg.body_text
-            existing.body_html = msg.body_html
-            existing.raw_headers = msg.raw_headers or {}
-            existing.updated_at = datetime.utcnow()
-            session.add(existing)
-        else:
-            record = EmailMessage(
-                business_id=business.id,
-                email_account_id=account.id,
-                provider_message_id=msg.provider_message_id,
-                provider_thread_id=msg.provider_thread_id,
-                folder=msg.folder,
-                from_email=msg.from_email,
-                from_name=msg.from_name,
-                to_emails=msg.to_emails,
-                cc_emails=msg.cc_emails,
-                subject=msg.subject,
-                snippet=msg.snippet,
-                received_at=msg.received_at,
-                is_unread=msg.is_unread,
-                has_attachments=msg.has_attachments,
-                labels=msg.labels,
-                body_text=msg.body_text,
-                body_html=msg.body_html,
-                raw_headers=msg.raw_headers or {},
-            )
-            session.add(record)
-        message_count += 1
-
-    sync_state.cursor = result.cursor or {}
-    sync_state.last_synced_at = datetime.utcnow()
-    sync_state.last_error = None
-    session.add(sync_state)
-    session.commit()
-
-    return EmailSyncRunResponse(
-        email_account_id=str(account.id),
-        synced=True,
-        message_count=message_count,
-        cursor=sync_state.cursor,
-    )
-
-
-@app.post("/v1/email/sync/run", response_model=EmailSyncRunResponse, tags=["Email"])
-async def run_email_sync(
-    auth_ctx=Depends(get_user_business_context),
-    session: Session = Depends(get_session),
-):
-    """Run inbox sync for the default email account."""
-    business = get_business_by_id(session, auth_ctx["business_id"])
-    account = get_default_email_account(session, business)
-    provider = get_provider_for_account(account)
-
-    sync_state = session.exec(
-        select(EmailSyncState).where(EmailSyncState.email_account_id == account.id)
-    ).first()
-    if not sync_state:
-        sync_state = EmailSyncState(email_account_id=account.id, cursor={})
-        session.add(sync_state)
-        session.commit()
-        session.refresh(sync_state)
-
-    result = provider.sync_inbox_changes(account=account, cursor=sync_state.cursor or {})
-    message_count = 0
-
-    for msg in result.messages:
-        existing = session.exec(
-            select(EmailMessage).where(
-                EmailMessage.email_account_id == account.id,
-                EmailMessage.provider_message_id == msg.provider_message_id,
-            )
-        ).first()
-        if existing:
-            existing.provider_thread_id = msg.provider_thread_id
-            existing.folder = msg.folder
-            existing.from_email = msg.from_email
-            existing.from_name = msg.from_name
-            existing.to_emails = msg.to_emails
-            existing.cc_emails = msg.cc_emails
-            existing.subject = msg.subject
-            existing.snippet = msg.snippet
-            existing.received_at = msg.received_at
-            existing.is_unread = msg.is_unread
-            existing.has_attachments = msg.has_attachments
-            existing.labels = msg.labels
-            existing.body_text = msg.body_text
-            existing.body_html = msg.body_html
-            existing.raw_headers = msg.raw_headers or {}
-            existing.updated_at = datetime.utcnow()
-            session.add(existing)
-        else:
-            record = EmailMessage(
-                business_id=business.id,
-                email_account_id=account.id,
-                provider_message_id=msg.provider_message_id,
-                provider_thread_id=msg.provider_thread_id,
-                folder=msg.folder,
-                from_email=msg.from_email,
-                from_name=msg.from_name,
-                to_emails=msg.to_emails,
-                cc_emails=msg.cc_emails,
-                subject=msg.subject,
-                snippet=msg.snippet,
-                received_at=msg.received_at,
-                is_unread=msg.is_unread,
-                has_attachments=msg.has_attachments,
-                labels=msg.labels,
-                body_text=msg.body_text,
-                body_html=msg.body_html,
-                raw_headers=msg.raw_headers or {},
-            )
-            session.add(record)
-        message_count += 1
-
-    sync_state.cursor = result.cursor or {}
-    sync_state.last_synced_at = datetime.utcnow()
-    sync_state.last_error = None
-    session.add(sync_state)
-    session.commit()
-
-    return EmailSyncRunResponse(
-        email_account_id=str(account.id),
-        synced=True,
-        message_count=message_count,
-        cursor=sync_state.cursor,
-    )
-
-
-@app.post("/v1/email/briefings/generate", response_model=EmailBriefingResponse, tags=["Email"])
-async def generate_email_briefing(
-    data: Optional[EmailBriefingRequest] = None,
-    hours: int = Query(default=24, ge=1, le=168),
-    email_account_id: Optional[str] = Query(default=None),
-    auth_ctx=Depends(get_user_business_context),
-    session: Session = Depends(get_session),
-):
-    """Generate a markdown briefing from recent email messages."""
-    business = get_business_by_id(session, auth_ctx["business_id"])
-    account = None
-    requested_account_id = data.email_account_id if data and data.email_account_id else email_account_id
-    if requested_account_id:
-        account = session.exec(
-            select(EmailAccount).where(
-                EmailAccount.id == requested_account_id,
-                EmailAccount.business_id == business.id,
-            )
-        ).first()
-        if not account:
-            raise HTTPException(status_code=404, detail="Email account not found")
-    else:
-        account = get_default_email_account(session, business)
-
-    period_end = datetime.utcnow()
-    period_hours = data.hours if data else hours
-    period_start = period_end - timedelta(hours=period_hours)
-
-    statement = select(EmailMessage).where(
-        EmailMessage.business_id == business.id,
-        EmailMessage.received_at >= period_start,
-        EmailMessage.received_at <= period_end,
-        EmailMessage.email_account_id == account.id,
-    )
-    statement = statement.order_by(EmailMessage.received_at.desc()).limit(200)
-    messages = session.exec(statement).all()
-
-    briefing_markdown = generate_email_briefing_markdown(messages, business)
-    stats = {
-        "total_messages": len(messages),
-        "unread_messages": sum(1 for m in messages if m.is_unread),
-    }
-
-    briefing = EmailBriefing(
-        business_id=business.id,
-        user_id=auth_ctx["user_id"],
-        email_account_id=account.id,
-        period_start=period_start,
-        period_end=period_end,
-        briefing_markdown=briefing_markdown,
-        stats=stats,
-    )
-    session.add(briefing)
-    session.commit()
-    session.refresh(briefing)
-
-    return EmailBriefingResponse(
-        id=str(briefing.id),
-        business_id=str(briefing.business_id),
-        user_id=str(briefing.user_id),
-        email_account_id=str(briefing.email_account_id) if briefing.email_account_id else None,
-        period_start=briefing.period_start,
-        period_end=briefing.period_end,
-        briefing_markdown=briefing.briefing_markdown,
-        created_at=briefing.created_at,
-    )
-
-
-@app.get("/v1/email/briefings/latest", response_model=EmailBriefingResponse, tags=["Email"])
-async def get_latest_email_briefing(
-    auth_ctx=Depends(get_user_business_context),
-    session: Session = Depends(get_session),
-):
-    """Fetch the latest email briefing for the business."""
-    business = get_business_by_id(session, auth_ctx["business_id"])
-    briefing = session.exec(
-        select(EmailBriefing)
-        .where(EmailBriefing.business_id == business.id)
-        .order_by(EmailBriefing.created_at.desc())
-        .limit(1)
-    ).first()
-    if not briefing:
-        raise HTTPException(status_code=404, detail="No briefings found")
-
-    return EmailBriefingResponse(
-        id=str(briefing.id),
-        business_id=str(briefing.business_id),
-        user_id=str(briefing.user_id),
-        email_account_id=str(briefing.email_account_id) if briefing.email_account_id else None,
-        period_start=briefing.period_start,
-        period_end=briefing.period_end,
-        briefing_markdown=briefing.briefing_markdown,
-        created_at=briefing.created_at,
-    )
-
-
-@app.post("/v1/email/drafts/generate", response_model=EmailDraftResponse, tags=["Email"])
-async def generate_email_draft(
-    data: EmailDraftRequest,
-    auth_ctx=Depends(get_user_business_context),
-    session: Session = Depends(get_session),
-):
-    """Generate a suggested reply draft for an email message."""
-    business = get_business_by_id(session, auth_ctx["business_id"])
-    message = session.exec(
-        select(EmailMessage).where(
-            EmailMessage.id == data.email_message_id,
-            EmailMessage.business_id == business.id,
-        )
-    ).first()
-    if not message:
-        raise HTTPException(status_code=404, detail="Email message not found")
-
-    to_emails = data.to_emails or ([message.from_email] if message.from_email else [])
-    if not to_emails:
-        raise HTTPException(status_code=400, detail="Recipient email not available")
-
-    draft_content = generate_email_reply_draft(message, business)
-    draft = EmailDraft(
-        business_id=business.id,
-        email_message_id=message.id,
-        to_emails=to_emails,
-        subject=draft_content["subject"],
-        body_text=draft_content.get("body_text"),
-        status="draft",
-    )
-    session.add(draft)
-    session.commit()
-    session.refresh(draft)
-
-    return EmailDraftResponse(
-        id=str(draft.id),
-        business_id=str(draft.business_id),
-        email_message_id=str(draft.email_message_id),
-        to_emails=draft.to_emails,
-        subject=draft.subject,
-        body_text=draft.body_text,
-        body_html=draft.body_html,
-        status=draft.status,
-        provider_message_id=draft.provider_message_id,
-        created_at=draft.created_at,
-        updated_at=draft.updated_at,
-    )
-
-
-@app.post("/v1/email/drafts/{draft_id}/send", response_model=EmailDraftSendResponse, tags=["Email"])
-async def send_email_draft(
-    draft_id: str,
-    auth_ctx=Depends(get_user_business_context),
-    session: Session = Depends(get_session),
-):
-    """Send an approved draft using the provider."""
-    business = get_business_by_id(session, auth_ctx["business_id"])
-    draft = session.exec(
-        select(EmailDraft).where(
-            EmailDraft.id == draft_id,
-            EmailDraft.business_id == business.id,
-        )
-    ).first()
-    if not draft:
-        raise HTTPException(status_code=404, detail="Email draft not found")
-
-    message = session.exec(
-        select(EmailMessage).where(
-            EmailMessage.id == draft.email_message_id,
-            EmailMessage.business_id == business.id,
-        )
-    ).first()
-    if not message:
-        raise HTTPException(status_code=404, detail="Email message not found")
-
-    account = session.exec(
-        select(EmailAccount).where(
-            EmailAccount.id == message.email_account_id,
-            EmailAccount.business_id == business.id,
-        )
-    ).first()
-    if not account:
-        raise HTTPException(status_code=404, detail="Email account not found")
-
-    provider = get_provider_for_account(account)
-    body_preview = draft.body_text or draft.body_html or ""
-
-    try:
-        result = provider.send_email(
-            account=account,
-            to_emails=draft.to_emails,
-            subject=draft.subject,
-            body_text=draft.body_text,
-            body_html=draft.body_html,
-            in_reply_to=message.provider_message_id,
-        )
-
-        outbox = EmailOutbox(
-            business_id=business.id,
-            email_account_id=account.id,
-            invoice_id=None,
-            chase_stage=None,
-            to_emails=draft.to_emails,
-            subject=draft.subject,
-            body_preview=body_preview,
-            provider_message_id=result.provider_message_id,
-            status="sent",
-            sent_at=datetime.utcnow(),
-        )
-        session.add(outbox)
-
-        draft.status = "sent"
-        draft.provider_message_id = result.provider_message_id
-        draft.updated_at = datetime.utcnow()
-        session.add(draft)
-
-        session.commit()
-        session.refresh(outbox)
-
-        return EmailDraftSendResponse(
-            success=True,
-            message="Draft sent",
-            outbox_id=str(outbox.id),
-            provider_message_id=result.provider_message_id,
-            status=draft.status,
-        )
-    except Exception as exc:
-        outbox = EmailOutbox(
-            business_id=business.id,
-            email_account_id=account.id,
-            invoice_id=None,
-            chase_stage=None,
-            to_emails=draft.to_emails,
-            subject=draft.subject,
-            body_preview=body_preview,
-            status="failed",
-            error=str(exc),
-        )
-        session.add(outbox)
-        session.commit()
-        session.refresh(outbox)
-
-        return EmailDraftSendResponse(
-            success=False,
-            message=str(exc),
-            outbox_id=str(outbox.id),
-            status="failed",
-        )
-
-
-# ============================================================================
 # INVOICE CHASE SEND ENDPOINTS
 # ============================================================================
 
@@ -2438,3 +1576,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 3000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
