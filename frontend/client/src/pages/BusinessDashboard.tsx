@@ -61,6 +61,7 @@ import {
   Outbox as OutboxIcon,
   Send as SendIcon,
   Preview as PreviewIcon,
+  Link as LinkIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type Business, type Task, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
@@ -552,6 +553,14 @@ export default function BusinessDashboard() {
                     onClick={() => navigate('/app/email/outbox')}
                   >
                     Email Outbox
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    startIcon={<LinkIcon />}
+                    onClick={() => navigate('/app/settings/awaz')}
+                  >
+                    Awaz Settings
                   </Button>
                   <Button
                     variant="outlined"
