@@ -46,6 +46,11 @@ export interface Business {
   api_key: string;
   logo_url: string | null;
   created_at: string;
+  plan_tier?: string;
+  is_active?: boolean;
+  trial_ends_at?: string | null;
+  feature_flags?: Record<string, any>;
+  limits?: Record<string, any>;
 }
 
 export interface BusinessMember {

@@ -5,6 +5,7 @@ import { queryClient } from './lib/queryClient';
 import { AuthProvider } from '@/contexts/AuthContext';
 import Login from '@/pages/Login';
 import AdminDashboard from '@/pages/AdminDashboard';
+import AdminBusinessDetail from '@/pages/AdminBusinessDetail';
 import BusinessDashboard from '@/pages/BusinessDashboard';
 import ConfirmEmail from '@/pages/ConfirmEmail';
 import BrandingSettings from '@/pages/BrandingSettings';
@@ -14,6 +15,8 @@ import Inbox from '@/pages/Inbox';
 import Briefings from '@/pages/Briefings';
 import AwazSettings from '@/pages/AwazSettings';
 import AssistantChat from '@/pages/AssistantChat';
+import HelpSupport from '@/pages/HelpSupport';
+import AdminSupport from '@/pages/AdminSupport';
 
 const theme = createTheme({
   palette: {
@@ -67,11 +70,14 @@ function App() {
             <Routes>
               <Route path="/login" element={<Login />} />
               <Route path="/admin" element={<AdminDashboard />} />
+              <Route path="/admin/businesses/:id" element={<AdminBusinessDetail />} />
+              <Route path="/admin/support" element={<AdminSupport />} />
               <Route path="/app" element={<BusinessDashboard />} />
               <Route path="/app/settings/branding" element={<BrandingSettings />} />
               <Route path="/app/settings/email" element={<EmailSettings />} />
               <Route path="/app/settings/awaz" element={<AwazSettings />} />
               <Route path="/app/assistant/chat" element={<AssistantChat />} />
+              <Route path="/app/help" element={<HelpSupport />} />
               <Route path="/app/inbox" element={<Inbox />} />
               <Route path="/app/briefings" element={<Briefings />} />
               <Route path="/app/email/outbox" element={<EmailOutbox />} />

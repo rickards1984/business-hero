@@ -64,6 +64,12 @@ const TIMEZONES = [
 ];
 
 const ROLES = ['owner', 'admin', 'member'];
+const PLAN_TIERS = ['starter', 'pro', 'elite', 'beta'];
+const FEATURE_PRESETS: Record<string, { feature_flags: Record<string, any>; limits: Record<string, any> }> = {
+  starter: { feature_flags: { ai_briefings: false }, limits: { users: 3, tasks: 200 } },
+  pro: { feature_flags: { ai_briefings: true }, limits: { users: 10, tasks: 1000 } },
+  elite: { feature_flags: { ai_briefings: true, premium_support: true }, limits: { users: 50, tasks: 5000 } },
+};
 
 export default function AdminDashboard() {
   const navigate = useNavigate();
@@ -82,6 +88,12 @@ export default function AdminDashboard() {
   const [businessName, setBusinessName] = useState('');
   const [businessTimezone, setBusinessTimezone] = useState('America/New_York');
   const [savingBusiness, setSavingBusiness] = useState(false);
+  const [businessPlanTier, setBusinessPlanTier] = useState('starter');
+  const [businessIsActive, setBusinessIsActive] = useState(true);
+  const [businessTrialEndsAt, setBusinessTrialEndsAt] = useState('');
+  const [featurePreset, setFeaturePreset] = useState('starter');
+  const [featureFlags, setFeatureFlags] = useState<Record<string, any>>(FEATURE_PRESETS.starter.feature_flags);
+  const [limits, setLimits] = useState<Record<string, any>>(FEATURE_PRESETS.starter.limits);
 
   const [memberDialogOpen, setMemberDialogOpen] = useState(false);
   const [memberEmail, setMemberEmail] = useState('');
@@ -144,6 +156,15 @@ export default function AdminDashboard() {
     return key;
   };
 
+  const handleFeaturePresetChange = (preset: string) => {
+    setFeaturePreset(preset);
+    const values = FEATURE_PRESETS[preset];
+    if (values) {
+      setFeatureFlags(values.feature_flags);
+      setLimits(values.limits);
+    }
+  };
+
   const handleCreateBusiness = async () => {
     if (!businessName.trim()) return;
     
@@ -157,6 +178,11 @@ export default function AdminDashboard() {
           name: businessName.trim(),
           timezone: businessTimezone,
           api_key: generateApiKey(),
+          plan_tier: businessPlanTier,
+          is_active: businessIsActive,
+          trial_ends_at: businessTrialEndsAt ? new Date(businessTrialEndsAt).toISOString() : null,
+          feature_flags: featureFlags,
+          limits,
         });
 
       if (insertError) throw insertError;
@@ -164,6 +190,10 @@ export default function AdminDashboard() {
       setBusinessDialogOpen(false);
       setBusinessName('');
       setBusinessTimezone('America/New_York');
+      setBusinessPlanTier('starter');
+      setBusinessIsActive(true);
+      setBusinessTrialEndsAt('');
+      handleFeaturePresetChange('starter');
       fetchData();
     } catch (err: any) {
       setError(err.message || 'Failed to create business');
@@ -245,6 +275,20 @@ export default function AdminDashboard() {
               <PeopleIcon />
             </ListItemIcon>
             <ListItemText primary="Members" />
+          </ListItemButton>
+        </ListItem>
+        <ListItem disablePadding>
+          <ListItemButton
+            onClick={() => {
+              navigate('/admin/support');
+              setDrawerOpen(false);
+            }}
+            data-testid="nav-support"
+          >
+            <ListItemIcon>
+              <DashboardIcon />
+            </ListItemIcon>
+            <ListItemText primary="Support" />
           </ListItemButton>
         </ListItem>
       </List>
@@ -353,13 +397,16 @@ export default function AdminDashboard() {
                   <TableRow>
                     <TableCell>Name</TableCell>
                     <TableCell>Timezone</TableCell>
+                    <TableCell>Plan</TableCell>
+                    <TableCell>Active</TableCell>
                     <TableCell>Created</TableCell>
+                    <TableCell align="right">Actions</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {businesses.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={3} align="center" sx={{ py: 4 }}>
+                      <TableCell colSpan={6} align="center" sx={{ py: 4 }}>
                         <Typography color="text.secondary">No businesses yet</Typography>
                       </TableCell>
                     </TableRow>
@@ -373,7 +420,26 @@ export default function AdminDashboard() {
                           <Chip label={business.timezone} size="small" variant="outlined" />
                         </TableCell>
                         <TableCell>
+                          <Chip label={business.plan_tier || 'starter'} size="small" variant="outlined" />
+                        </TableCell>
+                        <TableCell>
+                          <Chip
+                            label={business.is_active === false ? 'Paused' : 'Active'}
+                            size="small"
+                            color={business.is_active === false ? 'default' : 'success'}
+                          />
+                        </TableCell>
+                        <TableCell>
                           {new Date(business.created_at).toLocaleDateString()}
+                        </TableCell>
+                        <TableCell align="right">
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            onClick={() => navigate(`/admin/businesses/${business.id}`)}
+                          >
+                            Manage
+                          </Button>
                         </TableCell>
                       </TableRow>
                     ))
@@ -453,6 +519,57 @@ export default function AdminDashboard() {
               ))}
             </Select>
           </FormControl>
+          <FormControl fullWidth sx={{ mt: 2 }}>
+            <InputLabel>Plan tier</InputLabel>
+            <Select
+              value={businessPlanTier}
+              label="Plan tier"
+              onChange={(e) => setBusinessPlanTier(e.target.value)}
+            >
+              {PLAN_TIERS.map((tier) => (
+                <MenuItem key={tier} value={tier}>
+                  {tier}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <FormControl fullWidth sx={{ mt: 2 }}>
+            <InputLabel>Active</InputLabel>
+            <Select
+              value={businessIsActive ? 'true' : 'false'}
+              label="Active"
+              onChange={(e) => setBusinessIsActive(e.target.value === 'true')}
+            >
+              <MenuItem value="true">Active</MenuItem>
+              <MenuItem value="false">Paused</MenuItem>
+            </Select>
+          </FormControl>
+          <TextField
+            label="Trial ends at"
+            type="datetime-local"
+            fullWidth
+            value={businessTrialEndsAt}
+            onChange={(e) => setBusinessTrialEndsAt(e.target.value)}
+            InputLabelProps={{ shrink: true }}
+            sx={{ mt: 2 }}
+          />
+          <FormControl fullWidth sx={{ mt: 2 }}>
+            <InputLabel>Feature preset</InputLabel>
+            <Select
+              value={featurePreset}
+              label="Feature preset"
+              onChange={(e) => handleFeaturePresetChange(e.target.value)}
+            >
+              {Object.keys(FEATURE_PRESETS).map((preset) => (
+                <MenuItem key={preset} value={preset}>
+                  {preset.charAt(0).toUpperCase() + preset.slice(1)}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+            Preset applies feature flags and limits for the new business.
+          </Typography>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setBusinessDialogOpen(false)}>Cancel</Button>

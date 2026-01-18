@@ -567,6 +567,13 @@ export default function BusinessDashboard() {
                   <Button
                     variant="outlined"
                     size="small"
+                    onClick={() => navigate('/app/help')}
+                  >
+                    Help / Support
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    size="small"
                     startIcon={<LinkIcon />}
                     onClick={() => navigate('/app/settings/awaz')}
                   >

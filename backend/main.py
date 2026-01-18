@@ -450,10 +450,12 @@ async def get_business_integrations(
 @app.get("/v1/integrations/awaz", tags=["Integrations"])
 async def get_awaz_integration_status(
     request: Request,
+    business_id: Optional[str] = Query(default=None),
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
-    integration = ensure_awaz_integration(auth_ctx["business_id"], session)
+    target_business_id = resolve_awaz_business_id(auth_ctx, session, business_id)
+    integration = ensure_awaz_integration(target_business_id, session)
     config = integration.config or {}
     last_received_at = config.get("last_received_at")
     last_received_dt = _parse_iso_datetime(last_received_at)
@@ -474,10 +476,12 @@ async def get_awaz_integration_status(
 @app.post("/v1/integrations/awaz/rotate-secret", tags=["Integrations"])
 async def rotate_awaz_webhook_secret(
     request: Request,
+    business_id: Optional[str] = Query(default=None),
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
-    integration = ensure_awaz_integration(auth_ctx["business_id"], session)
+    target_business_id = resolve_awaz_business_id(auth_ctx, session, business_id)
+    integration = ensure_awaz_integration(target_business_id, session)
     config = integration.config or {}
     config["webhook_secret"] = secrets.token_urlsafe(32)
     integration.config = config
@@ -492,16 +496,18 @@ async def rotate_awaz_webhook_secret(
 
 @app.post("/v1/integrations/awaz/test", tags=["Integrations"])
 async def test_awaz_integration(
+    business_id: Optional[str] = Query(default=None),
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
+    target_business_id = resolve_awaz_business_id(auth_ctx, session, business_id)
     business = session.exec(
-        select(Business).where(Business.id == auth_ctx["business_id"])
+        select(Business).where(Business.id == target_business_id)
     ).first()
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
 
-    integration = ensure_awaz_integration(auth_ctx["business_id"], session)
+    integration = ensure_awaz_integration(target_business_id, session)
     config = integration.config or {}
 
     payload = CallCreate(
@@ -1184,6 +1190,26 @@ def get_awaz_integration(business_id: str, session: Session) -> Dict[str, Any]:
     if not integration:
         raise HTTPException(status_code=404, detail="Awaz integration not found")
     return {"id": str(integration.id), "config": integration.config or {}}
+
+
+def is_platform_admin_user(user_id: str, session: Session) -> bool:
+    result = session.exec(
+        text("SELECT 1 FROM platform_admins WHERE user_id = :user_id LIMIT 1"),
+        {"user_id": user_id},
+    ).first()
+    return result is not None
+
+
+def resolve_awaz_business_id(
+    auth_ctx: dict,
+    session: Session,
+    business_id: Optional[str] = None,
+) -> str:
+    if business_id and business_id != auth_ctx["business_id"]:
+        if not is_platform_admin_user(auth_ctx["user_id"], session):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return business_id
+    return auth_ctx["business_id"]
 
 
 def _build_awaz_webhook_url(request: Request, webhook_secret: str) -> str:
