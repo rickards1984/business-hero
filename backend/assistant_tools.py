@@ -89,6 +89,23 @@ TOOL_DEFINITIONS = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_task",
+            "description": "Soft delete a task by ID. Use when user confirms a task is a duplicate.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task UUID to delete"
+                    }
+                },
+                "required": ["task_id"]
+            }
+        }
     }
 ]
 
@@ -122,6 +139,8 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _list_calls(engine, business_id, arguments)
     elif tool_name == "get_today_briefing":
         return _get_today_briefing(engine, business_id, timezone)
+    elif tool_name == "delete_task":
+        return _delete_task(engine, business_id, arguments)
     else:
         return {"error": f"Unknown tool: {tool_name}"}
 
@@ -136,7 +155,7 @@ def _list_tasks(engine, business_id: str, args: dict) -> dict:
             query = text("""
                 SELECT id, title, description, due_at, status, source, created_at
                 FROM tasks
-                WHERE business_id = :business_id
+                WHERE business_id = :business_id AND deleted_at IS NULL
                 ORDER BY created_at DESC
                 LIMIT :limit
             """)
@@ -144,7 +163,7 @@ def _list_tasks(engine, business_id: str, args: dict) -> dict:
             query = text("""
                 SELECT id, title, description, due_at, status, source, created_at
                 FROM tasks
-                WHERE business_id = :business_id AND status = :status
+                WHERE business_id = :business_id AND status = :status AND deleted_at IS NULL
                 ORDER BY created_at DESC
                 LIMIT :limit
             """)
@@ -257,7 +276,7 @@ def _get_today_briefing(engine, business_id: str, timezone: str) -> dict:
         tasks_due_today = conn.execute(text("""
             SELECT id, title, description, due_at, status
             FROM tasks
-            WHERE business_id = :business_id AND status = 'open'
+            WHERE business_id = :business_id AND status = 'open' AND deleted_at IS NULL
               AND due_at >= :today_start AND due_at < :today_end
             ORDER BY due_at
         """), {
@@ -269,14 +288,14 @@ def _get_today_briefing(engine, business_id: str, timezone: str) -> dict:
         overdue_tasks = conn.execute(text("""
             SELECT id, title, description, due_at, status
             FROM tasks
-            WHERE business_id = :business_id AND status = 'open' AND due_at < :now
+            WHERE business_id = :business_id AND status = 'open' AND deleted_at IS NULL AND due_at < :now
             ORDER BY due_at
         """), {"business_id": business_id, "now": now}).fetchall()
         
         open_tasks = conn.execute(text("""
             SELECT id, title, description, due_at, status
             FROM tasks
-            WHERE business_id = :business_id AND status = 'open'
+            WHERE business_id = :business_id AND status = 'open' AND deleted_at IS NULL
             ORDER BY created_at DESC
             LIMIT 10
         """), {"business_id": business_id}).fetchall()
@@ -320,3 +339,27 @@ def _get_today_briefing(engine, business_id: str, timezone: str) -> dict:
         "recent_calls": [format_call(c) for c in recent_calls],
         "recent_calls_count": len(recent_calls)
     }
+
+
+def _delete_task(engine, business_id: str, args: dict) -> dict:
+    """Soft delete a task by ID."""
+    task_id = args.get("task_id")
+    if not task_id:
+        return {"error": "task_id is required"}
+
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            UPDATE tasks
+            SET deleted_at = NOW(), updated_at = NOW()
+            WHERE id = :task_id AND business_id = :business_id AND deleted_at IS NULL
+            RETURNING id, deleted_at
+        """), {"task_id": task_id, "business_id": business_id})
+        conn.commit()
+        row = result.fetchone()
+        if not row:
+            return {"error": "Task not found"}
+        return {
+            "success": True,
+            "task_id": str(row[0]),
+            "deleted_at": row[1].isoformat() if row[1] else None,
+        }

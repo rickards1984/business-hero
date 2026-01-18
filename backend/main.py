@@ -236,6 +236,7 @@ async def get_openapi_action_schema(request: Request):
         "/health": ["get"],
         "/v1/me": ["get"],
         "/v1/tasks": ["get", "post"],
+        "/v1/tasks/{task_id}": ["delete"],
         "/v1/tasks/{task_id}/complete": ["post"],
         "/v1/tasks/{task_id}/snooze": ["post"],
         "/v1/calls": ["get", "post"],
@@ -246,6 +247,7 @@ async def get_openapi_action_schema(request: Request):
         "/health": {"get": False},
         "/v1/me": {"get": False},
         "/v1/tasks": {"get": False, "post": False},
+        "/v1/tasks/{task_id}": {"delete": True},
         "/v1/tasks/{task_id}/complete": {"post": False},
         "/v1/tasks/{task_id}/snooze": {"post": False},
         "/v1/calls": {"get": False, "post": False},
@@ -664,7 +666,10 @@ async def list_tasks(
     session: Session = Depends(get_session)
 ):
     """List tasks for the current business."""
-    statement = select(Task).where(Task.business_id == business.id)
+    statement = select(Task).where(
+        Task.business_id == business.id,
+        Task.deleted_at.is_(None),
+    )
     
     if status:
         statement = statement.where(Task.status == status)
@@ -700,7 +705,11 @@ async def complete_task(
     session: Session = Depends(get_session)
 ):
     """Mark a task as done."""
-    statement = select(Task).where(Task.id == task_id, Task.business_id == business.id)
+    statement = select(Task).where(
+        Task.id == task_id,
+        Task.business_id == business.id,
+        Task.deleted_at.is_(None),
+    )
     task = session.exec(statement).first()
     
     if not task:
@@ -734,7 +743,11 @@ async def snooze_task(
     session: Session = Depends(get_session)
 ):
     """Snooze a task. Provide either 'minutes' or 'until'."""
-    statement = select(Task).where(Task.id == task_id, Task.business_id == business.id)
+    statement = select(Task).where(
+        Task.id == task_id,
+        Task.business_id == business.id,
+        Task.deleted_at.is_(None),
+    )
     task = session.exec(statement).first()
     
     if not task:
@@ -768,6 +781,34 @@ async def snooze_task(
         created_at=task.created_at,
         updated_at=task.updated_at
     )
+
+
+@app.delete("/v1/tasks/{task_id}", tags=["Tasks"])
+async def delete_task(
+    task_id: str,
+    business: Business = Depends(get_current_user_business),
+    session: Session = Depends(get_session),
+):
+    """Soft delete a task."""
+    statement = select(Task).where(
+        Task.id == task_id,
+        Task.business_id == business.id,
+        Task.deleted_at.is_(None),
+    )
+    task = session.exec(statement).first()
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+
+    task.deleted_at = datetime.utcnow()
+    task.updated_at = datetime.utcnow()
+    session.add(task)
+    session.commit()
+
+    return {
+        "ok": True,
+        "task_id": str(task.id),
+        "deleted_at": task.deleted_at,
+    }
 
 
 @app.post("/v1/calls", response_model=CallResponse, tags=["Calls"])
@@ -958,6 +999,7 @@ async def get_today_briefing(
         .where(
             Task.business_id == business.id,
             Task.status == "open",
+            Task.deleted_at.is_(None),
             Task.due_at >= today_start_utc,
             Task.due_at < today_end_utc
         )
@@ -970,6 +1012,7 @@ async def get_today_briefing(
         .where(
             Task.business_id == business.id,
             Task.status == "open",
+            Task.deleted_at.is_(None),
             Task.due_at < now
         )
         .order_by(Task.due_at)
@@ -978,7 +1021,11 @@ async def get_today_briefing(
     
     open_tasks_stmt = (
         select(Task)
-        .where(Task.business_id == business.id, Task.status == "open")
+        .where(
+            Task.business_id == business.id,
+            Task.status == "open",
+            Task.deleted_at.is_(None),
+        )
         .order_by(Task.created_at.desc())
         .limit(10)
     )

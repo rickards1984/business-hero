@@ -7,11 +7,17 @@ import {
   Button,
   CircularProgress,
   Container,
+  FormControlLabel,
   Paper,
+  Switch,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
+import ArrowBackIcon from '@mui/icons-material/ArrowBack';
+import MicIcon from '@mui/icons-material/Mic';
+import MicOffIcon from '@mui/icons-material/MicOff';
 import { useAuth } from '@/contexts/AuthContext';
 import { apiRequest } from '@/lib/queryClient';
 
@@ -36,13 +42,81 @@ export default function AssistantChat() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [listening, setListening] = useState(false);
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [speakReplies, setSpeakReplies] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<any>(null);
+  const lastSpokenIndexRef = useRef<number>(-1);
 
   useEffect(() => {
     if (!authLoading && !user) {
       navigate('/login');
     }
   }, [authLoading, user, navigate]);
+
+  useEffect(() => {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setVoiceSupported(false);
+      return;
+    }
+    setVoiceSupported(true);
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-GB';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.onresult = (event: any) => {
+      const transcript = event.results?.[0]?.[0]?.transcript;
+      if (transcript) {
+        setInput(transcript);
+        inputRef.current?.focus();
+      }
+    };
+    recognition.onerror = (event: any) => {
+      setError(event?.error || 'Voice input error');
+      setListening(false);
+    };
+    recognition.onend = () => {
+      setListening(false);
+    };
+    recognitionRef.current = recognition;
+    return () => {
+      recognition.stop?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!speakReplies) {
+      window.speechSynthesis?.cancel();
+      setSpeaking(false);
+    }
+  }, [speakReplies]);
+
+  useEffect(() => {
+    if (!speakReplies) return;
+    if (!messages.length) return;
+    const lastIndex = messages.length - 1;
+    if (lastSpokenIndexRef.current === lastIndex) return;
+    const lastMessage = messages[lastIndex];
+    if (lastMessage.role !== 'assistant' || !lastMessage.content) {
+      lastSpokenIndexRef.current = lastIndex;
+      return;
+    }
+    lastSpokenIndexRef.current = lastIndex;
+    if (!window.speechSynthesis) {
+      setError('Speech synthesis not supported');
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(lastMessage.content);
+    utterance.onstart = () => setSpeaking(true);
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => setSpeaking(false);
+    window.speechSynthesis.speak(utterance);
+  }, [messages, speakReplies]);
 
   const handleSend = async () => {
     const message = input.trim();
@@ -78,6 +152,23 @@ export default function AssistantChat() {
     inputRef.current?.focus();
   };
 
+  const handleMicToggle = () => {
+    if (!voiceSupported || !recognitionRef.current) return;
+    if (listening) {
+      recognitionRef.current.stop();
+      setListening(false);
+    } else {
+      setError('');
+      recognitionRef.current.start();
+      setListening(true);
+    }
+  };
+
+  const handleStopSpeaking = () => {
+    window.speechSynthesis?.cancel();
+    setSpeaking(false);
+  };
+
   if (authLoading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh' }}>
@@ -88,6 +179,16 @@ export default function AssistantChat() {
 
   return (
     <Container maxWidth="md" sx={{ py: 4 }}>
+      <Box sx={{ display: 'flex', justifyContent: 'flex-start', mb: 2 }}>
+        <Button
+          variant="outlined"
+          startIcon={<ArrowBackIcon />}
+          onClick={() => navigate('/app')}
+          fullWidth={{ xs: true, sm: false }}
+        >
+          Back to Dashboard
+        </Button>
+      </Box>
       <Paper sx={{ p: 3, mb: 3 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
           <SmartToyIcon color="primary" />
@@ -108,6 +209,30 @@ export default function AssistantChat() {
               {action}
             </Button>
           ))}
+        </Box>
+      </Paper>
+
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={speakReplies}
+                onChange={(event) => setSpeakReplies(event.target.checked)}
+              />
+            }
+            label="Speak replies"
+          />
+          {speaking && (
+            <Button variant="outlined" size="small" onClick={handleStopSpeaking}>
+              Stop speaking
+            </Button>
+          )}
+          {listening && (
+            <Typography variant="body2" color="primary">
+              Listening...
+            </Typography>
+          )}
         </Box>
       </Paper>
 
@@ -166,10 +291,29 @@ export default function AssistantChat() {
             maxRows={4}
             disabled={loading}
           />
-          <Button variant="contained" onClick={handleSend} disabled={loading || !input.trim()}>
-            {loading ? <CircularProgress size={20} color="inherit" /> : 'Send'}
-          </Button>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <Tooltip title={voiceSupported ? '' : 'Voice not supported in this browser'}>
+              <span>
+                <Button
+                  variant="outlined"
+                  onClick={handleMicToggle}
+                  disabled={!voiceSupported}
+                  startIcon={listening ? <MicOffIcon /> : <MicIcon />}
+                >
+                  {listening ? 'Stop' : 'Mic'}
+                </Button>
+              </span>
+            </Tooltip>
+            <Button variant="contained" onClick={handleSend} disabled={loading || !input.trim()}>
+              {loading ? <CircularProgress size={20} color="inherit" /> : 'Send'}
+            </Button>
+          </Box>
         </Box>
+        {!voiceSupported && (
+          <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+            Voice not supported in this browser.
+          </Typography>
+        )}
       </Paper>
     </Container>
   );

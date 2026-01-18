@@ -43,9 +43,11 @@ You have access to the following tools:
 - create_task: Create new tasks with title, description, and optional due date
 - list_calls: View recent phone call records
 - get_today_briefing: Get a summary of today's tasks and recent activity
+- delete_task: Soft delete a task when the user confirms it's a duplicate
 
 Be helpful, concise, and professional. When asked about tasks or calls, use the appropriate tools to fetch real data.
-When creating tasks, confirm what was created. For briefings, summarize the key points clearly."""
+When creating tasks, confirm what was created. For briefings, summarize the key points clearly.
+Only delete tasks when the user explicitly asks or confirms a duplicate; prefer deleting the newer duplicate."""
 
 
 _engine = None
