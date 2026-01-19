@@ -16,7 +16,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from auth import get_user_business_context
+from auth import get_user_business_context, require_feature
 from db import get_session
 from models import EmailAccount, EmailBriefing, EmailConnection, EmailDraft, EmailMessage, EmailOutbox, EmailSyncState
 from schemas import (
@@ -52,7 +52,11 @@ from providers.microsoft_graph import MicrosoftGraphProvider
 from providers.smtp import SMTPProvider
 
 
-router = APIRouter(prefix="/v1/email", tags=["Email"])
+router = APIRouter(
+    prefix="/v1/email",
+    tags=["Email"],
+    dependencies=[Depends(require_feature("email"))],
+)
 
 
 class EmailAccountPublic(BaseModel):

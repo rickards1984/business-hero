@@ -120,6 +120,35 @@ class HealthResponse(BaseModel):
     ok: bool = True
 
 
+class SupportTicketCreateAdmin(BaseModel):
+    """Schema for admin-created support ticket."""
+    business_id: str
+    title: str
+    message: str
+    severity: Optional[str] = "normal"
+    category: Optional[str] = "general"
+    page_url: Optional[str] = None
+    context: Optional[Dict[str, Any]] = None
+
+
+class SupportTicketUpdateAdmin(BaseModel):
+    """Schema for admin updating support ticket."""
+    status: Optional[str] = None
+    admin_notes: Optional[str] = None
+
+
+class BillingCheckoutRequest(BaseModel):
+    plan_tier: str
+
+
+class BillingSessionResponse(BaseModel):
+    url: str
+
+
+class BillingPortalResponse(BaseModel):
+    url: str
+
+
 class MessageResponse(BaseModel):
     """Generic message response."""
     message: str

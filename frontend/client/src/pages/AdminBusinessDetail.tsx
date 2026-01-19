@@ -50,10 +50,20 @@ interface SyncState {
   last_error: string | null;
 }
 
-type TabKey = 'overview' | 'members' | 'integrations' | 'activity';
+interface SupportTicket {
+  id: string;
+  title: string;
+  message: string;
+  severity: string;
+  status: string;
+  created_at: string;
+}
+
+type TabKey = 'overview' | 'members' | 'integrations' | 'activity' | 'support';
 
 const PLAN_TIERS = ['starter', 'pro', 'elite', 'beta', 'paused'];
 const ROLES = ['owner', 'admin', 'member'];
+const SUPPORT_PRIORITIES = ['low', 'normal', 'high', 'urgent'];
 
 export default function AdminBusinessDetail() {
   const { id } = useParams();
@@ -85,11 +95,24 @@ export default function AdminBusinessDetail() {
   const [openTasksCount, setOpenTasksCount] = useState(0);
   const [callsLast7Days, setCallsLast7Days] = useState(0);
 
+  const [supportTickets, setSupportTickets] = useState<SupportTicket[]>([]);
+  const [supportLoading, setSupportLoading] = useState(false);
+  const [supportSaving, setSupportSaving] = useState(false);
+  const [supportTitle, setSupportTitle] = useState('');
+  const [supportMessage, setSupportMessage] = useState('');
+  const [supportSeverity, setSupportSeverity] = useState('normal');
+
   useEffect(() => {
     if (id) {
       loadBusiness();
     }
   }, [id]);
+
+  useEffect(() => {
+    if (tab === 'support' && id) {
+      loadSupportTickets();
+    }
+  }, [tab, id]);
 
   const loadBusiness = async () => {
     setLoading(true);
@@ -210,6 +233,54 @@ export default function AdminBusinessDetail() {
     setCallsLast7Days(callCount || 0);
   };
 
+  const loadSupportTickets = async () => {
+    setSupportLoading(true);
+    setError('');
+    try {
+      const response = await apiRequest(
+        'GET',
+        `/v1/admin/support-tickets?business_id=${id}&limit=10`,
+      );
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to load support tickets');
+      }
+      const data = await response.json();
+      setSupportTickets(data || []);
+    } catch (err: any) {
+      setError(err.message || 'Failed to load support tickets');
+    } finally {
+      setSupportLoading(false);
+    }
+  };
+
+  const handleCreateSupportTicket = async () => {
+    if (!supportTitle.trim() || !supportMessage.trim()) return;
+    setSupportSaving(true);
+    setError('');
+    try {
+      const response = await apiRequest('POST', '/v1/admin/support-tickets', {
+        business_id: id,
+        title: supportTitle.trim(),
+        message: supportMessage.trim(),
+        severity: supportSeverity,
+        category: 'general',
+      });
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to create support ticket');
+      }
+      setSupportTitle('');
+      setSupportMessage('');
+      setSupportSeverity('normal');
+      await loadSupportTickets();
+    } catch (err: any) {
+      setError(err.message || 'Failed to create support ticket');
+    } finally {
+      setSupportSaving(false);
+    }
+  };
+
   const handleSaveOverview = async () => {
     if (!business) return;
     setSaving(true);
@@ -303,6 +374,15 @@ export default function AdminBusinessDetail() {
     [emailAccounts],
   );
 
+  const lastActivityAt = useMemo(() => {
+    const dates = [
+      recentCalls[0]?.created_at,
+      recentTasks[0]?.created_at,
+    ].filter(Boolean);
+    if (!dates.length) return null;
+    return dates.sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+  }, [recentCalls, recentTasks]);
+
   if (loading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh' }}>
@@ -320,7 +400,7 @@ export default function AdminBusinessDetail() {
             startIcon={<ArrowBackIcon />}
             onClick={() => navigate('/admin')}
           >
-            Back to Admin
+            Back to Admin Businesses
           </Button>
           <Typography variant="h6" sx={{ ml: 2 }}>
             {business?.name || 'Business'}
@@ -341,6 +421,7 @@ export default function AdminBusinessDetail() {
             <Tab label="Members" value="members" />
             <Tab label="Integrations" value="integrations" />
             <Tab label="Activity" value="activity" />
+            <Tab label="Support" value="support" />
           </Tabs>
         </Paper>
 
@@ -390,6 +471,42 @@ export default function AdminBusinessDetail() {
                 fullWidth
                 disabled
               />
+            </Box>
+
+            <Divider sx={{ my: 3 }} />
+
+            <Typography variant="subtitle1" sx={{ mb: 1 }}>
+              Onboarding checklist
+            </Typography>
+            <Box sx={{ display: 'grid', gap: 1 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Chip label={awaz?.connected ? 'Yes' : 'No'} color={awaz?.connected ? 'success' : 'default'} />
+                <Typography variant="body2">Awaz configured</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Last received: {awaz?.last_received_at || 'Never'}
+                </Typography>
+              </Box>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Chip label={emailAccounts.length ? 'Yes' : 'No'} color={emailAccounts.length ? 'success' : 'default'} />
+                <Typography variant="body2">Email connected</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Accounts: {emailAccounts.length} • Last sync: {emailSyncState?.last_synced_at || 'Never'}
+                </Typography>
+              </Box>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Chip label={calendarSyncState ? 'Yes' : 'No'} color={calendarSyncState ? 'success' : 'default'} />
+                <Typography variant="body2">Calendar connected</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Last sync: {calendarSyncState?.last_synced_at || 'Never'}
+                </Typography>
+              </Box>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Chip label={lastActivityAt ? 'Yes' : 'No'} color={lastActivityAt ? 'success' : 'default'} />
+                <Typography variant="body2">Recent activity</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {lastActivityAt ? new Date(lastActivityAt).toLocaleString() : 'None'}
+                </Typography>
+              </Box>
             </Box>
 
             <Divider sx={{ my: 3 }} />
@@ -547,6 +664,80 @@ export default function AdminBusinessDetail() {
                     <Typography variant="body2">{task.title}</Typography>
                     <Typography variant="caption" color="text.secondary">
                       {task.status} • {new Date(task.created_at).toLocaleString()}
+                    </Typography>
+                  </Box>
+                ))
+              )}
+            </Paper>
+          </Box>
+        )}
+
+        {tab === 'support' && (
+          <Box sx={{ display: 'grid', gap: 2 }}>
+            <Paper sx={{ p: 3 }}>
+              <Typography variant="h6" gutterBottom>Quick create ticket</Typography>
+              <Box sx={{ display: 'grid', gap: 2 }}>
+                <TextField
+                  label="Subject"
+                  value={supportTitle}
+                  onChange={(event) => setSupportTitle(event.target.value)}
+                />
+                <TextField
+                  label="Description"
+                  value={supportMessage}
+                  onChange={(event) => setSupportMessage(event.target.value)}
+                  multiline
+                  minRows={3}
+                />
+                <FormControl fullWidth>
+                  <InputLabel>Priority</InputLabel>
+                  <Select
+                    value={supportSeverity}
+                    label="Priority"
+                    onChange={(event) => setSupportSeverity(event.target.value)}
+                  >
+                    {SUPPORT_PRIORITIES.map((priority) => (
+                      <MenuItem key={priority} value={priority}>
+                        {priority}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <Button
+                    variant="contained"
+                    onClick={handleCreateSupportTicket}
+                    disabled={supportSaving || !supportTitle.trim() || !supportMessage.trim()}
+                  >
+                    {supportSaving ? 'Creating...' : 'Create ticket'}
+                  </Button>
+                </Box>
+              </Box>
+            </Paper>
+
+            <Paper sx={{ p: 3 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h6">Recent tickets</Typography>
+                <Button variant="outlined" onClick={() => navigate(`/admin/support?business_id=${id}`)}>
+                  View all tickets
+                </Button>
+              </Box>
+              {supportLoading ? (
+                <Typography color="text.secondary">Loading...</Typography>
+              ) : supportTickets.length === 0 ? (
+                <Typography color="text.secondary">No tickets yet.</Typography>
+              ) : (
+                supportTickets.map((ticket) => (
+                  <Box key={ticket.id} sx={{ borderBottom: '1px solid', borderColor: 'divider', py: 1.5 }}>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Typography variant="subtitle1">{ticket.title}</Typography>
+                      <Box sx={{ display: 'flex', gap: 1 }}>
+                        <Chip label={ticket.status} size="small" />
+                        <Chip label={ticket.severity} size="small" color={ticket.severity === 'urgent' ? 'error' : 'default'} />
+                      </Box>
+                    </Box>
+                    <Typography variant="caption" color="text.secondary">
+                      {new Date(ticket.created_at).toLocaleString()}
                     </Typography>
                   </Box>
                 ))

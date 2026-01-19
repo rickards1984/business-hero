@@ -32,6 +32,23 @@ class Business(SQLModel, table=True):
     timezone: str = Field(default="Europe/London")
     api_key: str = Field(default_factory=generate_api_key, unique=True, index=True)
     logo_url: Optional[str] = None
+    plan_tier: str = Field(default="starter")
+    is_active: bool = Field(default=True)
+    trial_ends_at: Optional[datetime] = None
+    feature_flags: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSONB, nullable=False, server_default='{}')
+    )
+    limits: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSONB, nullable=False, server_default='{}')
+    )
+    stripe_customer_id: Optional[str] = None
+    stripe_subscription_id: Optional[str] = None
+    subscription_status: Optional[str] = None
+    current_period_end: Optional[datetime] = None
+    cancel_at_period_end: bool = Field(default=False)
+    last_stripe_event_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
     tasks: list["Task"] = Relationship(back_populates="business")
@@ -128,6 +145,48 @@ class Integration(SQLModel, table=True):
     
     business: Optional[Business] = Relationship()
 
+
+class SupportTicket(SQLModel, table=True):
+    """Support ticket - customer feedback/support workflow."""
+    __tablename__ = "support_tickets"
+
+    id: UUID = Field(
+        default_factory=generate_uuid,
+        sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid)
+    )
+    business_id: UUID = Field(foreign_key="businesses.id", index=True)
+    user_id: UUID = Field(foreign_key="auth.users.id", index=True)
+    title: str
+    category: str = Field(default="general")
+    severity: str = Field(default="normal")
+    status: str = Field(default="open")
+    message: str
+    page_url: Optional[str] = None
+    context: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSONB, nullable=False, server_default='{}')
+    )
+    admin_notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class StripeEvent(SQLModel, table=True):
+    """Stripe webhook event audit."""
+    __tablename__ = "stripe_events"
+
+    id: UUID = Field(
+        default_factory=generate_uuid,
+        sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid)
+    )
+    business_id: Optional[UUID] = Field(default=None, foreign_key="businesses.id", index=True)
+    event_id: str = Field(index=True)
+    type: str
+    payload: Dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSONB, nullable=False, server_default='{}')
+    )
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class OAuthToken(SQLModel, table=True):
     """OAuth token storage - encrypted tokens, backend-only access."""

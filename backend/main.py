@@ -4,6 +4,7 @@ import os
 import json
 import copy
 import secrets
+import stripe
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
@@ -35,6 +36,8 @@ from models import (
     EmailSyncState,
     EmailBriefing,
     EmailDraft,
+    SupportTicket,
+    StripeEvent,
 )
 from schemas import (
     BusinessCreate, BusinessResponse, BusinessListItem, BusinessProfile,
@@ -52,8 +55,10 @@ from schemas import (
     EmailMessageItem, EmailMessageListResponse, EmailSyncRunResponse,
     EmailBriefingRequest, EmailBriefingResponse,
     EmailDraftRequest, EmailDraftResponse, EmailDraftSendResponse,
+    SupportTicketCreateAdmin, SupportTicketUpdateAdmin,
+    BillingCheckoutRequest, BillingSessionResponse, BillingPortalResponse,
 )
-from auth import verify_master_key, get_current_business, get_access_token, get_user_business_context
+from auth import verify_master_key, get_current_business, get_access_token, get_user_business_context, is_platform_admin_user
 from openai_utils import generate_call_summary
 from supabase_auth import verify_supabase_token
 from assistant_chat import process_chat_message, get_business_for_user
@@ -343,6 +348,205 @@ async def list_businesses(session: Session = Depends(get_session)):
         )
         for b in businesses
     ]
+
+
+@app.post("/v1/billing/checkout-session", response_model=BillingSessionResponse, tags=["Billing"])
+async def create_checkout_session(
+    payload: BillingCheckoutRequest,
+    request: Request,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    stripe.api_key = _get_stripe_secret()
+    business = session.exec(select(Business).where(Business.id == auth_ctx["business_id"])).first()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    customer_id = business.stripe_customer_id
+    if not customer_id:
+        customer = stripe.Customer.create(
+            email=getattr(request.state, "user_email", None),
+            metadata={"business_id": str(business.id)},
+        )
+        customer_id = customer["id"]
+        business.stripe_customer_id = customer_id
+        session.add(business)
+        session.commit()
+
+    plan_tier = payload.plan_tier.lower()
+    if plan_tier == "premium":
+        plan_tier = "elite"
+    price_id = _get_price_id(plan_tier)
+    base_url = _get_frontend_base_url(request)
+    checkout = stripe.checkout.Session.create(
+        mode="subscription",
+        customer=customer_id,
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=f"{base_url}/app/settings/billing?success=1",
+        cancel_url=f"{base_url}/app/settings/billing?canceled=1",
+        metadata={"business_id": str(business.id), "plan_tier": plan_tier},
+        client_reference_id=str(business.id),
+    )
+    return BillingSessionResponse(url=checkout["url"])
+
+
+@app.post("/v1/billing/portal", response_model=BillingPortalResponse, tags=["Billing"])
+async def create_billing_portal(
+    request: Request,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    stripe.api_key = _get_stripe_secret()
+    business = session.exec(select(Business).where(Business.id == auth_ctx["business_id"])).first()
+    if not business or not business.stripe_customer_id:
+        raise HTTPException(status_code=400, detail="Stripe customer not found for this business")
+    base_url = _get_frontend_base_url(request)
+    portal = stripe.billing_portal.Session.create(
+        customer=business.stripe_customer_id,
+        return_url=f"{base_url}/app/settings/billing",
+    )
+    return BillingPortalResponse(url=portal["url"])
+
+
+@app.post("/v1/billing/webhook", tags=["Billing"])
+async def stripe_webhook(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+    if not webhook_secret:
+        raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET not configured")
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid webhook signature: {exc}")
+
+    event_dict = event.to_dict() if hasattr(event, "to_dict") else event
+    event_type = event_dict["type"]
+    event_data = event_dict["data"]["object"]
+    business = None
+
+    if event_type == "checkout.session.completed":
+        business_id = event_data.get("metadata", {}).get("business_id")
+        if business_id:
+            business = session.exec(select(Business).where(Business.id == business_id)).first()
+        if business:
+            business.stripe_customer_id = event_data.get("customer") or business.stripe_customer_id
+            business.stripe_subscription_id = event_data.get("subscription") or business.stripe_subscription_id
+            business.last_stripe_event_at = datetime.utcnow()
+            session.add(business)
+            session.commit()
+
+    if event_type in ("customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"):
+        customer_id = event_data.get("customer")
+        subscription_id = event_data.get("id")
+        business = session.exec(
+            select(Business).where(
+                (Business.stripe_customer_id == customer_id) | (Business.stripe_subscription_id == subscription_id)
+            )
+        ).first()
+        if business:
+            plan_tier = None
+            items = event_data.get("items", {}).get("data", [])
+            if items:
+                price_id = items[0].get("price", {}).get("id")
+                plan_tier = _resolve_plan_from_price(price_id)
+            status = event_data.get("status")
+            business.stripe_customer_id = customer_id or business.stripe_customer_id
+            business.stripe_subscription_id = subscription_id or business.stripe_subscription_id
+            business.subscription_status = status
+            business.current_period_end = datetime.fromtimestamp(event_data.get("current_period_end")) if event_data.get("current_period_end") else None
+            business.cancel_at_period_end = bool(event_data.get("cancel_at_period_end", False))
+            business.last_stripe_event_at = datetime.utcnow()
+            if plan_tier:
+                business.plan_tier = plan_tier
+                business.feature_flags = _merge_feature_flags(business.feature_flags or {}, plan_tier)
+            business.is_active = status in ("active", "trialing")
+            session.add(business)
+            session.commit()
+
+    try:
+        stripe_event = StripeEvent(
+            business_id=business.id if business else None,
+            event_id=event_dict.get("id"),
+            type=event_type,
+            payload=event_dict,
+        )
+        session.add(stripe_event)
+        session.commit()
+    except Exception:
+        session.rollback()
+
+    return {"received": True}
+
+
+@app.get("/v1/admin/support-tickets", tags=["Admin"])
+async def list_support_tickets(
+    business_id: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    severity: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    require_platform_admin(auth_ctx, session)
+    statement = select(SupportTicket).order_by(SupportTicket.created_at.desc())
+    if business_id:
+        statement = statement.where(SupportTicket.business_id == business_id)
+    if status:
+        statement = statement.where(SupportTicket.status == status)
+    if severity:
+        statement = statement.where(SupportTicket.severity == severity)
+    statement = statement.limit(limit)
+    return session.exec(statement).all()
+
+
+@app.post("/v1/admin/support-tickets", tags=["Admin"])
+async def create_support_ticket_admin(
+    payload: SupportTicketCreateAdmin,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    require_platform_admin(auth_ctx, session)
+    ticket = SupportTicket(
+        business_id=payload.business_id,
+        user_id=auth_ctx["user_id"],
+        title=payload.title,
+        message=payload.message,
+        severity=payload.severity or "normal",
+        category=payload.category or "general",
+        status="open",
+        page_url=payload.page_url,
+        context=payload.context or {},
+    )
+    session.add(ticket)
+    session.commit()
+    session.refresh(ticket)
+    return ticket
+
+
+@app.patch("/v1/admin/support-tickets/{ticket_id}", tags=["Admin"])
+async def update_support_ticket_admin(
+    ticket_id: str,
+    payload: SupportTicketUpdateAdmin,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    require_platform_admin(auth_ctx, session)
+    ticket = session.exec(select(SupportTicket).where(SupportTicket.id == ticket_id)).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Support ticket not found")
+    if payload.status is not None:
+        ticket.status = payload.status
+    if payload.admin_notes is not None:
+        ticket.admin_notes = payload.admin_notes
+    ticket.updated_at = datetime.utcnow()
+    session.add(ticket)
+    session.commit()
+    session.refresh(ticket)
+    return ticket
 
 
 @app.get("/v1/me", response_model=BusinessProfile, tags=["Business"])
@@ -1192,12 +1396,67 @@ def get_awaz_integration(business_id: str, session: Session) -> Dict[str, Any]:
     return {"id": str(integration.id), "config": integration.config or {}}
 
 
-def is_platform_admin_user(user_id: str, session: Session) -> bool:
-    result = session.exec(
-        text("SELECT 1 FROM platform_admins WHERE user_id = :user_id LIMIT 1"),
-        {"user_id": user_id},
-    ).first()
-    return result is not None
+def require_platform_admin(auth_ctx: dict, session: Session) -> None:
+    if not is_platform_admin_user(auth_ctx["user_id"], session):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+
+def _get_frontend_base_url(request: Request) -> str:
+    base_url = os.getenv("FRONTEND_URL") or os.getenv("PUBLIC_BASE_URL")
+    if base_url:
+        return base_url.rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+def _get_stripe_secret() -> str:
+    secret = os.getenv("STRIPE_SECRET_KEY")
+    if not secret:
+        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY not configured")
+    return secret
+
+
+def _get_price_id(plan_tier: str) -> str:
+    plan = plan_tier.lower()
+    if plan == "premium":
+        plan = "elite"
+    mapping = {
+        "starter": os.getenv("PRICE_ID_STARTER", ""),
+        "pro": os.getenv("PRICE_ID_PRO", ""),
+        "elite": os.getenv("PRICE_ID_PREMIUM", ""),
+    }
+    price_id = mapping.get(plan, "")
+    if not price_id:
+        raise HTTPException(status_code=400, detail="Unknown or unmapped plan tier")
+    return price_id
+
+
+def _plan_feature_defaults(plan_tier: str) -> Dict[str, bool]:
+    defaults = {
+        "starter": {},
+        "pro": {"email": True},
+        "elite": {"email": True, "calendar": True, "voice": True},
+        "beta": {"email": True, "calendar": True, "voice": True},
+        "paused": {},
+    }
+    return defaults.get(plan_tier, {})
+
+
+def _merge_feature_flags(existing: Dict[str, Any], plan_tier: str) -> Dict[str, Any]:
+    defaults = _plan_feature_defaults(plan_tier)
+    merged = {**defaults, **(existing or {})}
+    return merged
+
+
+def _resolve_plan_from_price(price_id: str) -> Optional[str]:
+    if not price_id:
+        return None
+    if price_id == os.getenv("PRICE_ID_STARTER"):
+        return "starter"
+    if price_id == os.getenv("PRICE_ID_PRO"):
+        return "pro"
+    if price_id == os.getenv("PRICE_ID_PREMIUM"):
+        return "elite"
+    return None
 
 
 def resolve_awaz_business_id(

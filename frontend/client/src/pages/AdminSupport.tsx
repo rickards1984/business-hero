@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Alert,
   Box,
@@ -16,8 +16,8 @@ import {
   Typography,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
-import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
+import { apiRequest } from '@/lib/queryClient';
 
 const STATUS_OPTIONS = ['open', 'in_progress', 'resolved', 'closed'];
 const SEVERITY_OPTIONS = ['low', 'normal', 'high', 'urgent'];
@@ -39,12 +39,14 @@ interface SupportTicket {
 
 export default function AdminSupport() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user, isAdmin, loading: authLoading, adminLoading } = useAuth();
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [severityFilter, setSeverityFilter] = useState('all');
+  const businessFilter = searchParams.get('business_id') || '';
   const [selected, setSelected] = useState<SupportTicket | null>(null);
   const [adminNotes, setAdminNotes] = useState('');
   const [statusUpdate, setStatusUpdate] = useState('open');
@@ -62,24 +64,23 @@ export default function AdminSupport() {
     if (user && isAdmin) {
       loadTickets();
     }
-  }, [user, isAdmin, statusFilter, severityFilter]);
+  }, [user, isAdmin, statusFilter, severityFilter, businessFilter]);
 
   const loadTickets = async () => {
     setLoading(true);
     setError('');
     try {
-      let query = supabase
-        .from('support_tickets')
-        .select('*')
-        .order('created_at', { ascending: false });
-      if (statusFilter !== 'all') {
-        query = query.eq('status', statusFilter);
+      const params = new URLSearchParams();
+      if (businessFilter) params.set('business_id', businessFilter);
+      if (statusFilter !== 'all') params.set('status', statusFilter);
+      if (severityFilter !== 'all') params.set('severity', severityFilter);
+      params.set('limit', '200');
+      const response = await apiRequest('GET', `/v1/admin/support-tickets?${params.toString()}`);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to load tickets');
       }
-      if (severityFilter !== 'all') {
-        query = query.eq('severity', severityFilter);
-      }
-      const { data, error: fetchError } = await query;
-      if (fetchError) throw fetchError;
+      const data = await response.json();
       setTickets((data || []) as SupportTicket[]);
     } catch (err: any) {
       setError(err.message || 'Failed to load tickets');
@@ -99,11 +100,14 @@ export default function AdminSupport() {
     setSaving(true);
     setError('');
     try {
-      const { error: updateError } = await supabase
-        .from('support_tickets')
-        .update({ admin_notes: adminNotes, status: statusUpdate })
-        .eq('id', selected.id);
-      if (updateError) throw updateError;
+      const response = await apiRequest('PATCH', `/v1/admin/support-tickets/${selected.id}`, {
+        admin_notes: adminNotes,
+        status: statusUpdate,
+      });
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to update ticket');
+      }
       setSelected(null);
       loadTickets();
     } catch (err: any) {
@@ -123,6 +127,14 @@ export default function AdminSupport() {
           <Typography variant="h5">Support Tickets</Typography>
         </Box>
         <Box sx={{ display: 'flex', gap: 2 }}>
+          {businessFilter && (
+            <Button
+              variant="outlined"
+              onClick={() => setSearchParams({})}
+            >
+              Clear business filter
+            </Button>
+          )}
           <FormControl size="small">
             <InputLabel>Status</InputLabel>
             <Select value={statusFilter} label="Status" onChange={(e) => setStatusFilter(e.target.value)}>

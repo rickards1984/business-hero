@@ -17,6 +17,7 @@ import AwazSettings from '@/pages/AwazSettings';
 import AssistantChat from '@/pages/AssistantChat';
 import HelpSupport from '@/pages/HelpSupport';
 import AdminSupport from '@/pages/AdminSupport';
+import BillingSettings from '@/pages/BillingSettings';
 
 const theme = createTheme({
   palette: {
@@ -74,6 +75,7 @@ function App() {
               <Route path="/admin/support" element={<AdminSupport />} />
               <Route path="/app" element={<BusinessDashboard />} />
               <Route path="/app/settings/branding" element={<BrandingSettings />} />
+              <Route path="/app/settings/billing" element={<BillingSettings />} />
               <Route path="/app/settings/email" element={<EmailSettings />} />
               <Route path="/app/settings/awaz" element={<AwazSettings />} />
               <Route path="/app/assistant/chat" element={<AssistantChat />} />

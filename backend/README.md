@@ -279,6 +279,15 @@ Returns:
 | `OPENAI_API_KEY` | No | Enables AI call summarization |
 | `PORT` | No | Server port (default: 3000) |
 | `DATABASE_URL` | No | Database URL (default: sqlite:///./data.db) |
+| `SUPABASE_URL` | Yes | Supabase project URL |
+| `SUPABASE_ANON_KEY` | Yes | Supabase anon/public key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Supabase service role key |
+| `STRIPE_SECRET_KEY` | Yes | Stripe secret key for billing APIs |
+| `STRIPE_WEBHOOK_SECRET` | Yes | Stripe webhook signing secret |
+| `PRICE_ID_STARTER` | Yes | Stripe price ID for starter plan |
+| `PRICE_ID_PRO` | Yes | Stripe price ID for pro plan |
+| `PRICE_ID_PREMIUM` | Yes | Stripe price ID for premium/elite plan |
+| `FRONTEND_URL` | No | Frontend base URL for billing redirects |
 
 ## License
 

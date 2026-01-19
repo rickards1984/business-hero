@@ -51,6 +51,12 @@ export interface Business {
   trial_ends_at?: string | null;
   feature_flags?: Record<string, any>;
   limits?: Record<string, any>;
+  stripe_customer_id?: string | null;
+  stripe_subscription_id?: string | null;
+  subscription_status?: string | null;
+  current_period_end?: string | null;
+  cancel_at_period_end?: boolean;
+  last_stripe_event_at?: string | null;
 }
 
 export interface BusinessMember {

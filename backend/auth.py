@@ -1,10 +1,12 @@
 """Authentication dependencies for FastAPI."""
 
 import os
-from typing import Optional
+from typing import Optional, Dict
+from datetime import datetime, timezone
 from fastapi import Header, HTTPException, Depends, Request, Query, status
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from sqlmodel import Session, select
+from sqlalchemy import text
 from db import get_session
 from models import Business
 from supabase_auth import verify_supabase_token
@@ -157,3 +159,65 @@ async def get_current_business(
         )
     
     return business
+
+
+def is_platform_admin_user(user_id: str, session: Session) -> bool:
+    result = session.exec(
+        text("SELECT 1 FROM platform_admins WHERE user_id = :user_id LIMIT 1"),
+        {"user_id": user_id},
+    ).first()
+    return result is not None
+
+
+def _is_trial_expired(trial_ends_at: Optional[datetime]) -> bool:
+    if not trial_ends_at:
+        return True
+    if trial_ends_at.tzinfo is None:
+        return trial_ends_at < datetime.utcnow()
+    return trial_ends_at < datetime.now(timezone.utc)
+
+
+def _plan_feature_defaults(plan_tier: Optional[str]) -> Dict[str, bool]:
+    defaults = {
+        "starter": {},
+        "pro": {"email": True},
+        "elite": {"email": True, "calendar": True, "voice": True},
+        "beta": {"email": True, "calendar": True, "voice": True},
+        "paused": {},
+    }
+    return defaults.get((plan_tier or "starter").lower(), {})
+
+
+def _is_feature_enabled(business: Business, feature_name: str) -> bool:
+    flags = business.feature_flags or {}
+    if feature_name in flags:
+        return bool(flags.get(feature_name))
+    plan_defaults = _plan_feature_defaults(business.plan_tier)
+    return bool(plan_defaults.get(feature_name, False))
+
+
+def require_feature(feature_name: str):
+    async def _dependency(
+        auth_ctx: dict = Depends(get_user_business_context),
+        session: Session = Depends(get_session),
+    ):
+        if is_platform_admin_user(auth_ctx["user_id"], session):
+            return True
+        business = session.exec(
+            select(Business).where(Business.id == auth_ctx["business_id"])
+        ).first()
+        if not business:
+            raise HTTPException(status_code=404, detail="Business not found")
+        if not business.is_active and _is_trial_expired(business.trial_ends_at):
+            raise HTTPException(
+                status_code=403,
+                detail="Account inactive or trial expired"
+            )
+        if not _is_feature_enabled(business, feature_name):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Feature '{feature_name}' not enabled for your plan"
+            )
+        return True
+
+    return _dependency

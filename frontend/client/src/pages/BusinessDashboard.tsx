@@ -559,6 +559,13 @@ export default function BusinessDashboard() {
                   <Button
                     variant="outlined"
                     size="small"
+                    onClick={() => navigate('/app/settings/billing')}
+                  >
+                    Billing
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    size="small"
                     startIcon={<OutboxIcon />}
                     onClick={() => navigate('/app/email/outbox')}
                   >
