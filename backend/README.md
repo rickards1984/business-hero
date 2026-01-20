@@ -284,10 +284,16 @@ Returns:
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | Supabase service role key |
 | `STRIPE_SECRET_KEY` | Yes | Stripe secret key for billing APIs |
 | `STRIPE_WEBHOOK_SECRET` | Yes | Stripe webhook signing secret |
-| `PRICE_ID_STARTER` | Yes | Stripe price ID for starter plan |
-| `PRICE_ID_PRO` | Yes | Stripe price ID for pro plan |
-| `PRICE_ID_PREMIUM` | Yes | Stripe price ID for premium/elite plan |
-| `FRONTEND_URL` | No | Frontend base URL for billing redirects |
+| `STRIPE_PRICE_STARTER` | Yes | Stripe price ID for starter plan |
+| `STRIPE_PRICE_PRO` | Yes | Stripe price ID for pro plan |
+| `STRIPE_PRICE_ELITE` | Yes | Stripe price ID for elite plan |
+| `APP_BASE_URL` | Yes | Frontend base URL for billing redirects |
+
+### Stripe billing setup
+
+1) Add Stripe environment variables (see `.env.example`).
+2) Restart the backend after changing Stripe env vars.
+3) Verify configuration via `GET /v1/billing/status` (authenticated).
 
 ## License
 

@@ -71,6 +71,7 @@ from app.email.router import (
     build_google_oauth_start_url,
     build_microsoft_oauth_start_url,
 )
+from app.billing.config import get_stripe_config, validate_stripe_config
 
 
 async def get_current_user_business(
@@ -357,7 +358,11 @@ async def create_checkout_session(
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
-    stripe.api_key = _get_stripe_secret()
+    ok, missing = validate_stripe_config()
+    if not ok:
+        raise HTTPException(status_code=500, detail=f"Stripe not configured. Missing: {', '.join(missing)}")
+    config = get_stripe_config()
+    stripe.api_key = config["stripe_secret_key"]
     business = session.exec(select(Business).where(Business.id == auth_ctx["business_id"])).first()
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
@@ -376,7 +381,10 @@ async def create_checkout_session(
     plan_tier = payload.plan_tier.lower()
     if plan_tier == "premium":
         plan_tier = "elite"
-    price_id = _get_price_id(plan_tier)
+    prices = config.get("prices", {})
+    price_id = prices.get(plan_tier)
+    if not price_id:
+        raise HTTPException(status_code=400, detail="Unknown or unmapped plan tier")
     base_url = _get_frontend_base_url(request)
     checkout = stripe.checkout.Session.create(
         mode="subscription",
@@ -390,13 +398,34 @@ async def create_checkout_session(
     return BillingSessionResponse(url=checkout["url"])
 
 
+@app.get("/v1/billing/status", tags=["Billing"])
+async def billing_status(auth_ctx=Depends(get_user_business_context)):
+    ok, missing = validate_stripe_config()
+    config = get_stripe_config()
+    prices = config.get("prices", {})
+    return {
+        "configured": ok,
+        "missing": missing,
+        "app_base_url": config.get("app_base_url"),
+        "prices": {
+            "starter": bool(prices.get("starter")),
+            "pro": bool(prices.get("pro")),
+            "elite": bool(prices.get("elite")),
+        },
+    }
+
+
 @app.post("/v1/billing/portal", response_model=BillingPortalResponse, tags=["Billing"])
 async def create_billing_portal(
     request: Request,
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
-    stripe.api_key = _get_stripe_secret()
+    ok, missing = validate_stripe_config()
+    if not ok:
+        raise HTTPException(status_code=500, detail=f"Stripe not configured. Missing: {', '.join(missing)}")
+    config = get_stripe_config()
+    stripe.api_key = config["stripe_secret_key"]
     business = session.exec(select(Business).where(Business.id == auth_ctx["business_id"])).first()
     if not business or not business.stripe_customer_id:
         raise HTTPException(status_code=400, detail="Stripe customer not found for this business")
@@ -413,11 +442,13 @@ async def stripe_webhook(
     request: Request,
     session: Session = Depends(get_session),
 ):
+    ok, missing = validate_stripe_config()
+    if not ok:
+        raise HTTPException(status_code=500, detail=f"Stripe not configured. Missing: {', '.join(missing)}")
+    config = get_stripe_config()
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
-    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
-    if not webhook_secret:
-        raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET not configured")
+    webhook_secret = config["stripe_webhook_secret"]
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
     except Exception as exc:
@@ -1402,32 +1433,11 @@ def require_platform_admin(auth_ctx: dict, session: Session) -> None:
 
 
 def _get_frontend_base_url(request: Request) -> str:
-    base_url = os.getenv("FRONTEND_URL") or os.getenv("PUBLIC_BASE_URL")
+    config = get_stripe_config()
+    base_url = config.get("app_base_url")
     if base_url:
-        return base_url.rstrip("/")
+        return str(base_url).rstrip("/")
     return str(request.base_url).rstrip("/")
-
-
-def _get_stripe_secret() -> str:
-    secret = os.getenv("STRIPE_SECRET_KEY")
-    if not secret:
-        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY not configured")
-    return secret
-
-
-def _get_price_id(plan_tier: str) -> str:
-    plan = plan_tier.lower()
-    if plan == "premium":
-        plan = "elite"
-    mapping = {
-        "starter": os.getenv("PRICE_ID_STARTER", ""),
-        "pro": os.getenv("PRICE_ID_PRO", ""),
-        "elite": os.getenv("PRICE_ID_PREMIUM", ""),
-    }
-    price_id = mapping.get(plan, "")
-    if not price_id:
-        raise HTTPException(status_code=400, detail="Unknown or unmapped plan tier")
-    return price_id
 
 
 def _plan_feature_defaults(plan_tier: str) -> Dict[str, bool]:
@@ -1450,11 +1460,13 @@ def _merge_feature_flags(existing: Dict[str, Any], plan_tier: str) -> Dict[str, 
 def _resolve_plan_from_price(price_id: str) -> Optional[str]:
     if not price_id:
         return None
-    if price_id == os.getenv("PRICE_ID_STARTER"):
+    config = get_stripe_config()
+    prices = config.get("prices", {})
+    if price_id == prices.get("starter"):
         return "starter"
-    if price_id == os.getenv("PRICE_ID_PRO"):
+    if price_id == prices.get("pro"):
         return "pro"
-    if price_id == os.getenv("PRICE_ID_PREMIUM"):
+    if price_id == prices.get("elite"):
         return "elite"
     return None
 
