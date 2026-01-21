@@ -32,19 +32,29 @@ export default function BillingSettings() {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (me?.business?.id) {
+    if (me && !me.id) {
+      setError('No business assigned');
+      setLoading(false);
+      return;
+    }
+    if (me?.id) {
       loadBilling();
     }
-  }, [me?.business?.id]);
+  }, [me?.id]);
 
   const loadBilling = async () => {
+    if (!me?.id) {
+      setError('No business assigned');
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError('');
     try {
       const { data, error: fetchError } = await supabase
         .from('businesses')
         .select('plan_tier,subscription_status,current_period_end,is_active,trial_ends_at')
-        .eq('id', me?.business?.id)
+        .eq('id', me.id)
         .single();
       if (fetchError) throw fetchError;
       setPlanTier(data?.plan_tier || 'starter');

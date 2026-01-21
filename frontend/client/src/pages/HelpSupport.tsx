@@ -56,20 +56,29 @@ export default function HelpSupport() {
   }, [authLoading, user, navigate]);
 
   useEffect(() => {
-    if (me?.business?.id) {
+    if (me && !me.id) {
+      setError('No business assigned');
+      setLoading(false);
+      return;
+    }
+    if (me?.id) {
       loadTickets();
     }
-  }, [me?.business?.id]);
+  }, [me?.id]);
 
   const loadTickets = async () => {
-    if (!me?.business?.id) return;
+    if (!me?.id) {
+      setError('No business assigned');
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError('');
     try {
       const { data, error: fetchError } = await supabase
         .from('support_tickets')
         .select('*')
-        .eq('business_id', me.business.id)
+        .eq('business_id', me.id)
         .order('created_at', { ascending: false });
       if (fetchError) throw fetchError;
       setTickets((data || []) as SupportTicket[]);
@@ -82,7 +91,7 @@ export default function HelpSupport() {
   };
 
   const handleSubmit = async () => {
-    if (!me?.business?.id || !user) return;
+    if (!me?.id || !user) return;
     if (!title.trim() || !message.trim()) {
       setError('Title and message are required');
       return;
@@ -98,7 +107,7 @@ export default function HelpSupport() {
       };
 
       const { error: insertError } = await supabase.from('support_tickets').insert({
-        business_id: me.business.id,
+        business_id: me.id,
         user_id: user.id,
         title: title.trim(),
         category,
