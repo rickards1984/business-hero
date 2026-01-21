@@ -57,6 +57,25 @@ interface SupportTicket {
   severity: string;
   status: string;
   created_at: string;
+  admin_notes?: string | null;
+}
+
+interface BusinessHealth {
+  business: {
+    id: string;
+    name: string;
+    plan_tier: string | null;
+    is_active: boolean;
+    subscription_status: string | null;
+    current_period_end: string | null;
+    feature_flags: Record<string, any>;
+    limits_json: Record<string, any>;
+  };
+  awaz: { connected: boolean; last_webhook_at: string | null };
+  email: { connected: boolean; default_email: string | null; last_sync_at: string | null };
+  calendar: { connected: boolean; last_sync_at: string | null };
+  activity: { last_call_at: string | null; last_task_at: string | null };
+  support: { open_ticket_count: number };
 }
 
 type TabKey = 'overview' | 'members' | 'integrations' | 'activity' | 'support';
@@ -101,6 +120,13 @@ export default function AdminBusinessDetail() {
   const [supportTitle, setSupportTitle] = useState('');
   const [supportMessage, setSupportMessage] = useState('');
   const [supportSeverity, setSupportSeverity] = useState('normal');
+  const [selectedTicket, setSelectedTicket] = useState<SupportTicket | null>(null);
+  const [ticketStatus, setTicketStatus] = useState('open');
+  const [ticketSeverity, setTicketSeverity] = useState('normal');
+  const [ticketNotes, setTicketNotes] = useState('');
+
+  const [health, setHealth] = useState<BusinessHealth | null>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
 
   useEffect(() => {
     if (id) {
@@ -136,6 +162,7 @@ export default function AdminBusinessDetail() {
         loadAwaz(),
         loadEmailAccounts(),
         loadActivity(),
+        loadHealth(),
       ]);
     } catch (err: any) {
       setError(err.message || 'Failed to load business');
@@ -233,6 +260,23 @@ export default function AdminBusinessDetail() {
     setCallsLast7Days(callCount || 0);
   };
 
+  const loadHealth = async () => {
+    setHealthLoading(true);
+    try {
+      const response = await apiRequest('GET', `/v1/admin/businesses/${id}/health`);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to load health');
+      }
+      const data: BusinessHealth = await response.json();
+      setHealth(data);
+    } catch (err: any) {
+      setError(err.message || 'Failed to load health');
+    } finally {
+      setHealthLoading(false);
+    }
+  };
+
   const loadSupportTickets = async () => {
     setSupportLoading(true);
     setError('');
@@ -276,6 +320,36 @@ export default function AdminBusinessDetail() {
       await loadSupportTickets();
     } catch (err: any) {
       setError(err.message || 'Failed to create support ticket');
+    } finally {
+      setSupportSaving(false);
+    }
+  };
+
+  const handleOpenTicketEdit = (ticket: SupportTicket) => {
+    setSelectedTicket(ticket);
+    setTicketStatus(ticket.status);
+    setTicketSeverity(ticket.severity);
+    setTicketNotes(ticket.admin_notes || '');
+  };
+
+  const handleUpdateTicket = async () => {
+    if (!selectedTicket) return;
+    setSupportSaving(true);
+    setError('');
+    try {
+      const response = await apiRequest('PATCH', `/v1/admin/support-tickets/${selectedTicket.id}`, {
+        status: ticketStatus,
+        severity: ticketSeverity,
+        admin_notes: ticketNotes,
+      });
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to update ticket');
+      }
+      setSelectedTicket(null);
+      await loadSupportTickets();
+    } catch (err: any) {
+      setError(err.message || 'Failed to update ticket');
     } finally {
       setSupportSaving(false);
     }
@@ -357,15 +431,66 @@ export default function AdminBusinessDetail() {
 
   const handleTestAwaz = async () => {
     try {
-      const response = await apiRequest('POST', `/v1/integrations/awaz/test?business_id=${id}`);
+      const response = await apiRequest('POST', `/v1/admin/businesses/${id}/awaz/test`);
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.detail || 'Failed to test integration');
       }
       await loadAwaz();
       await loadActivity();
+      await loadHealth();
     } catch (err: any) {
       setError(err.message || 'Failed to test integration');
+    }
+  };
+
+  const handleEmailSync = async () => {
+    try {
+      const response = await apiRequest('POST', `/v1/admin/businesses/${id}/email/sync`);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to sync email');
+      }
+      await loadEmailAccounts();
+      await loadHealth();
+    } catch (err: any) {
+      setError(err.message || 'Failed to sync email');
+    }
+  };
+
+  const handleCalendarSync = async () => {
+    try {
+      const response = await apiRequest('POST', `/v1/admin/businesses/${id}/calendar/sync`);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to sync calendar');
+      }
+      await loadHealth();
+    } catch (err: any) {
+      setError(err.message || 'Failed to sync calendar');
+    }
+  };
+
+  const handleToggleActive = async () => {
+    if (!business) return;
+    setError('');
+    try {
+      const { error: updateError } = await supabase
+        .from('businesses')
+        .update({ is_active: !business.is_active })
+        .eq('id', business.id);
+      if (updateError) throw updateError;
+      await loadBusiness();
+    } catch (err: any) {
+      setError(err.message || 'Failed to update status');
+    }
+  };
+
+  const handleCopy = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      setError('Failed to copy');
     }
   };
 
@@ -427,6 +552,100 @@ export default function AdminBusinessDetail() {
 
         {tab === 'overview' && (
           <Paper sx={{ p: 3 }}>
+            <Typography variant="h6" gutterBottom>Health</Typography>
+            {healthLoading ? (
+              <Typography color="text.secondary">Loading health...</Typography>
+            ) : health ? (
+              <Box sx={{ display: 'grid', gap: 2 }}>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+                  <Chip label={`Plan: ${health.business.plan_tier || 'starter'}`} />
+                  <Chip label={`Subscription: ${health.business.subscription_status || 'none'}`} />
+                  <Chip
+                    label={health.business.is_active ? 'Active' : 'Paused'}
+                    color={health.business.is_active ? 'success' : 'default'}
+                  />
+                  <Typography variant="body2" color="text.secondary">
+                    Period end: {health.business.current_period_end ? new Date(health.business.current_period_end).toLocaleString() : '—'}
+                  </Typography>
+                  <Button variant="outlined" size="small" onClick={handleToggleActive}>
+                    {health.business.is_active ? 'Pause' : 'Activate'}
+                  </Button>
+                </Box>
+
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                  <Chip label={`Email: ${health.business.feature_flags?.email ? 'On' : 'Off'}`} size="small" />
+                  <Chip label={`Calendar: ${health.business.feature_flags?.calendar ? 'On' : 'Off'}`} size="small" />
+                  <Chip label={`Voice: ${health.business.feature_flags?.voice ? 'On' : 'Off'}`} size="small" />
+                </Box>
+
+                <Divider />
+
+                <Box sx={{ display: 'grid', gap: 1 }}>
+                  <Typography variant="subtitle1">Integrations</Typography>
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+                    <Chip label={`Awaz: ${health.awaz.connected ? 'Connected' : 'Not connected'}`} />
+                    <Typography variant="body2" color="text.secondary">
+                      Last webhook: {health.awaz.last_webhook_at || 'Never'}
+                    </Typography>
+                    <Button variant="outlined" size="small" onClick={handleRotateAwaz}>Rotate key</Button>
+                    <Button variant="outlined" size="small" onClick={handleTestAwaz}>Test webhook</Button>
+                  </Box>
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+                    <Chip label={`Email: ${health.email.connected ? 'Connected' : 'Not connected'}`} />
+                    <Typography variant="body2" color="text.secondary">
+                      Default: {health.email.default_email || 'None'}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Last sync: {health.email.last_sync_at || 'Never'}
+                    </Typography>
+                    <Button variant="outlined" size="small" onClick={handleEmailSync}>Force inbox sync</Button>
+                  </Box>
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+                    <Chip label={`Calendar: ${health.calendar.connected ? 'Connected' : 'Not connected'}`} />
+                    <Typography variant="body2" color="text.secondary">
+                      Last sync: {health.calendar.last_sync_at || 'Never'}
+                    </Typography>
+                    <Button variant="outlined" size="small" onClick={handleCalendarSync}>Force calendar sync</Button>
+                  </Box>
+                </Box>
+
+                <Divider />
+
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+                  <Typography variant="body2" color="text.secondary">
+                    Last call: {health.activity.last_call_at ? new Date(health.activity.last_call_at).toLocaleString() : '—'}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Last task: {health.activity.last_task_at ? new Date(health.activity.last_task_at).toLocaleString() : '—'}
+                  </Typography>
+                  <Chip label={`Open tickets: ${health.support.open_ticket_count}`} size="small" />
+                </Box>
+              </Box>
+            ) : (
+              <Typography color="text.secondary">No health data available.</Typography>
+            )}
+
+            <Divider sx={{ my: 3 }} />
+
+            <Typography variant="subtitle1" sx={{ mb: 1 }}>
+              Impersonation info
+            </Typography>
+            <Box sx={{ display: 'grid', gap: 1 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Typography variant="body2">Business ID: {business?.id}</Typography>
+                {business?.id && (
+                  <Button size="small" onClick={() => handleCopy(business.id)}>Copy</Button>
+                )}
+              </Box>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Typography variant="body2">Plan: {planTier}</Typography>
+                <Button size="small" onClick={() => handleCopy(planTier)}>Copy</Button>
+              </Box>
+              <Typography variant="body2">Feature flags: {featureFlagsText}</Typography>
+              <Typography variant="body2">Limits: {limitsText}</Typography>
+            </Box>
+
+            <Divider sx={{ my: 3 }} />
             <Typography variant="h6" gutterBottom>Business Profile</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               ID: {business?.id}
@@ -739,6 +958,11 @@ export default function AdminBusinessDetail() {
                     <Typography variant="caption" color="text.secondary">
                       {new Date(ticket.created_at).toLocaleString()}
                     </Typography>
+                    <Box sx={{ mt: 1 }}>
+                      <Button size="small" variant="outlined" onClick={() => handleOpenTicketEdit(ticket)}>
+                        Edit ticket
+                      </Button>
+                    </Box>
                   </Box>
                 ))
               )}
@@ -777,6 +1001,49 @@ export default function AdminBusinessDetail() {
           <Button onClick={() => setMemberDialogOpen(false)}>Cancel</Button>
           <Button variant="contained" onClick={handleAddMember} disabled={savingMember || !memberEmail.trim()}>
             {savingMember ? 'Adding...' : 'Add member'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={!!selectedTicket} onClose={() => setSelectedTicket(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>Edit support ticket</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            {selectedTicket?.title}
+          </Typography>
+          <FormControl fullWidth sx={{ mb: 2 }}>
+            <InputLabel>Status</InputLabel>
+            <Select value={ticketStatus} label="Status" onChange={(e) => setTicketStatus(e.target.value)}>
+              {['open', 'in_progress', 'resolved', 'closed'].map((status) => (
+                <MenuItem key={status} value={status}>
+                  {status}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <FormControl fullWidth sx={{ mb: 2 }}>
+            <InputLabel>Priority</InputLabel>
+            <Select value={ticketSeverity} label="Priority" onChange={(e) => setTicketSeverity(e.target.value)}>
+              {SUPPORT_PRIORITIES.map((priority) => (
+                <MenuItem key={priority} value={priority}>
+                  {priority}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <TextField
+            label="Admin note"
+            value={ticketNotes}
+            onChange={(e) => setTicketNotes(e.target.value)}
+            multiline
+            minRows={3}
+            fullWidth
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSelectedTicket(null)}>Cancel</Button>
+          <Button variant="contained" onClick={handleUpdateTicket} disabled={supportSaving}>
+            {supportSaving ? 'Saving...' : 'Save'}
           </Button>
         </DialogActions>
       </Dialog>

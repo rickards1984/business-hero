@@ -20,7 +20,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { apiRequest } from '@/lib/queryClient';
 
 const STATUS_OPTIONS = ['open', 'in_progress', 'resolved', 'closed'];
-const SEVERITY_OPTIONS = ['low', 'normal', 'high', 'urgent'];
+const PRIORITY_OPTIONS = ['low', 'normal', 'high', 'urgent'];
 
 interface SupportTicket {
   id: string;
@@ -45,11 +45,13 @@ export default function AdminSupport() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
-  const [severityFilter, setSeverityFilter] = useState('all');
+  const [priorityFilter, setPriorityFilter] = useState('all');
   const businessFilter = searchParams.get('business_id') || '';
+  const [businessFilterInput, setBusinessFilterInput] = useState(businessFilter);
   const [selected, setSelected] = useState<SupportTicket | null>(null);
   const [adminNotes, setAdminNotes] = useState('');
   const [statusUpdate, setStatusUpdate] = useState('open');
+  const [priorityUpdate, setPriorityUpdate] = useState('normal');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -64,7 +66,7 @@ export default function AdminSupport() {
     if (user && isAdmin) {
       loadTickets();
     }
-  }, [user, isAdmin, statusFilter, severityFilter, businessFilter]);
+  }, [user, isAdmin, statusFilter, priorityFilter, businessFilter]);
 
   const loadTickets = async () => {
     setLoading(true);
@@ -73,7 +75,7 @@ export default function AdminSupport() {
       const params = new URLSearchParams();
       if (businessFilter) params.set('business_id', businessFilter);
       if (statusFilter !== 'all') params.set('status', statusFilter);
-      if (severityFilter !== 'all') params.set('severity', severityFilter);
+      if (priorityFilter !== 'all') params.set('severity', priorityFilter);
       params.set('limit', '200');
       const response = await apiRequest('GET', `/v1/admin/support-tickets?${params.toString()}`);
       if (!response.ok) {
@@ -93,6 +95,7 @@ export default function AdminSupport() {
     setSelected(ticket);
     setAdminNotes(ticket.admin_notes || '');
     setStatusUpdate(ticket.status);
+    setPriorityUpdate(ticket.severity);
   };
 
   const handleSave = async () => {
@@ -103,6 +106,7 @@ export default function AdminSupport() {
       const response = await apiRequest('PATCH', `/v1/admin/support-tickets/${selected.id}`, {
         admin_notes: adminNotes,
         status: statusUpdate,
+        priority: priorityUpdate,
       });
       if (!response.ok) {
         const errorData = await response.json();
@@ -135,6 +139,21 @@ export default function AdminSupport() {
               Clear business filter
             </Button>
           )}
+          <TextField
+            size="small"
+            label="Business ID"
+            value={businessFilterInput}
+            onChange={(e) => setBusinessFilterInput(e.target.value)}
+            onBlur={() => {
+              const trimmed = businessFilterInput.trim();
+              if (trimmed) {
+                setSearchParams({ business_id: trimmed });
+              } else {
+                setSearchParams({});
+              }
+            }}
+            sx={{ minWidth: 220 }}
+          />
           <FormControl size="small">
             <InputLabel>Status</InputLabel>
             <Select value={statusFilter} label="Status" onChange={(e) => setStatusFilter(e.target.value)}>
@@ -147,12 +166,12 @@ export default function AdminSupport() {
             </Select>
           </FormControl>
           <FormControl size="small">
-            <InputLabel>Severity</InputLabel>
-            <Select value={severityFilter} label="Severity" onChange={(e) => setSeverityFilter(e.target.value)}>
+            <InputLabel>Priority</InputLabel>
+            <Select value={priorityFilter} label="Priority" onChange={(e) => setPriorityFilter(e.target.value)}>
               <MenuItem value="all">All</MenuItem>
-              {SEVERITY_OPTIONS.map((severity) => (
-                <MenuItem key={severity} value={severity}>
-                  {severity}
+              {PRIORITY_OPTIONS.map((priority) => (
+                <MenuItem key={priority} value={priority}>
+                  {priority}
                 </MenuItem>
               ))}
             </Select>
@@ -223,6 +242,16 @@ export default function AdminSupport() {
                 sx={{ mt: 3 }}
               />
               <FormControl fullWidth sx={{ mt: 2 }}>
+                <InputLabel>Priority</InputLabel>
+                <Select value={priorityUpdate} label="Priority" onChange={(e) => setPriorityUpdate(e.target.value)}>
+                  {PRIORITY_OPTIONS.map((priority) => (
+                    <MenuItem key={priority} value={priority}>
+                      {priority}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <FormControl fullWidth sx={{ mt: 2 }}>
                 <InputLabel>Status</InputLabel>
                 <Select value={statusUpdate} label="Status" onChange={(e) => setStatusUpdate(e.target.value)}>
                   {STATUS_OPTIONS.map((status) => (
@@ -232,6 +261,15 @@ export default function AdminSupport() {
                   ))}
                 </Select>
               </FormControl>
+              <TextField
+                label="Context (read-only)"
+                multiline
+                minRows={4}
+                fullWidth
+                value={JSON.stringify(selected.context || {}, null, 2)}
+                InputProps={{ readOnly: true }}
+                sx={{ mt: 2 }}
+              />
               <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 3 }}>
                 <Button variant="contained" onClick={handleSave} disabled={saving}>
                   {saving ? 'Saving...' : 'Save'}

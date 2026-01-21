@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Box,
@@ -46,7 +46,8 @@ import {
   Logout as LogoutIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase, type Business, type BusinessMember } from '@/lib/supabase';
+import { supabase, type BusinessMember } from '@/lib/supabase';
+import { apiRequest } from '@/lib/queryClient';
 import DebugPanel from '@/components/DebugPanel';
 
 const TIMEZONES = [
@@ -65,6 +66,24 @@ const TIMEZONES = [
 
 const ROLES = ['owner', 'admin', 'member'];
 const PLAN_TIERS = ['starter', 'pro', 'elite', 'beta'];
+const SUBSCRIPTION_STATUSES = ['active', 'past_due', 'canceled'];
+
+interface BusinessSummary {
+  id: string;
+  name: string;
+  timezone: string;
+  plan_tier: string | null;
+  is_active: boolean | null;
+  subscription_status: string | null;
+  awaz_connected: boolean;
+  email_connected: boolean;
+  calendar_connected: boolean;
+  open_ticket_count: number;
+  last_activity_at: string | null;
+  last_awaz_webhook_at: string | null;
+  last_email_sync_at: string | null;
+  last_calendar_sync_at: string | null;
+}
 const FEATURE_PRESETS: Record<string, { feature_flags: Record<string, any>; limits: Record<string, any> }> = {
   starter: { feature_flags: { ai_briefings: false }, limits: { users: 3, tasks: 200 } },
   pro: { feature_flags: { ai_briefings: true }, limits: { users: 10, tasks: 1000 } },
@@ -79,7 +98,7 @@ export default function AdminDashboard() {
   
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'businesses' | 'members'>('businesses');
-  const [businesses, setBusinesses] = useState<Business[]>([]);
+  const [businesses, setBusinesses] = useState<BusinessSummary[]>([]);
   const [members, setMembers] = useState<(BusinessMember & { business_name?: string })[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -101,6 +120,16 @@ export default function AdminDashboard() {
   const [memberRole, setMemberRole] = useState('member');
   const [savingMember, setSavingMember] = useState(false);
 
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterPlan, setFilterPlan] = useState('all');
+  const [filterActive, setFilterActive] = useState('all');
+  const [filterSubscription, setFilterSubscription] = useState('all');
+  const [filterAwaz, setFilterAwaz] = useState('all');
+  const [filterEmail, setFilterEmail] = useState('all');
+  const [filterCalendar, setFilterCalendar] = useState('all');
+  const [toggleDialogOpen, setToggleDialogOpen] = useState(false);
+  const [toggleTarget, setToggleTarget] = useState<BusinessSummary | null>(null);
+
   useEffect(() => {
     if (!authLoading && !user) {
       navigate('/login');
@@ -120,12 +149,12 @@ export default function AdminDashboard() {
     setError('');
     
     try {
-      const { data: businessData, error: businessError } = await supabase
-        .from('businesses')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (businessError) throw businessError;
+      const response = await apiRequest('GET', '/v1/admin/businesses/summary');
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to fetch businesses');
+      }
+      const businessData = await response.json();
       setBusinesses(businessData || []);
 
       const { data: memberData, error: memberError } = await supabase
@@ -144,6 +173,88 @@ export default function AdminDashboard() {
       setError(err.message || 'Failed to fetch data');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const memberEmailMap = useMemo(() => {
+    const map: Record<string, string[]> = {};
+    members.forEach((member) => {
+      if (!member.business_id || !member.invited_email) return;
+      if (!map[member.business_id]) {
+        map[member.business_id] = [];
+      }
+      map[member.business_id].push(member.invited_email.toLowerCase());
+    });
+    return map;
+  }, [members]);
+
+  const filteredBusinesses = useMemo(() => {
+    const term = searchTerm.trim().toLowerCase();
+    return businesses.filter((biz) => {
+      if (term) {
+        const nameMatch = biz.name.toLowerCase().includes(term);
+        const memberMatch = (memberEmailMap[biz.id] || []).some((email) => email.includes(term));
+        if (!nameMatch && !memberMatch) return false;
+      }
+      if (filterPlan !== 'all' && (biz.plan_tier || 'starter') !== filterPlan) return false;
+      if (filterActive !== 'all') {
+        const activeValue = filterActive === 'active';
+        if (Boolean(biz.is_active) !== activeValue) return false;
+      }
+      if (filterSubscription !== 'all' && (biz.subscription_status || 'none') !== filterSubscription) return false;
+      if (filterAwaz !== 'all') {
+        const awazValue = filterAwaz === 'connected';
+        if (Boolean(biz.awaz_connected) !== awazValue) return false;
+      }
+      if (filterEmail !== 'all') {
+        const emailValue = filterEmail === 'connected';
+        if (Boolean(biz.email_connected) !== emailValue) return false;
+      }
+      if (filterCalendar !== 'all') {
+        const calValue = filterCalendar === 'connected';
+        if (Boolean(biz.calendar_connected) !== calValue) return false;
+      }
+      return true;
+    });
+  }, [
+    businesses,
+    searchTerm,
+    filterPlan,
+    filterActive,
+    filterSubscription,
+    filterAwaz,
+    filterEmail,
+    filterCalendar,
+    memberEmailMap,
+  ]);
+
+  const handleCopyBusinessId = async (id: string) => {
+    try {
+      await navigator.clipboard.writeText(id);
+    } catch {
+      setError('Failed to copy business ID');
+    }
+  };
+
+  const confirmToggleActive = (business: BusinessSummary) => {
+    setToggleTarget(business);
+    setToggleDialogOpen(true);
+  };
+
+  const handleToggleActive = async () => {
+    if (!toggleTarget) return;
+    setError('');
+    try {
+      const { error: updateError } = await supabase
+        .from('businesses')
+        .update({ is_active: !toggleTarget.is_active })
+        .eq('id', toggleTarget.id);
+      if (updateError) throw updateError;
+      setToggleDialogOpen(false);
+      setToggleTarget(null);
+      fetchData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to update business');
     }
   };
 
@@ -391,62 +502,181 @@ export default function AdminDashboard() {
               <CircularProgress />
             </Box>
           ) : activeTab === 'businesses' ? (
-            <TableContainer component={Paper} elevation={1}>
-              <Table>
-                <TableHead>
-                  <TableRow>
-                    <TableCell>Name</TableCell>
-                    <TableCell>Timezone</TableCell>
-                    <TableCell>Plan</TableCell>
-                    <TableCell>Active</TableCell>
-                    <TableCell>Created</TableCell>
-                    <TableCell align="right">Actions</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {businesses.length === 0 ? (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <Paper sx={{ p: 2 }}>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+                  <TextField
+                    label="Search businesses"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    sx={{ minWidth: 240 }}
+                  />
+                  <FormControl sx={{ minWidth: 140 }}>
+                    <InputLabel>Plan</InputLabel>
+                    <Select value={filterPlan} label="Plan" onChange={(e) => setFilterPlan(e.target.value)}>
+                      <MenuItem value="all">All</MenuItem>
+                      {PLAN_TIERS.map((tier) => (
+                        <MenuItem key={tier} value={tier}>
+                          {tier}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <FormControl sx={{ minWidth: 140 }}>
+                    <InputLabel>Status</InputLabel>
+                    <Select value={filterActive} label="Status" onChange={(e) => setFilterActive(e.target.value)}>
+                      <MenuItem value="all">All</MenuItem>
+                      <MenuItem value="active">Active</MenuItem>
+                      <MenuItem value="paused">Paused</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <FormControl sx={{ minWidth: 180 }}>
+                    <InputLabel>Subscription</InputLabel>
+                    <Select
+                      value={filterSubscription}
+                      label="Subscription"
+                      onChange={(e) => setFilterSubscription(e.target.value)}
+                    >
+                      <MenuItem value="all">All</MenuItem>
+                      {SUBSCRIPTION_STATUSES.map((status) => (
+                        <MenuItem key={status} value={status}>
+                          {status}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <FormControl sx={{ minWidth: 160 }}>
+                    <InputLabel>Awaz</InputLabel>
+                    <Select value={filterAwaz} label="Awaz" onChange={(e) => setFilterAwaz(e.target.value)}>
+                      <MenuItem value="all">All</MenuItem>
+                      <MenuItem value="connected">Connected</MenuItem>
+                      <MenuItem value="not_connected">Not connected</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <FormControl sx={{ minWidth: 160 }}>
+                    <InputLabel>Email</InputLabel>
+                    <Select value={filterEmail} label="Email" onChange={(e) => setFilterEmail(e.target.value)}>
+                      <MenuItem value="all">All</MenuItem>
+                      <MenuItem value="connected">Connected</MenuItem>
+                      <MenuItem value="not_connected">Not connected</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <FormControl sx={{ minWidth: 170 }}>
+                    <InputLabel>Calendar</InputLabel>
+                    <Select
+                      value={filterCalendar}
+                      label="Calendar"
+                      onChange={(e) => setFilterCalendar(e.target.value)}
+                    >
+                      <MenuItem value="all">All</MenuItem>
+                      <MenuItem value="connected">Connected</MenuItem>
+                      <MenuItem value="not_connected">Not connected</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Box>
+              </Paper>
+
+              <TableContainer component={Paper} elevation={1}>
+                <Table>
+                  <TableHead>
                     <TableRow>
-                      <TableCell colSpan={6} align="center" sx={{ py: 4 }}>
-                        <Typography color="text.secondary">No businesses yet</Typography>
-                      </TableCell>
+                      <TableCell>Name</TableCell>
+                      <TableCell>Plan</TableCell>
+                      <TableCell>Subscription</TableCell>
+                      <TableCell>Awaz</TableCell>
+                      <TableCell>Email</TableCell>
+                      <TableCell>Calendar</TableCell>
+                      <TableCell>Open tickets</TableCell>
+                      <TableCell>Last activity</TableCell>
+                      <TableCell align="right">Actions</TableCell>
                     </TableRow>
-                  ) : (
-                    businesses.map((business) => (
-                      <TableRow key={business.id} data-testid={`row-business-${business.id}`}>
-                        <TableCell>
-                          <Typography fontWeight="medium">{business.name}</Typography>
-                        </TableCell>
-                        <TableCell>
-                          <Chip label={business.timezone} size="small" variant="outlined" />
-                        </TableCell>
-                        <TableCell>
-                          <Chip label={business.plan_tier || 'starter'} size="small" variant="outlined" />
-                        </TableCell>
-                        <TableCell>
-                          <Chip
-                            label={business.is_active === false ? 'Paused' : 'Active'}
-                            size="small"
-                            color={business.is_active === false ? 'default' : 'success'}
-                          />
-                        </TableCell>
-                        <TableCell>
-                          {new Date(business.created_at).toLocaleDateString()}
-                        </TableCell>
-                        <TableCell align="right">
-                          <Button
-                            variant="outlined"
-                            size="small"
-                            onClick={() => navigate(`/admin/businesses/${business.id}`)}
-                          >
-                            Manage
-                          </Button>
+                  </TableHead>
+                  <TableBody>
+                    {filteredBusinesses.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={9} align="center" sx={{ py: 4 }}>
+                          <Typography color="text.secondary">No businesses found</Typography>
                         </TableCell>
                       </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
-            </TableContainer>
+                    ) : (
+                      filteredBusinesses.map((business) => (
+                        <TableRow key={business.id} data-testid={`row-business-${business.id}`}>
+                          <TableCell>
+                            <Typography fontWeight="medium">{business.name}</Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {business.id}
+                            </Typography>
+                          </TableCell>
+                          <TableCell>
+                            <Chip label={business.plan_tier || 'starter'} size="small" variant="outlined" />
+                          </TableCell>
+                          <TableCell>
+                            <Chip
+                              label={business.subscription_status || 'none'}
+                              size="small"
+                              color={business.subscription_status === 'active' ? 'success' : 'default'}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <Chip
+                              label={business.awaz_connected ? 'Connected' : 'Not connected'}
+                              size="small"
+                              color={business.awaz_connected ? 'success' : 'default'}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <Chip
+                              label={business.email_connected ? 'Connected' : 'Not connected'}
+                              size="small"
+                              color={business.email_connected ? 'success' : 'default'}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <Chip
+                              label={business.calendar_connected ? 'Connected' : 'Not connected'}
+                              size="small"
+                              color={business.calendar_connected ? 'success' : 'default'}
+                            />
+                          </TableCell>
+                          <TableCell>{business.open_ticket_count}</TableCell>
+                          <TableCell>
+                            {business.last_activity_at
+                              ? new Date(business.last_activity_at).toLocaleString()
+                              : '—'}
+                          </TableCell>
+                          <TableCell align="right">
+                            <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, flexWrap: 'wrap' }}>
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                onClick={() => navigate(`/admin/businesses/${business.id}`)}
+                              >
+                                Manage
+                              </Button>
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                onClick={() => handleCopyBusinessId(business.id)}
+                              >
+                                Copy ID
+                              </Button>
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                color={business.is_active === false ? 'success' : 'warning'}
+                                onClick={() => confirmToggleActive(business)}
+                              >
+                                {business.is_active === false ? 'Activate' : 'Pause'}
+                              </Button>
+                            </Box>
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </Box>
           ) : (
             <TableContainer component={Paper} elevation={1}>
               <Table>
@@ -580,6 +810,23 @@ export default function AdminDashboard() {
             data-testid="button-save-business"
           >
             {savingBusiness ? <CircularProgress size={20} /> : 'Create'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={toggleDialogOpen} onClose={() => setToggleDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Confirm status change</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            {toggleTarget?.is_active === false
+              ? `Activate ${toggleTarget?.name}?`
+              : `Pause ${toggleTarget?.name}?`}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setToggleDialogOpen(false)}>Cancel</Button>
+          <Button variant="contained" color="warning" onClick={handleToggleActive}>
+            Confirm
           </Button>
         </DialogActions>
       </Dialog>

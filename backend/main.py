@@ -5,6 +5,7 @@ import json
 import copy
 import secrets
 import stripe
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
@@ -65,6 +66,9 @@ from assistant_chat import process_chat_message, get_business_for_user
 from app.email.service import (
     get_or_create_smtp_account,
     send_email_smtp,
+    get_business_by_id,
+    get_default_email_account,
+    get_provider_for_account,
 )
 from app.email.router import (
     router as email_router,
@@ -351,6 +355,229 @@ async def list_businesses(session: Session = Depends(get_session)):
     ]
 
 
+@app.get("/v1/admin/businesses/{business_id}/health", tags=["Admin"])
+async def get_business_health(
+    business_id: str,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    require_platform_admin(auth_ctx, session)
+    query = text(
+        """
+        SELECT
+            b.id::text AS id,
+            b.name,
+            b.plan_tier,
+            b.is_active,
+            b.subscription_status,
+            b.current_period_end,
+            b.feature_flags,
+            b.limits,
+            (
+                SELECT NULLIF(i.config->>'last_received_at', '')::timestamptz
+                FROM integrations i
+                WHERE i.business_id = b.id AND i.integration_type = 'awaz'
+                LIMIT 1
+            ) AS last_awaz_webhook_at,
+            EXISTS (
+                SELECT 1
+                FROM integrations i
+                WHERE i.business_id = b.id
+                  AND i.integration_type = 'awaz'
+                  AND (i.config->>'last_received_at') IS NOT NULL
+            ) AS awaz_connected,
+            (
+                SELECT ea.email_address
+                FROM email_accounts ea
+                WHERE ea.business_id = b.id AND ea.is_default = true
+                LIMIT 1
+            ) AS default_email,
+            EXISTS (
+                SELECT 1 FROM email_accounts ea WHERE ea.business_id = b.id
+            ) AS email_connected,
+            EXISTS (
+                SELECT 1
+                FROM calendar_sync_state cs
+                JOIN email_accounts ea ON ea.id = cs.email_account_id
+                WHERE ea.business_id = b.id
+            ) AS calendar_connected,
+            (
+                SELECT MAX(es.last_synced_at)
+                FROM email_sync_state es
+                JOIN email_accounts ea ON ea.id = es.email_account_id
+                WHERE ea.business_id = b.id
+            ) AS last_email_sync_at,
+            (
+                SELECT MAX(cs.last_synced_at)
+                FROM calendar_sync_state cs
+                JOIN email_accounts ea ON ea.id = cs.email_account_id
+                WHERE ea.business_id = b.id
+            ) AS last_calendar_sync_at,
+            (
+                SELECT MAX(created_at) FROM calls c WHERE c.business_id = b.id
+            ) AS last_call_at,
+            (
+                SELECT MAX(created_at) FROM tasks t WHERE t.business_id = b.id AND t.deleted_at IS NULL
+            ) AS last_task_at,
+            (
+                SELECT COUNT(*) FROM support_tickets st
+                WHERE st.business_id = b.id AND st.status != 'closed'
+            ) AS open_ticket_count
+        FROM businesses b
+        WHERE b.id = :business_id
+        LIMIT 1
+        """
+    )
+    row = session.exec(query, {"business_id": business_id}).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Business not found")
+    data = dict(row._mapping)
+    return {
+        "business": {
+            "id": data["id"],
+            "name": data["name"],
+            "plan_tier": data["plan_tier"],
+            "is_active": data["is_active"],
+            "subscription_status": data["subscription_status"],
+            "current_period_end": data["current_period_end"],
+            "feature_flags": data["feature_flags"] or {},
+            "limits_json": data["limits"] or {},
+        },
+        "awaz": {
+            "connected": data["awaz_connected"],
+            "last_webhook_at": data["last_awaz_webhook_at"],
+        },
+        "email": {
+            "connected": data["email_connected"],
+            "default_email": data["default_email"],
+            "last_sync_at": data["last_email_sync_at"],
+        },
+        "calendar": {
+            "connected": data["calendar_connected"],
+            "last_sync_at": data["last_calendar_sync_at"],
+        },
+        "activity": {
+            "last_call_at": data["last_call_at"],
+            "last_task_at": data["last_task_at"],
+        },
+        "support": {
+            "open_ticket_count": data["open_ticket_count"],
+        },
+    }
+
+
+@app.post("/v1/admin/businesses/{business_id}/awaz/test", tags=["Admin"])
+async def admin_test_awaz(
+    business_id: str,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    require_platform_admin(auth_ctx, session)
+    logger.info("admin_awaz_test", extra={"user_id": auth_ctx["user_id"], "business_id": business_id})
+    call_id = _run_awaz_test_for_business(business_id, session)
+    return {"call_id": call_id}
+
+
+@app.post("/v1/admin/businesses/{business_id}/email/sync", response_model=EmailSyncRunResponse, tags=["Admin"])
+async def admin_email_sync(
+    business_id: str,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    require_platform_admin(auth_ctx, session)
+    logger.info("admin_email_sync", extra={"user_id": auth_ctx["user_id"], "business_id": business_id})
+    return _run_email_sync_for_business(business_id, session)
+
+
+@app.post("/v1/admin/businesses/{business_id}/calendar/sync", tags=["Admin"])
+async def admin_calendar_sync(
+    business_id: str,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    require_platform_admin(auth_ctx, session)
+    logger.info("admin_calendar_sync", extra={"user_id": auth_ctx["user_id"], "business_id": business_id})
+    raise HTTPException(status_code=501, detail="Calendar sync not implemented")
+
+
+@app.get("/v1/admin/businesses/summary", tags=["Admin"])
+async def list_businesses_summary(
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    require_platform_admin(auth_ctx, session)
+    query = text(
+        """
+        SELECT
+            b.id::text AS id,
+            b.name,
+            b.timezone,
+            b.plan_tier,
+            b.is_active,
+            b.subscription_status,
+            (
+                SELECT NULLIF(i.config->>'last_received_at', '')::timestamptz
+                FROM integrations i
+                WHERE i.business_id = b.id AND i.integration_type = 'awaz'
+                LIMIT 1
+            ) AS last_awaz_webhook_at,
+            EXISTS (
+                SELECT 1
+                FROM integrations i
+                WHERE i.business_id = b.id
+                  AND i.integration_type = 'awaz'
+                  AND (i.config->>'last_received_at') IS NOT NULL
+            ) AS awaz_connected,
+            EXISTS (
+                SELECT 1 FROM email_accounts ea WHERE ea.business_id = b.id
+            ) AS email_connected,
+            EXISTS (
+                SELECT 1
+                FROM calendar_sync_state cs
+                JOIN email_accounts ea ON ea.id = cs.email_account_id
+                WHERE ea.business_id = b.id
+            ) AS calendar_connected,
+            (
+                SELECT COUNT(*) FROM support_tickets st
+                WHERE st.business_id = b.id AND st.status != 'closed'
+            ) AS open_ticket_count,
+            (
+                SELECT MAX(created_at) FROM calls c WHERE c.business_id = b.id
+            ) AS last_call_at,
+            (
+                SELECT MAX(created_at) FROM tasks t WHERE t.business_id = b.id AND t.deleted_at IS NULL
+            ) AS last_task_at,
+            (
+                SELECT MAX(es.last_synced_at)
+                FROM email_sync_state es
+                JOIN email_accounts ea ON ea.id = es.email_account_id
+                WHERE ea.business_id = b.id
+            ) AS last_email_sync_at,
+            (
+                SELECT MAX(cs.last_synced_at)
+                FROM calendar_sync_state cs
+                JOIN email_accounts ea ON ea.id = cs.email_account_id
+                WHERE ea.business_id = b.id
+            ) AS last_calendar_sync_at
+        FROM businesses b
+        ORDER BY b.created_at DESC
+        """
+    )
+    rows = session.exec(query).all()
+    summaries = []
+    for row in rows:
+        data = dict(row._mapping)
+        last_call = data.pop("last_call_at")
+        last_task = data.pop("last_task_at")
+        if last_call and last_task:
+            last_activity_at = max(last_call, last_task)
+        else:
+            last_activity_at = last_call or last_task
+        data["last_activity_at"] = last_activity_at
+        summaries.append(data)
+    return summaries
+
+
 @app.post("/v1/billing/checkout-session", response_model=BillingSessionResponse, tags=["Billing"])
 async def create_checkout_session(
     payload: BillingCheckoutRequest,
@@ -519,6 +746,7 @@ async def list_support_tickets(
     status: Optional[str] = Query(default=None),
     severity: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
@@ -530,7 +758,7 @@ async def list_support_tickets(
         statement = statement.where(SupportTicket.status == status)
     if severity:
         statement = statement.where(SupportTicket.severity == severity)
-    statement = statement.limit(limit)
+    statement = statement.offset(offset).limit(limit)
     return session.exec(statement).all()
 
 
@@ -573,6 +801,10 @@ async def update_support_ticket_admin(
         ticket.status = payload.status
     if payload.admin_notes is not None:
         ticket.admin_notes = payload.admin_notes
+    if payload.severity is not None:
+        ticket.severity = payload.severity
+    elif payload.priority is not None:
+        ticket.severity = payload.priority
     ticket.updated_at = datetime.utcnow()
     session.add(ticket)
     session.commit()
@@ -1430,6 +1662,120 @@ def get_awaz_integration(business_id: str, session: Session) -> Dict[str, Any]:
 def require_platform_admin(auth_ctx: dict, session: Session) -> None:
     if not is_platform_admin_user(auth_ctx["user_id"], session):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+
+logger = logging.getLogger("admin")
+
+
+def _run_awaz_test_for_business(business_id: str, session: Session) -> str:
+    business = session.exec(
+        select(Business).where(Business.id == business_id)
+    ).first()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    integration = ensure_awaz_integration(business_id, session)
+    config = integration.config or {}
+
+    payload = CallCreate(
+        caller_number=config.get("phone_number") or "+440000000000",
+        caller_name=config.get("receptionist_name") or "Awaz Test",
+        started_at=datetime.utcnow(),
+        ended_at=datetime.utcnow(),
+        transcript="Test call from Awaz integration.",
+        intent="test",
+        create_follow_up_task=True,
+    )
+    response = _create_call_record(payload, business, session)
+
+    config["last_received_at"] = datetime.utcnow().isoformat()
+    config["last_error"] = None
+    integration.config = config
+    integration.updated_at = datetime.utcnow()
+    session.add(integration)
+    session.commit()
+
+    return response.id
+
+
+def _run_email_sync_for_business(business_id: str, session: Session) -> EmailSyncRunResponse:
+    business = get_business_by_id(session, business_id)
+    account = get_default_email_account(session, business)
+    provider = get_provider_for_account(account)
+
+    sync_state = session.exec(
+        select(EmailSyncState).where(EmailSyncState.email_account_id == account.id)
+    ).first()
+    if not sync_state:
+        sync_state = EmailSyncState(email_account_id=account.id, cursor={})
+        session.add(sync_state)
+        session.commit()
+        session.refresh(sync_state)
+
+    result = provider.sync_inbox_changes(account=account, cursor=sync_state.cursor or {})
+    message_count = 0
+
+    for msg in result.messages:
+        existing = session.exec(
+            select(EmailMessage).where(
+                EmailMessage.email_account_id == account.id,
+                EmailMessage.provider_message_id == msg.provider_message_id,
+            )
+        ).first()
+        if existing:
+            existing.provider_thread_id = msg.provider_thread_id
+            existing.folder = msg.folder
+            existing.from_email = msg.from_email
+            existing.from_name = msg.from_name
+            existing.to_emails = msg.to_emails
+            existing.cc_emails = msg.cc_emails
+            existing.subject = msg.subject
+            existing.snippet = msg.snippet
+            existing.received_at = msg.received_at
+            existing.is_unread = msg.is_unread
+            existing.has_attachments = msg.has_attachments
+            existing.labels = msg.labels
+            existing.body_text = msg.body_text
+            existing.body_html = msg.body_html
+            existing.raw_headers = msg.raw_headers or {}
+            existing.updated_at = datetime.utcnow()
+            session.add(existing)
+        else:
+            record = EmailMessage(
+                business_id=business.id,
+                email_account_id=account.id,
+                provider_message_id=msg.provider_message_id,
+                provider_thread_id=msg.provider_thread_id,
+                folder=msg.folder,
+                from_email=msg.from_email,
+                from_name=msg.from_name,
+                to_emails=msg.to_emails,
+                cc_emails=msg.cc_emails,
+                subject=msg.subject,
+                snippet=msg.snippet,
+                received_at=msg.received_at,
+                is_unread=msg.is_unread,
+                has_attachments=msg.has_attachments,
+                labels=msg.labels,
+                body_text=msg.body_text,
+                body_html=msg.body_html,
+                raw_headers=msg.raw_headers or {},
+            )
+            session.add(record)
+        message_count += 1
+
+    sync_state.cursor = result.cursor or {}
+    sync_state.last_synced_at = datetime.utcnow()
+    sync_state.last_error = None
+    session.add(sync_state)
+    session.commit()
+
+    return EmailSyncRunResponse(
+        email_account_id=str(account.id),
+        synced=True,
+        message_count=message_count,
+        cursor=sync_state.cursor,
+    )
 
 
 def _get_frontend_base_url(request: Request) -> str:

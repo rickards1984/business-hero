@@ -135,6 +135,8 @@ class SupportTicketUpdateAdmin(BaseModel):
     """Schema for admin updating support ticket."""
     status: Optional[str] = None
     admin_notes: Optional[str] = None
+    severity: Optional[str] = None
+    priority: Optional[str] = None
 
 
 class BillingCheckoutRequest(BaseModel):
