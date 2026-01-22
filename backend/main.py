@@ -1350,21 +1350,26 @@ async def _create_call_record(
 
 
 _awaz_api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
-_awaz_bearer_auth = HTTPBearer(auto_error=False)
+_awaz_logger = logging.getLogger("webhooks")
+
+
+def _select_awaz_token(x_api_key: Optional[str], api_key: Optional[str]) -> Optional[str]:
+    return x_api_key or api_key
 
 
 async def get_awaz_business(
     api_key: Optional[str] = Query(default=None, description="Business API key for Awaz webhooks"),
     x_api_key: Optional[str] = Depends(_awaz_api_key_header),
-    authorization: Optional[HTTPAuthorizationCredentials] = Depends(_awaz_bearer_auth),
     session: Session = Depends(get_session),
 ) -> Business:
-    token = api_key or x_api_key or (authorization.credentials if authorization else None)
+    token = _select_awaz_token(x_api_key, api_key)
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing authentication. Use x-api-key header, Authorization: Bearer <key>, or api_key query param",
+            detail="Missing business api key",
         )
+    if not x_api_key and api_key:
+        _awaz_logger.info("Awaz webhook auth via query param")
     integration = session.exec(
         select(Integration).where(
             Integration.integration_type == "awaz",
