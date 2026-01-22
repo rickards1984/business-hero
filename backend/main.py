@@ -14,6 +14,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query, Request, status, Upl
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
+from pydantic import ValidationError
 from sqlmodel import Session, select
 from sqlalchemy import text, func
 import pytz
@@ -474,7 +475,7 @@ async def admin_test_awaz(
 ):
     require_platform_admin(auth_ctx, session)
     logger.info("admin_awaz_test", extra={"user_id": auth_ctx["user_id"], "business_id": business_id})
-    call_id = _run_awaz_test_for_business(business_id, session)
+    call_id = await _run_awaz_test_for_business(business_id, session)
     return {"call_id": call_id}
 
 
@@ -1357,9 +1358,44 @@ def _select_awaz_token(x_api_key: Optional[str], api_key: Optional[str]) -> Opti
     return x_api_key or api_key
 
 
+async def _parse_awaz_webhook_payload(request: Request) -> dict:
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty request body")
+
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON payload") from exc
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        form = await request.form()
+        payload = dict(form)
+    else:
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail=f"Unsupported content-type: {content_type or 'unknown'}",
+            ) from exc
+
+    if isinstance(payload, list):
+        if not payload:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty request body")
+        payload = payload[0]
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid payload type")
+
+    return payload
+
+
 async def get_awaz_business(
     api_key: Optional[str] = Query(default=None, description="Business API key for Awaz webhooks"),
     x_api_key: Optional[str] = Depends(_awaz_api_key_header),
+    request: Request = None,
     session: Session = Depends(get_session),
 ) -> Business:
     token = _select_awaz_token(x_api_key, api_key)
@@ -1368,55 +1404,168 @@ async def get_awaz_business(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing business api key",
         )
+    auth_via = "header" if x_api_key else "query"
     if not x_api_key and api_key:
         _awaz_logger.info("Awaz webhook auth via query param")
-    integration = session.exec(
-        select(Integration).where(
-            Integration.integration_type == "awaz",
-            text("config ->> 'webhook_secret' = :token"),
-        ),
-        {"token": token},
-    ).first()
+
+    integration = None
+    dialect = session.get_bind().dialect.name
+    if request is not None:
+        request.state.awaz_auth_via = auth_via
+        request.state.awaz_dialect = dialect
+    try:
+        if dialect == "sqlite":
+            integrations = session.exec(
+                select(Integration).where(Integration.integration_type == "awaz")
+            ).all()
+            integration = next(
+                (
+                    candidate
+                    for candidate in integrations
+                    if (candidate.config or {}).get("webhook_secret") == token
+                ),
+                None,
+            )
+        else:
+            integration = session.exec(
+                select(Integration).where(
+                    Integration.integration_type == "awaz",
+                    text("integrations.config ->> 'webhook_secret' = :token"),
+                ),
+                {"token": token},
+            ).first()
+    except Exception:
+        _awaz_logger.exception("awaz_webhook_auth_lookup_failed", extra={"dialect": dialect})
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Webhook auth lookup failed")
     if integration:
         business = session.exec(
             select(Business).where(Business.id == integration.business_id)
         ).first()
         if not business:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook secret")
-        integration.config = integration.config or {}
-        integration.config["last_received_at"] = datetime.utcnow().isoformat()
-        integration.config["last_error"] = None
-        integration.updated_at = datetime.utcnow()
-        session.add(integration)
-        session.commit()
+        if request is not None:
+            request.state.awaz_integration = integration
+            request.state.awaz_token = token
         return business
 
     # TODO(2026-01-31): Remove legacy business api key fallback for Awaz webhook.
     statement = select(Business).where(Business.api_key == token)
     business = session.exec(statement).first()
     if not business:
-        session.exec(
-            text(
-                "UPDATE integrations "
-                "SET config = jsonb_set(coalesce(config, '{}'::jsonb), '{last_error}', to_jsonb(:err::text), true), "
-                "updated_at = NOW() "
-                "WHERE integration_type = 'awaz' AND config ->> 'webhook_secret' = :token"
-            ),
-            {"err": "Invalid webhook secret", "token": token},
-        )
-        session.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook secret")
+    if request is not None:
+        request.state.awaz_integration = None
+        request.state.awaz_token = token
     return business
 
 
-@app.post("/v1/webhooks/awaz/calls", response_model=CallResponse, tags=["Webhooks"])
+@app.post(
+    "/v1/webhooks/awaz/calls",
+    response_model=CallResponse,
+    tags=["Webhooks"],
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {"schema": {"$ref": "#/components/schemas/CallCreate"}}
+            },
+        }
+    },
+)
 async def awaz_calls_webhook(
-    data: CallCreate,
+    request: Request,
     business: Business = Depends(get_awaz_business),
     session: Session = Depends(get_session),
 ):
     """Handle Awaz calls webhook using business API key auth."""
-    return await _create_call_record(data, business, session, source="awaz")
+    integration = getattr(request.state, "awaz_integration", None)
+    auth_via = getattr(request.state, "awaz_auth_via", "unknown")
+    dialect = getattr(request.state, "awaz_dialect", "unknown")
+
+    try:
+        payload_dict = await _parse_awaz_webhook_payload(request)
+    except HTTPException as exc:
+        if integration is not None:
+            config = integration.config or {}
+            config["last_error"] = exc.detail
+            integration.config = config
+            integration.updated_at = datetime.utcnow()
+            session.add(integration)
+            session.commit()
+        _awaz_logger.exception(
+            "awaz_webhook_payload_parse_failed",
+            extra={
+                "auth_via": auth_via,
+                "dialect": dialect,
+                "business_id": str(business.id),
+                "payload_keys": [],
+            },
+        )
+        raise
+
+    payload_keys = list(payload_dict.keys())
+    try:
+        data = CallCreate(**payload_dict)
+    except ValidationError as exc:
+        if integration is not None:
+            config = integration.config or {}
+            config["last_error"] = "Validation error"
+            integration.config = config
+            integration.updated_at = datetime.utcnow()
+            session.add(integration)
+            session.commit()
+        _awaz_logger.exception(
+            "awaz_webhook_validation_failed",
+            extra={
+                "auth_via": auth_via,
+                "dialect": dialect,
+                "business_id": str(business.id),
+                "payload_keys": payload_keys,
+            },
+        )
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.errors())
+
+    try:
+        result = await _create_call_record(data, business, session, source="awaz")
+    except Exception:
+        session.rollback()
+        if integration is not None:
+            config = integration.config or {}
+            config["last_error"] = "Failed to process webhook payload"
+            integration.config = config
+            integration.updated_at = datetime.utcnow()
+            session.add(integration)
+            session.commit()
+        _awaz_logger.exception(
+            "awaz_webhook_failed",
+            extra={
+                "auth_via": auth_via,
+                "dialect": dialect,
+                "business_id": str(business.id),
+                "payload_keys": payload_keys,
+            },
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to process webhook payload")
+
+    if integration is not None:
+        config = integration.config or {}
+        config["last_received_at"] = datetime.utcnow().isoformat()
+        config["last_error"] = None
+        integration.config = config
+        integration.updated_at = datetime.utcnow()
+        session.add(integration)
+        session.commit()
+
+    _awaz_logger.info(
+        "awaz_webhook_processed",
+        extra={
+            "auth_via": auth_via,
+            "dialect": dialect,
+            "business_id": str(business.id),
+            "payload_keys": payload_keys,
+        },
+    )
+    return result
 
 
 @app.get("/v1/calls", response_model=List[CallResponse], tags=["Calls"])
@@ -1672,7 +1821,7 @@ def require_platform_admin(auth_ctx: dict, session: Session) -> None:
 logger = logging.getLogger("admin")
 
 
-def _run_awaz_test_for_business(business_id: str, session: Session) -> str:
+async def _run_awaz_test_for_business(business_id: str, session: Session) -> str:
     business = session.exec(
         select(Business).where(Business.id == business_id)
     ).first()
@@ -1691,7 +1840,7 @@ def _run_awaz_test_for_business(business_id: str, session: Session) -> str:
         intent="test",
         create_follow_up_task=True,
     )
-    response = _create_call_record(payload, business, session)
+    response = await _create_call_record(payload, business, session)
 
     config["last_received_at"] = datetime.utcnow().isoformat()
     config["last_error"] = None
