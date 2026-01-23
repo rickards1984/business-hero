@@ -78,17 +78,25 @@ async def verify_master_key(
 
 
 async def get_access_token(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(supabase_bearer)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(supabase_bearer),
+    access_token: Optional[str] = Query(default=None),
+    token: Optional[str] = Query(default=None),
 ) -> str:
     """Extract and return the Supabase access token from Authorization header.
     
     Used for AI Assistant endpoints that require Supabase JWT authentication.
     Raises 401 if no token is provided.
     """
+    if credentials:
+        return credentials.credentials
+    if access_token:
+        return access_token
+    if token:
+        return token
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing Authorization header"
+            detail="Missing Authorization header or access_token query param"
         )
     return credentials.credentials
 
@@ -97,12 +105,38 @@ async def get_user_business_context(
     request: Request,
     token: str = Depends(get_access_token),
     business_id: Optional[str] = Query(default=None),
+    session: Session = Depends(get_session),
 ) -> dict:
     """Return user_id and business_id from a Supabase JWT.
 
     If business_id is provided, verify user membership for that business.
     """
     user = await verify_supabase_token(token)
+    is_platform_admin = is_platform_admin_user(user.id, session)
+    if is_platform_admin:
+        request.state.user_email = user.email
+        if business_id:
+            return {
+                "user_id": user.id,
+                "business_id": business_id,
+                "is_platform_admin": True,
+            }
+        try:
+            business_ctx = get_business_for_user(user.id)
+        except ValueError as exc:
+            args = exc.args
+            if len(args) >= 2 and args[0] == "NO_BUSINESS":
+                return {
+                    "user_id": user.id,
+                    "business_id": None,
+                    "is_platform_admin": True,
+                }
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        return {
+            "user_id": user.id,
+            "business_id": business_ctx.id,
+            "is_platform_admin": True,
+        }
     try:
         business_ctx = get_business_for_user(user.id, requested_business_id=business_id)
     except ValueError as exc:
@@ -118,7 +152,7 @@ async def get_user_business_context(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     request.state.user_email = user.email
-    return {"user_id": user.id, "business_id": business_ctx.id}
+    return {"user_id": user.id, "business_id": business_ctx.id, "is_platform_admin": False}
 
 
 async def get_current_business(

@@ -224,8 +224,14 @@ export default function EmailSettings() {
     }
   };
 
-  const startOAuth = (provider: 'google' | 'microsoft', mode: 'read_basic' | 'read_full') => {
-    const url = `${config.apiBaseUrl}/v1/oauth/${provider}?mode=${mode}`;
+  const startOAuth = async (provider: 'google' | 'microsoft', mode: 'read_basic' | 'read_full') => {
+    const { data } = await supabase.auth.getSession();
+    const accessToken = data.session?.access_token;
+    if (!accessToken) {
+      setError('You must be logged in to connect an email account.');
+      return;
+    }
+    const url = `${config.apiBaseUrl}/v1/oauth/${provider}?mode=${mode}&access_token=${encodeURIComponent(accessToken)}`;
     window.location.href = url;
   };
 
