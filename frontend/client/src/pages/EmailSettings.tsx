@@ -241,14 +241,9 @@ export default function EmailSettings() {
         }
       );
       if (!response.ok) {
-        let message = 'Failed to start OAuth';
-        try {
-          const errorData = await response.json();
-          message = errorData.detail || message;
-        } catch (err) {
-          // Ignore parse errors and use default message.
-        }
-        setError(message);
+        const bodyText = await response.text();
+        console.error(`OAuth start failed (${response.status})`, bodyText);
+        setError(bodyText || 'Failed to start OAuth');
         return;
       }
       const payload = await response.json();
@@ -256,7 +251,7 @@ export default function EmailSettings() {
         setError('Failed to start OAuth');
         return;
       }
-      window.location.href = payload.url;
+      window.location.assign(payload.url);
     } catch (err: any) {
       setError(err.message || 'Failed to start OAuth');
     }

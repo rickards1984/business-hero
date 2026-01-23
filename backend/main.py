@@ -169,6 +169,7 @@ app = FastAPI(
 # We must specify exact origins
 allowed_origins = [
     "https://business-hero.vercel.app",  # Production Vercel frontend
+    "http://localhost:5173",  # Local development (Vite)
     "http://localhost:5000",  # Local development
     "http://localhost:3000",  # Alternative local port
     "http://127.0.0.1:5000",  # Local development (127.0.0.1)
@@ -199,6 +200,7 @@ if replit_url:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
