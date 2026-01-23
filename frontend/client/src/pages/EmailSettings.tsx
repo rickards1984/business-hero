@@ -105,12 +105,26 @@ export default function EmailSettings() {
     setError('');
 
     try {
-      const { data: memberData } = await supabase
+      const { data: memberData, error: memberError } = await supabase
         .from('business_members')
         .select('role')
         .eq('user_id', user?.id)
         .eq('is_active', true)
-        .single();
+        .maybeSingle();
+
+      if (memberError) throw memberError;
+      if (!memberData) {
+        const { data: adminData, error: adminError } = await supabase
+          .from('platform_admins')
+          .select('user_id')
+          .eq('user_id', user?.id)
+          .maybeSingle();
+        if (adminError) throw adminError;
+        setHasAccess(false);
+        setError('No business assigned');
+        setLoading(false);
+        return;
+      }
 
       const role = memberData?.role;
       const allowed = ['owner', 'manager', 'admin'].includes(role);
@@ -325,7 +339,11 @@ export default function EmailSettings() {
       <Container maxWidth="md" sx={{ py: 4 }}>
         <Paper sx={{ p: 3 }}>
           <Typography variant="h6" gutterBottom>Email Settings</Typography>
-          <Alert severity="info">You do not have permission to view or edit email settings.</Alert>
+          {error ? (
+            <Alert severity="warning">{error}</Alert>
+          ) : (
+            <Alert severity="info">You do not have permission to view or edit email settings.</Alert>
+          )}
         </Paper>
       </Container>
     );

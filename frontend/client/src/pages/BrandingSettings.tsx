@@ -49,9 +49,25 @@ export default function BrandingSettings() {
         .from('business_members')
         .select('*, businesses(*)')
         .eq('user_id', user?.id)
-        .single();
+        .maybeSingle();
 
       if (memberError) throw memberError;
+      if (!memberData) {
+        const { data: adminData, error: adminError } = await supabase
+          .from('platform_admins')
+          .select('user_id')
+          .eq('user_id', user?.id)
+          .maybeSingle();
+        if (adminError) throw adminError;
+        if (adminData) {
+          setError('No business assigned');
+        } else {
+          setError('No business assigned');
+        }
+        setBusiness(null);
+        setLoading(false);
+        return;
+      }
 
       const businessData = memberData.businesses as Business;
       setBusiness(businessData);

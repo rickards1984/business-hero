@@ -169,14 +169,23 @@ export default function BusinessDashboard() {
         .from('business_members')
         .select('*, businesses(*)')
         .eq('user_id', user?.id)
-        .single();
+        .maybeSingle();
 
-      if (memberError) {
-        if (memberError.code === 'PGRST116') {
-          setError('You are not assigned to any business. Please contact an administrator.');
+      if (memberError) throw memberError;
+      if (!memberData) {
+        const { data: adminData, error: adminError } = await supabase
+          .from('platform_admins')
+          .select('user_id')
+          .eq('user_id', user?.id)
+          .maybeSingle();
+        if (adminError) throw adminError;
+        if (adminData) {
+          setError('No business assigned');
         } else {
-          throw memberError;
+          setError('No business assigned');
         }
+        setMembership(null);
+        setBusiness(null);
         setLoading(false);
         return;
       }
