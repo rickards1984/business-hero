@@ -60,7 +60,7 @@ from schemas import (
     SupportTicketCreateAdmin, SupportTicketUpdateAdmin,
     BillingCheckoutRequest, BillingSessionResponse, BillingPortalResponse,
 )
-from auth import verify_master_key, get_current_business, get_access_token, get_user_business_context, is_platform_admin_user
+from auth import verify_master_key, get_current_business, get_access_token, get_user_business_context, get_platform_admin_context, is_platform_admin_user
 from openai_utils import generate_call_summary
 from supabase_auth import verify_supabase_token
 from assistant_chat import process_chat_message, get_business_for_user
@@ -221,12 +221,28 @@ async def oauth_google_start(
     return RedirectResponse(url=build_google_oauth_start_url(auth_ctx, mode))
 
 
+@app.get("/v1/oauth/google/start")
+async def oauth_google_start_json(
+    mode: Optional[str] = Query(default="connect"),
+    auth_ctx=Depends(get_user_business_context),
+):
+    return {"url": build_google_oauth_start_url(auth_ctx, mode)}
+
+
 @app.get("/v1/oauth/microsoft")
 async def oauth_microsoft_start(
     mode: Optional[str] = Query(default=None),
     auth_ctx=Depends(get_user_business_context),
 ):
     return RedirectResponse(url=build_microsoft_oauth_start_url(auth_ctx, mode))
+
+
+@app.get("/v1/oauth/microsoft/start")
+async def oauth_microsoft_start_json(
+    mode: Optional[str] = Query(default="connect"),
+    auth_ctx=Depends(get_user_business_context),
+):
+    return {"url": build_microsoft_oauth_start_url(auth_ctx, mode)}
 
 
 @app.get("/openapi-action.json", include_in_schema=False)
@@ -356,10 +372,19 @@ async def list_businesses(session: Session = Depends(get_session)):
     ]
 
 
+@app.get("/v1/admin/me", tags=["Admin"])
+async def admin_me(auth_ctx=Depends(get_platform_admin_context)):
+    return {
+        "user_id": auth_ctx["user_id"],
+        "email": auth_ctx.get("email"),
+        "is_platform_admin": True,
+    }
+
+
 @app.get("/v1/admin/businesses/{business_id}/health", tags=["Admin"])
 async def get_business_health(
     business_id: str,
-    auth_ctx=Depends(get_user_business_context),
+    auth_ctx=Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
 ):
     require_platform_admin(auth_ctx, session)
@@ -470,7 +495,7 @@ async def get_business_health(
 @app.post("/v1/admin/businesses/{business_id}/awaz/test", tags=["Admin"])
 async def admin_test_awaz(
     business_id: str,
-    auth_ctx=Depends(get_user_business_context),
+    auth_ctx=Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
 ):
     require_platform_admin(auth_ctx, session)
@@ -482,7 +507,7 @@ async def admin_test_awaz(
 @app.post("/v1/admin/businesses/{business_id}/email/sync", response_model=EmailSyncRunResponse, tags=["Admin"])
 async def admin_email_sync(
     business_id: str,
-    auth_ctx=Depends(get_user_business_context),
+    auth_ctx=Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
 ):
     require_platform_admin(auth_ctx, session)
@@ -493,7 +518,7 @@ async def admin_email_sync(
 @app.post("/v1/admin/businesses/{business_id}/calendar/sync", tags=["Admin"])
 async def admin_calendar_sync(
     business_id: str,
-    auth_ctx=Depends(get_user_business_context),
+    auth_ctx=Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
 ):
     require_platform_admin(auth_ctx, session)
@@ -503,7 +528,7 @@ async def admin_calendar_sync(
 
 @app.get("/v1/admin/businesses/summary", tags=["Admin"])
 async def list_businesses_summary(
-    auth_ctx=Depends(get_user_business_context),
+    auth_ctx=Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
 ):
     require_platform_admin(auth_ctx, session)
@@ -748,7 +773,7 @@ async def list_support_tickets(
     severity: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    auth_ctx=Depends(get_user_business_context),
+    auth_ctx=Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
 ):
     require_platform_admin(auth_ctx, session)
@@ -766,7 +791,7 @@ async def list_support_tickets(
 @app.post("/v1/admin/support-tickets", tags=["Admin"])
 async def create_support_ticket_admin(
     payload: SupportTicketCreateAdmin,
-    auth_ctx=Depends(get_user_business_context),
+    auth_ctx=Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
 ):
     require_platform_admin(auth_ctx, session)
@@ -791,7 +816,7 @@ async def create_support_ticket_admin(
 async def update_support_ticket_admin(
     ticket_id: str,
     payload: SupportTicketUpdateAdmin,
-    auth_ctx=Depends(get_user_business_context),
+    auth_ctx=Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
 ):
     require_platform_admin(auth_ctx, session)

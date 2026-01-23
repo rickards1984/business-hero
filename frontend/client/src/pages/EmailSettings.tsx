@@ -231,8 +231,35 @@ export default function EmailSettings() {
       setError('You must be logged in to connect an email account.');
       return;
     }
-    const url = `${config.apiBaseUrl}/v1/oauth/${provider}?mode=${mode}&access_token=${encodeURIComponent(accessToken)}`;
-    window.location.href = url;
+    try {
+      const response = await fetch(
+        `${config.apiBaseUrl}/v1/oauth/${provider}/start?mode=${mode}`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        }
+      );
+      if (!response.ok) {
+        let message = 'Failed to start OAuth';
+        try {
+          const errorData = await response.json();
+          message = errorData.detail || message;
+        } catch (err) {
+          // Ignore parse errors and use default message.
+        }
+        setError(message);
+        return;
+      }
+      const payload = await response.json();
+      if (!payload?.url) {
+        setError('Failed to start OAuth');
+        return;
+      }
+      window.location.href = payload.url;
+    } catch (err: any) {
+      setError(err.message || 'Failed to start OAuth');
+    }
   };
 
   const formatTimestamp = (value: string | null | undefined) => {
