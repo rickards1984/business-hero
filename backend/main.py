@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Request, status, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
@@ -164,46 +164,33 @@ app = FastAPI(
     swagger_ui_parameters={"persistAuthorization": True}
 )
 
+
+@app.options("/{path:path}")
+async def preflight_handler(path: str):
+    return Response(status_code=204)
+
+
 # CORS configuration
 # Note: When allow_credentials=True, we cannot use "*" for allow_origins
 # We must specify exact origins
 allowed_origins = [
-    "https://business-hero.vercel.app",  # Production Vercel frontend
-    "http://localhost:5173",  # Local development (Vite)
-    "http://localhost:5000",  # Local development
-    "http://localhost:3000",  # Alternative local port
-    "http://127.0.0.1:5000",  # Local development (127.0.0.1)
-    "http://127.0.0.1:3000",  # Alternative local port (127.0.0.1)
+    "https://business-hero.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost:8000",
 ]
-
-# Add Replit origins if running on Replit
-# Replit provides REPLIT_URL or we can construct from REPL_SLUG and REPL_OWNER
-replit_url = os.getenv("REPLIT_URL")
-if not replit_url:
-    repl_slug = os.getenv("REPL_SLUG")
-    repl_owner = os.getenv("REPL_OWNER")
-    if repl_slug and repl_owner:
-        # Construct Replit URL: https://<slug>.<owner>.repl.co
-        replit_url = f"https://{repl_slug}.{repl_owner}.repl.co"
-
-if replit_url:
-    # Ensure URL starts with http/https
-    if not replit_url.startswith("http"):
-        replit_url = f"https://{replit_url}"
-    allowed_origins.append(replit_url)
-    # Also add .replit.app variant (Replit's newer domain)
-    if ".repl.co" in replit_url:
-        allowed_origins.append(replit_url.replace(".repl.co", ".replit.app"))
-    elif ".replit.app" in replit_url:
-        allowed_origins.append(replit_url.replace(".replit.app", ".repl.co"))
+allow_origin_regex = r"^https://.*\.vercel\.app$"
+print(f"CORS allowed_origins={allowed_origins} allow_origin_regex={allow_origin_regex}")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=r"^https://.*\.vercel\.app$",
+    allow_origin_regex=allow_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,
 )
 
 app.include_router(email_router)
