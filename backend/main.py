@@ -1,6 +1,7 @@
 """FastAPI application for AI Admin Assistant."""
 
 import os
+import re
 import json
 import copy
 import secrets
@@ -60,7 +61,7 @@ from schemas import (
     SupportTicketCreateAdmin, SupportTicketUpdateAdmin,
     BillingCheckoutRequest, BillingSessionResponse, BillingPortalResponse,
 )
-from auth import verify_master_key, get_current_business, get_access_token, get_user_business_context, get_platform_admin_context, is_platform_admin_user
+from auth import verify_master_key, get_current_business, get_access_token, get_user_auth_context, get_user_business_context, get_platform_admin_context, is_platform_admin_user
 from openai_utils import generate_call_summary
 from supabase_auth import verify_supabase_token
 from assistant_chat import process_chat_message, get_business_for_user
@@ -182,6 +183,31 @@ allowed_origins = [
 allow_origin_regex = r"^https://.*\.vercel\.app$"
 print(f"CORS allowed_origins={allowed_origins} allow_origin_regex={allow_origin_regex}")
 
+
+def _is_allowed_origin(origin: Optional[str]) -> bool:
+    if not origin:
+        return False
+    if origin in allowed_origins:
+        return True
+    return re.match(allow_origin_regex, origin) is not None
+
+
+@app.middleware("http")
+async def custom_cors_middleware(request: Request, call_next):
+    origin = request.headers.get("origin")
+    is_allowed = _is_allowed_origin(origin)
+    if request.method == "OPTIONS":
+        response = Response(status_code=204)
+    else:
+        response = await call_next(request)
+    if is_allowed and origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Headers"] = "authorization, content-type, x-api-key"
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+        response.headers["Vary"] = "Origin"
+    return response
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -200,6 +226,12 @@ app.include_router(email_router)
 async def health_check():
     """Health check endpoint."""
     return HealthResponse(ok=True)
+
+
+@app.get("/v1/debug/cors")
+async def debug_cors(request: Request):
+    origin = request.headers.get("origin")
+    return {"origin": origin, "allowed": _is_allowed_origin(origin)}
 
 
 @app.get("/v1/oauth/google")
@@ -827,15 +859,26 @@ async def update_support_ticket_admin(
     return ticket
 
 
-@app.get("/v1/me", response_model=BusinessProfile, tags=["Business"])
-async def get_my_profile(business: Business = Depends(get_current_user_business)):
-    """Get current business profile."""
-    return BusinessProfile(
-        id=str(business.id),
-        name=business.name,
-        timezone=business.timezone,
-        logo_url=business.logo_url
-    )
+@app.get("/v1/me", tags=["Business"])
+async def get_my_profile(
+    auth_ctx=Depends(get_user_auth_context),
+):
+    """Get current user info for UI bootstrapping."""
+    business_id = None
+    try:
+        business_ctx = get_business_for_user(auth_ctx["user_id"])
+        business_id = business_ctx.id
+    except ValueError as exc:
+        args = exc.args
+        if not (len(args) >= 2 and args[0] == "NO_BUSINESS"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    return {
+        "user_id": auth_ctx["user_id"],
+        "email": auth_ctx.get("email"),
+        "is_platform_admin": auth_ctx.get("is_platform_admin", False),
+        "business_id": business_id,
+    }
 
 
 @app.get("/v1/business/settings", response_model=BusinessSettingsResponse, tags=["Business"])
