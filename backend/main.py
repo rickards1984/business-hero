@@ -166,9 +166,10 @@ app = FastAPI(
 )
 
 
-@app.options("/{path:path}")
-async def preflight_handler(path: str):
-    return Response(status_code=204)
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception):
+    logging.getLogger("app").exception("Unhandled exception", exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 
 # CORS configuration
@@ -191,23 +192,6 @@ def _is_allowed_origin(origin: Optional[str]) -> bool:
         return True
     return re.match(allow_origin_regex, origin) is not None
 
-
-@app.middleware("http")
-async def custom_cors_middleware(request: Request, call_next):
-    origin = request.headers.get("origin")
-    is_allowed = _is_allowed_origin(origin)
-    if request.method == "OPTIONS":
-        response = Response(status_code=204)
-    else:
-        response = await call_next(request)
-    if is_allowed and origin:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Headers"] = "authorization, content-type, x-api-key"
-        response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-        response.headers["Vary"] = "Origin"
-    return response
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -226,6 +210,11 @@ app.include_router(email_router)
 async def health_check():
     """Health check endpoint."""
     return HealthResponse(ok=True)
+
+
+@app.get("/v1/_debug/ping")
+async def debug_ping():
+    return {"ok": True, "ts": datetime.utcnow().isoformat() + "Z"}
 
 
 @app.get("/v1/debug/cors")
@@ -610,7 +599,32 @@ async def list_businesses_summary(
         ORDER BY b.created_at DESC
         """
     )
-    rows = session.exec(query).all()
+    try:
+        rows = session.exec(query).all()
+    except Exception:
+        logger.warning("admin_businesses_summary_fallback", exc_info=True)
+        businesses = session.exec(select(Business).order_by(Business.created_at.desc())).all()
+        summaries = []
+        for business in businesses:
+            summaries.append(
+                {
+                    "id": str(business.id),
+                    "name": business.name,
+                    "timezone": business.timezone,
+                    "plan_tier": business.plan_tier,
+                    "is_active": business.is_active,
+                    "subscription_status": business.subscription_status,
+                    "last_awaz_webhook_at": None,
+                    "awaz_connected": False,
+                    "email_connected": False,
+                    "calendar_connected": False,
+                    "open_ticket_count": 0,
+                    "last_email_sync_at": None,
+                    "last_calendar_sync_at": None,
+                    "last_activity_at": None,
+                }
+            )
+        return summaries
     summaries = []
     for row in rows:
         data = dict(row._mapping)

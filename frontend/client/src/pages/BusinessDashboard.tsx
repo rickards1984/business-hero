@@ -165,13 +165,16 @@ export default function BusinessDashboard() {
     setError('');
 
     try {
-      const { data: memberData, error: memberError } = await supabase
+      const { data: memberRows, error: memberError } = await supabase
         .from('business_members')
-        .select('*, businesses(*)')
-        .eq('user_id', user?.id)
-        .maybeSingle();
+        .select('business_id, role')
+        .eq('user_id', user?.id);
 
       if (memberError) throw memberError;
+      const memberData =
+        memberRows?.find(row => row.role === 'owner') ??
+        memberRows?.[0] ??
+        null;
       if (!memberData) {
         const { data: adminData, error: adminError } = await supabase
           .from('platform_admins')
@@ -190,8 +193,14 @@ export default function BusinessDashboard() {
         return;
       }
 
-      setMembership(memberData);
-      setBusiness(memberData.businesses);
+      setMembership(memberData as BusinessMember);
+      const { data: businessData, error: businessError } = await supabase
+        .from('businesses')
+        .select('*')
+        .eq('id', memberData.business_id)
+        .single();
+      if (businessError) throw businessError;
+      setBusiness(businessData);
 
       await Promise.all([
         fetchTasks(memberData.business_id),

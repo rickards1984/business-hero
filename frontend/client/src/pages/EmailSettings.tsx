@@ -105,14 +105,17 @@ export default function EmailSettings() {
     setError('');
 
     try {
-      const { data: memberData, error: memberError } = await supabase
+      const { data: memberRows, error: memberError } = await supabase
         .from('business_members')
-        .select('role')
+        .select('business_id, role')
         .eq('user_id', user?.id)
-        .eq('is_active', true)
-        .maybeSingle();
+        .eq('is_active', true);
 
       if (memberError) throw memberError;
+      const memberData =
+        memberRows?.find(row => row.role === 'owner') ??
+        memberRows?.[0] ??
+        null;
       if (!memberData) {
         const { data: adminData, error: adminError } = await supabase
           .from('platform_admins')

@@ -101,6 +101,22 @@ async def get_access_token(
     return credentials.credentials
 
 
+async def get_user_auth_context(
+    request: Request,
+    token: str = Depends(get_access_token),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Authenticate Supabase user and return basic identity + admin flag."""
+    user = await verify_supabase_token(token)
+    request.state.user_email = user.email
+    return {
+        "user_id": user.id,
+        "email": user.email,
+        "is_platform_admin": is_platform_admin_user(user.id, session),
+        "access_token": token,
+    }
+
+
 async def get_user_business_context(
     request: Request,
     token: str = Depends(get_access_token),
@@ -153,6 +169,25 @@ async def get_user_business_context(
 
     request.state.user_email = user.email
     return {"user_id": user.id, "business_id": business_ctx.id, "is_platform_admin": False}
+
+
+async def get_user_context_no_business(
+    request: Request,
+    token: str = Depends(get_access_token),
+) -> dict:
+    """Return user context without enforcing business membership."""
+    user = await verify_supabase_token(token)
+    request.state.user_email = user.email
+    return {"user_id": user.id, "email": user.email, "access_token": token}
+
+
+async def get_platform_admin_context(
+    user_ctx: dict = Depends(get_user_context_no_business),
+    session: Session = Depends(get_session),
+) -> dict:
+    if not is_platform_admin_user(user_ctx["user_id"], session):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Platform admin required")
+    return user_ctx
 
 
 async def get_current_business(

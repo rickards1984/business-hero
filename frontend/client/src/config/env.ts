@@ -12,8 +12,10 @@ if (!apiBaseUrl) {
   );
 }
 
+const normalizedApiBaseUrl = (apiBaseUrl as string).replace(/\/+$/, '');
+
 export const config = {
-  apiBaseUrl: apiBaseUrl as string,
+  apiBaseUrl: normalizedApiBaseUrl,
 } as const;
 
 
