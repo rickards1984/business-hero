@@ -231,7 +231,7 @@ async def get_current_business(
 
 
 def is_platform_admin_user(user_id: str, session: Session) -> bool:
-    result = session.exec(
+    result = session.execute(
         text("SELECT 1 FROM platform_admins WHERE user_id = :user_id LIMIT 1"),
         {"user_id": user_id},
     ).first()
