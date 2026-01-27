@@ -1,10 +1,10 @@
 """Stripe billing configuration helpers."""
 
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 
-def _get_env(name: str, fallback: List[str] | None = None) -> str | None:
+def _get_env(name: str, fallback: Optional[List[str]] = None) -> Optional[str]:
     value = os.getenv(name)
     if value:
         return value
@@ -16,14 +16,14 @@ def _get_env(name: str, fallback: List[str] | None = None) -> str | None:
     return None
 
 
-def _mask_value(value: str | None) -> str | None:
+def _mask_value(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
     prefix = value.split("_")[0]
     return f"{prefix}_***"
 
 
-def get_stripe_config() -> Dict[str, str | Dict[str, str | None]]:
+def get_stripe_config() -> Dict[str, Union[str, Dict[str, Optional[str]], None]]:
     return {
         "stripe_secret_key": _get_env("STRIPE_SECRET_KEY"),
         "stripe_webhook_secret": _get_env("STRIPE_WEBHOOK_SECRET"),
@@ -57,7 +57,7 @@ def validate_stripe_config() -> Tuple[bool, List[str]]:
     return (len(missing) == 0), missing
 
 
-def masked_stripe_config() -> Dict[str, str | Dict[str, str | None]]:
+def masked_stripe_config() -> Dict[str, Union[str, Dict[str, Optional[str]], None]]:
     config = get_stripe_config()
     return {
         "stripe_secret_key": _mask_value(config.get("stripe_secret_key")),

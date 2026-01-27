@@ -2537,7 +2537,6 @@ async def send_chase_bulk(
         ).first()
         if not connection or not connection.is_enabled:
             raise HTTPException(status_code=400, detail="Email connection not configured or disabled")
-    account = get_or_create_smtp_account(session, business, user.id, connection)
         account = get_or_create_smtp_account(session, business, user.id, connection)
 
     window_start = datetime.utcnow() - timedelta(minutes=1)

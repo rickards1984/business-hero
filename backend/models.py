@@ -1,7 +1,7 @@
 """SQLModel database models for AI Admin Assistant."""
 
 import uuid as uuid_module
-from datetime import datetime, date, date
+from datetime import datetime, date
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 from sqlmodel import SQLModel, Field, Relationship
@@ -271,6 +271,24 @@ class EmailConnection(SQLModel, table=True):
     business: Optional[Business] = Relationship()
 
 
+class EmailAccount(SQLModel, table=True):
+    """Email account for OAuth-connected email (Google/Microsoft)."""
+    __tablename__ = "email_accounts"
+    id: UUID = Field(default_factory=generate_uuid, sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid))
+    business_id: UUID = Field(foreign_key="businesses.id", index=True)
+    user_id: UUID = Field(index=True)
+    provider: str = Field(index=True)
+    email_address: str
+    access_token_encrypted: Optional[str] = None
+    refresh_token_encrypted: Optional[str] = None
+    token_expires_at: Optional[datetime] = None
+    is_default: bool = Field(default=False)
+    is_enabled: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    business: Optional[Business] = Relationship()
+
+
 class EmailOutbox(SQLModel, table=True):
     """Email outbox for queued/sent/failed email records."""
     __tablename__ = "email_outbox"
@@ -293,5 +311,77 @@ class EmailOutbox(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     business: Optional[Business] = Relationship()
-    email_account: Optional["EmailAccount"] = Relationship()
+    email_account: Optional[EmailAccount] = Relationship()
     invoice: Optional[Invoice] = Relationship()
+
+
+class EmailMessage(SQLModel, table=True):
+    """Synced email message from provider."""
+    __tablename__ = "email_messages"
+    id: UUID = Field(default_factory=generate_uuid, sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid))
+    business_id: UUID = Field(foreign_key="businesses.id", index=True)
+    email_account_id: UUID = Field(foreign_key="email_accounts.id", index=True)
+    provider_message_id: str = Field(index=True)
+    provider_thread_id: Optional[str] = None
+    folder: Optional[str] = None
+    from_email: Optional[str] = None
+    from_name: Optional[str] = None
+    to_emails: List[str] = Field(default=[], sa_column=Column(ARRAY(Text), nullable=False, server_default="{}"))
+    cc_emails: List[str] = Field(default=[], sa_column=Column(ARRAY(Text), nullable=False, server_default="{}"))
+    subject: Optional[str] = None
+    snippet: Optional[str] = None
+    body_text: Optional[str] = None
+    body_html: Optional[str] = None
+    received_at: Optional[datetime] = None
+    is_unread: bool = Field(default=True)
+    has_attachments: bool = Field(default=False)
+    labels: List[str] = Field(default=[], sa_column=Column(ARRAY(Text), nullable=False, server_default="{}"))
+    raw_headers: Dict[str, Any] = Field(default={}, sa_column=Column(JSONB, nullable=False, server_default="{}"))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    business: Optional[Business] = Relationship()
+
+
+class EmailSyncState(SQLModel, table=True):
+    """Tracks sync cursor/state for each email account."""
+    __tablename__ = "email_sync_states"
+    id: UUID = Field(default_factory=generate_uuid, sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid))
+    email_account_id: UUID = Field(foreign_key="email_accounts.id", unique=True, index=True)
+    cursor: Dict[str, Any] = Field(default={}, sa_column=Column(JSONB, nullable=False, server_default="{}"))
+    last_synced_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class EmailBriefing(SQLModel, table=True):
+    """AI-generated email briefing/summary."""
+    __tablename__ = "email_briefings"
+    id: UUID = Field(default_factory=generate_uuid, sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid))
+    business_id: UUID = Field(foreign_key="businesses.id", index=True)
+    email_account_id: UUID = Field(foreign_key="email_accounts.id", index=True)
+    summary: str
+    highlights: List[str] = Field(default=[], sa_column=Column(ARRAY(Text), nullable=False, server_default="{}"))
+    action_items: List[str] = Field(default=[], sa_column=Column(ARRAY(Text), nullable=False, server_default="{}"))
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    business: Optional[Business] = Relationship()
+
+
+class EmailDraft(SQLModel, table=True):
+    """AI-generated email draft."""
+    __tablename__ = "email_drafts"
+    id: UUID = Field(default_factory=generate_uuid, sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid))
+    business_id: UUID = Field(foreign_key="businesses.id", index=True)
+    email_account_id: UUID = Field(foreign_key="email_accounts.id", index=True)
+    in_reply_to_message_id: Optional[UUID] = Field(default=None, foreign_key="email_messages.id")
+    to_emails: List[str] = Field(default=[], sa_column=Column(ARRAY(Text), nullable=False, server_default="{}"))
+    cc_emails: List[str] = Field(default=[], sa_column=Column(ARRAY(Text), nullable=False, server_default="{}"))
+    subject: str
+    body_text: str
+    body_html: Optional[str] = None
+    status: str = Field(default="draft", index=True)
+    sent_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    business: Optional[Business] = Relationship()

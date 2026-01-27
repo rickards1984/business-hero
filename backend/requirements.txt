@@ -11,3 +11,4 @@ httpx
 sqlalchemy
 cryptography
 stripe
+python-multipart

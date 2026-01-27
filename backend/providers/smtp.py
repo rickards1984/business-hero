@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 from email.message import EmailMessage
 import smtplib
 
@@ -14,11 +14,11 @@ class SMTPProvider(BaseEmailProvider):
         self,
         *,
         account: Any,
-        to_emails: list[str],
+        to_emails: List[str],
         subject: str,
-        body_text: str | None = None,
-        body_html: str | None = None,
-        in_reply_to: str | None = None,
+        body_text: Optional[str] = None,
+        body_html: Optional[str] = None,
+        in_reply_to: Optional[str] = None,
     ) -> ProviderSendResult:
         smtp_config = getattr(account, "smtp_config", {}) or {}
         host = smtp_config.get("host")
@@ -73,6 +73,6 @@ class SMTPProvider(BaseEmailProvider):
         *,
         account: Any,
         provider_message_id: str,
-    ) -> ProviderMessage | None:
+    ) -> Optional[ProviderMessage]:
         # SMTP has no inbox fetch support.
         return None

@@ -75,11 +75,11 @@ class MicrosoftGraphProvider(BaseEmailProvider):
         self,
         *,
         account: Any,
-        to_emails: list[str],
+        to_emails: List[str],
         subject: str,
-        body_text: str | None = None,
-        body_html: str | None = None,
-        in_reply_to: str | None = None,
+        body_text: Optional[str] = None,
+        body_html: Optional[str] = None,
+        in_reply_to: Optional[str] = None,
     ) -> ProviderSendResult:
         access_token = get_valid_access_token(account)
         url = f"{GRAPH_BASE_URL}/me/sendMail"
@@ -149,7 +149,7 @@ class MicrosoftGraphProvider(BaseEmailProvider):
         *,
         account: Any,
         provider_message_id: str,
-    ) -> ProviderMessage | None:
+    ) -> Optional[ProviderMessage]:
         # TODO: Implement Microsoft Graph message fetch
         return None
 

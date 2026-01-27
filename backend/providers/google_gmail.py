@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 import base64
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -18,11 +18,11 @@ class GoogleGmailProvider(BaseEmailProvider):
         self,
         *,
         account: Any,
-        to_emails: list[str],
+        to_emails: List[str],
         subject: str,
-        body_text: str | None = None,
-        body_html: str | None = None,
-        in_reply_to: str | None = None,
+        body_text: Optional[str] = None,
+        body_html: Optional[str] = None,
+        in_reply_to: Optional[str] = None,
     ) -> ProviderSendResult:
         access_token = get_valid_access_token(account)
         from_email = getattr(account, "email_address", None)
@@ -135,7 +135,7 @@ def _fetch_message_metadata(
     )
 
 
-def _parse_single_address(value: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+def _parse_single_address(value: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     if not value:
         return None, None
     name, email = parseaddr(value)
