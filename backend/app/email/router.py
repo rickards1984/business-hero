@@ -58,6 +58,12 @@ router = APIRouter(
     dependencies=[Depends(require_feature("email"))],
 )
 
+# Separate router for OAuth callbacks (no auth required - these receive redirects from OAuth providers)
+oauth_router = APIRouter(
+    prefix="/v1/email",
+    tags=["Email OAuth"],
+)
+
 
 class EmailAccountPublic(BaseModel):
     id: str
@@ -1144,7 +1150,7 @@ async def google_oauth_start(
     return RedirectResponse(url=build_google_oauth_start_url(auth_ctx, mode))
 
 
-@router.get("/oauth/google/callback")
+@oauth_router.get("/oauth/google/callback")
 async def google_oauth_callback(
     code: Optional[str] = None,
     state: Optional[str] = None,
@@ -1217,7 +1223,7 @@ async def microsoft_oauth_start(
     return RedirectResponse(url=build_microsoft_oauth_start_url(auth_ctx, mode))
 
 
-@router.get("/oauth/microsoft/callback")
+@oauth_router.get("/oauth/microsoft/callback")
 async def microsoft_oauth_callback(
     code: Optional[str] = None,
     state: Optional[str] = None,

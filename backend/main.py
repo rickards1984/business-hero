@@ -74,6 +74,7 @@ from app.email.service import (
 )
 from app.email.router import (
     router as email_router,
+    oauth_router as email_oauth_router,
     build_google_oauth_start_url,
     build_microsoft_oauth_start_url,
 )
@@ -204,6 +205,7 @@ app.add_middleware(
 )
 
 app.include_router(email_router)
+app.include_router(email_oauth_router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
