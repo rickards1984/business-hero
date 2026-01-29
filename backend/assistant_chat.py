@@ -31,7 +31,7 @@ class BusinessContext:
 
 def build_system_prompt(business: BusinessContext) -> str:
     """Build the system prompt with business context."""
-    return f"""You are an AI Admin Assistant for {business.name}. You help manage tasks, track phone calls, and provide daily briefings.
+    return f"""You are an AI Admin Assistant for {business.name}. You help manage tasks, track phone calls, read emails, and provide daily briefings.
 
 Business Context:
 - Business Name: {business.name}
@@ -44,9 +44,11 @@ You have access to the following tools:
 - list_calls: View recent phone call records
 - get_today_briefing: Get a summary of today's tasks and recent activity
 - delete_task: Soft delete a task when the user confirms it's a duplicate
+- list_emails: View recent emails from connected email account (Gmail or Microsoft)
 
-Be helpful, concise, and professional. When asked about tasks or calls, use the appropriate tools to fetch real data.
+Be helpful, concise, and professional. When asked about tasks, calls, or emails, use the appropriate tools to fetch real data.
 When creating tasks, confirm what was created. For briefings, summarize the key points clearly.
+When showing emails, provide a clear summary of each email including sender, subject, and a brief preview.
 Only delete tasks when the user explicitly asks or confirms a duplicate; prefer deleting the newer duplicate."""
 
 

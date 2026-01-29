@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Any
 from uuid import UUID
 import pytz
+import httpx
+from cryptography.fernet import Fernet
 from sqlalchemy import create_engine, text
 
 
@@ -106,6 +108,27 @@ TOOL_DEFINITIONS = [
                 "required": ["task_id"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_emails",
+            "description": "List recent emails from the user's connected email account (Gmail or Microsoft).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of emails to return (default 10, max 20)"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional search query to filter emails (e.g., 'is:unread' or 'from:someone@example.com')"
+                    }
+                },
+                "required": []
+            }
+        }
     }
 ]
 
@@ -115,6 +138,15 @@ def _get_engine():
     if not SUPABASE_DATABASE_URL:
         raise RuntimeError("SUPABASE_DATABASE_URL not configured")
     return create_engine(SUPABASE_DATABASE_URL, pool_pre_ping=True)
+
+
+def _decrypt_token(ciphertext: str) -> str:
+    """Decrypt an encrypted token."""
+    key = os.getenv("EMAIL_ENCRYPTION_KEY")
+    if not key:
+        raise RuntimeError("EMAIL_ENCRYPTION_KEY not configured")
+    f = Fernet(key.encode("utf-8"))
+    return f.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
 
 
 def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: str = "Europe/London") -> dict:
@@ -141,6 +173,8 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _get_today_briefing(engine, business_id, timezone)
     elif tool_name == "delete_task":
         return _delete_task(engine, business_id, arguments)
+    elif tool_name == "list_emails":
+        return _list_emails(engine, business_id, arguments)
     else:
         return {"error": f"Unknown tool: {tool_name}"}
 
@@ -363,3 +397,152 @@ def _delete_task(engine, business_id: str, args: dict) -> dict:
             "task_id": str(row[0]),
             "deleted_at": row[1].isoformat() if row[1] else None,
         }
+
+
+def _list_emails(engine, business_id: str, args: dict) -> dict:
+    """List recent emails from connected email account."""
+    limit = min(args.get("limit", 10), 20)
+    query = args.get("query", "")
+    
+    # Get the email account for this business
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT id, provider, email_address, token_ciphertext, refresh_token_ciphertext, token_expires_at
+            FROM email_accounts
+            WHERE business_id = :business_id AND provider IN ('google', 'microsoft')
+            ORDER BY created_at DESC
+            LIMIT 1
+        """), {"business_id": business_id})
+        row = result.fetchone()
+    
+    if not row:
+        return {"error": "No email account connected. Please connect your Google or Microsoft account in Email Settings."}
+    
+    account_id, provider, email_address, token_ciphertext, refresh_token_ciphertext, token_expires_at = row
+    
+    if not token_ciphertext:
+        return {"error": "Email account token not available. Please reconnect your email account in Email Settings."}
+    
+    # Decrypt the access token
+    try:
+        access_token = _decrypt_token(token_ciphertext)
+    except Exception as e:
+        return {"error": f"Failed to decrypt email token: {str(e)}"}
+    
+    if provider == "google":
+        return _fetch_gmail_emails(access_token, email_address, limit, query)
+    elif provider == "microsoft":
+        return _fetch_microsoft_emails(access_token, email_address, limit, query)
+    else:
+        return {"error": f"Unsupported email provider: {provider}"}
+
+
+def _fetch_gmail_emails(access_token: str, email_address: str, limit: int, query: str) -> dict:
+    """Fetch emails from Gmail API."""
+    try:
+        headers = {"Authorization": f"Bearer {access_token}"}
+        
+        # List messages
+        params = {"maxResults": limit}
+        if query:
+            params["q"] = query
+        
+        response = httpx.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            headers=headers,
+            params=params,
+            timeout=30
+        )
+        
+        if response.status_code == 401:
+            return {"error": "Email access token expired. Please reconnect your Google account in Email Settings."}
+        
+        if response.status_code != 200:
+            return {"error": f"Gmail API error: {response.status_code}"}
+        
+        data = response.json()
+        message_ids = [m["id"] for m in data.get("messages", [])]
+        
+        if not message_ids:
+            return {"emails": [], "count": 0, "account": email_address}
+        
+        # Fetch each message's details
+        emails = []
+        for msg_id in message_ids[:limit]:
+            msg_response = httpx.get(
+                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
+                headers=headers,
+                params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]},
+                timeout=30
+            )
+            
+            if msg_response.status_code == 200:
+                msg_data = msg_response.json()
+                headers_list = msg_data.get("payload", {}).get("headers", [])
+                
+                email_info = {
+                    "id": msg_id,
+                    "snippet": msg_data.get("snippet", ""),
+                    "from": "",
+                    "subject": "",
+                    "date": ""
+                }
+                
+                for h in headers_list:
+                    if h["name"] == "From":
+                        email_info["from"] = h["value"]
+                    elif h["name"] == "Subject":
+                        email_info["subject"] = h["value"]
+                    elif h["name"] == "Date":
+                        email_info["date"] = h["value"]
+                
+                emails.append(email_info)
+        
+        return {"emails": emails, "count": len(emails), "account": email_address}
+    
+    except httpx.TimeoutException:
+        return {"error": "Gmail API timeout. Please try again."}
+    except Exception as e:
+        return {"error": f"Failed to fetch emails: {str(e)}"}
+
+
+def _fetch_microsoft_emails(access_token: str, email_address: str, limit: int, query: str) -> dict:
+    """Fetch emails from Microsoft Graph API."""
+    try:
+        headers = {"Authorization": f"Bearer {access_token}"}
+        
+        params = {"$top": limit, "$orderby": "receivedDateTime desc", "$select": "id,subject,from,receivedDateTime,bodyPreview"}
+        if query:
+            params["$search"] = f'"{query}"'
+        
+        response = httpx.get(
+            "https://graph.microsoft.com/v1.0/me/messages",
+            headers=headers,
+            params=params,
+            timeout=30
+        )
+        
+        if response.status_code == 401:
+            return {"error": "Email access token expired. Please reconnect your Microsoft account in Email Settings."}
+        
+        if response.status_code != 200:
+            return {"error": f"Microsoft Graph API error: {response.status_code}"}
+        
+        data = response.json()
+        
+        emails = []
+        for msg in data.get("value", []):
+            emails.append({
+                "id": msg.get("id"),
+                "subject": msg.get("subject", ""),
+                "from": msg.get("from", {}).get("emailAddress", {}).get("address", ""),
+                "date": msg.get("receivedDateTime", ""),
+                "snippet": msg.get("bodyPreview", "")
+            })
+        
+        return {"emails": emails, "count": len(emails), "account": email_address}
+    
+    except httpx.TimeoutException:
+        return {"error": "Microsoft Graph API timeout. Please try again."}
+    except Exception as e:
+        return {"error": f"Failed to fetch emails: {str(e)}"}
