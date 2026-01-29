@@ -399,6 +399,106 @@ def _delete_task(engine, business_id: str, args: dict) -> dict:
         }
 
 
+def _refresh_google_token(engine, account_id: str, refresh_token_ciphertext: str) -> str:
+    """Refresh an expired Google access token and update the database."""
+    try:
+        refresh_token = _decrypt_token(refresh_token_ciphertext)
+        
+        response = httpx.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": os.getenv("GOOGLE_OAUTH_CLIENT_ID"),
+                "client_secret": os.getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token"
+            },
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"Token refresh failed: {response.status_code}")
+        
+        data = response.json()
+        new_access_token = data.get("access_token")
+        expires_in = data.get("expires_in", 3600)
+        
+        if not new_access_token:
+            raise Exception("No access token in refresh response")
+        
+        # Encrypt and store the new token
+        key = os.getenv("EMAIL_ENCRYPTION_KEY")
+        f = Fernet(key.encode("utf-8"))
+        new_token_ciphertext = f.encrypt(new_access_token.encode("utf-8")).decode("utf-8")
+        
+        new_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+        
+        with engine.connect() as conn:
+            conn.execute(text("""
+                UPDATE email_accounts 
+                SET token_ciphertext = :token, token_expires_at = :expires_at, updated_at = NOW()
+                WHERE id = :account_id
+            """), {
+                "token": new_token_ciphertext,
+                "expires_at": new_expires_at,
+                "account_id": str(account_id)
+            })
+            conn.commit()
+        
+        return new_access_token
+    except Exception as e:
+        raise Exception(f"Failed to refresh token: {str(e)}")
+
+
+def _refresh_microsoft_token(engine, account_id: str, refresh_token_ciphertext: str) -> str:
+    """Refresh an expired Microsoft access token."""
+    try:
+        refresh_token = _decrypt_token(refresh_token_ciphertext)
+        
+        response = httpx.post(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            data={
+                "client_id": os.getenv("MICROSOFT_OAUTH_CLIENT_ID"),
+                "client_secret": os.getenv("MICROSOFT_OAUTH_CLIENT_SECRET"),
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+                "scope": "offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read"
+            },
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"Token refresh failed: {response.status_code}")
+        
+        data = response.json()
+        new_access_token = data.get("access_token")
+        expires_in = data.get("expires_in", 3600)
+        
+        if not new_access_token:
+            raise Exception("No access token in refresh response")
+        
+        key = os.getenv("EMAIL_ENCRYPTION_KEY")
+        f = Fernet(key.encode("utf-8"))
+        new_token_ciphertext = f.encrypt(new_access_token.encode("utf-8")).decode("utf-8")
+        
+        new_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+        
+        with engine.connect() as conn:
+            conn.execute(text("""
+                UPDATE email_accounts 
+                SET token_ciphertext = :token, token_expires_at = :expires_at, updated_at = NOW()
+                WHERE id = :account_id
+            """), {
+                "token": new_token_ciphertext,
+                "expires_at": new_expires_at,
+                "account_id": str(account_id)
+            })
+            conn.commit()
+        
+        return new_access_token
+    except Exception as e:
+        raise Exception(f"Failed to refresh token: {str(e)}")
+
+
 def _list_emails(engine, business_id: str, args: dict) -> dict:
     """List recent emails from connected email account."""
     limit = min(args.get("limit", 10), 20)
@@ -430,19 +530,18 @@ def _list_emails(engine, business_id: str, args: dict) -> dict:
         return {"error": f"Failed to decrypt email token: {str(e)}"}
     
     if provider == "google":
-        return _fetch_gmail_emails(access_token, email_address, limit, query)
+        return _fetch_gmail_emails(engine, str(account_id), access_token, refresh_token_ciphertext, email_address, limit, query)
     elif provider == "microsoft":
-        return _fetch_microsoft_emails(access_token, email_address, limit, query)
+        return _fetch_microsoft_emails(engine, str(account_id), access_token, refresh_token_ciphertext, email_address, limit, query)
     else:
         return {"error": f"Unsupported email provider: {provider}"}
 
 
-def _fetch_gmail_emails(access_token: str, email_address: str, limit: int, query: str) -> dict:
-    """Fetch emails from Gmail API."""
-    try:
-        headers = {"Authorization": f"Bearer {access_token}"}
-        
-        # List messages
+def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_token_ciphertext: Optional[str], email_address: str, limit: int, query: str) -> dict:
+    """Fetch emails from Gmail API with automatic token refresh."""
+    
+    def make_request(token: str):
+        headers = {"Authorization": f"Bearer {token}"}
         params = {"maxResults": limit}
         if query:
             params["q"] = query
@@ -453,6 +552,18 @@ def _fetch_gmail_emails(access_token: str, email_address: str, limit: int, query
             params=params,
             timeout=30
         )
+        return response, headers
+    
+    try:
+        response, headers = make_request(access_token)
+        
+        # If token expired, refresh and retry
+        if response.status_code == 401 and refresh_token_ciphertext:
+            try:
+                new_token = _refresh_google_token(engine, account_id, refresh_token_ciphertext)
+                response, headers = make_request(new_token)
+            except Exception as refresh_error:
+                return {"error": f"Email token expired and refresh failed: {str(refresh_error)}. Please reconnect your Google account."}
         
         if response.status_code == 401:
             return {"error": "Email access token expired. Please reconnect your Google account in Email Settings."}
@@ -466,14 +577,14 @@ def _fetch_gmail_emails(access_token: str, email_address: str, limit: int, query
         if not message_ids:
             return {"emails": [], "count": 0, "account": email_address}
         
-        # Fetch each message's details
+        # Fetch messages (limit to first 10 for speed)
         emails = []
-        for msg_id in message_ids[:limit]:
+        for msg_id in message_ids[:min(limit, 10)]:
             msg_response = httpx.get(
                 f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
                 headers=headers,
                 params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]},
-                timeout=30
+                timeout=10
             )
             
             if msg_response.status_code == 200:
@@ -482,7 +593,7 @@ def _fetch_gmail_emails(access_token: str, email_address: str, limit: int, query
                 
                 email_info = {
                     "id": msg_id,
-                    "snippet": msg_data.get("snippet", ""),
+                    "snippet": msg_data.get("snippet", "")[:200],
                     "from": "",
                     "subject": "",
                     "date": ""
@@ -506,11 +617,11 @@ def _fetch_gmail_emails(access_token: str, email_address: str, limit: int, query
         return {"error": f"Failed to fetch emails: {str(e)}"}
 
 
-def _fetch_microsoft_emails(access_token: str, email_address: str, limit: int, query: str) -> dict:
-    """Fetch emails from Microsoft Graph API."""
-    try:
-        headers = {"Authorization": f"Bearer {access_token}"}
-        
+def _fetch_microsoft_emails(engine, account_id: str, access_token: str, refresh_token_ciphertext: Optional[str], email_address: str, limit: int, query: str) -> dict:
+    """Fetch emails from Microsoft Graph API with automatic token refresh."""
+    
+    def make_request(token: str):
+        headers = {"Authorization": f"Bearer {token}"}
         params = {"$top": limit, "$orderby": "receivedDateTime desc", "$select": "id,subject,from,receivedDateTime,bodyPreview"}
         if query:
             params["$search"] = f'"{query}"'
@@ -521,6 +632,18 @@ def _fetch_microsoft_emails(access_token: str, email_address: str, limit: int, q
             params=params,
             timeout=30
         )
+        return response
+    
+    try:
+        response = make_request(access_token)
+        
+        # If token expired, refresh and retry
+        if response.status_code == 401 and refresh_token_ciphertext:
+            try:
+                new_token = _refresh_microsoft_token(engine, account_id, refresh_token_ciphertext)
+                response = make_request(new_token)
+            except Exception as refresh_error:
+                return {"error": f"Email token expired and refresh failed: {str(refresh_error)}. Please reconnect your Microsoft account."}
         
         if response.status_code == 401:
             return {"error": "Email access token expired. Please reconnect your Microsoft account in Email Settings."}
@@ -531,13 +654,13 @@ def _fetch_microsoft_emails(access_token: str, email_address: str, limit: int, q
         data = response.json()
         
         emails = []
-        for msg in data.get("value", []):
+        for msg in data.get("value", [])[:min(limit, 10)]:
             emails.append({
                 "id": msg.get("id"),
                 "subject": msg.get("subject", ""),
                 "from": msg.get("from", {}).get("emailAddress", {}).get("address", ""),
                 "date": msg.get("receivedDateTime", ""),
-                "snippet": msg.get("bodyPreview", "")
+                "snippet": msg.get("bodyPreview", "")[:200] if msg.get("bodyPreview") else ""
             })
         
         return {"emails": emails, "count": len(emails), "account": email_address}
