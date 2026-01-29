@@ -24,6 +24,9 @@ import {
   Tooltip,
 } from '@mui/material';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import ArrowBackIcon from '@mui/icons-material/ArrowBack';
+import GoogleIcon from '@mui/icons-material/Google';
+import EmailIcon from '@mui/icons-material/Email';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { apiRequest } from '@/lib/queryClient';
@@ -57,6 +60,14 @@ interface AwazIntegration {
   phone_number?: string | null;
 }
 
+interface OAuthAccount {
+  id: string;
+  provider: string;
+  email_address: string;
+  display_name?: string;
+  created_at: string;
+}
+
 export default function EmailSettings() {
   const navigate = useNavigate();
   const { user, loading: authLoading } = useAuth();
@@ -75,6 +86,7 @@ export default function EmailSettings() {
   const [rotateOpen, setRotateOpen] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [testingAwaz, setTestingAwaz] = useState(false);
+  const [oauthAccounts, setOauthAccounts] = useState<OAuthAccount[]>([]);
 
   // Form state
   const [smtpHost, setSmtpHost] = useState('');
@@ -97,6 +109,7 @@ export default function EmailSettings() {
     if (user) {
       loadSettings();
       loadAwazIntegration();
+      fetchOAuthAccounts();
     }
   }, [user]);
 
@@ -185,6 +198,18 @@ export default function EmailSettings() {
       setAwazError(err.message || 'Failed to load Awaz integration');
     } finally {
       setAwazLoading(false);
+    }
+  };
+
+  const fetchOAuthAccounts = async () => {
+    try {
+      const response = await apiRequest('GET', '/v1/email/accounts');
+      if (response.ok) {
+        const data = await response.json();
+        setOauthAccounts(data.accounts || data || []);
+      }
+    } catch (error) {
+      console.error('Failed to fetch OAuth accounts:', error);
     }
   };
 
@@ -354,6 +379,17 @@ export default function EmailSettings() {
 
   return (
     <Container maxWidth="md" sx={{ py: 4 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
+        <Button
+          startIcon={<ArrowBackIcon />}
+          onClick={() => navigate('/app')}
+          variant="text"
+        >
+          Back to Dashboard
+        </Button>
+        <Typography variant="h5" component="h1">Email Settings</Typography>
+      </Box>
+
       <Paper sx={{ p: 3, mb: 3 }}>
         <Typography variant="h6" gutterBottom>Email Accounts</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
@@ -377,26 +413,56 @@ export default function EmailSettings() {
 
         <Divider sx={{ my: 2 }} />
 
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Connected accounts</Typography>
-        {accounts.length === 0 && (
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Connected OAuth Accounts</Typography>
+        {oauthAccounts.length === 0 && accounts.length === 0 && (
           <Typography color="text.secondary">No connected accounts yet.</Typography>
         )}
-        {accounts.map((account) => (
+        {oauthAccounts.map((account) => (
           <Box
-            key={`${account.provider}-${account.email_address}`}
-            sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', py: 1 }}
+            key={account.id}
+            sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', py: 1, borderBottom: '1px solid', borderColor: 'divider' }}
           >
-            <Box>
-              <Typography variant="body2">{account.email_address}</Typography>
-              <Typography variant="caption" color="text.secondary">{account.provider}</Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              {account.provider === 'google' ? (
+                <GoogleIcon color="error" />
+              ) : (
+                <EmailIcon color="primary" />
+              )}
+              <Box>
+                <Typography variant="body2">{account.email_address}</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {account.provider === 'google' ? 'Google' : account.provider === 'microsoft' ? 'Microsoft' : account.provider}
+                  {account.display_name && ` - ${account.display_name}`}
+                </Typography>
+              </Box>
             </Box>
-            <Chip
-              size="small"
-              label={account.capabilities.send ? 'Send enabled' : 'Read only'}
-              color={account.capabilities.send ? 'success' : 'default'}
-            />
+            <Button size="small" color="error" variant="outlined" disabled>
+              Disconnect
+            </Button>
           </Box>
         ))}
+
+        {accounts.length > 0 && (
+          <>
+            <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>SMTP Account</Typography>
+            {accounts.map((account) => (
+              <Box
+                key={`${account.provider}-${account.email_address}`}
+                sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', py: 1 }}
+              >
+                <Box>
+                  <Typography variant="body2">{account.email_address}</Typography>
+                  <Typography variant="caption" color="text.secondary">{account.provider}</Typography>
+                </Box>
+                <Chip
+                  size="small"
+                  label={account.capabilities.send ? 'Send enabled' : 'Read only'}
+                  color={account.capabilities.send ? 'success' : 'default'}
+                />
+              </Box>
+            ))}
+          </>
+        )}
       </Paper>
 
       <Paper sx={{ p: 3, mb: 3 }}>
