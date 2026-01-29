@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Box,
   Paper,
@@ -27,6 +27,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import GoogleIcon from '@mui/icons-material/Google';
 import EmailIcon from '@mui/icons-material/Email';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { apiRequest } from '@/lib/queryClient';
@@ -70,6 +71,7 @@ interface OAuthAccount {
 
 export default function EmailSettings() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user, loading: authLoading } = useAuth();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -87,6 +89,9 @@ export default function EmailSettings() {
   const [rotating, setRotating] = useState(false);
   const [testingAwaz, setTestingAwaz] = useState(false);
   const [oauthAccounts, setOauthAccounts] = useState<OAuthAccount[]>([]);
+  const [disconnectOpen, setDisconnectOpen] = useState(false);
+  const [accountToDisconnect, setAccountToDisconnect] = useState<OAuthAccount | null>(null);
+  const [disconnecting, setDisconnecting] = useState(false);
 
   // Form state
   const [smtpHost, setSmtpHost] = useState('');
@@ -98,6 +103,17 @@ export default function EmailSettings() {
   const [useTls, setUseTls] = useState(true);
   const [useSsl, setUseSsl] = useState(false);
   const [isEnabled, setIsEnabled] = useState(true);
+
+  // Check for success param on mount
+  useEffect(() => {
+    const success = searchParams.get('success');
+    if (success === '1') {
+      setSuccessMessage('Email account connected successfully!');
+      // Remove the param from URL
+      searchParams.delete('success');
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -266,7 +282,7 @@ export default function EmailSettings() {
     }
   };
 
-  const startOAuth = async (provider: 'google' | 'microsoft', mode: 'read_basic' | 'read_full') => {
+  const startOAuth = async (provider: 'google' | 'microsoft') => {
     const { data } = await supabase.auth.getSession();
     const accessToken = data.session?.access_token;
     if (!accessToken) {
@@ -275,7 +291,7 @@ export default function EmailSettings() {
     }
     try {
       const response = await fetch(
-        `${config.apiBaseUrl}/v1/oauth/${provider}/start?mode=${mode}`,
+        `${config.apiBaseUrl}/v1/oauth/${provider}/start?mode=read_full`,
         {
           headers: {
             Authorization: `Bearer ${accessToken}`,
@@ -296,6 +312,33 @@ export default function EmailSettings() {
       window.location.assign(payload.url);
     } catch (err: any) {
       setError(err.message || 'Failed to start OAuth');
+    }
+  };
+
+  const handleDisconnectClick = (account: OAuthAccount) => {
+    setAccountToDisconnect(account);
+    setDisconnectOpen(true);
+  };
+
+  const handleDisconnect = async () => {
+    if (!accountToDisconnect) return;
+    
+    setDisconnecting(true);
+    try {
+      const response = await apiRequest('DELETE', `/v1/email/accounts/${accountToDisconnect.id}`);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to disconnect account');
+      }
+      setSuccessMessage('Email account disconnected');
+      setDisconnectOpen(false);
+      setAccountToDisconnect(null);
+      // Refresh the accounts list
+      fetchOAuthAccounts();
+    } catch (err: any) {
+      setError(err.message || 'Failed to disconnect account');
+    } finally {
+      setDisconnecting(false);
     }
   };
 
@@ -354,6 +397,10 @@ export default function EmailSettings() {
     }
   };
 
+  // Check if provider is already connected
+  const hasGoogle = oauthAccounts.some(a => a.provider === 'google');
+  const hasMicrosoft = oauthAccounts.some(a => a.provider === 'microsoft');
+
   if (loading || authLoading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
@@ -390,81 +437,117 @@ export default function EmailSettings() {
         <Typography variant="h5" component="h1">Email Settings</Typography>
       </Box>
 
+      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+
+      {/* Section 1: Connected Accounts */}
       <Paper sx={{ p: 3, mb: 3 }}>
-        <Typography variant="h6" gutterBottom>Email Accounts</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-          Connect Google or Microsoft accounts for inbox sync and briefings, or configure SMTP for sending.
-        </Typography>
-
-        <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 2 }}>
-          <Button variant="outlined" onClick={() => startOAuth('google', 'read_basic')}>
-            Connect Google (Briefings)
-          </Button>
-          <Button variant="outlined" onClick={() => startOAuth('google', 'read_full')}>
-            Connect Google (Draft replies)
-          </Button>
-          <Button variant="outlined" onClick={() => startOAuth('microsoft', 'read_basic')}>
-            Connect Microsoft (Briefings)
-          </Button>
-          <Button variant="outlined" onClick={() => startOAuth('microsoft', 'read_full')}>
-            Connect Microsoft (Draft replies)
-          </Button>
-        </Box>
-
-        <Divider sx={{ my: 2 }} />
-
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Connected OAuth Accounts</Typography>
-        {oauthAccounts.length === 0 && accounts.length === 0 && (
-          <Typography color="text.secondary">No connected accounts yet.</Typography>
-        )}
-        {oauthAccounts.map((account) => (
-          <Box
-            key={account.id}
-            sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', py: 1, borderBottom: '1px solid', borderColor: 'divider' }}
-          >
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              {account.provider === 'google' ? (
-                <GoogleIcon color="error" />
-              ) : (
-                <EmailIcon color="primary" />
-              )}
-              <Box>
-                <Typography variant="body2">{account.email_address}</Typography>
-                <Typography variant="caption" color="text.secondary">
-                  {account.provider === 'google' ? 'Google' : account.provider === 'microsoft' ? 'Microsoft' : account.provider}
-                  {account.display_name && ` - ${account.display_name}`}
-                </Typography>
-              </Box>
-            </Box>
-            <Button size="small" color="error" variant="outlined" disabled>
-              Disconnect
-            </Button>
+        <Typography variant="h6" gutterBottom>Connected Accounts</Typography>
+        
+        {oauthAccounts.length === 0 ? (
+          <Box sx={{ py: 2 }}>
+            <Typography color="text.secondary">
+              No email accounts connected yet. Connect your Google or Microsoft account below.
+            </Typography>
           </Box>
-        ))}
-
-        {accounts.length > 0 && (
-          <>
-            <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>SMTP Account</Typography>
-            {accounts.map((account) => (
+        ) : (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+            {oauthAccounts.map((account) => (
               <Box
-                key={`${account.provider}-${account.email_address}`}
-                sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', py: 1 }}
+                key={account.id}
+                sx={{ 
+                  display: 'flex', 
+                  justifyContent: 'space-between', 
+                  alignItems: 'center', 
+                  p: 2, 
+                  bgcolor: 'background.default',
+                  borderRadius: 1,
+                  border: '1px solid',
+                  borderColor: 'divider'
+                }}
               >
-                <Box>
-                  <Typography variant="body2">{account.email_address}</Typography>
-                  <Typography variant="caption" color="text.secondary">{account.provider}</Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                  {account.provider === 'google' ? (
+                    <GoogleIcon sx={{ color: '#DB4437', fontSize: 32 }} />
+                  ) : (
+                    <EmailIcon sx={{ color: '#0078D4', fontSize: 32 }} />
+                  )}
+                  <Box>
+                    <Typography variant="body1" fontWeight="medium">
+                      {account.email_address}
+                    </Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <Chip 
+                        size="small" 
+                        label={account.provider === 'google' ? 'Google' : 'Microsoft'}
+                        color={account.provider === 'google' ? 'error' : 'primary'}
+                        variant="outlined"
+                      />
+                      <Chip 
+                        size="small" 
+                        icon={<CheckCircleIcon />}
+                        label="Connected"
+                        color="success"
+                        variant="outlined"
+                      />
+                    </Box>
+                  </Box>
                 </Box>
-                <Chip
-                  size="small"
-                  label={account.capabilities.send ? 'Send enabled' : 'Read only'}
-                  color={account.capabilities.send ? 'success' : 'default'}
-                />
+                <Button 
+                  size="small" 
+                  color="error" 
+                  variant="outlined"
+                  onClick={() => handleDisconnectClick(account)}
+                >
+                  Disconnect
+                </Button>
               </Box>
             ))}
-          </>
+          </Box>
         )}
       </Paper>
 
+      {/* Section 2: Connect New Account */}
+      {(!hasGoogle || !hasMicrosoft) && (
+        <Paper sx={{ p: 3, mb: 3 }}>
+          <Typography variant="h6" gutterBottom>Connect New Account</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+            Connect your email account to enable inbox sync, email briefings, and draft replies.
+          </Typography>
+
+          <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+            {!hasGoogle && (
+              <Button 
+                variant="outlined" 
+                startIcon={<GoogleIcon />}
+                onClick={() => startOAuth('google')}
+                sx={{ 
+                  borderColor: '#DB4437', 
+                  color: '#DB4437',
+                  '&:hover': { borderColor: '#C53929', bgcolor: 'rgba(219, 68, 55, 0.04)' }
+                }}
+              >
+                Connect Google
+              </Button>
+            )}
+            {!hasMicrosoft && (
+              <Button 
+                variant="outlined" 
+                startIcon={<EmailIcon />}
+                onClick={() => startOAuth('microsoft')}
+                sx={{ 
+                  borderColor: '#0078D4', 
+                  color: '#0078D4',
+                  '&:hover': { borderColor: '#006CBE', bgcolor: 'rgba(0, 120, 212, 0.04)' }
+                }}
+              >
+                Connect Microsoft
+              </Button>
+            )}
+          </Box>
+        </Paper>
+      )}
+
+      {/* Section 3: Awaz Integration */}
       <Paper sx={{ p: 3, mb: 3 }}>
         <Typography variant="h6" gutterBottom>Awaz Integration</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
@@ -492,6 +575,7 @@ export default function EmailSettings() {
                 label="Webhook URL"
                 value={awazIntegration.webhook_url || ''}
                 InputProps={{ readOnly: true }}
+                size="small"
               />
               <Tooltip title="Copy">
                 <IconButton onClick={handleCopyWebhook} aria-label="Copy webhook URL">
@@ -501,13 +585,13 @@ export default function EmailSettings() {
             </Box>
 
             <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 2 }}>
-              <Button variant="outlined" onClick={handleAwazTest} disabled={testingAwaz}>
+              <Button variant="outlined" onClick={handleAwazTest} disabled={testingAwaz} size="small">
                 {testingAwaz ? 'Testing...' : 'Test connection'}
               </Button>
-              <Button variant="outlined" color="warning" onClick={() => setRotateOpen(true)}>
+              <Button variant="outlined" color="warning" onClick={() => setRotateOpen(true)} size="small">
                 Rotate key
               </Button>
-              <Button variant="text" onClick={() => setShowAwazSetup((prev) => !prev)}>
+              <Button variant="text" onClick={() => setShowAwazSetup((prev) => !prev)} size="small">
                 {showAwazSetup ? 'Hide setup instructions' : 'Setup instructions'}
               </Button>
             </Box>
@@ -518,7 +602,7 @@ export default function EmailSettings() {
                 <Typography variant="body2" color="text.secondary">
                   1. In Awaz, open your AI receptionist settings.
                   <br />
-                  2. Find the “Webhooks” or “Integrations” section.
+                  2. Find the "Webhooks" or "Integrations" section.
                   <br />
                   3. Paste the webhook URL shown above.
                   <br />
@@ -526,7 +610,7 @@ export default function EmailSettings() {
                   <br />
                   5. Save and run a test call to verify connectivity.
                   <br />
-                  6. Use “Test connection” here to confirm it logs a call.
+                  6. Use "Test connection" here to confirm it logs a call.
                 </Typography>
               </Box>
             </Collapse>
@@ -534,63 +618,71 @@ export default function EmailSettings() {
         )}
       </Paper>
 
+      {/* Section 4: SMTP Settings (Collapsible) */}
       <Paper sx={{ p: 3 }}>
-        <Typography variant="h6" gutterBottom>SMTP Settings</Typography>
+        <Typography variant="h6" gutterBottom>SMTP Settings (Advanced)</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-          Configure SMTP for sending invoice chase emails.
+          Configure SMTP for sending emails directly. Most users should use Google or Microsoft connection above.
         </Typography>
 
-        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <TextField label="SMTP Host" value={smtpHost} onChange={(e) => setSmtpHost(e.target.value)} />
+          <TextField label="SMTP Host" value={smtpHost} onChange={(e) => setSmtpHost(e.target.value)} size="small" />
           <TextField
             label="SMTP Port"
             type="number"
             value={smtpPort}
             onChange={(e) => setSmtpPort(Number(e.target.value))}
+            size="small"
           />
-          <TextField label="SMTP Username" value={smtpUsername} onChange={(e) => setSmtpUsername(e.target.value)} />
+          <TextField label="SMTP Username" value={smtpUsername} onChange={(e) => setSmtpUsername(e.target.value)} size="small" />
           <TextField
             label="SMTP Password"
             type="password"
             value={smtpPassword}
             onChange={(e) => setSmtpPassword(e.target.value)}
             helperText="Enter a new password to update"
+            size="small"
           />
-          <TextField label="From Email" value={fromEmail} onChange={(e) => setFromEmail(e.target.value)} />
-          <TextField label="From Name" value={fromName} onChange={(e) => setFromName(e.target.value)} />
+          <TextField label="From Email" value={fromEmail} onChange={(e) => setFromEmail(e.target.value)} size="small" />
+          <TextField label="From Name" value={fromName} onChange={(e) => setFromName(e.target.value)} size="small" />
 
           <FormControlLabel
-            control={<Switch checked={useTls} onChange={(e) => setUseTls(e.target.checked)} />}
+            control={<Switch checked={useTls} onChange={(e) => setUseTls(e.target.checked)} size="small" />}
             label="Use TLS"
           />
           <FormControlLabel
-            control={<Switch checked={useSsl} onChange={(e) => setUseSsl(e.target.checked)} />}
+            control={<Switch checked={useSsl} onChange={(e) => setUseSsl(e.target.checked)} size="small" />}
             label="Use SSL"
           />
           <FormControlLabel
-            control={<Switch checked={isEnabled} onChange={(e) => setIsEnabled(e.target.checked)} />}
+            control={<Switch checked={isEnabled} onChange={(e) => setIsEnabled(e.target.checked)} size="small" />}
             label="Enabled"
           />
 
           <Box sx={{ display: 'flex', gap: 2 }}>
-            <Button variant="contained" onClick={handleSave} disabled={saving}>
-              {saving ? <CircularProgress size={20} /> : 'Save'}
+            <Button variant="contained" onClick={handleSave} disabled={saving} size="small">
+              {saving ? <CircularProgress size={20} /> : 'Save SMTP Settings'}
             </Button>
-            <Button variant="outlined" onClick={handleTest} disabled={testing}>
+            <Button variant="outlined" onClick={handleTest} disabled={testing} size="small">
               {testing ? <CircularProgress size={20} /> : 'Send Test Email'}
             </Button>
           </Box>
         </Box>
       </Paper>
 
+      {/* Success Snackbar */}
       <Snackbar
         open={!!successMessage}
         autoHideDuration={6000}
         onClose={() => setSuccessMessage('')}
-        message={successMessage}
-      />
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert onClose={() => setSuccessMessage('')} severity="success" sx={{ width: '100%' }}>
+          {successMessage}
+        </Alert>
+      </Snackbar>
+
+      {/* Copy Success Snackbar */}
       <Snackbar
         open={!!copySuccess}
         autoHideDuration={3000}
@@ -602,6 +694,7 @@ export default function EmailSettings() {
         </Alert>
       </Snackbar>
 
+      {/* Rotate Key Confirmation Dialog */}
       <Dialog open={rotateOpen} onClose={() => setRotateOpen(false)}>
         <DialogTitle>Rotate webhook key?</DialogTitle>
         <DialogContent>
@@ -613,6 +706,24 @@ export default function EmailSettings() {
           <Button onClick={() => setRotateOpen(false)}>Cancel</Button>
           <Button onClick={handleRotateSecret} color="warning" disabled={rotating}>
             {rotating ? 'Rotating...' : 'Rotate key'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Disconnect Confirmation Dialog */}
+      <Dialog open={disconnectOpen} onClose={() => setDisconnectOpen(false)}>
+        <DialogTitle>Disconnect email account?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Are you sure you want to disconnect <strong>{accountToDisconnect?.email_address}</strong>?
+            <br /><br />
+            This will remove access to your email for briefings and drafts. You can reconnect at any time.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDisconnectOpen(false)}>Cancel</Button>
+          <Button onClick={handleDisconnect} color="error" disabled={disconnecting}>
+            {disconnecting ? 'Disconnecting...' : 'Disconnect'}
           </Button>
         </DialogActions>
       </Dialog>
