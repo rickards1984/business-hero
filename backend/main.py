@@ -1051,22 +1051,33 @@ async def update_support_ticket_admin(
 async def get_my_profile(
     auth_ctx=Depends(get_user_auth_context),
 ):
-    """Get current user info for UI bootstrapping."""
-    business_id = None
+    """Get current user info and business profile for UI bootstrapping."""
+    business = None
     try:
-        business_ctx = get_business_for_user(auth_ctx["user_id"])
-        business_id = business_ctx.id
+        business = get_business_for_user(auth_ctx["user_id"])
     except ValueError as exc:
         args = exc.args
         if not (len(args) >= 2 and args[0] == "NO_BUSINESS"):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
-    return {
+    # Build response with user info and business profile
+    response = {
         "user_id": auth_ctx["user_id"],
         "email": auth_ctx.get("email"),
         "is_platform_admin": auth_ctx.get("is_platform_admin", False),
-        "business_id": business_id,
+        "business_id": str(business.id) if business else None,
     }
+    
+    # Include business profile fields for the frontend
+    if business:
+        response.update({
+            "id": str(business.id),
+            "name": business.name,
+            "timezone": business.timezone,
+            "logo_url": business.logo_url,
+        })
+    
+    return response
 
 
 @app.get("/v1/business/settings", response_model=BusinessSettingsResponse, tags=["Business"])
