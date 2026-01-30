@@ -98,53 +98,115 @@ def _decrypt_email_token(ciphertext: str) -> str:
     return f.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
 
 
-def _send_gmail(access_token: str, to_email: str, subject: str, body: str) -> dict:
-    """Send email via Gmail API."""
-    message = MIMEText(body)
-    message['to'] = to_email
-    message['subject'] = subject
-    raw = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+def _refresh_google_token_for_sending(session: Session, account) -> str:
+    """Refresh an expired Google access token and update the database."""
+    try:
+        refresh_token = _decrypt_email_token(account.refresh_token_ciphertext)
+        
+        response = httpx.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": os.getenv("GOOGLE_OAUTH_CLIENT_ID"),
+                "client_secret": os.getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token"
+            },
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"Token refresh failed: {response.status_code}")
+        
+        data = response.json()
+        new_access_token = data.get("access_token")
+        expires_in = data.get("expires_in", 3600)
+        
+        if not new_access_token:
+            raise Exception("No access token in refresh response")
+        
+        # Encrypt and store the new token
+        key = os.getenv("EMAIL_ENCRYPTION_KEY")
+        f = Fernet(key.encode("utf-8"))
+        new_token_ciphertext = f.encrypt(new_access_token.encode("utf-8")).decode("utf-8")
+        
+        new_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+        
+        # Update the account in the database
+        account.token_ciphertext = new_token_ciphertext
+        account.token_expires_at = new_expires_at
+        account.updated_at = datetime.utcnow()
+        session.add(account)
+        session.commit()
+        
+        return new_access_token
+    except Exception as e:
+        raise Exception(f"Failed to refresh token: {str(e)}")
+
+
+def _send_gmail_with_refresh(session: Session, account, access_token: str, to_email: str, subject: str, body: str) -> dict:
+    """Send email via Gmail API with automatic token refresh on 401."""
+    def attempt_send(token):
+        message = MIMEText(body)
+        message['to'] = to_email
+        message['subject'] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        
+        response = httpx.post(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"raw": raw},
+            timeout=30
+        )
+        return response
     
-    response = httpx.post(
-        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
-        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-        json={"raw": raw},
-        timeout=30
-    )
+    # First attempt
+    response = attempt_send(access_token)
     
-    if response.status_code == 401:
-        raise Exception("Gmail token expired. Please reconnect your Google account.")
-    if response.status_code != 200:
+    # If 401, refresh token and retry
+    if response.status_code == 401 and account.refresh_token_ciphertext:
+        try:
+            new_token = _refresh_google_token_for_sending(session, account)
+            response = attempt_send(new_token)
+        except Exception as refresh_error:
+            raise Exception(f"Gmail token expired and refresh failed: {str(refresh_error)}. Please reconnect your Google account.")
+    
+    if response.status_code not in [200, 202]:
         raise Exception(f"Gmail API error: {response.status_code} - {response.text}")
     
     return response.json()
 
 
-def _send_microsoft_email(access_token: str, to_email: str, subject: str, body: str) -> dict:
-    """Send email via Microsoft Graph API."""
-    response = httpx.post(
-        "https://graph.microsoft.com/v1.0/me/sendMail",
-        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-        json={
-            "message": {
-                "subject": subject,
-                "body": {"contentType": "Text", "content": body},
-                "toRecipients": [{"emailAddress": {"address": to_email}}]
-            }
-        },
-        timeout=30
-    )
+def _send_microsoft_email_with_refresh(session: Session, account, access_token: str, to_email: str, subject: str, body: str) -> dict:
+    """Send email via Microsoft Graph API with automatic token refresh."""
+    def attempt_send(token):
+        response = httpx.post(
+            "https://graph.microsoft.com/v1.0/me/sendMail",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "message": {
+                    "subject": subject,
+                    "body": {"contentType": "Text", "content": body},
+                    "toRecipients": [{"emailAddress": {"address": to_email}}]
+                }
+            },
+            timeout=30
+        )
+        return response
     
+    response = attempt_send(access_token)
+    
+    # If 401, token is expired (Microsoft refresh can be added later if needed)
     if response.status_code == 401:
         raise Exception("Microsoft token expired. Please reconnect your Microsoft account.")
+    
     if response.status_code not in [200, 202]:
         raise Exception(f"Microsoft Graph error: {response.status_code} - {response.text}")
     
     return {"status": "sent"}
 
 
-def send_email_oauth(account: EmailAccount, to_email: str, subject: str, body: str) -> dict:
-    """Send email using OAuth account (Google or Microsoft)."""
+def send_email_oauth(session: Session, account: EmailAccount, to_email: str, subject: str, body: str) -> dict:
+    """Send email using OAuth account (Google or Microsoft) with automatic token refresh."""
     if not account.token_ciphertext:
         raise Exception("No access token available for this account")
     
@@ -154,9 +216,9 @@ def send_email_oauth(account: EmailAccount, to_email: str, subject: str, body: s
         raise Exception(f"Failed to decrypt token: {str(e)}")
     
     if account.provider == "google":
-        return _send_gmail(access_token, to_email, subject, body)
+        return _send_gmail_with_refresh(session, account, access_token, to_email, subject, body)
     elif account.provider == "microsoft":
-        return _send_microsoft_email(access_token, to_email, subject, body)
+        return _send_microsoft_email_with_refresh(session, account, access_token, to_email, subject, body)
     else:
         raise Exception(f"Unsupported provider: {account.provider}")
 
@@ -2590,7 +2652,7 @@ async def send_chase_email(
 
     try:
         if oauth_account:
-            send_email_oauth(oauth_account, invoice.customer_email, subject, body)
+            send_email_oauth(session, oauth_account, invoice.customer_email, subject, body)
         else:
             send_email_smtp(smtp_connection, invoice.customer_email, subject, body)
         
@@ -2735,7 +2797,7 @@ async def send_chase_bulk(
 
         try:
             if oauth_account:
-                send_email_oauth(oauth_account, invoice.customer_email, subject, body)
+                send_email_oauth(session, oauth_account, invoice.customer_email, subject, body)
             else:
                 send_email_smtp(smtp_connection, invoice.customer_email, subject, body)
             outbox.status = "sent"
