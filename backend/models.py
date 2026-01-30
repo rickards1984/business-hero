@@ -276,19 +276,18 @@ class EmailAccount(SQLModel, table=True):
     __tablename__ = "email_accounts"
     id: UUID = Field(default_factory=generate_uuid, sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid))
     business_id: UUID = Field(foreign_key="businesses.id", index=True)
-    user_id: Optional[UUID] = Field(default=None, index=True)
+    user_id: UUID = Field(index=True)
     provider: str = Field(index=True)  # 'google', 'microsoft', 'smtp'
     email_address: str
     display_name: Optional[str] = None
-    capabilities: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
+    capabilities: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    is_default: bool = Field(default=False)
     token_ciphertext: Optional[str] = None  # encrypted access token
     refresh_token_ciphertext: Optional[str] = None  # encrypted refresh token
     token_expires_at: Optional[datetime] = None
-    smtp_config: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
-    is_default: bool = Field(default=False)
-    is_enabled: bool = Field(default=True)
+    smtp_config: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: Optional[datetime] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
     business: Optional[Business] = Relationship()
 
 
