@@ -5,7 +5,7 @@ from datetime import datetime, date
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 from sqlmodel import SQLModel, Field, Relationship
-from sqlalchemy import Column, UniqueConstraint, Date, Numeric, Text
+from sqlalchemy import Column, UniqueConstraint, Date, Numeric, Text, JSON
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB, ARRAY
 import secrets
 
@@ -272,20 +272,23 @@ class EmailConnection(SQLModel, table=True):
 
 
 class EmailAccount(SQLModel, table=True):
-    """Email account for OAuth-connected email (Google/Microsoft)."""
+    """Email account for OAuth-connected email (Google/Microsoft) or SMTP."""
     __tablename__ = "email_accounts"
     id: UUID = Field(default_factory=generate_uuid, sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid))
     business_id: UUID = Field(foreign_key="businesses.id", index=True)
-    user_id: UUID = Field(index=True)
-    provider: str = Field(index=True)
+    user_id: Optional[UUID] = Field(default=None, index=True)
+    provider: str = Field(index=True)  # 'google', 'microsoft', 'smtp'
     email_address: str
-    access_token_encrypted: Optional[str] = None
-    refresh_token_encrypted: Optional[str] = None
+    display_name: Optional[str] = None
+    capabilities: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
+    token_ciphertext: Optional[str] = None  # encrypted access token
+    refresh_token_ciphertext: Optional[str] = None  # encrypted refresh token
     token_expires_at: Optional[datetime] = None
+    smtp_config: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
     is_default: bool = Field(default=False)
     is_enabled: bool = Field(default=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
     business: Optional[Business] = Relationship()
 
 
