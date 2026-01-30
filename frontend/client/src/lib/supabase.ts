@@ -34,9 +34,10 @@ export function resolveLogoSrc(logoUrl: string | null | undefined): string | nul
     return logoUrl;
   }
   
-  // Otherwise, treat it as a Supabase Storage path in the "logos" bucket
-  const { data } = supabase.storage.from('logos').getPublicUrl(logoUrl);
-  return data.publicUrl;
+  // Construct the public URL directly for the logos bucket
+  // Format: {supabase_url}/storage/v1/object/public/logos/{path}
+  const baseUrl = supabaseUrl || 'https://oxblcmwhuwtobdhsfgyi.supabase.co';
+  return `${baseUrl}/storage/v1/object/public/logos/${logoUrl}`;
 }
 
 export interface Business {
