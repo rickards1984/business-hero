@@ -7,9 +7,13 @@ import copy
 import secrets
 import stripe
 import logging
+import base64
+import httpx
+from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
+from cryptography.fernet import Fernet
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -79,6 +83,112 @@ from app.email.router import (
     build_microsoft_oauth_start_url,
 )
 from app.billing.config import get_stripe_config, validate_stripe_config
+
+
+# ============================================================================
+# EMAIL OAUTH HELPERS
+# ============================================================================
+
+def _decrypt_email_token(ciphertext: str) -> str:
+    """Decrypt an encrypted email token."""
+    key = os.getenv("EMAIL_ENCRYPTION_KEY")
+    if not key:
+        raise RuntimeError("EMAIL_ENCRYPTION_KEY not configured")
+    f = Fernet(key.encode("utf-8"))
+    return f.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+
+
+def _send_gmail(access_token: str, to_email: str, subject: str, body: str) -> dict:
+    """Send email via Gmail API."""
+    message = MIMEText(body)
+    message['to'] = to_email
+    message['subject'] = subject
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+    
+    response = httpx.post(
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json={"raw": raw},
+        timeout=30
+    )
+    
+    if response.status_code == 401:
+        raise Exception("Gmail token expired. Please reconnect your Google account.")
+    if response.status_code != 200:
+        raise Exception(f"Gmail API error: {response.status_code} - {response.text}")
+    
+    return response.json()
+
+
+def _send_microsoft_email(access_token: str, to_email: str, subject: str, body: str) -> dict:
+    """Send email via Microsoft Graph API."""
+    response = httpx.post(
+        "https://graph.microsoft.com/v1.0/me/sendMail",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json={
+            "message": {
+                "subject": subject,
+                "body": {"contentType": "Text", "content": body},
+                "toRecipients": [{"emailAddress": {"address": to_email}}]
+            }
+        },
+        timeout=30
+    )
+    
+    if response.status_code == 401:
+        raise Exception("Microsoft token expired. Please reconnect your Microsoft account.")
+    if response.status_code not in [200, 202]:
+        raise Exception(f"Microsoft Graph error: {response.status_code} - {response.text}")
+    
+    return {"status": "sent"}
+
+
+def send_email_oauth(account: EmailAccount, to_email: str, subject: str, body: str) -> dict:
+    """Send email using OAuth account (Google or Microsoft)."""
+    if not account.token_ciphertext:
+        raise Exception("No access token available for this account")
+    
+    try:
+        access_token = _decrypt_email_token(account.token_ciphertext)
+    except Exception as e:
+        raise Exception(f"Failed to decrypt token: {str(e)}")
+    
+    if account.provider == "google":
+        return _send_gmail(access_token, to_email, subject, body)
+    elif account.provider == "microsoft":
+        return _send_microsoft_email(access_token, to_email, subject, body)
+    else:
+        raise Exception(f"Unsupported provider: {account.provider}")
+
+
+def get_email_account_for_sending(session: Session, business_id: str):
+    """Get the best email account for sending (OAuth preferred over SMTP).
+    
+    Returns tuple of (oauth_account, smtp_connection) - one will be None.
+    """
+    # First try OAuth accounts (Google/Microsoft)
+    oauth_account = session.exec(
+        select(EmailAccount).where(
+            EmailAccount.business_id == business_id,
+            EmailAccount.provider.in_(["google", "microsoft"])
+        ).order_by(EmailAccount.created_at.desc())
+    ).first()
+    
+    if oauth_account:
+        return (oauth_account, None)
+    
+    # Fall back to SMTP
+    smtp_connection = session.exec(
+        select(EmailConnection).where(
+            EmailConnection.business_id == business_id,
+            EmailConnection.is_enabled == True
+        )
+    ).first()
+    
+    if smtp_connection:
+        return (None, smtp_connection)
+    
+    return (None, None)
 
 
 async def get_current_user_business(
@@ -2442,16 +2552,16 @@ async def send_chase_email(
             dry_run=True
         )
 
-    connection = session.exec(
-        select(EmailConnection).where(EmailConnection.business_id == business.id)
-    ).first()
-    if not connection or not connection.is_enabled:
-        raise HTTPException(status_code=400, detail="Email connection not configured or disabled")
+    # Get email account (OAuth or SMTP)
+    oauth_account, smtp_connection = get_email_account_for_sending(session, str(business.id))
+    
+    if not oauth_account and not smtp_connection:
+        raise HTTPException(status_code=400, detail="No email account configured. Please connect Google/Microsoft or configure SMTP in Email Settings.")
 
-    account = get_or_create_smtp_account(session, business, user.id, connection)
+    # Create outbox entry
     outbox = EmailOutbox(
         business_id=business.id,
-        email_account_id=account.id,
+        email_account_id=oauth_account.id if oauth_account else None,
         invoice_id=invoice.id,
         chase_stage=stage,
         to_emails=[invoice.customer_email or ""],
@@ -2479,7 +2589,11 @@ async def send_chase_email(
         )
 
     try:
-        send_email_smtp(connection, invoice.customer_email, subject, body)
+        if oauth_account:
+            send_email_oauth(oauth_account, invoice.customer_email, subject, body)
+        else:
+            send_email_smtp(smtp_connection, invoice.customer_email, subject, body)
+        
         outbox.status = "sent"
         outbox.sent_at = datetime.utcnow()
         session.add(outbox)
@@ -2533,13 +2647,12 @@ async def send_chase_bulk(
     ).all()
     invoice_map = {str(inv.id): inv for inv in invoices}
 
+    oauth_account = None
+    smtp_connection = None
     if not data.dry_run:
-        connection = session.exec(
-            select(EmailConnection).where(EmailConnection.business_id == business.id)
-        ).first()
-        if not connection or not connection.is_enabled:
-            raise HTTPException(status_code=400, detail="Email connection not configured or disabled")
-        account = get_or_create_smtp_account(session, business, user.id, connection)
+        oauth_account, smtp_connection = get_email_account_for_sending(session, str(business.id))
+        if not oauth_account and not smtp_connection:
+            raise HTTPException(status_code=400, detail="No email account configured. Please connect Google/Microsoft or configure SMTP in Email Settings.")
 
     window_start = datetime.utcnow() - timedelta(minutes=1)
     recent_count = session.exec(
@@ -2608,7 +2721,7 @@ async def send_chase_bulk(
 
         outbox = EmailOutbox(
             business_id=business.id,
-            email_account_id=account.id,
+            email_account_id=oauth_account.id if oauth_account else None,
             invoice_id=invoice.id,
             chase_stage=stage,
             to_emails=[invoice.customer_email],
@@ -2621,7 +2734,10 @@ async def send_chase_bulk(
         session.refresh(outbox)
 
         try:
-            send_email_smtp(connection, invoice.customer_email, subject, body)
+            if oauth_account:
+                send_email_oauth(oauth_account, invoice.customer_email, subject, body)
+            else:
+                send_email_smtp(smtp_connection, invoice.customer_email, subject, body)
             outbox.status = "sent"
             outbox.sent_at = datetime.utcnow()
             session.add(outbox)
