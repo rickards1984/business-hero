@@ -27,6 +27,7 @@ class BusinessContext:
     id: str
     name: str
     timezone: str
+    logo_url: Optional[str] = None
 
 
 def build_system_prompt(business: BusinessContext) -> str:
@@ -80,11 +81,11 @@ def get_business_by_id(business_id: str) -> Optional[BusinessContext]:
     engine = _get_engine()
     with engine.connect() as conn:
         result = conn.execute(text("""
-            SELECT id, name, timezone FROM businesses WHERE id = :business_id LIMIT 1
+            SELECT id, name, timezone, logo_url FROM businesses WHERE id = :business_id LIMIT 1
         """), {"business_id": business_id})
         row = result.fetchone()
         if row:
-            return BusinessContext(id=str(row[0]), name=row[1], timezone=row[2])
+            return BusinessContext(id=str(row[0]), name=row[1], timezone=row[2], logo_url=row[3])
         return None
 
 
@@ -114,7 +115,7 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
         
         with engine.connect() as conn:
             result = conn.execute(text("""
-                SELECT b.id, b.name, b.timezone
+                SELECT b.id, b.name, b.timezone, b.logo_url
                 FROM business_members bm
                 JOIN businesses b ON b.id = bm.business_id
                 WHERE bm.user_id = :user_id 
@@ -127,11 +128,11 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
         if not row:
             raise ValueError("FORBIDDEN", f"Access denied to business {requested_business_id}")
         
-        return BusinessContext(id=str(row[0]), name=row[1], timezone=row[2])
+        return BusinessContext(id=str(row[0]), name=row[1], timezone=row[2], logo_url=row[3])
     
     with engine.connect() as conn:
         result = conn.execute(text("""
-            SELECT bm.business_id, b.name, b.timezone, bm.role, bm.created_at
+            SELECT bm.business_id, b.name, b.timezone, b.logo_url, bm.role, bm.created_at
             FROM business_members bm
             JOIN businesses b ON b.id = bm.business_id
             WHERE bm.user_id = :user_id AND bm.is_active = true
@@ -145,14 +146,14 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
     
     if len(memberships) == 1:
         m = memberships[0]
-        return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2])
+        return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2], logo_url=m[3])
     
     for m in memberships:
-        if m[3] == 'owner':
-            return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2])
+        if m[4] == 'owner':  # role is now at index 4
+            return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2], logo_url=m[3])
     
     m = memberships[0]
-    return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2])
+    return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2], logo_url=m[3])
 
 
 @dataclass
