@@ -14,6 +14,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import { keyframes } from '@mui/system';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import MicIcon from '@mui/icons-material/Mic';
@@ -29,10 +30,16 @@ interface ChatMessage {
 }
 
 const QUICK_ACTIONS = [
-  "Summarise today’s calls",
+  "Summarise today's calls",
   'List open tasks I should do next',
   'Create a follow-up message for the last caller',
 ];
+
+const pulseAnimation = keyframes`
+  0% { box-shadow: 0 0 0 0 rgba(244, 67, 54, 0.7); }
+  70% { box-shadow: 0 0 0 10px rgba(244, 67, 54, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(244, 67, 54, 0); }
+`;
 
 export default function AssistantChat() {
   const navigate = useNavigate();
@@ -49,12 +56,29 @@ export default function AssistantChat() {
   const inputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
   const lastSpokenIndexRef = useRef<number>(-1);
+  const pendingVoiceMessageRef = useRef<string | null>(null);
+  const speakRepliesRef = useRef(speakReplies);
+
+  // Keep speakRepliesRef in sync
+  useEffect(() => {
+    speakRepliesRef.current = speakReplies;
+  }, [speakReplies]);
 
   useEffect(() => {
     if (!authLoading && !user) {
       navigate('/login');
     }
   }, [authLoading, user, navigate]);
+
+  // Load voices on mount (Chrome needs this)
+  useEffect(() => {
+    if (window.speechSynthesis) {
+      window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.getVoices();
+      };
+    }
+  }, []);
 
   useEffect(() => {
     const SpeechRecognition =
@@ -71,8 +95,14 @@ export default function AssistantChat() {
     recognition.onresult = (event: any) => {
       const transcript = event.results?.[0]?.[0]?.transcript;
       if (transcript) {
-        setInput(transcript);
-        inputRef.current?.focus();
+        if (speakRepliesRef.current) {
+          // In voice mode, auto-send after recognition
+          pendingVoiceMessageRef.current = transcript;
+          setInput(transcript);
+        } else {
+          setInput(transcript);
+          inputRef.current?.focus();
+        }
       }
     };
     recognition.onerror = (event: any) => {
@@ -87,6 +117,18 @@ export default function AssistantChat() {
       recognition.stop?.();
     };
   }, []);
+
+  // Handle pending voice message (auto-send after speech recognition)
+  useEffect(() => {
+    if (pendingVoiceMessageRef.current && !loading && !listening) {
+      const message = pendingVoiceMessageRef.current;
+      pendingVoiceMessageRef.current = null;
+      // Small delay to ensure UI updates
+      setTimeout(() => {
+        handleSendMessage(message);
+      }, 100);
+    }
+  }, [listening, loading]);
 
   useEffect(() => {
     if (!speakReplies) {
@@ -111,15 +153,60 @@ export default function AssistantChat() {
       return;
     }
     window.speechSynthesis.cancel();
+    
     const utterance = new SpeechSynthesisUtterance(lastMessage.content);
+    utterance.lang = 'en-GB';
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    
+    // Try to find a natural-sounding voice
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoices = [
+      'Google UK English Female',
+      'Google UK English Male', 
+      'Microsoft Libby Online (Natural)',
+      'Microsoft Ryan Online (Natural)',
+      'Samantha',
+      'Daniel',
+    ];
+    
+    let selectedVoice = null;
+    for (const preferred of preferredVoices) {
+      selectedVoice = voices.find(v => v.name.includes(preferred));
+      if (selectedVoice) break;
+    }
+    
+    // Fallback to any English GB voice, then any English voice
+    if (!selectedVoice) {
+      selectedVoice = voices.find(v => v.lang === 'en-GB') || 
+                      voices.find(v => v.lang.startsWith('en'));
+    }
+    
+    if (selectedVoice) {
+      utterance.voice = selectedVoice;
+    }
+    
     utterance.onstart = () => setSpeaking(true);
-    utterance.onend = () => setSpeaking(false);
+    utterance.onend = () => {
+      setSpeaking(false);
+      // Auto-listen after speaking if in voice mode
+      if (speakRepliesRef.current && recognitionRef.current) {
+        setTimeout(() => {
+          try {
+            recognitionRef.current.start();
+            setListening(true);
+          } catch (e) {
+            // Ignore if already listening
+          }
+        }, 500);
+      }
+    };
     utterance.onerror = () => setSpeaking(false);
     window.speechSynthesis.speak(utterance);
   }, [messages, speakReplies]);
 
-  const handleSend = async () => {
-    const message = input.trim();
+  const handleSendMessage = async (messageText: string) => {
+    const message = messageText.trim();
     if (!message || loading) return;
 
     setError('');
@@ -145,6 +232,10 @@ export default function AssistantChat() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSend = () => {
+    handleSendMessage(input);
   };
 
   const handleQuickAction = (text: string) => {
@@ -184,7 +275,7 @@ export default function AssistantChat() {
           variant="outlined"
           startIcon={<ArrowBackIcon />}
           onClick={() => navigate('/app')}
-          fullWidth={{ xs: true, sm: false }}
+          sx={{ width: { xs: '100%', sm: 'auto' } }}
         >
           Back to Dashboard
         </Button>
@@ -221,17 +312,15 @@ export default function AssistantChat() {
                 onChange={(event) => setSpeakReplies(event.target.checked)}
               />
             }
-            label="Speak replies"
+            label="Voice conversation mode"
           />
+          <Typography variant="caption" color="text.secondary">
+            {speakReplies ? 'AI will speak and auto-listen' : 'Text-only mode'}
+          </Typography>
           {speaking && (
             <Button variant="outlined" size="small" onClick={handleStopSpeaking}>
               Stop speaking
             </Button>
-          )}
-          {listening && (
-            <Typography variant="body2" color="primary">
-              Listening...
-            </Typography>
           )}
         </Box>
       </Paper>
@@ -292,15 +381,17 @@ export default function AssistantChat() {
             disabled={loading}
           />
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-            <Tooltip title={voiceSupported ? '' : 'Voice not supported in this browser'}>
+            <Tooltip title={voiceSupported ? (listening ? 'Stop listening' : 'Start voice input') : 'Voice not supported in this browser'}>
               <span>
                 <Button
-                  variant="outlined"
+                  variant={listening ? "contained" : "outlined"}
+                  color={listening ? "error" : "primary"}
                   onClick={handleMicToggle}
-                  disabled={!voiceSupported}
+                  disabled={!voiceSupported || loading || speaking}
                   startIcon={listening ? <MicOffIcon /> : <MicIcon />}
+                  sx={listening ? { animation: `${pulseAnimation} 1.5s infinite` } : {}}
                 >
-                  {listening ? 'Stop' : 'Mic'}
+                  {listening ? 'Listening...' : 'Mic'}
                 </Button>
               </span>
             </Tooltip>
