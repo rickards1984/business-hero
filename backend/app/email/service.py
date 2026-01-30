@@ -116,6 +116,17 @@ class SupabaseAdminClient:
             headers=headers,
         )
 
+    async def _delete(self, table: str, *, filters: Dict[str, Any]) -> Any:
+        """Delete rows matching filters. Returns deleted rows."""
+        params = {key: f"eq.{value}" for key, value in filters.items()}
+        headers = {"Prefer": "return=representation"}
+        return await self._request(
+            "DELETE",
+            table,
+            params=params,
+            headers=headers,
+        )
+
     async def upsert_email_accounts(self, payload: Any) -> Any:
         return await self._upsert(
             "email_accounts",

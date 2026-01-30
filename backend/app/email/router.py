@@ -378,6 +378,37 @@ async def upsert_smtp_account(
     )
 
 
+@router.delete("/accounts/{account_id}")
+async def delete_email_account(
+    account_id: str,
+    auth_ctx: dict = Depends(get_user_business_context),
+    admin: SupabaseAdminClient = Depends(get_supabase_admin_client),
+):
+    """Disconnect/delete an email account."""
+    business_id = auth_ctx["business_id"]
+    
+    # First fetch the account to get details for the response
+    account = await admin.fetch_email_account(
+        business_id=business_id,
+        account_id=account_id,
+        fields="id,provider,email_address",
+    )
+    
+    if not account:
+        raise HTTPException(status_code=404, detail="Email account not found")
+    
+    # Delete it via Supabase admin client
+    deleted = await admin._delete("email_accounts", filters={"id": account_id, "business_id": business_id})
+    
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Email account not found or already deleted")
+    
+    return {
+        "success": True,
+        "message": f"Disconnected {account['provider']} account {account['email_address']}"
+    }
+
+
 @router.post("/send", response_model=SendEmailResponse)
 async def send_email(
     data: SendEmailRequest,
