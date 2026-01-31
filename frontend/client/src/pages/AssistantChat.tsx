@@ -53,11 +53,13 @@ export default function AssistantChat() {
   const [voiceSupported, setVoiceSupported] = useState(false);
   const [speakReplies, setSpeakReplies] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  const [usePremiumVoice, setUsePremiumVoice] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
   const lastSpokenIndexRef = useRef<number>(-1);
   const pendingVoiceMessageRef = useRef<string | null>(null);
   const speakRepliesRef = useRef(speakReplies);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   // Keep speakRepliesRef in sync
   useEffect(() => {
@@ -133,33 +135,81 @@ export default function AssistantChat() {
   useEffect(() => {
     if (!speakReplies) {
       window.speechSynthesis?.cancel();
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
       setSpeaking(false);
     }
   }, [speakReplies]);
 
-  useEffect(() => {
-    if (!speakReplies) return;
-    if (!messages.length) return;
-    const lastIndex = messages.length - 1;
-    if (lastSpokenIndexRef.current === lastIndex) return;
-    const lastMessage = messages[lastIndex];
-    if (lastMessage.role !== 'assistant' || !lastMessage.content) {
-      lastSpokenIndexRef.current = lastIndex;
-      return;
+  // Speak with OpenAI TTS (premium voice)
+  const speakWithOpenAI = async (text: string) => {
+    try {
+      setSpeaking(true);
+      
+      const response = await apiRequest('POST', '/v1/tts', {
+        text: text,
+        voice: 'nova'  // Natural female voice
+      });
+      
+      if (!response.ok) {
+        throw new Error('TTS request failed');
+      }
+      
+      const data = await response.json();
+      const audioData = data.audio;
+      
+      // Create audio element and play
+      const audio = new Audio(`data:audio/mp3;base64,${audioData}`);
+      audioRef.current = audio;
+      
+      audio.onended = () => {
+        setSpeaking(false);
+        audioRef.current = null;
+        // Auto-listen after speaking if in voice mode
+        if (speakRepliesRef.current && recognitionRef.current) {
+          setTimeout(() => {
+            try {
+              recognitionRef.current.start();
+              setListening(true);
+            } catch (e) {
+              // Ignore if already listening
+            }
+          }, 500);
+        }
+      };
+      
+      audio.onerror = () => {
+        setSpeaking(false);
+        audioRef.current = null;
+        // Fallback to browser TTS
+        speakWithBrowser(text);
+      };
+      
+      await audio.play();
+      
+    } catch (error) {
+      console.error('OpenAI TTS error:', error);
+      setSpeaking(false);
+      // Fallback to browser TTS
+      speakWithBrowser(text);
     }
-    lastSpokenIndexRef.current = lastIndex;
+  };
+
+  // Speak with browser TTS (fallback)
+  const speakWithBrowser = (text: string) => {
     if (!window.speechSynthesis) {
-      setError('Speech synthesis not supported');
+      setSpeaking(false);
       return;
     }
-    window.speechSynthesis.cancel();
     
-    const utterance = new SpeechSynthesisUtterance(lastMessage.content);
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'en-GB';
     utterance.rate = 1.0;
     utterance.pitch = 1.0;
     
-    // Try to find a natural-sounding voice
     const voices = window.speechSynthesis.getVoices();
     const preferredVoices = [
       'Google UK English Female',
@@ -176,7 +226,6 @@ export default function AssistantChat() {
       if (selectedVoice) break;
     }
     
-    // Fallback to any English GB voice, then any English voice
     if (!selectedVoice) {
       selectedVoice = voices.find(v => v.lang === 'en-GB') || 
                       voices.find(v => v.lang.startsWith('en'));
@@ -189,21 +238,39 @@ export default function AssistantChat() {
     utterance.onstart = () => setSpeaking(true);
     utterance.onend = () => {
       setSpeaking(false);
-      // Auto-listen after speaking if in voice mode
       if (speakRepliesRef.current && recognitionRef.current) {
         setTimeout(() => {
           try {
             recognitionRef.current.start();
             setListening(true);
-          } catch (e) {
-            // Ignore if already listening
-          }
+          } catch (e) {}
         }, 500);
       }
     };
     utterance.onerror = () => setSpeaking(false);
     window.speechSynthesis.speak(utterance);
-  }, [messages, speakReplies]);
+  };
+
+  // Speak new assistant messages
+  useEffect(() => {
+    if (!speakReplies) return;
+    if (!messages.length) return;
+    const lastIndex = messages.length - 1;
+    if (lastSpokenIndexRef.current === lastIndex) return;
+    const lastMessage = messages[lastIndex];
+    if (lastMessage.role !== 'assistant' || !lastMessage.content) {
+      lastSpokenIndexRef.current = lastIndex;
+      return;
+    }
+    lastSpokenIndexRef.current = lastIndex;
+    
+    // Use OpenAI TTS for premium voice, otherwise browser TTS
+    if (usePremiumVoice) {
+      speakWithOpenAI(lastMessage.content);
+    } else {
+      speakWithBrowser(lastMessage.content);
+    }
+  }, [messages, speakReplies, usePremiumVoice]);
 
   const handleSendMessage = async (messageText: string) => {
     const message = messageText.trim();
@@ -302,6 +369,10 @@ export default function AssistantChat() {
     // If AI is speaking, stop it first (allows interruption)
     if (speaking) {
       window.speechSynthesis?.cancel();
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
       setSpeaking(false);
     }
     
@@ -321,6 +392,10 @@ export default function AssistantChat() {
 
   const handleStopSpeaking = () => {
     window.speechSynthesis?.cancel();
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
     setSpeaking(false);
   };
 
@@ -378,8 +453,22 @@ export default function AssistantChat() {
             }
             label="Voice conversation mode"
           />
+          {speakReplies && (
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={usePremiumVoice}
+                  onChange={(event) => setUsePremiumVoice(event.target.checked)}
+                  size="small"
+                />
+              }
+              label={<Typography variant="body2">Premium voice</Typography>}
+            />
+          )}
           <Typography variant="caption" color="text.secondary">
-            {speakReplies ? 'AI will speak and auto-listen' : 'Text-only mode'}
+            {speakReplies 
+              ? (usePremiumVoice ? 'Using OpenAI natural voice' : 'Using browser voice') 
+              : 'Text-only mode'}
           </Typography>
           {speaking && (
             <Button variant="outlined" size="small" onClick={handleStopSpeaking}>

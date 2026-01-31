@@ -704,9 +704,12 @@ def _fetch_microsoft_emails(engine, account_id: str, access_token: str, refresh_
 
 def _send_email(engine, business_id: str, args: dict) -> dict:
     """Send an email using the connected OAuth account."""
-    to_email = args.get("to")
-    subject = args.get("subject")
-    body = args.get("body")
+    to_email = args.get("to", "").strip()
+    subject = args.get("subject", "").strip()
+    body = args.get("body", "").strip()
+    
+    # Clean up the body - replace literal \n with actual newlines if needed
+    body = body.replace("\\n", "\n")
     
     if not to_email or not subject or not body:
         return {"error": "Missing required fields: to, subject, and body are all required"}

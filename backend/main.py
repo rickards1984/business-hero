@@ -1991,6 +1991,63 @@ async def assistant_chat(
     )
 
 
+@app.post("/v1/tts", tags=["Assistant"])
+async def text_to_speech(
+    request: Request,
+    token: str = Depends(get_access_token)
+):
+    """Convert text to speech using OpenAI TTS API.
+    
+    Returns audio as base64-encoded MP3.
+    Voice options: alloy, echo, fable, onyx, nova, shimmer
+    """
+    from openai import OpenAI
+    
+    # Verify user is authenticated
+    await verify_supabase_token(token)
+    
+    try:
+        data = await request.json()
+        text = data.get("text", "")
+        voice = data.get("voice", "nova")  # nova is a natural female voice
+        
+        if not text:
+            raise HTTPException(status_code=400, detail="Text is required")
+        
+        # Validate voice option
+        valid_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+        if voice not in valid_voices:
+            voice = "nova"
+        
+        # Limit text length to control costs (roughly 4096 chars max)
+        if len(text) > 4096:
+            text = text[:4096]
+        
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise HTTPException(status_code=500, detail="OpenAI API key not configured")
+        
+        client = OpenAI(api_key=openai_api_key)
+        
+        response = client.audio.speech.create(
+            model="tts-1",  # Use tts-1-hd for higher quality but more cost
+            voice=voice,
+            input=text,
+            response_format="mp3"
+        )
+        
+        # Return audio as base64
+        audio_base64 = base64.b64encode(response.content).decode('utf-8')
+        
+        return {"audio": audio_base64, "format": "mp3"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"TTS error: {e}")
+        raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")
+
+
 # ============================================================================
 # INVOICE ENDPOINTS
 # ============================================================================
