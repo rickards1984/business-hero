@@ -214,6 +214,50 @@ export default function AssistantChat() {
     setMessages((prev) => [...prev, { role: 'user', content: message }]);
     setInput('');
 
+    // Immediate voice feedback while processing
+    if (speakReplies && window.speechSynthesis) {
+      const lowerMessage = message.toLowerCase();
+      let acknowledgment = "One moment...";
+      
+      if (lowerMessage.includes('email') || lowerMessage.includes('inbox')) {
+        acknowledgment = "Let me check your emails...";
+      } else if (lowerMessage.includes('calendar') || lowerMessage.includes('schedule') || lowerMessage.includes('meeting')) {
+        acknowledgment = "Let me look at your calendar...";
+      } else if (lowerMessage.includes('call') || lowerMessage.includes('calls')) {
+        acknowledgment = "Let me pull up your calls...";
+      } else if (lowerMessage.includes('task') || lowerMessage.includes('tasks') || lowerMessage.includes('to do') || lowerMessage.includes('todo')) {
+        acknowledgment = "Let me check your tasks...";
+      } else if (lowerMessage.includes('invoice') || lowerMessage.includes('payment')) {
+        acknowledgment = "Let me look at your invoices...";
+      } else if (lowerMessage.includes('brief') || lowerMessage.includes('summary') || lowerMessage.includes('today') || lowerMessage.includes('morning')) {
+        acknowledgment = "Let me pull together your briefing...";
+      } else if (lowerMessage.includes('send') && lowerMessage.includes('email')) {
+        acknowledgment = "I'll draft that email for you...";
+      }
+      
+      // Speak acknowledgment immediately
+      const ack = new SpeechSynthesisUtterance(acknowledgment);
+      ack.lang = 'en-GB';
+      ack.rate = 1.1; // Slightly faster for acknowledgment
+      
+      // Use the same voice selection logic
+      const voices = window.speechSynthesis.getVoices();
+      const preferredVoices = ['Google UK English Female', 'Google UK English Male', 'Microsoft Libby', 'Microsoft Ryan', 'Samantha', 'Daniel'];
+      let selectedVoice = null;
+      for (const preferred of preferredVoices) {
+        selectedVoice = voices.find(v => v.name.includes(preferred));
+        if (selectedVoice) break;
+      }
+      if (!selectedVoice) {
+        selectedVoice = voices.find(v => v.lang === 'en-GB') || voices.find(v => v.lang.startsWith('en'));
+      }
+      if (selectedVoice) {
+        ack.voice = selectedVoice;
+      }
+      
+      window.speechSynthesis.speak(ack);
+    }
+
     try {
       const payload: Record<string, any> = { 
         message,
@@ -232,6 +276,12 @@ export default function AssistantChat() {
       }
     } catch (err: any) {
       setError(err.message || 'Something went wrong');
+      // Speak error in voice mode
+      if (speakReplies && window.speechSynthesis) {
+        const errorUtterance = new SpeechSynthesisUtterance("Sorry, I had trouble with that. Please try again.");
+        errorUtterance.lang = 'en-GB';
+        window.speechSynthesis.speak(errorUtterance);
+      }
     } finally {
       setLoading(false);
     }

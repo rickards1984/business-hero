@@ -129,6 +129,31 @@ TOOL_DEFINITIONS = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "Send an email on behalf of the user. Use this when the user asks to send, reply to, or compose and send an email.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient email address"
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Email subject line"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Email body content (plain text)"
+                    }
+                },
+                "required": ["to", "subject", "body"]
+            }
+        }
     }
 ]
 
@@ -175,6 +200,8 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _delete_task(engine, business_id, arguments)
     elif tool_name == "list_emails":
         return _list_emails(engine, business_id, arguments)
+    elif tool_name == "send_email":
+        return _send_email(engine, business_id, arguments)
     else:
         return {"error": f"Unknown tool: {tool_name}"}
 
@@ -669,3 +696,125 @@ def _fetch_microsoft_emails(engine, account_id: str, access_token: str, refresh_
         return {"error": "Microsoft Graph API timeout. Please try again."}
     except Exception as e:
         return {"error": f"Failed to fetch emails: {str(e)}"}
+
+
+# ============================================================================
+# SEND EMAIL TOOL
+# ============================================================================
+
+def _send_email(engine, business_id: str, args: dict) -> dict:
+    """Send an email using the connected OAuth account."""
+    to_email = args.get("to")
+    subject = args.get("subject")
+    body = args.get("body")
+    
+    if not to_email or not subject or not body:
+        return {"error": "Missing required fields: to, subject, and body are all required"}
+    
+    # Basic email validation
+    if "@" not in to_email or "." not in to_email:
+        return {"error": f"Invalid email address: {to_email}"}
+    
+    # Get OAuth account
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT id, provider, email_address, token_ciphertext, refresh_token_ciphertext
+            FROM email_accounts
+            WHERE business_id = :business_id AND provider IN ('google', 'microsoft')
+            ORDER BY created_at DESC
+            LIMIT 1
+        """), {"business_id": business_id})
+        row = result.fetchone()
+    
+    if not row:
+        return {"error": "No email account connected. Please connect your Google or Microsoft account in Email Settings."}
+    
+    account_id, provider, email_address, token_ciphertext, refresh_token_ciphertext = row
+    
+    if not token_ciphertext:
+        return {"error": "Email account token not available. Please reconnect your email account."}
+    
+    try:
+        access_token = _decrypt_token(token_ciphertext)
+    except Exception as e:
+        return {"error": f"Failed to decrypt email token: {str(e)}"}
+    
+    try:
+        if provider == "google":
+            result = _send_gmail_message(engine, str(account_id), access_token, refresh_token_ciphertext, to_email, subject, body)
+        elif provider == "microsoft":
+            result = _send_microsoft_message(engine, str(account_id), access_token, refresh_token_ciphertext, to_email, subject, body)
+        else:
+            return {"error": f"Unsupported email provider: {provider}"}
+        
+        return {"success": True, "message": f"Email sent to {to_email}", "from": email_address, "subject": subject}
+    except Exception as e:
+        return {"error": f"Failed to send email: {str(e)}"}
+
+
+def _send_gmail_message(engine, account_id: str, access_token: str, refresh_token_ciphertext: str, to_email: str, subject: str, body: str) -> dict:
+    """Send email via Gmail API with token refresh."""
+    import base64
+    from email.mime.text import MIMEText
+    
+    def attempt_send(token: str):
+        message = MIMEText(body)
+        message['to'] = to_email
+        message['subject'] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        
+        response = httpx.post(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"raw": raw},
+            timeout=30
+        )
+        return response
+    
+    response = attempt_send(access_token)
+    
+    # If 401, refresh token and retry
+    if response.status_code == 401 and refresh_token_ciphertext:
+        try:
+            new_token = _refresh_google_token(engine, account_id, refresh_token_ciphertext)
+            response = attempt_send(new_token)
+        except Exception as refresh_error:
+            raise Exception(f"Token expired and refresh failed: {str(refresh_error)}")
+    
+    if response.status_code not in [200, 202]:
+        raise Exception(f"Gmail API error: {response.status_code} - {response.text}")
+    
+    return response.json()
+
+
+def _send_microsoft_message(engine, account_id: str, access_token: str, refresh_token_ciphertext: str, to_email: str, subject: str, body: str) -> dict:
+    """Send email via Microsoft Graph API with token refresh."""
+    def attempt_send(token: str):
+        response = httpx.post(
+            "https://graph.microsoft.com/v1.0/me/sendMail",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "message": {
+                    "subject": subject,
+                    "body": {"contentType": "Text", "content": body},
+                    "toRecipients": [{"emailAddress": {"address": to_email}}]
+                }
+            },
+            timeout=30
+        )
+        return response
+    
+    response = attempt_send(access_token)
+    
+    # If 401, refresh token and retry
+    if response.status_code == 401 and refresh_token_ciphertext:
+        try:
+            new_token = _refresh_microsoft_token(engine, account_id, refresh_token_ciphertext)
+            response = attempt_send(new_token)
+        except Exception as refresh_error:
+            raise Exception(f"Token expired and refresh failed: {str(refresh_error)}")
+    
+    if response.status_code not in [200, 202]:
+        raise Exception(f"Microsoft Graph error: {response.status_code} - {response.text}")
+    
+    return {"status": "sent"}
