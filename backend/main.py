@@ -1670,26 +1670,19 @@ async def get_awaz_business(
         request.state.awaz_auth_via = auth_via
         request.state.awaz_dialect = dialect
     try:
-        if dialect == "sqlite":
-            integrations = session.exec(
-                select(Integration).where(Integration.integration_type == "awaz")
-            ).all()
-            integration = next(
-                (
-                    candidate
-                    for candidate in integrations
-                    if (candidate.config or {}).get("webhook_secret") == token
-                ),
-                None,
-            )
-        else:
-            integration = session.exec(
-                select(Integration).where(
-                    Integration.integration_type == "awaz",
-                    text("integrations.config ->> 'webhook_secret' = :token"),
-                ),
-                {"token": token},
-            ).first()
+        # Fetch all awaz integrations and filter in Python
+        # This avoids SQL dialect differences for JSON queries
+        integrations = session.exec(
+            select(Integration).where(Integration.integration_type == "awaz")
+        ).all()
+        integration = next(
+            (
+                candidate
+                for candidate in integrations
+                if (candidate.config or {}).get("webhook_secret") == token
+            ),
+            None,
+        )
     except Exception:
         _awaz_logger.exception("awaz_webhook_auth_lookup_failed", extra={"dialect": dialect})
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Webhook auth lookup failed")
