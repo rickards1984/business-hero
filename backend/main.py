@@ -1978,7 +1978,8 @@ async def assistant_chat(
         user=user,
         message=data.message,
         conversation_id=data.conversation_id,
-        business_id=data.business_id
+        business_id=data.business_id,
+        voice_mode=data.voice_mode
     )
     
     if "error" in result:

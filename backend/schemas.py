@@ -161,6 +161,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., description="User message to the assistant")
     conversation_id: Optional[str] = Field(None, alias="conversationId", description="Optional conversation ID for context")
     business_id: Optional[str] = Field(None, alias="businessId", description="Optional business ID (required if user belongs to multiple businesses)")
+    voice_mode: bool = Field(False, alias="voiceMode", description="Whether the user is in voice conversation mode (more concise responses)")
     
     class Config:
         populate_by_name = True

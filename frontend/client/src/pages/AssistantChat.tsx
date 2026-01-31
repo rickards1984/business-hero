@@ -215,7 +215,10 @@ export default function AssistantChat() {
     setInput('');
 
     try {
-      const payload: Record<string, any> = { message };
+      const payload: Record<string, any> = { 
+        message,
+        voice_mode: speakReplies,
+      };
       if (conversationId) payload.conversation_id = conversationId;
       const response = await apiRequest('POST', '/v1/assistant/chat', payload);
       if (!response.ok) {
@@ -245,13 +248,24 @@ export default function AssistantChat() {
 
   const handleMicToggle = () => {
     if (!voiceSupported || !recognitionRef.current) return;
+    
+    // If AI is speaking, stop it first (allows interruption)
+    if (speaking) {
+      window.speechSynthesis?.cancel();
+      setSpeaking(false);
+    }
+    
     if (listening) {
       recognitionRef.current.stop();
       setListening(false);
     } else {
       setError('');
-      recognitionRef.current.start();
-      setListening(true);
+      try {
+        recognitionRef.current.start();
+        setListening(true);
+      } catch (e) {
+        // Ignore if already started
+      }
     }
   };
 
@@ -381,13 +395,13 @@ export default function AssistantChat() {
             disabled={loading}
           />
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-            <Tooltip title={voiceSupported ? (listening ? 'Stop listening' : 'Start voice input') : 'Voice not supported in this browser'}>
+            <Tooltip title={voiceSupported ? (listening ? 'Stop listening' : (speaking ? 'Interrupt and speak' : 'Start voice input')) : 'Voice not supported in this browser'}>
               <span>
                 <Button
                   variant={listening ? "contained" : "outlined"}
                   color={listening ? "error" : "primary"}
                   onClick={handleMicToggle}
-                  disabled={!voiceSupported || loading || speaking}
+                  disabled={!voiceSupported || loading}
                   startIcon={listening ? <MicOffIcon /> : <MicIcon />}
                   sx={listening ? { animation: `${pulseAnimation} 1.5s infinite` } : {}}
                 >
