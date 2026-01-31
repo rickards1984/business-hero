@@ -772,29 +772,51 @@ def _send_email(engine, business_id: str, args: dict) -> dict:
         row = result.fetchone()
     
     if not row:
-        return {"error": "No email account connected. Please connect your Google or Microsoft account in Email Settings."}
+        return {"success": False, "error": "No email account connected. Please connect Google or Microsoft in Email Settings."}
     
-    account_id, provider, email_address, token_ciphertext, refresh_token_ciphertext = row
+    account_id, provider, from_email, token_ciphertext, refresh_token_ciphertext = row
     
     if not token_ciphertext:
-        return {"error": "Email account token not available. Please reconnect your email account."}
+        return {"success": False, "error": "Email token missing. Please reconnect your email account."}
     
     try:
         access_token = _decrypt_token(token_ciphertext)
     except Exception as e:
-        return {"error": f"Failed to decrypt email token: {str(e)}"}
+        return {"success": False, "error": f"Token decryption failed: {str(e)}"}
     
     try:
         if provider == "google":
-            result = _send_gmail_message(engine, str(account_id), access_token, refresh_token_ciphertext, to_email, subject, body)
+            api_result = _send_gmail_message(engine, str(account_id), access_token, refresh_token_ciphertext, to_email, subject, body)
+            # Gmail returns the message ID on success
+            if api_result and api_result.get("id"):
+                return {
+                    "success": True, 
+                    "sent": True,
+                    "message": f"Email successfully sent to {to_email}",
+                    "from": from_email,
+                    "to": to_email,
+                    "subject": subject,
+                    "gmail_message_id": api_result.get("id")
+                }
+            else:
+                return {"success": False, "error": "Gmail API did not confirm send"}
+                
         elif provider == "microsoft":
-            result = _send_microsoft_message(engine, str(account_id), access_token, refresh_token_ciphertext, to_email, subject, body)
+            api_result = _send_microsoft_message(engine, str(account_id), access_token, refresh_token_ciphertext, to_email, subject, body)
+            # Microsoft returns 202 Accepted, api_result will be {"status": "sent"}
+            return {
+                "success": True,
+                "sent": True, 
+                "message": f"Email successfully sent to {to_email}",
+                "from": from_email,
+                "to": to_email,
+                "subject": subject
+            }
         else:
-            return {"error": f"Unsupported email provider: {provider}"}
-        
-        return {"success": True, "message": f"Email sent to {to_email}", "from": email_address, "subject": subject}
+            return {"success": False, "error": f"Unknown email provider: {provider}"}
+            
     except Exception as e:
-        return {"error": f"Failed to send email: {str(e)}"}
+        return {"success": False, "error": f"Send failed: {str(e)}"}
 
 
 def _send_gmail_message(engine, account_id: str, access_token: str, refresh_token_ciphertext: str, to_email: str, subject: str, body: str) -> dict:

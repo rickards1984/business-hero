@@ -30,7 +30,7 @@ class BusinessContext:
     logo_url: Optional[str] = None
 
 
-def build_system_prompt(business: BusinessContext, voice_mode: bool = False) -> str:
+def build_system_prompt(business: BusinessContext, voice_mode: bool = False, user_name: Optional[str] = None, user_email: Optional[str] = None) -> str:
     """Build the system prompt with business context."""
     base_prompt = f"""You are a friendly, professional AI executive assistant for {business.name}. Think of yourself as a trusted colleague who happens to have instant access to emails, calendar, calls, and tasks.
 
@@ -110,6 +110,23 @@ When the user asks to send an email:
 
 4. **Be specific and accurate.** Only mention senders/subjects that actually appear in tool results."""
 
+    # Add user context
+    if user_name or user_email:
+        base_prompt += "\n\n## User Information"
+        if user_name:
+            base_prompt += f"\nThe user's name is {user_name}."
+        if user_email:
+            base_prompt += f" Their email is {user_email}."
+    
+    # Email signature instructions
+    base_prompt += """
+
+### Email Signatures
+When sending emails on behalf of the user:
+- If you know the user's name, sign emails appropriately: "Best regards,\\n[User's Name]"
+- Never leave placeholders like "[Your Name]" - use the actual name or ask for it
+- Keep signatures professional and simple"""
+
     if voice_mode:
         base_prompt += """
 
@@ -129,6 +146,42 @@ def _get_engine():
             raise RuntimeError("SUPABASE_DATABASE_URL not configured")
         _engine = create_engine(SUPABASE_DATABASE_URL, pool_pre_ping=True, pool_size=5)
     return _engine
+
+
+def get_user_display_name(user_id: str) -> Optional[str]:
+    """Get user's display name from profiles table or business_members."""
+    engine = _get_engine()
+    with engine.connect() as conn:
+        # Try to get from profiles table if it exists
+        try:
+            result = conn.execute(text("""
+                SELECT full_name, display_name 
+                FROM profiles 
+                WHERE id = :user_id
+                LIMIT 1
+            """), {"user_id": user_id})
+            row = result.fetchone()
+            if row and (row[0] or row[1]):
+                return row[1] or row[0]  # Prefer display_name over full_name
+        except Exception:
+            pass  # Table might not exist
+        
+        # Try business_members for at least the role
+        try:
+            result = conn.execute(text("""
+                SELECT role FROM business_members 
+                WHERE user_id = :user_id
+                ORDER BY created_at ASC
+                LIMIT 1
+            """), {"user_id": user_id})
+            row = result.fetchone()
+            if row and row[0]:
+                # Capitalize role for display
+                return row[0].title()
+        except Exception:
+            pass
+    
+    return None
 
 
 def is_platform_admin(user_id: str) -> bool:
@@ -450,8 +503,10 @@ async def process_chat_message(
     logger.info(f"[DEBUG] Saved user message to conversation {resolved_conv_id}")
     
     # Step 6: Build messages array with system prompt + history + current message
-    system_prompt = build_system_prompt(business, voice_mode=voice_mode)
-    logger.info(f"[DEBUG] System prompt built for {business.name} (voice_mode={voice_mode}). History has {len(history)} messages.")
+    user_name = get_user_display_name(user.id)
+    user_email = user.email if hasattr(user, 'email') else None
+    system_prompt = build_system_prompt(business, voice_mode=voice_mode, user_name=user_name, user_email=user_email)
+    logger.info(f"[DEBUG] System prompt built for {business.name} (voice_mode={voice_mode}, user_name={user_name}). History has {len(history)} messages.")
     
     client = OpenAI(api_key=OPENAI_API_KEY)
     
