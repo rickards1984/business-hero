@@ -1,6 +1,7 @@
 """OpenAI assistant tools for AI Admin Assistant."""
 
 import os
+import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Optional, List, Any
 from uuid import UUID
@@ -528,7 +529,7 @@ def _refresh_microsoft_token(engine, account_id: str, refresh_token_ciphertext: 
 
 def _list_emails(engine, business_id: str, args: dict) -> dict:
     """List recent emails from connected email account."""
-    limit = min(args.get("limit", 10), 20)
+    limit = min(args.get("limit", 5), 20)  # Default 5 for faster voice responses
     query = args.get("query", "")
     
     # Get the email account for this business
@@ -565,9 +566,9 @@ def _list_emails(engine, business_id: str, args: dict) -> dict:
 
 
 def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_token_ciphertext: Optional[str], email_address: str, limit: int, query: str) -> dict:
-    """Fetch emails from Gmail API with automatic token refresh."""
+    """Fetch emails from Gmail API with automatic token refresh and parallel fetching."""
     
-    def make_request(token: str):
+    def make_list_request(token: str):
         headers = {"Authorization": f"Bearer {token}"}
         params = {"maxResults": limit}
         if query:
@@ -577,18 +578,19 @@ def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_toke
             "https://gmail.googleapis.com/gmail/v1/users/me/messages",
             headers=headers,
             params=params,
-            timeout=30
+            timeout=15
         )
-        return response, headers
+        return response, token
     
     try:
-        response, headers = make_request(access_token)
+        response, current_token = make_list_request(access_token)
         
         # If token expired, refresh and retry
         if response.status_code == 401 and refresh_token_ciphertext:
             try:
                 new_token = _refresh_google_token(engine, account_id, refresh_token_ciphertext)
-                response, headers = make_request(new_token)
+                current_token = new_token
+                response, current_token = make_list_request(new_token)
             except Exception as refresh_error:
                 return {"error": f"Email token expired and refresh failed: {str(refresh_error)}. Please reconnect your Google account."}
         
@@ -604,37 +606,47 @@ def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_toke
         if not message_ids:
             return {"emails": [], "count": 0, "account": email_address}
         
-        # Fetch messages (limit to first 10 for speed)
-        emails = []
-        for msg_id in message_ids[:min(limit, 10)]:
-            msg_response = httpx.get(
-                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
-                headers=headers,
-                params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]},
-                timeout=10
-            )
-            
-            if msg_response.status_code == 200:
-                msg_data = msg_response.json()
-                headers_list = msg_data.get("payload", {}).get("headers", [])
+        # Fetch single email details
+        def fetch_single_email(msg_id: str) -> Optional[dict]:
+            try:
+                msg_response = httpx.get(
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
+                    headers={"Authorization": f"Bearer {current_token}"},
+                    params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]},
+                    timeout=8
+                )
                 
-                email_info = {
-                    "id": msg_id,
-                    "snippet": msg_data.get("snippet", "")[:200],
-                    "from": "",
-                    "subject": "",
-                    "date": ""
-                }
-                
-                for h in headers_list:
-                    if h["name"] == "From":
-                        email_info["from"] = h["value"]
-                    elif h["name"] == "Subject":
-                        email_info["subject"] = h["value"]
-                    elif h["name"] == "Date":
-                        email_info["date"] = h["value"]
-                
-                emails.append(email_info)
+                if msg_response.status_code == 200:
+                    msg_data = msg_response.json()
+                    headers_list = msg_data.get("payload", {}).get("headers", [])
+                    
+                    email_info = {
+                        "id": msg_id,
+                        "snippet": msg_data.get("snippet", "")[:150],  # Shorter for speed
+                        "from": "",
+                        "subject": "",
+                        "date": ""
+                    }
+                    
+                    for h in headers_list:
+                        if h["name"] == "From":
+                            email_info["from"] = h["value"]
+                        elif h["name"] == "Subject":
+                            email_info["subject"] = h["value"]
+                        elif h["name"] == "Date":
+                            email_info["date"] = h["value"]
+                    
+                    return email_info
+            except:
+                pass
+            return None
+        
+        # Fetch messages IN PARALLEL (much faster!)
+        ids_to_fetch = message_ids[:min(limit, 10)]
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(fetch_single_email, ids_to_fetch))
+            emails = [r for r in results if r is not None]
         
         return {"emails": emails, "count": len(emails), "account": email_address}
     
