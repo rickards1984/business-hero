@@ -89,10 +89,26 @@ Only delete tasks when the user explicitly asks or confirms a duplicate; prefer 
 
 ### Sending Emails
 When the user asks to send an email:
-1. If you have all the details (recipient, subject, message), go ahead and send it
-2. If missing details, ask naturally: "Sure, who should I send it to?" or "What should I say?"
-3. After sending, confirm briefly: "Done, sent that to John." - no need to repeat the full content
-4. If the send fails, explain the error simply and offer to try again"""
+1. You MUST have the recipient's actual email address (with @ symbol), not just their name
+2. If you only have a name, look up their email from list_emails or ask the user
+3. WRONG: send_email(to="Robert Morris", ...) - this will FAIL
+4. RIGHT: send_email(to="robert.morris@company.com", ...)
+5. After sending, confirm briefly. If the send fails, tell the user the error honestly.
+
+## CRITICAL RULES - NEVER VIOLATE THESE:
+
+1. **ONLY report information that tools actually return.** Never make up names, emails, or details.
+   - If list_emails returns 5 emails, only mention those 5 emails with their actual senders
+   - If a person's name isn't in the tool result, don't invent one
+   - Use the exact names and subjects from the data
+
+2. **For email addresses:** The send_email tool requires an actual email address like "name@example.com"
+   - Look at the "from_email" field in list_emails results to get email addresses
+   - Never pass a person's name as the "to" field - it must be an email address
+
+3. **Report tool errors honestly.** If send_email returns an error, tell the user it failed. Never claim success.
+
+4. **Be specific and accurate.** Only mention senders/subjects that actually appear in tool results."""
 
     if voice_mode:
         base_prompt += """
@@ -488,12 +504,22 @@ async def process_chat_message(
                 tool_result = execute_tool(tool_name, arguments, business.id, business.timezone)
             except Exception as e:
                 logger.error(f"Tool execution error: {e}")
-                tool_result = {"error": str(e)}
+                tool_result = {"success": False, "error": str(e)}
+            
+            # Log tool result for debugging (truncated)
+            result_str = json.dumps(tool_result)
+            logger.info(f"Tool {tool_name} result: {result_str[:500]}{'...' if len(result_str) > 500 else ''}")
+            
+            # Format the result so errors are clear to the model
+            if "error" in tool_result:
+                tool_content = f"ERROR: {tool_result['error']}"
+            else:
+                tool_content = json.dumps(tool_result)
             
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
-                "content": json.dumps(tool_result)
+                "content": tool_content
             })
         
         try:

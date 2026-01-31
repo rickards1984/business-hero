@@ -1,6 +1,7 @@
 """OpenAI assistant tools for AI Admin Assistant."""
 
 import os
+import re
 import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Optional, List, Any
@@ -9,6 +10,19 @@ import pytz
 import httpx
 from cryptography.fernet import Fernet
 from sqlalchemy import create_engine, text
+
+
+def extract_email_address(from_header: str) -> str:
+    """Extract email address from a From header like 'Name <email@example.com>'."""
+    if not from_header:
+        return ""
+    match = re.search(r'<([^>]+)>', from_header)
+    if match:
+        return match.group(1)
+    # If no angle brackets, the whole thing might be the email
+    if '@' in from_header:
+        return from_header.strip()
+    return ""
 
 
 SUPABASE_DATABASE_URL = os.getenv("SUPABASE_DATABASE_URL")
@@ -624,6 +638,7 @@ def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_toke
                         "id": msg_id,
                         "snippet": msg_data.get("snippet", "")[:150],  # Shorter for speed
                         "from": "",
+                        "from_email": "",  # Just the email address for easy access
                         "subject": "",
                         "date": ""
                     }
@@ -631,6 +646,7 @@ def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_toke
                     for h in headers_list:
                         if h["name"] == "From":
                             email_info["from"] = h["value"]
+                            email_info["from_email"] = extract_email_address(h["value"])
                         elif h["name"] == "Subject":
                             email_info["subject"] = h["value"]
                         elif h["name"] == "Date":
@@ -694,12 +710,17 @@ def _fetch_microsoft_emails(engine, account_id: str, access_token: str, refresh_
         
         emails = []
         for msg in data.get("value", [])[:min(limit, 10)]:
+            from_info = msg.get("from", {}).get("emailAddress", {})
+            from_email = from_info.get("address", "")
+            from_name = from_info.get("name", "")
+            # Microsoft Graph already gives us just the email address
             emails.append({
                 "id": msg.get("id"),
                 "subject": msg.get("subject", ""),
-                "from": msg.get("from", {}).get("emailAddress", {}).get("address", ""),
+                "from": f"{from_name} <{from_email}>" if from_name else from_email,
+                "from_email": from_email,  # Just the email address for easy access
                 "date": msg.get("receivedDateTime", ""),
-                "snippet": msg.get("bodyPreview", "")[:200] if msg.get("bodyPreview") else ""
+                "snippet": msg.get("bodyPreview", "")[:150] if msg.get("bodyPreview") else ""
             })
         
         return {"emails": emails, "count": len(emails), "account": email_address}
@@ -724,11 +745,20 @@ def _send_email(engine, business_id: str, args: dict) -> dict:
     body = body.replace("\\n", "\n")
     
     if not to_email or not subject or not body:
-        return {"error": "Missing required fields: to, subject, and body are all required"}
+        return {"success": False, "error": "Missing required fields: to, subject, and body are all required"}
     
-    # Basic email validation
-    if "@" not in to_email or "." not in to_email:
-        return {"error": f"Invalid email address: {to_email}"}
+    # Strict email validation - must be a real email address, not a name
+    if "@" not in to_email:
+        return {
+            "success": False, 
+            "error": f"Invalid recipient: '{to_email}' is not an email address. You must use an actual email address like 'name@example.com'. Look at the 'from_email' field in list_emails results to get email addresses, or ask the user for the email address."
+        }
+    
+    if "." not in to_email.split("@")[-1]:
+        return {
+            "success": False,
+            "error": f"Invalid email domain in '{to_email}'. The email address must have a valid domain like 'example.com'."
+        }
     
     # Get OAuth account
     with engine.connect() as conn:
