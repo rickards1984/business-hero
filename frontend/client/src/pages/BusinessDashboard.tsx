@@ -35,6 +35,7 @@ import {
   List,
   ListItem,
   ListItemText,
+  ListItemIcon,
   Snackbar,
   Checkbox,
   FormControl,
@@ -43,6 +44,8 @@ import {
   MenuItem,
   FormControlLabel,
   Switch,
+  Menu,
+  Tooltip,
 } from '@mui/material';
 import {
   Business as BusinessIcon,
@@ -66,6 +69,10 @@ import {
   Preview as PreviewIcon,
   Link as LinkIcon,
   SmartToy as SmartToyIcon,
+  Payment as PaymentIcon,
+  Palette as PaletteIcon,
+  Help as HelpIcon,
+  Edit as EditIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type Business, type Task, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
@@ -148,6 +155,8 @@ export default function BusinessDashboard() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [calls, setCalls] = useState<Call[]>([]);
   const [callFilter, setCallFilter] = useState<'all' | 'new' | 'archived'>('new');
+  const [taskFilter, setTaskFilter] = useState<'open' | 'completed' | 'all'>('open');
+  const [settingsAnchor, setSettingsAnchor] = useState<null | HTMLElement>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   
@@ -361,6 +370,18 @@ export default function BusinessDashboard() {
     if (callFilter === 'new') return !call.archived;
     return true; // 'all'
   });
+
+  // Filter tasks based on taskFilter
+  const filteredTasks = tasks.filter(task => {
+    if (taskFilter === 'open') return task.status !== 'completed';
+    if (taskFilter === 'completed') return task.status === 'completed';
+    return true; // 'all'
+  });
+
+  // Task counts for badges
+  const openTaskCount = tasks.filter(t => t.status !== 'completed').length;
+  const overdueInvoiceCount = invoices.filter(inv => new Date(inv.due_date) < new Date() && inv.status !== 'paid').length;
+  const newCallCount = calls.filter(c => !c.archived).length;
 
   const handleSignOut = async () => {
     await signOut();
@@ -644,154 +665,175 @@ export default function BusinessDashboard() {
           </Paper>
         ) : (
           <>
-            <Paper sx={{ p: 3, mb: 3 }} elevation={1}>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                <Typography variant="h5">
-                  Business Profile
-                </Typography>
-                <Box sx={{ display: 'flex', gap: 1 }}>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<SettingsIcon />}
-                    onClick={() => navigate('/app/settings/email')}
-                  >
-                    Email Settings
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    onClick={() => navigate('/app/settings/billing')}
-                  >
-                    Billing
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<OutboxIcon />}
-                    onClick={() => navigate('/app/email/outbox')}
-                  >
-                    Email Outbox
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    onClick={() => navigate('/app/help')}
-                  >
-                    Help / Support
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<LinkIcon />}
-                    onClick={() => navigate('/app/settings/awaz')}
-                  >
-                    Awaz Settings
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    onClick={() => navigate('/app/settings/branding')}
-                  >
-                    Branding Settings
-                  </Button>
+            {/* Compact Business Header */}
+            <Card sx={{ mb: 3, p: 2 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 2 }}>
+                {/* Left: Logo and business info */}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                  {logoUrl ? (
+                    <Avatar 
+                      src={logoUrl} 
+                      alt={businessProfile?.name || business?.name || 'Business'}
+                      sx={{ width: 48, height: 48, borderRadius: 1 }}
+                      variant="rounded"
+                    />
+                  ) : (
+                    <Avatar sx={{ width: 48, height: 48, borderRadius: 1, bgcolor: 'primary.main' }} variant="rounded">
+                      {getBusinessInitials(businessProfile?.name || business?.name || 'B')}
+                    </Avatar>
+                  )}
+                  <Box>
+                    <Typography variant="h6" fontWeight={600} data-testid="text-business-name">
+                      {businessProfile?.name || business.name}
+                    </Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                      <Chip 
+                        icon={<AccessTimeIcon />} 
+                        label={business.timezone || 'Europe/London'} 
+                        size="small" 
+                        variant="outlined"
+                      />
+                      <Chip 
+                        label={membership?.role || 'owner'} 
+                        size="small" 
+                        color="primary"
+                      />
+                    </Box>
+                  </Box>
                 </Box>
-              </Box>
-              <Divider sx={{ mb: 2 }} />
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
-                {logoUrl ? (
-                  <img
-                    src={logoUrl}
-                    alt={businessProfile?.name || business?.name || 'Business Logo'}
-                    style={{
-                      height: '64px',
-                      width: 'auto',
-                      maxWidth: '200px',
-                      objectFit: 'contain',
-                    }}
-                  />
-                ) : businessProfile?.name || business?.name ? (
-                  <Avatar
-                    sx={{
-                      width: 64,
-                      height: 64,
-                      bgcolor: 'primary.main',
-                      fontSize: '1.5rem',
-                    }}
-                  >
-                    {getBusinessInitials(businessProfile?.name || business?.name || '')}
-                  </Avatar>
-                ) : (
-                  <BusinessIcon sx={{ fontSize: 64, color: 'text.disabled' }} />
-                )}
+                
+                {/* Right: Settings dropdown */}
                 <Box>
-                  <Typography variant="h6" data-testid="text-business-name">
-                    {businessProfile?.name || business.name}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    Business Logo
-                  </Typography>
+                  <Button
+                    variant="outlined"
+                    onClick={(e) => setSettingsAnchor(e.currentTarget)}
+                    endIcon={<SettingsIcon />}
+                  >
+                    Settings
+                  </Button>
+                  <Menu
+                    anchorEl={settingsAnchor}
+                    open={Boolean(settingsAnchor)}
+                    onClose={() => setSettingsAnchor(null)}
+                    PaperProps={{ sx: { minWidth: 200 } }}
+                  >
+                    <MenuItem onClick={() => { setSettingsAnchor(null); navigate('/app/settings/email'); }}>
+                      <ListItemIcon><EmailIcon fontSize="small" /></ListItemIcon>
+                      <ListItemText>Email Settings</ListItemText>
+                    </MenuItem>
+                    <MenuItem onClick={() => { setSettingsAnchor(null); navigate('/app/settings/billing'); }}>
+                      <ListItemIcon><PaymentIcon fontSize="small" /></ListItemIcon>
+                      <ListItemText>Billing</ListItemText>
+                    </MenuItem>
+                    <MenuItem onClick={() => { setSettingsAnchor(null); navigate('/app/settings/awaz'); }}>
+                      <ListItemIcon><PhoneIcon fontSize="small" /></ListItemIcon>
+                      <ListItemText>Awaz Settings</ListItemText>
+                    </MenuItem>
+                    <MenuItem onClick={() => { setSettingsAnchor(null); navigate('/app/settings/branding'); }}>
+                      <ListItemIcon><PaletteIcon fontSize="small" /></ListItemIcon>
+                      <ListItemText>Branding</ListItemText>
+                    </MenuItem>
+                    <MenuItem onClick={() => { setSettingsAnchor(null); navigate('/app/email/outbox'); }}>
+                      <ListItemIcon><OutboxIcon fontSize="small" /></ListItemIcon>
+                      <ListItemText>Email Outbox</ListItemText>
+                    </MenuItem>
+                    <Divider />
+                    <MenuItem onClick={() => { setSettingsAnchor(null); navigate('/app/help'); }}>
+                      <ListItemIcon><HelpIcon fontSize="small" /></ListItemIcon>
+                      <ListItemText>Help & Support</ListItemText>
+                    </MenuItem>
+                  </Menu>
                 </Box>
               </Box>
-              <Grid container spacing={3}>
-                <Grid size={{ xs: 12, md: 4 }}>
-                  <Typography variant="caption" color="text.secondary" display="block">
-                    Business Name
-                  </Typography>
-                  <Typography variant="body1" fontWeight="medium">
-                    {businessProfile?.name || business.name}
-                  </Typography>
-                </Grid>
-                <Grid size={{ xs: 12, md: 4 }}>
-                  <Typography variant="caption" color="text.secondary" display="block">
-                    Timezone
-                  </Typography>
-                  <Chip
-                    icon={<AccessTimeIcon />}
-                    label={business.timezone}
-                    size="small"
-                    variant="outlined"
-                  />
-                </Grid>
-                <Grid size={{ xs: 12, md: 4 }}>
-                  <Typography variant="caption" color="text.secondary" display="block">
-                    Your Role
-                  </Typography>
-                  <Chip
-                    label={membership?.role || 'Member'}
-                    size="small"
-                    color="primary"
-                  />
-                </Grid>
-              </Grid>
-            </Paper>
+            </Card>
 
             <Paper sx={{ p: 3 }} elevation={1}>
               <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 0 }}>
-                <Tabs value={tabValue} onChange={(_, v) => setTabValue(v)}>
+                <Tabs 
+                  value={tabValue} 
+                  onChange={(_, v) => setTabValue(v)}
+                  sx={{ 
+                    '& .MuiTab-root': {
+                      minHeight: 56,
+                      textTransform: 'none',
+                      fontWeight: 500,
+                    }
+                  }}
+                >
                   <Tab
                     icon={<TaskIcon />}
                     iconPosition="start"
-                    label={`Tasks (${tasks.length})`}
+                    label={
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        Tasks
+                        <Chip 
+                          label={openTaskCount} 
+                          size="small" 
+                          color={openTaskCount > 0 ? 'primary' : 'default'}
+                          sx={{ minWidth: 24, height: 22 }}
+                        />
+                      </Box>
+                    }
                     data-testid="tab-tasks"
                   />
                   <Tab
                     icon={<PhoneIcon />}
                     iconPosition="start"
-                    label={`Calls (${calls.length})`}
+                    label={
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        Calls
+                        <Chip 
+                          label={newCallCount} 
+                          size="small" 
+                          color={newCallCount > 0 ? 'primary' : 'default'}
+                          sx={{ minWidth: 24, height: 22 }}
+                        />
+                      </Box>
+                    }
                     data-testid="tab-calls"
                   />
                   <Tab
                     icon={<ReceiptIcon />}
                     iconPosition="start"
-                    label={`Invoices (${invoices.length})`}
+                    label={
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        Invoices
+                        <Chip 
+                          label={overdueInvoiceCount > 0 ? `${overdueInvoiceCount} overdue` : invoices.length} 
+                          size="small" 
+                          color={overdueInvoiceCount > 0 ? 'error' : 'default'}
+                          sx={{ minWidth: 24, height: 22 }}
+                        />
+                      </Box>
+                    }
                     data-testid="tab-invoices"
                   />
                 </Tabs>
               </Box>
 
               <TabPanel value={tabValue} index={0}>
-                <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 2 }}>
+                {/* Header with filter chips and create button */}
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
+                  <Box sx={{ display: 'flex', gap: 1 }}>
+                    <Chip 
+                      label={`Open (${tasks.filter(t => t.status !== 'completed').length})`}
+                      onClick={() => setTaskFilter('open')}
+                      color={taskFilter === 'open' ? 'primary' : 'default'}
+                      variant={taskFilter === 'open' ? 'filled' : 'outlined'}
+                    />
+                    <Chip 
+                      label={`Completed (${tasks.filter(t => t.status === 'completed').length})`}
+                      onClick={() => setTaskFilter('completed')}
+                      color={taskFilter === 'completed' ? 'primary' : 'default'}
+                      variant={taskFilter === 'completed' ? 'filled' : 'outlined'}
+                    />
+                    <Chip 
+                      label={`All (${tasks.length})`}
+                      onClick={() => setTaskFilter('all')}
+                      color={taskFilter === 'all' ? 'primary' : 'default'}
+                      variant={taskFilter === 'all' ? 'filled' : 'outlined'}
+                    />
+                  </Box>
                   <Button
                     variant="contained"
                     startIcon={<AddIcon />}
@@ -802,58 +844,108 @@ export default function BusinessDashboard() {
                   </Button>
                 </Box>
 
-                {tasks.length === 0 ? (
+                {filteredTasks.length === 0 ? (
                   <Box sx={{ textAlign: 'center', py: 4 }}>
                     <TaskIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
-                    <Typography color="text.secondary">No tasks yet</Typography>
+                    <Typography color="text.secondary">
+                      {taskFilter === 'completed' ? 'No completed tasks' : taskFilter === 'open' ? 'No open tasks' : 'No tasks yet'}
+                    </Typography>
                   </Box>
                 ) : (
-                  <Grid container spacing={2}>
-                    {tasks.map((task) => (
-                      <Grid size={{ xs: 12, sm: 6, md: 4 }} key={task.id}>
-                        <Card
-                          variant="outlined"
-                          sx={{
-                            opacity: task.status === 'completed' ? 0.7 : 1,
-                          }}
+                  <Box>
+                    {filteredTasks.map((task) => {
+                      const isOverdue = task.due_at && new Date(task.due_at) < new Date() && task.status !== 'completed';
+                      return (
+                        <Card 
+                          key={task.id}
                           data-testid={`card-task-${task.id}`}
+                          sx={{ 
+                            p: 2, 
+                            mb: 2,
+                            borderLeft: 4,
+                            borderLeftColor: isOverdue ? 'error.main' : task.status === 'completed' ? 'success.main' : 'primary.main',
+                            opacity: task.status === 'completed' ? 0.7 : 1,
+                            '&:hover': { boxShadow: 2 },
+                            transition: 'box-shadow 0.2s'
+                          }}
                         >
-                          <CardContent>
-                            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1, gap: 1 }}>
-                              <Typography variant="subtitle1" fontWeight="medium" sx={{ flexGrow: 1 }}>
-                                {task.title}
-                              </Typography>
-                              <Chip
-                                label={task.status}
-                                size="small"
-                                color={task.status === 'completed' ? 'success' : 'warning'}
-                              />
+                          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                            <Box sx={{ flex: 1 }}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5, flexWrap: 'wrap' }}>
+                                <Typography 
+                                  variant="subtitle1" 
+                                  fontWeight={600} 
+                                  sx={{
+                                    textDecoration: task.status === 'completed' ? 'line-through' : 'none'
+                                  }}
+                                >
+                                  {task.title}
+                                </Typography>
+                                <Chip 
+                                  label={task.status} 
+                                  size="small"
+                                  color={task.status === 'completed' ? 'success' : 'primary'}
+                                  variant="outlined"
+                                />
+                              </Box>
+                              
+                              {task.description && (
+                                <Typography 
+                                  variant="body2" 
+                                  color="text.secondary" 
+                                  sx={{ 
+                                    mb: 1,
+                                    display: '-webkit-box',
+                                    WebkitLineClamp: 2,
+                                    WebkitBoxOrient: 'vertical',
+                                    overflow: 'hidden'
+                                  }}
+                                >
+                                  {task.description}
+                                </Typography>
+                              )}
+                              
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+                                {task.due_at && (
+                                  <Typography variant="caption" color={isOverdue ? 'error.main' : 'text.secondary'}>
+                                    {isOverdue ? '⚠️ Overdue: ' : 'Due: '}
+                                    {new Date(task.due_at).toLocaleDateString('en-GB', { 
+                                      day: 'numeric', 
+                                      month: 'short',
+                                      hour: '2-digit',
+                                      minute: '2-digit'
+                                    })}
+                                  </Typography>
+                                )}
+                                {task.source && (
+                                  <Chip label={task.source} size="small" variant="outlined" />
+                                )}
+                                <Typography variant="caption" color="text.disabled">
+                                  Created: {new Date(task.created_at).toLocaleDateString('en-GB')}
+                                </Typography>
+                              </Box>
                             </Box>
-                            {task.description && (
-                              <Typography variant="body2" color="text.secondary">
-                                {task.description}
-                              </Typography>
-                            )}
-                            <Typography variant="caption" color="text.disabled" display="block" sx={{ mt: 1 }}>
-                              {new Date(task.created_at).toLocaleString()}
-                            </Typography>
-                          </CardContent>
-                          {task.status !== 'completed' && (
-                            <CardActions>
-                              <Button
-                                size="small"
-                                startIcon={<CheckCircleIcon />}
-                                onClick={() => handleCompleteTask(task.id)}
-                                data-testid={`button-complete-task-${task.id}`}
-                              >
-                                Complete
-                              </Button>
-                            </CardActions>
-                          )}
+                            
+                            {/* Action buttons */}
+                            <Box sx={{ display: 'flex', gap: 0.5, ml: 1 }}>
+                              {task.status !== 'completed' && (
+                                <Tooltip title="Mark complete">
+                                  <IconButton 
+                                    size="small" 
+                                    onClick={() => handleCompleteTask(task.id)} 
+                                    color="success"
+                                    data-testid={`button-complete-task-${task.id}`}
+                                  >
+                                    <CheckCircleIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                              )}
+                            </Box>
+                          </Box>
                         </Card>
-                      </Grid>
-                    ))}
-                  </Grid>
+                      );
+                    })}
+                  </Box>
                 )}
               </TabPanel>
 

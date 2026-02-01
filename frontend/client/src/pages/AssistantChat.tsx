@@ -19,6 +19,11 @@ import SmartToyIcon from '@mui/icons-material/SmartToy';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
+import EmailIcon from '@mui/icons-material/Email';
+import TaskIcon from '@mui/icons-material/Task';
+import PhoneIcon from '@mui/icons-material/Phone';
+import ReceiptIcon from '@mui/icons-material/Receipt';
+import { Card } from '@mui/material';
 import { useAuth } from '@/contexts/AuthContext';
 import { apiRequest } from '@/lib/queryClient';
 
@@ -30,9 +35,10 @@ interface ChatMessage {
 }
 
 const QUICK_ACTIONS = [
-  "Summarise today's calls",
-  'List open tasks I should do next',
-  'Create a follow-up message for the last caller',
+  { icon: <EmailIcon />, label: "Check my emails", action: "Give me a summary of my emails today" },
+  { icon: <TaskIcon />, label: "Review tasks", action: "What tasks should I focus on today?" },
+  { icon: <PhoneIcon />, label: "Recent calls", action: "Summarise my recent calls" },
+  { icon: <ReceiptIcon />, label: "Invoice status", action: "Which invoices are overdue?" },
 ];
 
 const pulseAnimation = keyframes`
@@ -360,7 +366,8 @@ export default function AssistantChat() {
 
   const handleQuickAction = (text: string) => {
     setInput(text);
-    inputRef.current?.focus();
+    // Auto-send the quick action
+    handleSendMessage(text);
   };
 
   const handleMicToggle = () => {
@@ -419,29 +426,7 @@ export default function AssistantChat() {
           Back to Dashboard
         </Button>
       </Box>
-      <Paper sx={{ p: 3, mb: 3 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-          <SmartToyIcon color="primary" />
-          <Typography variant="h6">AI Admin Chat</Typography>
-        </Box>
-        <Typography variant="body2" color="text.secondary">
-          Ask the assistant to summarise calls, list tasks, or draft follow-ups.
-        </Typography>
-      </Paper>
-
-      <Paper sx={{ p: 3, mb: 2 }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>
-          Quick actions
-        </Typography>
-        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-          {QUICK_ACTIONS.map((action) => (
-            <Button key={action} variant="outlined" size="small" onClick={() => handleQuickAction(action)}>
-              {action}
-            </Button>
-          ))}
-        </Box>
-      </Paper>
-
+      {/* Voice controls */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
           <FormControlLabel
@@ -478,9 +463,89 @@ export default function AssistantChat() {
         </Box>
       </Paper>
 
-      <Paper sx={{ p: 3, mb: 2, minHeight: 320 }}>
+      <Paper sx={{ p: 3, mb: 2, minHeight: 400 }}>
         {messages.length === 0 ? (
-          <Typography color="text.secondary">Start a conversation to see responses here.</Typography>
+          /* Modern empty state */
+          <Box sx={{ 
+            display: 'flex', 
+            flexDirection: 'column', 
+            alignItems: 'center', 
+            justifyContent: 'center',
+            height: '100%',
+            minHeight: 350,
+            textAlign: 'center',
+            py: 4
+          }}>
+            {/* Animated AI icon */}
+            <Box sx={{ 
+              width: 80, 
+              height: 80, 
+              borderRadius: '50%', 
+              bgcolor: 'primary.light',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              mb: 3,
+              animation: 'pulse 2s infinite',
+              '@keyframes pulse': {
+                '0%': { boxShadow: '0 0 0 0 rgba(25, 118, 210, 0.4)' },
+                '70%': { boxShadow: '0 0 0 15px rgba(25, 118, 210, 0)' },
+                '100%': { boxShadow: '0 0 0 0 rgba(25, 118, 210, 0)' },
+              }
+            }}>
+              <SmartToyIcon sx={{ fontSize: 40, color: 'primary.main' }} />
+            </Box>
+            
+            <Typography variant="h5" fontWeight={600} gutterBottom>
+              Hi! I'm your AI Admin
+            </Typography>
+            <Typography variant="body1" color="text.secondary" sx={{ mb: 4, maxWidth: 400 }}>
+              I can help you manage emails, tasks, calls, and invoices. Try asking me something or use a quick action below.
+            </Typography>
+            
+            {/* Quick action cards */}
+            <Box sx={{ 
+              display: 'grid', 
+              gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)' }, 
+              gap: 2,
+              maxWidth: 500,
+              width: '100%'
+            }}>
+              {QUICK_ACTIONS.map((action, index) => (
+                <Card 
+                  key={index}
+                  sx={{ 
+                    p: 2, 
+                    cursor: 'pointer',
+                    transition: 'all 0.2s',
+                    '&:hover': { 
+                      transform: 'translateY(-2px)',
+                      boxShadow: 3,
+                      borderColor: 'primary.main'
+                    },
+                    border: '1px solid',
+                    borderColor: 'divider'
+                  }}
+                  onClick={() => handleQuickAction(action.action)}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                    <Box sx={{ color: 'primary.main' }}>{action.icon}</Box>
+                    <Typography variant="body2" fontWeight={500}>
+                      {action.label}
+                    </Typography>
+                  </Box>
+                </Card>
+              ))}
+            </Box>
+            
+            {/* Voice mode hint */}
+            <Box sx={{ mt: 4, display: 'flex', alignItems: 'center', gap: 1, color: 'text.secondary' }}>
+              <MicIcon fontSize="small" />
+              <Typography variant="caption">
+                Toggle voice mode above for hands-free conversation
+              </Typography>
+            </Box>
+          </Box>
         ) : (
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             {messages.map((message, idx) => (
