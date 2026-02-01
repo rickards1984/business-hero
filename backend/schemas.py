@@ -259,6 +259,7 @@ class ChaseDraftResponse(BaseModel):
     subject: str
     body: str
     chase_stage: int
+    stage_description: Optional[str] = None
 
 
 class EmailConnectionPublic(BaseModel):
@@ -313,6 +314,7 @@ class SendChaseResponse(BaseModel):
     subject: str
     body: str
     chase_stage: int
+    stage_description: Optional[str] = None
     status: str
     error_message: Optional[str] = None
     outbox_id: Optional[str] = None

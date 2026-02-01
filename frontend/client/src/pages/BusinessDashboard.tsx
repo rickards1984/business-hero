@@ -54,6 +54,8 @@ import {
   AccessTime as AccessTimeIcon,
   Receipt as ReceiptIcon,
   Archive as ArchiveIcon,
+  Warning as WarningIcon,
+  Gavel as GavelIcon,
   CloudUpload as CloudUploadIcon,
   Email as EmailIcon,
   CheckCircleOutline as CheckCircleOutlineIcon,
@@ -98,6 +100,42 @@ function TabPanel(props: TabPanelProps) {
     </div>
   );
 }
+
+// Chase stage definitions
+interface ChaseStage {
+  stage: number;
+  label: string;
+  description: string;
+  color: 'default' | 'primary' | 'warning' | 'error';
+}
+
+const CHASE_STAGES: ChaseStage[] = [
+  { stage: 1, label: 'Stage 1', description: 'Friendly Reminder', color: 'primary' },
+  { stage: 2, label: 'Stage 2', description: 'Second Notice', color: 'primary' },
+  { stage: 3, label: 'Stage 3', description: 'Final Warning', color: 'warning' },
+  { stage: 4, label: 'Stage 4', description: 'Legal Action Notice', color: 'error' },
+];
+
+// Helper component to display chase stage as a chip
+const ChaseStageChip: React.FC<{ stage: number }> = ({ stage }) => {
+  if (!stage || stage === 0) {
+    return <Chip label="Not chased" size="small" variant="outlined" />;
+  }
+  
+  const stageInfo = CHASE_STAGES.find(s => s.stage === stage);
+  if (!stageInfo) {
+    return <Chip label={`Stage ${stage}`} size="small" />;
+  }
+  
+  return (
+    <Chip 
+      label={`${stageInfo.label}: ${stageInfo.description}`}
+      size="small"
+      color={stageInfo.color}
+      icon={stage >= 4 ? <GavelIcon /> : stage >= 3 ? <WarningIcon /> : undefined}
+    />
+  );
+};
 
 export default function BusinessDashboard() {
   const navigate = useNavigate();
@@ -147,8 +185,9 @@ export default function BusinessDashboard() {
   const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<string[]>([]);
   const [invoiceStage, setInvoiceStage] = useState(1);
   const [dryRunSend, setDryRunSend] = useState(false);
+  const [bulkChaseStage, setBulkChaseStage] = useState(1);
   const [bulkPreviewOpen, setBulkPreviewOpen] = useState(false);
-  const [bulkPreview, setBulkPreview] = useState<{ invoice_id: string; subject: string; body: string; status: string; error_message?: string }[]>([]);
+  const [bulkPreview, setBulkPreview] = useState<{ invoice_id: string; subject: string; body: string; status: string; stage_description?: string; error_message?: string }[]>([]);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -393,7 +432,7 @@ export default function BusinessDashboard() {
   const handleGetChaseDraft = async () => {
     if (!selectedInvoice) return;
     try {
-      const response = await apiRequest('POST', `/v1/invoices/${selectedInvoice.id}/chase-draft`);
+      const response = await apiRequest('POST', `/v1/invoices/${selectedInvoice.id}/chase-draft?stage=${invoiceStage}`);
       const data = await response.json();
       setChaseDraft(data);
     } catch (err: any) {
@@ -405,7 +444,7 @@ export default function BusinessDashboard() {
     if (!selectedInvoice) return;
     try {
       const response = await apiRequest('POST', `/v1/invoices/${selectedInvoice.id}/send-chase`, {
-        chase_stage: invoiceStage - 1,
+        chase_stage: invoiceStage,  // Now uses 1-4 directly
         dry_run: dryRunSend,
       });
       const data = await response.json();
@@ -415,7 +454,8 @@ export default function BusinessDashboard() {
         return;
       }
       await fetchInvoices();
-      setSuccessMessage('Chase email sent');
+      const stageInfo = CHASE_STAGES.find(s => s.stage === invoiceStage);
+      setSuccessMessage(`${stageInfo?.description || 'Chase email'} sent successfully`);
     } catch (err: any) {
       setError(err.message || 'Failed to send chase email');
     }
@@ -456,7 +496,7 @@ export default function BusinessDashboard() {
     try {
       const response = await apiRequest('POST', `/v1/invoices/send-chase/bulk`, {
         invoice_ids: selectedInvoiceIds,
-        chase_stage: 0,
+        chase_stage: bulkChaseStage,  // Use selected stage
         dry_run: true,
       });
       const data = await response.json();
@@ -472,13 +512,14 @@ export default function BusinessDashboard() {
     try {
       const response = await apiRequest('POST', `/v1/invoices/send-chase/bulk`, {
         invoice_ids: selectedInvoiceIds,
-        chase_stage: 0,
+        chase_stage: bulkChaseStage,  // Use selected stage
         dry_run: false,
       });
       const data = await response.json();
       setBulkPreview(data.results || []);
       await fetchInvoices();
-      setSuccessMessage(`Bulk send complete: ${data.sent} sent, ${data.failed} failed`);
+      const stageInfo = CHASE_STAGES.find(s => s.stage === bulkChaseStage);
+      setSuccessMessage(`Bulk ${stageInfo?.description || 'chase'} complete: ${data.sent} sent, ${data.failed} failed`);
       setSelectedInvoiceIds([]);
       setBulkPreviewOpen(false);
     } catch (err: any) {
@@ -969,14 +1010,33 @@ export default function BusinessDashboard() {
                       </Typography>
                     </Card>
                   </Box>
-                  <Box sx={{ display: 'flex', gap: 1 }}>
+                  <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                    <FormControl size="small" sx={{ minWidth: 180 }}>
+                      <InputLabel>Chase Stage</InputLabel>
+                      <Select
+                        value={bulkChaseStage}
+                        label="Chase Stage"
+                        onChange={(e) => setBulkChaseStage(Number(e.target.value))}
+                      >
+                        {CHASE_STAGES.map((stage) => (
+                          <MenuItem key={stage.stage} value={stage.stage}>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                              {stage.stage >= 4 && <GavelIcon fontSize="small" color="error" />}
+                              {stage.stage === 3 && <WarningIcon fontSize="small" color="warning" />}
+                              <span>{stage.label}: {stage.description}</span>
+                            </Box>
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
                     <Button
                       variant="outlined"
                       startIcon={<SendIcon />}
                       disabled={selectedInvoiceIds.length === 0}
                       onClick={handleBulkPreview}
+                      color={bulkChaseStage >= 3 ? 'warning' : 'primary'}
                     >
-                      Send stage 1
+                      Preview ({selectedInvoiceIds.length})
                     </Button>
                     <input
                       accept=".csv"
@@ -1058,7 +1118,9 @@ export default function BusinessDashboard() {
                                 color={invoice.status === 'paid' ? 'success' : invoice.status === 'overdue' ? 'error' : 'warning'}
                               />
                             </TableCell>
-                            <TableCell>{invoice.chase_stage}</TableCell>
+                            <TableCell>
+                              <ChaseStageChip stage={invoice.chase_stage} />
+                            </TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
@@ -1132,19 +1194,24 @@ export default function BusinessDashboard() {
 
             <Divider sx={{ my: 2 }} />
 
-            <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
-              <FormControl size="small" fullWidth>
-                <InputLabel id="invoice-stage-label">Stage</InputLabel>
+            <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap' }}>
+              <FormControl size="small" sx={{ minWidth: 220 }}>
+                <InputLabel id="invoice-stage-label">Chase Stage</InputLabel>
                 <Select
                   labelId="invoice-stage-label"
-                  label="Stage"
+                  label="Chase Stage"
                   value={invoiceStage}
                   onChange={(e) => setInvoiceStage(Number(e.target.value))}
                 >
-                  <MenuItem value={1}>Stage 1</MenuItem>
-                  <MenuItem value={2}>Stage 2</MenuItem>
-                  <MenuItem value={3}>Stage 3</MenuItem>
-                  <MenuItem value={4}>Stage 4</MenuItem>
+                  {CHASE_STAGES.map((stage) => (
+                    <MenuItem key={stage.stage} value={stage.stage}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        {stage.stage >= 4 && <GavelIcon fontSize="small" color="error" />}
+                        {stage.stage === 3 && <WarningIcon fontSize="small" color="warning" />}
+                        <span>{stage.label}: {stage.description}</span>
+                      </Box>
+                    </MenuItem>
+                  ))}
                 </Select>
               </FormControl>
               <FormControlLabel
@@ -1157,6 +1224,16 @@ export default function BusinessDashboard() {
                 label="Dry run"
               />
             </Box>
+            
+            {/* Warning for serious stages */}
+            {invoiceStage >= 3 && (
+              <Alert severity={invoiceStage >= 4 ? 'error' : 'warning'} sx={{ mb: 2 }}>
+                {invoiceStage >= 4 
+                  ? 'This will send a formal legal action notice. Only use when all other attempts have failed.'
+                  : 'This will send a final warning before potential legal action.'
+                }
+              </Alert>
+            )}
 
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
               <Button
@@ -1200,7 +1277,17 @@ export default function BusinessDashboard() {
 
       {/* Bulk Send Preview Dialog */}
       <Dialog open={bulkPreviewOpen} onClose={() => setBulkPreviewOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle>Review bulk send (Stage 1)</DialogTitle>
+        <DialogTitle>
+          Review bulk send - {CHASE_STAGES.find(s => s.stage === bulkChaseStage)?.description || `Stage ${bulkChaseStage}`}
+          {bulkChaseStage >= 3 && (
+            <Chip 
+              label={bulkChaseStage >= 4 ? 'Legal Action' : 'Final Warning'} 
+              color={bulkChaseStage >= 4 ? 'error' : 'warning'} 
+              size="small" 
+              sx={{ ml: 1 }}
+            />
+          )}
+        </DialogTitle>
         <DialogContent>
           {bulkPreview.length === 0 ? (
             <Typography color="text.secondary">No preview available.</Typography>

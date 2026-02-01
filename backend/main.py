@@ -2349,64 +2349,26 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def generate_chase_email(invoice: Invoice, business: Business, stage: int) -> Dict[str, str]:
-    """Generate chase email subject/body based on stage."""
-    stage = min(max(stage, 0), 3)
-    amount_text = f"{invoice.currency} {float(invoice.amount):.2f}"
-    due_date = invoice.due_date.strftime("%d %B %Y")
-
-    templates = {
-        0: {
-            "subject": f"Payment Reminder: Invoice {invoice.invoice_number}",
-            "body": (
-                f"Dear {invoice.customer_name},\n\n"
-                f"This is a friendly reminder that payment for invoice {invoice.invoice_number} "
-                f"in the amount of {amount_text} is now due.\n\n"
-                "Please arrange payment at your earliest convenience.\n\n"
-                "Thank you for your business.\n\n"
-                f"Best regards,\n{business.name}"
-            ),
-        },
-        1: {
-            "subject": f"Second Notice: Invoice {invoice.invoice_number} - Payment Overdue",
-            "body": (
-                f"Dear {invoice.customer_name},\n\n"
-                f"We have not yet received payment for invoice {invoice.invoice_number} "
-                f"in the amount of {amount_text}, which was due on {due_date}.\n\n"
-                "Please arrange payment immediately to avoid further action.\n\n"
-                "If you have already made payment, please disregard this notice.\n\n"
-                f"Best regards,\n{business.name}"
-            ),
-        },
-        2: {
-            "subject": f"Final Notice: Invoice {invoice.invoice_number} - Urgent Payment Required",
-            "body": (
-                f"Dear {invoice.customer_name},\n\n"
-                f"This is our final notice regarding invoice {invoice.invoice_number} "
-                f"in the amount of {amount_text}, which is now significantly overdue.\n\n"
-                f"Payment was due on {due_date} and we have not received payment despite previous reminders.\n\n"
-                "Please arrange payment immediately. If payment is not received within 7 days, "
-                "we may need to take further action.\n\n"
-                "If you have any queries or concerns, please contact us immediately.\n\n"
-                f"Best regards,\n{business.name}"
-            ),
-        },
-        3: {
-            "subject": f"URGENT: Invoice {invoice.invoice_number} - Immediate Payment Required",
-            "body": (
-                f"Dear {invoice.customer_name},\n\n"
-                f"This is an urgent final notice regarding invoice {invoice.invoice_number} "
-                f"in the amount of {amount_text}.\n\n"
-                f"This invoice is now overdue since {due_date}, and we have sent multiple reminders without response.\n\n"
-                "We require immediate payment. If payment is not received within 3 business days, "
-                "we will have no choice but to escalate this matter, which may include legal action.\n\n"
-                "Please contact us immediately to discuss payment arrangements.\n\n"
-                f"Best regards,\n{business.name}"
-            ),
-        },
+def generate_chase_email(invoice: Invoice, business: Business, stage: int, user_name: Optional[str] = None) -> Dict[str, str]:
+    """Generate chase email subject/body based on stage (1-4).
+    
+    Uses professional escalating templates from email_templates module.
+    """
+    from email_templates import get_chase_email_template
+    
+    # Normalize stage to 1-4 range (previously was 0-3, now 1-4)
+    stage = min(max(stage, 1), 4)
+    
+    # Build invoice data dict for template
+    invoice_data = {
+        "customer_name": invoice.customer_name or "Customer",
+        "invoice_number": invoice.invoice_number,
+        "amount": float(invoice.amount) if invoice.amount else 0,
+        "due_date": invoice.due_date.strftime("%d/%m/%Y") if invoice.due_date else "N/A",
+        "currency": invoice.currency or "£"
     }
-
-    return templates[stage]
+    
+    return get_chase_email_template(stage, invoice_data, business.name, user_name)
 
 
 @app.get("/v1/invoices", response_model=InvoiceListResponse, tags=["Invoices"])
@@ -2645,16 +2607,20 @@ async def mark_invoice_chased(
 @app.post("/v1/invoices/{invoice_id}/chase-draft", response_model=ChaseDraftResponse, tags=["Invoices"])
 async def get_chase_draft(
     invoice_id: str,
-    business: Business = Depends(get_current_user_business),
+    stage: Optional[int] = Query(default=None, ge=1, le=4, description="Chase stage (1-4), defaults to next stage"),
+    user_business=Depends(get_current_user_and_business),
     session: Session = Depends(get_session)
 ):
     """Get email draft for chasing an invoice.
     
     Authentication: Bearer token (Supabase access token) in Authorization header.
     
-    Returns email subject and body based on chase stage (0-3).
+    Returns email subject and body based on chase stage (1-4).
     Does NOT send the email.
     """
+    from email_templates import get_stage_description
+    
+    user, business = user_business
     invoice = session.exec(
         select(Invoice).where(
             Invoice.id == invoice_id,
@@ -2665,12 +2631,31 @@ async def get_chase_draft(
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
     
-    template = generate_chase_email(invoice, business, invoice.chase_stage)
+    # Get user's name for email signature
+    user_name = None
+    try:
+        result = session.execute(text("""
+            SELECT full_name, display_name FROM profiles WHERE id = :user_id
+        """), {"user_id": str(user.id)})
+        row = result.fetchone()
+        if row:
+            user_name = row[1] or row[0]
+    except Exception:
+        pass
+    
+    # Determine stage: use provided stage or next stage (current+1, min 1, max 4)
+    if stage is not None:
+        chase_stage = stage
+    else:
+        chase_stage = min((invoice.chase_stage or 0) + 1, 4)
+    
+    template = generate_chase_email(invoice, business, chase_stage, user_name)
 
     return ChaseDraftResponse(
         subject=template["subject"],
         body=template["body"],
-        chase_stage=invoice.chase_stage
+        chase_stage=chase_stage,
+        stage_description=get_stage_description(chase_stage)
     )
 
 
@@ -2685,7 +2670,9 @@ async def send_chase_email(
     user_business=Depends(get_current_user_and_business),
     session: Session = Depends(get_session)
 ):
-    """Send a chase email for a single invoice."""
+    """Send a chase email for a single invoice at specified stage (1-4)."""
+    from email_templates import get_stage_description
+    
     user, business = user_business
     invoice = session.exec(
         select(Invoice).where(
@@ -2697,10 +2684,29 @@ async def send_chase_email(
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
 
-    stage = data.chase_stage if data.chase_stage is not None else invoice.chase_stage
-    template = generate_chase_email(invoice, business, stage)
+    # Get user's name for email signature
+    user_name = None
+    try:
+        result = session.execute(text("""
+            SELECT full_name, display_name FROM profiles WHERE id = :user_id
+        """), {"user_id": str(user.id)})
+        row = result.fetchone()
+        if row:
+            user_name = row[1] or row[0]  # Prefer display_name over full_name
+    except Exception:
+        pass  # profiles table might not exist
+
+    # Determine stage (1-4, default to current+1 or 1)
+    if data.chase_stage is not None:
+        stage = min(max(data.chase_stage, 1), 4)
+    else:
+        # Auto-increment: if current stage is 0, start at 1; otherwise next stage up to 4
+        stage = min((invoice.chase_stage or 0) + 1, 4)
+    
+    template = generate_chase_email(invoice, business, stage, user_name)
     subject = data.subject or template["subject"]
     body = data.body or template["body"]
+    stage_desc = get_stage_description(stage)
 
     if data.dry_run:
         return SendChaseResponse(
@@ -2708,6 +2714,7 @@ async def send_chase_email(
             subject=subject,
             body=body,
             chase_stage=stage,
+            stage_description=stage_desc,
             status="dry_run",
             dry_run=True
         )
@@ -2743,6 +2750,7 @@ async def send_chase_email(
             subject=subject,
             body=body,
             chase_stage=stage,
+            stage_description=stage_desc,
             status="failed",
             error_message="Customer email not set",
             outbox_id=str(outbox.id)
@@ -2759,7 +2767,7 @@ async def send_chase_email(
         session.add(outbox)
 
         invoice.last_chased_at = datetime.utcnow()
-        invoice.chase_stage = invoice.chase_stage + 1
+        invoice.chase_stage = stage  # Set to the actual stage sent
         session.add(invoice)
 
         session.commit()
@@ -2768,6 +2776,7 @@ async def send_chase_email(
             subject=subject,
             body=body,
             chase_stage=stage,
+            stage_description=stage_desc,
             status="sent",
             outbox_id=str(outbox.id)
         )
@@ -2781,6 +2790,7 @@ async def send_chase_email(
             subject=subject,
             body=body,
             chase_stage=stage,
+            stage_description=stage_desc,
             status="failed",
             error_message=str(exc),
             outbox_id=str(outbox.id)
@@ -2793,11 +2803,25 @@ async def send_chase_bulk(
     user_business=Depends(get_current_user_and_business),
     session: Session = Depends(get_session)
 ):
-    """Send chase emails for multiple invoices."""
-    _, business = user_business
+    """Send chase emails for multiple invoices at specified stage (1-4)."""
+    from email_templates import get_stage_description
+    
+    user, business = user_business
     results: List[SendChaseResponse] = []
     sent = 0
     failed = 0
+
+    # Get user's name for email signature
+    user_name = None
+    try:
+        result = session.execute(text("""
+            SELECT full_name, display_name FROM profiles WHERE id = :user_id
+        """), {"user_id": str(user.id)})
+        row = result.fetchone()
+        if row:
+            user_name = row[1] or row[0]
+    except Exception:
+        pass
 
     invoices = session.exec(
         select(Invoice).where(
@@ -2829,18 +2853,26 @@ async def send_chase_bulk(
         invoice = invoice_map.get(invoice_id)
         if not invoice:
             failed += 1
+            stage = min(max(data.chase_stage or 1, 1), 4)
             results.append(SendChaseResponse(
                 invoice_id=invoice_id,
                 subject="",
                 body="",
-                chase_stage=data.chase_stage or 0,
+                chase_stage=stage,
+                stage_description=get_stage_description(stage),
                 status="failed",
                 error_message="Invoice not found"
             ))
             continue
 
-        stage = data.chase_stage if data.chase_stage is not None else invoice.chase_stage
-        template = generate_chase_email(invoice, business, stage)
+        # Determine stage: use provided or next stage (current+1, min 1, max 4)
+        if data.chase_stage is not None:
+            stage = min(max(data.chase_stage, 1), 4)
+        else:
+            stage = min((invoice.chase_stage or 0) + 1, 4)
+        
+        stage_desc = get_stage_description(stage)
+        template = generate_chase_email(invoice, business, stage, user_name)
         subject = template["subject"]
         body = template["body"]
 
@@ -2850,6 +2882,7 @@ async def send_chase_bulk(
                 subject=subject,
                 body=body,
                 chase_stage=stage,
+                stage_description=stage_desc,
                 status="dry_run",
                 dry_run=True
             ))
@@ -2862,6 +2895,7 @@ async def send_chase_bulk(
                 subject=subject,
                 body=body,
                 chase_stage=stage,
+                stage_description=stage_desc,
                 status="failed",
                 error_message="Rate limit exceeded"
             ))
@@ -2874,6 +2908,7 @@ async def send_chase_bulk(
                 subject=subject,
                 body=body,
                 chase_stage=stage,
+                stage_description=stage_desc,
                 status="failed",
                 error_message="Customer email not set"
             ))
@@ -2903,7 +2938,7 @@ async def send_chase_bulk(
             session.add(outbox)
 
             invoice.last_chased_at = datetime.utcnow()
-            invoice.chase_stage = invoice.chase_stage + 1
+            invoice.chase_stage = stage  # Set to the actual stage sent
             session.add(invoice)
 
             session.commit()
@@ -2914,6 +2949,7 @@ async def send_chase_bulk(
                 subject=subject,
                 body=body,
                 chase_stage=stage,
+                stage_description=stage_desc,
                 status="sent",
                 outbox_id=str(outbox.id)
             ))
@@ -2928,6 +2964,7 @@ async def send_chase_bulk(
                 subject=subject,
                 body=body,
                 chase_stage=stage,
+                stage_description=stage_desc,
                 status="failed",
                 error_message=str(exc),
                 outbox_id=str(outbox.id)
