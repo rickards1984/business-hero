@@ -22,7 +22,7 @@ import MicOffIcon from '@mui/icons-material/MicOff';
 import EmailIcon from '@mui/icons-material/Email';
 import TaskIcon from '@mui/icons-material/Task';
 import PhoneIcon from '@mui/icons-material/Phone';
-import ReceiptIcon from '@mui/icons-material/Receipt';
+import CalendarTodayIcon from '@mui/icons-material/CalendarToday';
 import { Card } from '@mui/material';
 import { useAuth } from '@/contexts/AuthContext';
 import { apiRequest } from '@/lib/queryClient';
@@ -36,9 +36,9 @@ interface ChatMessage {
 
 const QUICK_ACTIONS = [
   { icon: <EmailIcon />, label: "Check my emails", action: "Give me a summary of my emails today" },
+  { icon: <CalendarTodayIcon />, label: "Today's schedule", action: "What's on my calendar today?" },
   { icon: <TaskIcon />, label: "Review tasks", action: "What tasks should I focus on today?" },
   { icon: <PhoneIcon />, label: "Recent calls", action: "Summarise my recent calls" },
-  { icon: <ReceiptIcon />, label: "Invoice status", action: "Which invoices are overdue?" },
 ];
 
 const pulseAnimation = keyframes`

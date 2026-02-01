@@ -173,6 +173,39 @@ TOOL_DEFINITIONS = [
                 "required": ["to", "subject", "body"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_calendar_events",
+            "description": "List upcoming calendar events from the user's Google Calendar. Use this to check appointments, meetings, and scheduled events.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Number of days ahead to look (default 7, max 30)"
+                    },
+                    "include_past": {
+                        "type": "boolean",
+                        "description": "Whether to include events from earlier today (default false)"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_calendar_briefing",
+            "description": "Get a calendar briefing including today's events, upcoming events, and tomorrow's schedule. Use this for daily briefings or when the user asks about their schedule.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
     }
 ]
 
@@ -221,6 +254,10 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _list_emails(engine, business_id, arguments)
     elif tool_name == "send_email":
         return _send_email(engine, business_id, arguments)
+    elif tool_name == "list_calendar_events":
+        return _list_calendar_events(engine, business_id, arguments)
+    elif tool_name == "get_calendar_briefing":
+        return _get_calendar_briefing(engine, business_id, arguments, timezone)
     else:
         return {"error": f"Unknown tool: {tool_name}"}
 
@@ -901,3 +938,259 @@ def _send_microsoft_message(engine, account_id: str, access_token: str, refresh_
         raise Exception(f"Microsoft Graph error: {response.status_code} - {response.text}")
     
     return {"status": "sent"}
+
+
+# =============================================================================
+# CALENDAR FUNCTIONS
+# =============================================================================
+
+def _list_calendar_events(engine, business_id: str, args: dict) -> dict:
+    """List upcoming calendar events from connected Google Calendar."""
+    days_ahead = min(args.get("days", 7), 30)  # Default 7 days, max 30
+    include_past = args.get("include_past", False)
+    
+    # Get OAuth account
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT id, provider, email_address, token_ciphertext, refresh_token_ciphertext
+            FROM email_accounts
+            WHERE business_id = :business_id AND provider = 'google'
+            ORDER BY created_at DESC
+            LIMIT 1
+        """), {"business_id": business_id})
+        row = result.fetchone()
+    
+    if not row:
+        return {"error": "No Google account connected. Please connect your Google account in Email Settings to access calendar."}
+    
+    account_id, provider, email_address, token_ciphertext, refresh_token_ciphertext = row
+    
+    if not token_ciphertext:
+        return {"error": "Google account token not available. Please reconnect your Google account."}
+    
+    try:
+        access_token = _decrypt_token(token_ciphertext)
+    except Exception as e:
+        return {"error": f"Failed to decrypt token: {str(e)}"}
+    
+    return _fetch_google_calendar_events(
+        engine, 
+        str(account_id), 
+        access_token, 
+        refresh_token_ciphertext, 
+        email_address, 
+        days_ahead,
+        include_past
+    )
+
+
+def _fetch_google_calendar_events(
+    engine, 
+    account_id: str, 
+    access_token: str, 
+    refresh_token_ciphertext: Optional[str], 
+    email_address: str, 
+    days_ahead: int,
+    include_past: bool = False
+) -> dict:
+    """Fetch events from Google Calendar API."""
+    
+    now = datetime.utcnow()
+    
+    if include_past:
+        # Include events from start of today
+        time_min = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        time_min = now
+    
+    time_max = now + timedelta(days=days_ahead)
+    
+    def make_request(token: str):
+        headers = {"Authorization": f"Bearer {token}"}
+        params = {
+            "timeMin": time_min.isoformat() + "Z",
+            "timeMax": time_max.isoformat() + "Z",
+            "singleEvents": "true",
+            "orderBy": "startTime",
+            "maxResults": 50
+        }
+        
+        response = httpx.get(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers=headers,
+            params=params,
+            timeout=30
+        )
+        return response
+    
+    try:
+        response = make_request(access_token)
+        
+        # If token expired, refresh and retry
+        if response.status_code == 401 and refresh_token_ciphertext:
+            try:
+                new_token = _refresh_google_token(engine, account_id, refresh_token_ciphertext)
+                response = make_request(new_token)
+            except Exception as refresh_error:
+                return {"error": f"Calendar token expired and refresh failed: {str(refresh_error)}. Please reconnect your Google account."}
+        
+        if response.status_code == 403:
+            return {"error": "Calendar access not authorized. Please reconnect your Google account and grant calendar permissions."}
+        
+        if response.status_code != 200:
+            return {"error": f"Google Calendar API error: {response.status_code}"}
+        
+        data = response.json()
+        
+        events = []
+        for event in data.get("items", []):
+            # Parse start time
+            start = event.get("start", {})
+            start_time = start.get("dateTime") or start.get("date")
+            
+            # Parse end time
+            end = event.get("end", {})
+            end_time = end.get("dateTime") or end.get("date")
+            
+            # Determine if all-day event
+            is_all_day = "date" in start and "dateTime" not in start
+            
+            events.append({
+                "id": event.get("id"),
+                "title": event.get("summary", "No title"),
+                "description": event.get("description", "")[:200] if event.get("description") else None,
+                "location": event.get("location"),
+                "start": start_time,
+                "end": end_time,
+                "is_all_day": is_all_day,
+                "status": event.get("status"),
+                "attendees": [
+                    {
+                        "email": a.get("email"),
+                        "name": a.get("displayName"),
+                        "response": a.get("responseStatus")
+                    }
+                    for a in event.get("attendees", [])[:5]  # Limit to 5 attendees
+                ],
+                "meeting_link": event.get("hangoutLink") or _extract_meeting_link(event.get("description", "")),
+                "organizer": event.get("organizer", {}).get("email")
+            })
+        
+        return {
+            "events": events,
+            "count": len(events),
+            "calendar": email_address,
+            "period": f"Next {days_ahead} days" if not include_past else f"Today and next {days_ahead} days"
+        }
+    
+    except httpx.TimeoutException:
+        return {"error": "Google Calendar API timeout. Please try again."}
+    except Exception as e:
+        return {"error": f"Failed to fetch calendar events: {str(e)}"}
+
+
+def _extract_meeting_link(text: str) -> Optional[str]:
+    """Extract Zoom/Teams/Meet link from text."""
+    if not text:
+        return None
+    
+    patterns = [
+        r'https://[a-zA-Z0-9.-]*zoom\.us/j/\S+',
+        r'https://teams\.microsoft\.com/l/meetup-join/\S+',
+        r'https://meet\.google\.com/\S+',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(0)
+    
+    return None
+
+
+def _get_calendar_briefing(engine, business_id: str, args: dict, timezone: str = "Europe/London") -> dict:
+    """Get a calendar briefing for today or a specific date."""
+    
+    # Get today's events
+    today_result = _list_calendar_events(engine, business_id, {"days": 1, "include_past": True})
+    
+    if "error" in today_result:
+        return today_result
+    
+    # Get this week's events for context
+    week_result = _list_calendar_events(engine, business_id, {"days": 7, "include_past": False})
+    
+    try:
+        tz = pytz.timezone(timezone)
+    except Exception:
+        tz = pytz.timezone("Europe/London")
+    
+    now = datetime.now(tz)
+    today_str = now.strftime("%A, %d %B %Y")
+    
+    # Categorize today's events
+    today_events = today_result.get("events", [])
+    upcoming_today = []
+    past_today = []
+    
+    for event in today_events:
+        event_start = event.get("start")
+        if event_start:
+            try:
+                if "T" in event_start:
+                    event_time = datetime.fromisoformat(event_start.replace("Z", "+00:00"))
+                    if event_time.tzinfo is None:
+                        event_time = tz.localize(event_time)
+                    else:
+                        event_time = event_time.astimezone(tz)
+                    
+                    if event_time > now:
+                        upcoming_today.append(event)
+                    else:
+                        past_today.append(event)
+                else:
+                    # All-day event
+                    upcoming_today.append(event)
+            except Exception:
+                upcoming_today.append(event)
+    
+    # Get tomorrow's events
+    tomorrow_events = [e for e in week_result.get("events", []) if _is_tomorrow(e.get("start"), tz)]
+    
+    return {
+        "date": today_str,
+        "timezone": timezone,
+        "today": {
+            "total": len(today_events),
+            "upcoming": upcoming_today,
+            "upcoming_count": len(upcoming_today),
+            "completed": past_today,
+            "completed_count": len(past_today)
+        },
+        "tomorrow": {
+            "events": tomorrow_events,
+            "count": len(tomorrow_events)
+        },
+        "week": {
+            "total_events": week_result.get("count", 0)
+        }
+    }
+
+
+def _is_tomorrow(date_str: str, tz) -> bool:
+    """Check if a date string is tomorrow."""
+    if not date_str:
+        return False
+    
+    try:
+        now = datetime.now(tz)
+        tomorrow = (now + timedelta(days=1)).date()
+        
+        if "T" in date_str:
+            event_date = datetime.fromisoformat(date_str.replace("Z", "+00:00")).date()
+        else:
+            event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        
+        return event_date == tomorrow
+    except Exception:
+        return False

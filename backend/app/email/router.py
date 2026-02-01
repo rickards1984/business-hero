@@ -166,8 +166,13 @@ def _verify_state(state: str) -> Dict[str, Any]:
 
 def _google_scopes(mode: Optional[str]) -> str:
     if mode == "read_basic":
-        return "https://www.googleapis.com/auth/gmail.readonly"
-    return "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send"
+        return "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly"
+    return (
+        "https://www.googleapis.com/auth/gmail.readonly "
+        "https://www.googleapis.com/auth/gmail.send "
+        "https://www.googleapis.com/auth/calendar.readonly "
+        "https://www.googleapis.com/auth/calendar.events.readonly"
+    )
 
 
 def _microsoft_scopes(mode: Optional[str]) -> str:
