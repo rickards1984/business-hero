@@ -94,7 +94,9 @@ class Call(SQLModel, table=True):
     transcript: Optional[str] = None
     summary: Optional[str] = None
     intent: Optional[str] = None
+    archived: bool = Field(default=False, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
     
     business: Optional[Business] = Relationship(back_populates="calls")
 

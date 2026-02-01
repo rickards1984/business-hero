@@ -53,6 +53,7 @@ import {
   Logout as LogoutIcon,
   AccessTime as AccessTimeIcon,
   Receipt as ReceiptIcon,
+  Archive as ArchiveIcon,
   CloudUpload as CloudUploadIcon,
   Email as EmailIcon,
   CheckCircleOutline as CheckCircleOutlineIcon,
@@ -108,6 +109,7 @@ export default function BusinessDashboard() {
   const [business, setBusiness] = useState<Business | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [calls, setCalls] = useState<Call[]>([]);
+  const [callFilter, setCallFilter] = useState<'all' | 'new' | 'archived'>('new');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   
@@ -279,6 +281,47 @@ export default function BusinessDashboard() {
       setError(err.message || 'Failed to complete task');
     }
   };
+
+  // Helper function to format relative time
+  const formatRelativeTime = (dateString: string) => {
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+    
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  };
+
+  // Handler to archive/unarchive a call
+  const handleArchiveCall = async (callId: string) => {
+    try {
+      const response = await apiRequest('PATCH', `/v1/calls/${callId}/archive`, {});
+      if (response.ok) {
+        const data = await response.json();
+        // Update local state to toggle archived status
+        setCalls(prev => prev.map(c => 
+          c.id === callId ? { ...c, archived: data.archived } : c
+        ));
+      } else {
+        console.error('Failed to archive call');
+      }
+    } catch (error) {
+      console.error('Failed to archive call:', error);
+    }
+  };
+
+  // Filter calls based on callFilter
+  const filteredCalls = calls.filter(call => {
+    if (callFilter === 'archived') return call.archived;
+    if (callFilter === 'new') return !call.archived;
+    return true; // 'all'
+  });
 
   const handleSignOut = async () => {
     await signOut();
@@ -774,31 +817,120 @@ export default function BusinessDashboard() {
               </TabPanel>
 
               <TabPanel value={tabValue} index={1}>
-                {calls.length === 0 ? (
+                {/* Filter chips */}
+                <Box sx={{ display: 'flex', gap: 1, mb: 3 }}>
+                  <Chip 
+                    label={`New (${calls.filter(c => !c.archived).length})`}
+                    onClick={() => setCallFilter('new')}
+                    color={callFilter === 'new' ? 'primary' : 'default'}
+                    variant={callFilter === 'new' ? 'filled' : 'outlined'}
+                  />
+                  <Chip 
+                    label={`All (${calls.length})`}
+                    onClick={() => setCallFilter('all')}
+                    color={callFilter === 'all' ? 'primary' : 'default'}
+                    variant={callFilter === 'all' ? 'filled' : 'outlined'}
+                  />
+                  <Chip 
+                    label={`Archived (${calls.filter(c => c.archived).length})`}
+                    onClick={() => setCallFilter('archived')}
+                    color={callFilter === 'archived' ? 'primary' : 'default'}
+                    variant={callFilter === 'archived' ? 'filled' : 'outlined'}
+                  />
+                </Box>
+
+                {filteredCalls.length === 0 ? (
                   <Box sx={{ textAlign: 'center', py: 4 }}>
                     <PhoneIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
-                    <Typography color="text.secondary">No calls recorded</Typography>
+                    <Typography color="text.secondary">
+                      {callFilter === 'archived' ? 'No archived calls' : callFilter === 'new' ? 'No new calls' : 'No calls recorded'}
+                    </Typography>
                   </Box>
                 ) : (
                   <Grid container spacing={2}>
-                    {calls.map((call) => (
+                    {filteredCalls.map((call) => (
                       <Grid size={{ xs: 12, sm: 6, md: 4 }} key={call.id}>
-                        <Card variant="outlined" data-testid={`card-call-${call.id}`}>
-                          <CardContent>
-                            <Typography variant="subtitle1" fontWeight="medium">
-                              {call.caller_name}
+                        <Card 
+                          variant="outlined" 
+                          data-testid={`card-call-${call.id}`}
+                          sx={{ 
+                            position: 'relative',
+                            '&:hover': { boxShadow: 3 },
+                            transition: 'box-shadow 0.2s',
+                            opacity: call.archived ? 0.7 : 1,
+                          }}
+                        >
+                          {/* Archive button */}
+                          <IconButton
+                            size="small"
+                            onClick={() => handleArchiveCall(call.id)}
+                            sx={{ 
+                              position: 'absolute', 
+                              top: 8, 
+                              right: 8,
+                              opacity: 0.5,
+                              '&:hover': { opacity: 1, backgroundColor: 'action.hover' }
+                            }}
+                            title={call.archived ? 'Unarchive call' : 'Archive call'}
+                          >
+                            <ArchiveIcon fontSize="small" />
+                          </IconButton>
+
+                          <CardContent sx={{ pr: 5 }}>
+                            {/* Caller info */}
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                              <PhoneIcon color="primary" fontSize="small" />
+                              <Typography variant="subtitle1" fontWeight={600}>
+                                {call.caller_name || 'Unknown Caller'}
+                              </Typography>
+                            </Box>
+                            
+                            <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+                              {call.caller_number || call.phone_number || 'No number'}
                             </Typography>
-                            <Typography variant="body2" color="text.secondary">
-                              {call.phone_number}
+                            
+                            <Typography variant="caption" color="text.secondary">
+                              {formatRelativeTime(call.created_at)}
                             </Typography>
-                            {call.notes && (
-                              <Typography variant="body2" sx={{ mt: 1 }}>
-                                {call.notes}
+                            
+                            {/* Summary */}
+                            {(call.summary || call.notes) && (
+                              <Typography 
+                                variant="body2" 
+                                sx={{ 
+                                  mt: 1.5, 
+                                  color: 'text.secondary',
+                                  display: '-webkit-box',
+                                  WebkitLineClamp: 2,
+                                  WebkitBoxOrient: 'vertical',
+                                  overflow: 'hidden'
+                                }}
+                              >
+                                {call.summary || call.notes}
                               </Typography>
                             )}
-                            <Typography variant="caption" color="text.disabled" display="block" sx={{ mt: 1 }}>
-                              {new Date(call.created_at).toLocaleString()}
-                            </Typography>
+                            
+                            {/* Intent badge */}
+                            {call.intent && (
+                              <Chip 
+                                label={call.intent} 
+                                size="small" 
+                                sx={{ mt: 1.5 }}
+                                color="primary"
+                                variant="outlined"
+                              />
+                            )}
+
+                            {/* Archived badge */}
+                            {call.archived && (
+                              <Chip 
+                                label="Archived" 
+                                size="small" 
+                                sx={{ mt: 1.5, ml: call.intent ? 1 : 0 }}
+                                color="default"
+                                variant="outlined"
+                              />
+                            )}
                           </CardContent>
                         </Card>
                       </Grid>

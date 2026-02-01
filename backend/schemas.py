@@ -103,7 +103,9 @@ class CallResponse(BaseModel):
     transcript: Optional[str]
     summary: Optional[str]
     intent: Optional[str]
+    archived: bool = False
     created_at: datetime
+    updated_at: Optional[datetime] = None
 
 
 class BriefingResponse(BaseModel):

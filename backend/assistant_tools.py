@@ -82,13 +82,17 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "list_calls",
-            "description": "List recent phone calls/call events for the business.",
+            "description": "List recent phone calls/call events for the business. By default only shows non-archived calls.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "limit": {
                         "type": "integer",
                         "description": "Maximum number of calls to return (default 10, max 50)"
+                    },
+                    "include_archived": {
+                        "type": "boolean",
+                        "description": "Whether to include archived calls (default false)"
                     }
                 },
                 "required": []
@@ -305,15 +309,26 @@ def _create_task(engine, business_id: str, args: dict) -> dict:
 def _list_calls(engine, business_id: str, args: dict) -> dict:
     """List recent calls."""
     limit = min(args.get("limit", 10), 50)
+    include_archived = args.get("include_archived", False)
     
     with engine.connect() as conn:
-        query = text("""
-            SELECT id, caller_number, caller_name, started_at, ended_at, summary, intent, created_at
-            FROM calls
-            WHERE business_id = :business_id
-            ORDER BY created_at DESC
-            LIMIT :limit
-        """)
+        # Default: only show non-archived calls unless include_archived is True
+        if include_archived:
+            query = text("""
+                SELECT id, caller_number, caller_name, started_at, ended_at, summary, intent, created_at, COALESCE(archived, false) as archived
+                FROM calls
+                WHERE business_id = :business_id
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """)
+        else:
+            query = text("""
+                SELECT id, caller_number, caller_name, started_at, ended_at, summary, intent, created_at, COALESCE(archived, false) as archived
+                FROM calls
+                WHERE business_id = :business_id AND (archived IS NULL OR archived = false)
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """)
         
         result = conn.execute(query, {"business_id": business_id, "limit": limit})
         calls = []
@@ -326,7 +341,8 @@ def _list_calls(engine, business_id: str, args: dict) -> dict:
                 "ended_at": row[4].isoformat() if row[4] else None,
                 "summary": row[5],
                 "intent": row[6],
-                "created_at": row[7].isoformat() if row[7] else None
+                "created_at": row[7].isoformat() if row[7] else None,
+                "archived": bool(row[8]) if row[8] is not None else False
             })
         
         return {"calls": calls, "count": len(calls)}

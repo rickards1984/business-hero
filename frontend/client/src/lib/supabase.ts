@@ -84,8 +84,12 @@ export interface Call {
   id: string;
   business_id: string;
   caller_name: string;
-  phone_number: string;
-  notes: string;
+  caller_number: string;
+  phone_number?: string; // Alias for caller_number
+  notes?: string;
+  summary?: string;
+  intent?: string;
+  archived?: boolean;
   created_at: string;
 }
 

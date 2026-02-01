@@ -1602,7 +1602,9 @@ async def _create_call_record(
         transcript=call_event.transcript,
         summary=call_event.summary,
         intent=call_event.intent,
+        archived=getattr(call_event, 'archived', False),
         created_at=call_event.created_at,
+        updated_at=getattr(call_event, 'updated_at', None),
     )
 
 
@@ -1820,16 +1822,18 @@ async def awaz_calls_webhook(
 @app.get("/v1/calls", response_model=List[CallResponse], tags=["Calls"])
 async def list_calls(
     limit: int = Query(50, le=100, description="Maximum number of calls to return"),
+    archived: Optional[bool] = Query(None, description="Filter by archived status (null=all, true=archived only, false=non-archived only)"),
     business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
     """List recent call events for the current business."""
-    statement = (
-        select(Call)
-        .where(Call.business_id == business.id)
-        .order_by(Call.created_at.desc())
-        .limit(limit)
-    )
+    statement = select(Call).where(Call.business_id == business.id)
+    
+    # Apply archived filter if specified
+    if archived is not None:
+        statement = statement.where(Call.archived == archived)
+    
+    statement = statement.order_by(Call.created_at.desc()).limit(limit)
     calls = session.exec(statement).all()
     
     return [
@@ -1844,10 +1848,40 @@ async def list_calls(
             transcript=c.transcript,
             summary=c.summary,
             intent=c.intent,
-            created_at=c.created_at
+            archived=getattr(c, 'archived', False),
+            created_at=c.created_at,
+            updated_at=getattr(c, 'updated_at', None),
         )
         for c in calls
     ]
+
+
+@app.patch("/v1/calls/{call_id}/archive", tags=["Calls"])
+async def archive_call(
+    call_id: str,
+    business: Business = Depends(get_current_user_business),
+    session: Session = Depends(get_session),
+):
+    """Archive or unarchive a call (toggles the archived status)."""
+    # Find the call
+    call = session.exec(
+        select(Call).where(
+            Call.id == call_id,
+            Call.business_id == business.id
+        )
+    ).first()
+    
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    
+    # Toggle archived status
+    call.archived = not getattr(call, 'archived', False)
+    call.updated_at = datetime.utcnow()
+    session.add(call)
+    session.commit()
+    session.refresh(call)
+    
+    return {"success": True, "archived": call.archived, "call_id": str(call.id)}
 
 
 @app.get("/v1/briefing/today", response_model=BriefingResponse, tags=["Briefing"])
@@ -1941,7 +1975,9 @@ async def get_today_briefing(
             transcript=c.transcript,
             summary=c.summary,
             intent=c.intent,
-            created_at=c.created_at
+            archived=getattr(c, 'archived', False),
+            created_at=c.created_at,
+            updated_at=getattr(c, 'updated_at', None),
         )
     
     return BriefingResponse(
