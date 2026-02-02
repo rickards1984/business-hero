@@ -233,6 +233,9 @@ class Invoice(BaseModel):
     currency: str
     status: str
     paid_date: Optional[date] = None
+    paid_amount: Optional[float] = None
+    paid_at: Optional[datetime] = None
+    archived: bool = False
     last_chased_at: Optional[datetime] = None
     chase_stage: int
     source: str
@@ -245,6 +248,8 @@ class InvoiceListResponse(BaseModel):
     """Schema for list of invoices."""
     invoices: List[Invoice]
     total: int
+    limit: Optional[int] = None
+    offset: Optional[int] = None
 
 
 class ImportResponse(BaseModel):

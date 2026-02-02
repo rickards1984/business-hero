@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
 from pydantic import ValidationError
 from sqlmodel import Session, select
-from sqlalchemy import text, func
+from sqlalchemy import text, func, or_
 import pytz
 import csv
 import io
@@ -2373,13 +2373,18 @@ def generate_chase_email(invoice: Invoice, business: Business, stage: int, user_
 
 @app.get("/v1/invoices", response_model=InvoiceListResponse, tags=["Invoices"])
 async def list_invoices(
-    status: Optional[str] = Query(default="unpaid", description="Filter by status"),
+    status: Optional[str] = Query(default=None, description="Filter by status: unpaid, paid, partially_paid, cancelled"),
     overdue: Optional[bool] = Query(default=None, description="Filter overdue invoices"),
+    archived: Optional[bool] = Query(default=False, description="Include archived invoices"),
+    search: Optional[str] = Query(default=None, description="Search by customer name, invoice number, or email"),
+    sort_by: Optional[str] = Query(default="due_date", description="Sort by: due_date, amount, created_at, customer_name, status"),
+    sort_order: Optional[str] = Query(default="asc", description="Sort order: asc or desc"),
     limit: int = Query(default=50, ge=1, le=500, description="Maximum number of invoices to return"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
     business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
 ):
-    """List invoices for the current business.
+    """List invoices for the current business with filtering, searching, and sorting.
     
     Authentication: Bearer token (Supabase access token) in Authorization header.
     """
@@ -2387,9 +2392,15 @@ async def list_invoices(
     
     statement = select(Invoice).where(Invoice.business_id == business.id)
     
+    # Filter by archived status
+    if not archived:
+        statement = statement.where(or_(Invoice.archived == False, Invoice.archived == None))
+    
+    # Filter by status
     if status:
         statement = statement.where(Invoice.status == status)
     
+    # Filter by overdue
     if overdue is True:
         today = date_type.today()
         statement = statement.where(Invoice.due_date < today).where(Invoice.status != 'paid')
@@ -2399,7 +2410,38 @@ async def list_invoices(
             (Invoice.due_date >= today) | (Invoice.status == 'paid')
         )
     
-    statement = statement.order_by(Invoice.due_date.asc()).limit(limit)
+    # Search
+    if search:
+        search_term = f"%{search}%"
+        statement = statement.where(
+            or_(
+                Invoice.customer_name.ilike(search_term),
+                Invoice.invoice_number.ilike(search_term),
+                Invoice.customer_email.ilike(search_term)
+            )
+        )
+    
+    # Sorting
+    sort_column_map = {
+        "due_date": Invoice.due_date,
+        "amount": Invoice.amount,
+        "created_at": Invoice.created_at,
+        "customer_name": Invoice.customer_name,
+        "status": Invoice.status,
+    }
+    sort_column = sort_column_map.get(sort_by, Invoice.due_date)
+    
+    if sort_order == "desc":
+        statement = statement.order_by(sort_column.desc())
+    else:
+        statement = statement.order_by(sort_column.asc())
+    
+    # Get total count (before pagination)
+    count_statement = select(func.count()).select_from(statement.subquery())
+    total = session.exec(count_statement).one()
+    
+    # Apply pagination
+    statement = statement.offset(offset).limit(limit)
     
     invoices = session.exec(statement).all()
     
@@ -2412,12 +2454,15 @@ async def list_invoices(
             customer_email=inv.customer_email,
             issue_date=inv.issue_date,
             due_date=inv.due_date,
-            amount=float(inv.amount),
+            amount=float(inv.amount) if inv.amount else 0,
             currency=inv.currency,
-            status=inv.status,
+            status=inv.status or "unpaid",
             paid_date=inv.paid_date,
+            paid_amount=float(inv.paid_amount) if inv.paid_amount else None,
+            paid_at=inv.paid_at,
+            archived=inv.archived or False,
             last_chased_at=inv.last_chased_at,
-            chase_stage=inv.chase_stage,
+            chase_stage=inv.chase_stage or 0,
             source=inv.source,
             source_ref=inv.source_ref,
             created_at=inv.created_at,
@@ -2426,8 +2471,114 @@ async def list_invoices(
     
     return InvoiceListResponse(
         invoices=[invoice_to_response(inv) for inv in invoices],
-        total=len(invoices)
+        total=total,
+        limit=limit,
+        offset=offset
     )
+
+
+@app.patch("/v1/invoices/{invoice_id}/status", tags=["Invoices"])
+async def update_invoice_status(
+    invoice_id: str,
+    status: str = Query(..., description="New status: paid, unpaid, partially_paid, cancelled"),
+    paid_amount: Optional[float] = Query(None, description="Amount paid (for partial payments)"),
+    paid_date: Optional[str] = Query(None, description="Date of payment (ISO format)"),
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """Update invoice status (mark as paid, cancelled, etc.)."""
+    _, business = user_business
+    
+    invoice = session.exec(
+        select(Invoice).where(
+            Invoice.id == invoice_id,
+            Invoice.business_id == business.id
+        )
+    ).first()
+    
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    
+    valid_statuses = ["paid", "unpaid", "partially_paid", "cancelled"]
+    if status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+    
+    invoice.status = status
+    invoice.updated_at = datetime.utcnow()
+    
+    if status == "paid":
+        invoice.paid_amount = float(invoice.amount) if invoice.amount else 0
+        invoice.paid_at = datetime.fromisoformat(paid_date.replace("Z", "+00:00")) if paid_date else datetime.utcnow()
+    elif status == "partially_paid" and paid_amount is not None:
+        invoice.paid_amount = paid_amount
+        invoice.paid_at = datetime.fromisoformat(paid_date.replace("Z", "+00:00")) if paid_date else datetime.utcnow()
+    elif status == "unpaid":
+        invoice.paid_amount = None
+        invoice.paid_at = None
+    
+    session.add(invoice)
+    session.commit()
+    session.refresh(invoice)
+    
+    return {
+        "success": True,
+        "invoice_id": str(invoice.id),
+        "status": invoice.status,
+        "paid_amount": float(invoice.paid_amount) if invoice.paid_amount else None,
+        "paid_at": invoice.paid_at.isoformat() if invoice.paid_at else None
+    }
+
+
+@app.patch("/v1/invoices/{invoice_id}/archive", tags=["Invoices"])
+async def archive_invoice(
+    invoice_id: str,
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """Archive or unarchive an invoice (soft delete toggle)."""
+    _, business = user_business
+    
+    invoice = session.exec(
+        select(Invoice).where(
+            Invoice.id == invoice_id,
+            Invoice.business_id == business.id
+        )
+    ).first()
+    
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    
+    invoice.archived = not (invoice.archived or False)
+    invoice.updated_at = datetime.utcnow()
+    session.add(invoice)
+    session.commit()
+    
+    return {"success": True, "archived": invoice.archived}
+
+
+@app.delete("/v1/invoices/{invoice_id}", tags=["Invoices"])
+async def delete_invoice(
+    invoice_id: str,
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """Permanently delete an invoice."""
+    _, business = user_business
+    
+    invoice = session.exec(
+        select(Invoice).where(
+            Invoice.id == invoice_id,
+            Invoice.business_id == business.id
+        )
+    ).first()
+    
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    
+    session.delete(invoice)
+    session.commit()
+    
+    return {"success": True, "deleted": True}
 
 
 @app.post("/v1/invoices/import/csv", response_model=ImportResponse, tags=["Invoices"])

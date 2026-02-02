@@ -235,6 +235,9 @@ class Invoice(SQLModel, table=True):
     currency: str = Field(default="GBP")
     status: str = Field(default="unpaid", index=True)
     paid_date: Optional[date] = Field(default=None, sa_column=Column(Date))
+    paid_amount: Optional[float] = Field(default=None, sa_column=Column(Numeric(12, 2)))
+    paid_at: Optional[datetime] = None
+    archived: bool = Field(default=False, index=True)
     last_chased_at: Optional[datetime] = None
     chase_stage: int = Field(default=0)
     source: str = Field(default="csv")

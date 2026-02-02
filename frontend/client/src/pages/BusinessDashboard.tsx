@@ -16,6 +16,7 @@ import {
   Dialog,
   DialogTitle,
   DialogContent,
+  DialogContentText,
   DialogActions,
   TextField,
   CircularProgress,
@@ -46,6 +47,7 @@ import {
   Switch,
   Menu,
   Tooltip,
+  InputAdornment,
 } from '@mui/material';
 import {
   Business as BusinessIcon,
@@ -73,6 +75,13 @@ import {
   Palette as PaletteIcon,
   Help as HelpIcon,
   Edit as EditIcon,
+  Undo as UndoIcon,
+  Cancel as CancelIcon,
+  Delete as DeleteIcon,
+  Search as SearchIcon,
+  Clear as ClearIcon,
+  ArrowUpward as ArrowUpwardIcon,
+  ArrowDownward as ArrowDownwardIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type Business, type Task, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
@@ -179,6 +188,9 @@ export default function BusinessDashboard() {
     currency: string;
     status: string;
     paid_date: string | null;
+    paid_amount: number | null;
+    paid_at: string | null;
+    archived: boolean;
     last_chased_at: string | null;
     chase_stage: number;
     source: string;
@@ -197,6 +209,15 @@ export default function BusinessDashboard() {
   const [bulkChaseStage, setBulkChaseStage] = useState(1);
   const [bulkPreviewOpen, setBulkPreviewOpen] = useState(false);
   const [bulkPreview, setBulkPreview] = useState<{ invoice_id: string; subject: string; body: string; status: string; stage_description?: string; error_message?: string }[]>([]);
+  
+  // Invoice filtering state
+  const [invoiceSearch, setInvoiceSearch] = useState('');
+  const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('');
+  const [showArchivedInvoices, setShowArchivedInvoices] = useState(false);
+  const [invoiceSortBy, setInvoiceSortBy] = useState('due_date');
+  const [invoiceSortOrder, setInvoiceSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [invoiceActionLoading, setInvoiceActionLoading] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{ open: boolean; action: 'delete' | 'cancel' | null; invoiceId: string | null }>({ open: false, action: null, invoiceId: null });
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -393,7 +414,14 @@ export default function BusinessDashboard() {
     if (!business) return;
     setInvoicesLoading(true);
     try {
-      const response = await apiRequest('GET', `/v1/invoices?status=unpaid&overdue=true`);
+      const params = new URLSearchParams();
+      if (invoiceSearch) params.append('search', invoiceSearch);
+      if (invoiceStatusFilter) params.append('status', invoiceStatusFilter);
+      params.append('archived', showArchivedInvoices.toString());
+      params.append('sort_by', invoiceSortBy);
+      params.append('sort_order', invoiceSortOrder);
+      
+      const response = await apiRequest('GET', `/v1/invoices?${params.toString()}`);
       const data = await response.json();
       setInvoices(data.invoices || []);
     } catch (err: any) {
@@ -548,12 +576,129 @@ export default function BusinessDashboard() {
     }
   };
 
-  // Fetch invoices when invoices tab is selected
+  // Invoice action handlers
+  const handleMarkAsPaid = async (invoiceId: string) => {
+    setInvoiceActionLoading('paid');
+    try {
+      const response = await apiRequest('PATCH', `/v1/invoices/${invoiceId}/status?status=paid`);
+      if (response.ok) {
+        await fetchInvoices();
+        setSuccessMessage('Invoice marked as paid');
+        setInvoiceDrawerOpen(false);
+        setSelectedInvoice(null);
+      } else {
+        const data = await response.json();
+        setError(data.detail || 'Failed to mark as paid');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to mark as paid');
+    } finally {
+      setInvoiceActionLoading(null);
+    }
+  };
+
+  const handleMarkAsUnpaid = async (invoiceId: string) => {
+    setInvoiceActionLoading('unpaid');
+    try {
+      const response = await apiRequest('PATCH', `/v1/invoices/${invoiceId}/status?status=unpaid`);
+      if (response.ok) {
+        await fetchInvoices();
+        setSuccessMessage('Invoice marked as unpaid');
+        // Update selected invoice
+        const data = await response.json();
+        if (selectedInvoice && selectedInvoice.id === invoiceId) {
+          setSelectedInvoice({ ...selectedInvoice, status: 'unpaid', paid_amount: null, paid_at: null });
+        }
+      } else {
+        const data = await response.json();
+        setError(data.detail || 'Failed to mark as unpaid');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to mark as unpaid');
+    } finally {
+      setInvoiceActionLoading(null);
+    }
+  };
+
+  const handleCancelInvoice = async (invoiceId: string) => {
+    setInvoiceActionLoading('cancel');
+    try {
+      const response = await apiRequest('PATCH', `/v1/invoices/${invoiceId}/status?status=cancelled`);
+      if (response.ok) {
+        await fetchInvoices();
+        setSuccessMessage('Invoice cancelled');
+        setInvoiceDrawerOpen(false);
+        setSelectedInvoice(null);
+      } else {
+        const data = await response.json();
+        setError(data.detail || 'Failed to cancel invoice');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to cancel invoice');
+    } finally {
+      setInvoiceActionLoading(null);
+      setConfirmDialog({ open: false, action: null, invoiceId: null });
+    }
+  };
+
+  const handleArchiveInvoice = async (invoiceId: string) => {
+    setInvoiceActionLoading('archive');
+    try {
+      const response = await apiRequest('PATCH', `/v1/invoices/${invoiceId}/archive`);
+      if (response.ok) {
+        await fetchInvoices();
+        const data = await response.json();
+        setSuccessMessage(data.archived ? 'Invoice archived' : 'Invoice unarchived');
+        setInvoiceDrawerOpen(false);
+        setSelectedInvoice(null);
+      } else {
+        const data = await response.json();
+        setError(data.detail || 'Failed to archive invoice');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to archive invoice');
+    } finally {
+      setInvoiceActionLoading(null);
+    }
+  };
+
+  const handleDeleteInvoice = async (invoiceId: string) => {
+    setInvoiceActionLoading('delete');
+    try {
+      const response = await apiRequest('DELETE', `/v1/invoices/${invoiceId}`);
+      if (response.ok) {
+        await fetchInvoices();
+        setSuccessMessage('Invoice deleted');
+        setInvoiceDrawerOpen(false);
+        setSelectedInvoice(null);
+      } else {
+        const data = await response.json();
+        setError(data.detail || 'Failed to delete invoice');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete invoice');
+    } finally {
+      setInvoiceActionLoading(null);
+      setConfirmDialog({ open: false, action: null, invoiceId: null });
+    }
+  };
+
+  // Fetch invoices when invoices tab is selected or filters change
   useEffect(() => {
     if (tabValue === 2 && business) {
       fetchInvoices();
     }
-  }, [tabValue, business]);
+  }, [tabValue, business, invoiceStatusFilter, showArchivedInvoices, invoiceSortBy, invoiceSortOrder]);
+
+  // Debounced search for invoices
+  useEffect(() => {
+    if (tabValue === 2 && business) {
+      const timer = setTimeout(() => {
+        fetchInvoices();
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [invoiceSearch]);
 
   if (authLoading || loading) {
     return (
@@ -1073,82 +1218,166 @@ export default function BusinessDashboard() {
               </TabPanel>
 
               <TabPanel value={tabValue} index={2}>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-                  <Box sx={{ display: 'flex', gap: 2 }}>
-                    <Card variant="outlined" sx={{ p: 2, minWidth: 150 }}>
-                      <Typography variant="caption" color="text.secondary">Overdue</Typography>
-                      <Typography variant="h5" color="error">
-                        {invoices.filter(inv => new Date(inv.due_date) < new Date() && inv.status !== 'paid').length}
-                      </Typography>
-                    </Card>
-                    <Card variant="outlined" sx={{ p: 2, minWidth: 150 }}>
-                      <Typography variant="caption" color="text.secondary">Due in 7 days</Typography>
-                      <Typography variant="h5" color="warning.main">
-                        {invoices.filter(inv => {
-                          const dueDate = new Date(inv.due_date);
-                          const today = new Date();
-                          const daysDiff = Math.ceil((dueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-                          return daysDiff >= 0 && daysDiff <= 7 && inv.status !== 'paid';
-                        }).length}
-                      </Typography>
-                    </Card>
-                    <Card variant="outlined" sx={{ p: 2, minWidth: 150 }}>
-                      <Typography variant="caption" color="text.secondary">Unpaid Total</Typography>
-                      <Typography variant="h5">
-                        {invoices
-                          .filter(inv => inv.status !== 'paid')
-                          .reduce((sum, inv) => sum + inv.amount, 0)
-                          .toLocaleString('en-GB', { style: 'currency', currency: 'GBP' })}
-                      </Typography>
-                    </Card>
-                  </Box>
-                  <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                    <FormControl size="small" sx={{ minWidth: 180 }}>
-                      <InputLabel>Chase Stage</InputLabel>
+                {/* Summary Cards */}
+                <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap' }}>
+                  <Card variant="outlined" sx={{ p: 2, minWidth: 130 }}>
+                    <Typography variant="caption" color="text.secondary">Overdue</Typography>
+                    <Typography variant="h5" color="error">
+                      {invoices.filter(inv => new Date(inv.due_date) < new Date() && inv.status !== 'paid' && !inv.archived).length}
+                    </Typography>
+                  </Card>
+                  <Card variant="outlined" sx={{ p: 2, minWidth: 130 }}>
+                    <Typography variant="caption" color="text.secondary">Due in 7 days</Typography>
+                    <Typography variant="h5" color="warning.main">
+                      {invoices.filter(inv => {
+                        if (inv.status === 'paid' || inv.archived) return false;
+                        const dueDate = new Date(inv.due_date);
+                        const today = new Date();
+                        const daysDiff = Math.ceil((dueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+                        return daysDiff >= 0 && daysDiff <= 7;
+                      }).length}
+                    </Typography>
+                  </Card>
+                  <Card variant="outlined" sx={{ p: 2, minWidth: 130 }}>
+                    <Typography variant="caption" color="text.secondary">Unpaid Total</Typography>
+                    <Typography variant="h5">
+                      {invoices
+                        .filter(inv => inv.status !== 'paid' && !inv.archived)
+                        .reduce((sum, inv) => sum + inv.amount, 0)
+                        .toLocaleString('en-GB', { style: 'currency', currency: 'GBP' })}
+                    </Typography>
+                  </Card>
+                </Box>
+
+                {/* Search and Filter Toolbar */}
+                <Box sx={{ mb: 3 }}>
+                  {/* Search Bar */}
+                  <TextField
+                    placeholder="Search by customer name, invoice number, or email..."
+                    value={invoiceSearch}
+                    onChange={(e) => setInvoiceSearch(e.target.value)}
+                    size="small"
+                    fullWidth
+                    sx={{ mb: 2 }}
+                    InputProps={{
+                      startAdornment: (
+                        <InputAdornment position="start">
+                          <SearchIcon color="action" />
+                        </InputAdornment>
+                      ),
+                      endAdornment: invoiceSearch && (
+                        <InputAdornment position="end">
+                          <IconButton size="small" onClick={() => setInvoiceSearch('')}>
+                            <ClearIcon fontSize="small" />
+                          </IconButton>
+                        </InputAdornment>
+                      ),
+                    }}
+                  />
+
+                  {/* Filters Row */}
+                  <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {/* Status Filter Chips */}
+                    <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                      {['all', 'unpaid', 'paid', 'partially_paid', 'cancelled'].map((status) => (
+                        <Chip
+                          key={status}
+                          label={status === 'all' ? 'All' : status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                          onClick={() => setInvoiceStatusFilter(status === 'all' ? '' : status)}
+                          color={invoiceStatusFilter === status || (status === 'all' && !invoiceStatusFilter) ? 'primary' : 'default'}
+                          variant={invoiceStatusFilter === status || (status === 'all' && !invoiceStatusFilter) ? 'filled' : 'outlined'}
+                          size="small"
+                        />
+                      ))}
+                    </Box>
+
+                    {/* Show Archived Toggle */}
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          size="small"
+                          checked={showArchivedInvoices}
+                          onChange={(e) => setShowArchivedInvoices(e.target.checked)}
+                        />
+                      }
+                      label="Show archived"
+                      sx={{ ml: 'auto' }}
+                    />
+
+                    {/* Sort Dropdown */}
+                    <FormControl size="small" sx={{ minWidth: 140 }}>
+                      <InputLabel>Sort by</InputLabel>
                       <Select
-                        value={bulkChaseStage}
-                        label="Chase Stage"
-                        onChange={(e) => setBulkChaseStage(Number(e.target.value))}
+                        value={invoiceSortBy}
+                        label="Sort by"
+                        onChange={(e) => setInvoiceSortBy(e.target.value)}
                       >
-                        {CHASE_STAGES.map((stage) => (
-                          <MenuItem key={stage.stage} value={stage.stage}>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                              {stage.stage >= 4 && <GavelIcon fontSize="small" color="error" />}
-                              {stage.stage === 3 && <WarningIcon fontSize="small" color="warning" />}
-                              <span>{stage.label}: {stage.description}</span>
-                            </Box>
-                          </MenuItem>
-                        ))}
+                        <MenuItem value="due_date">Due Date</MenuItem>
+                        <MenuItem value="amount">Amount</MenuItem>
+                        <MenuItem value="customer_name">Customer Name</MenuItem>
+                        <MenuItem value="created_at">Date Created</MenuItem>
+                        <MenuItem value="status">Status</MenuItem>
                       </Select>
                     </FormControl>
-                    <Button
-                      variant="outlined"
-                      startIcon={<SendIcon />}
-                      disabled={selectedInvoiceIds.length === 0}
-                      onClick={handleBulkPreview}
-                      color={bulkChaseStage >= 3 ? 'warning' : 'primary'}
+
+                    {/* Sort Order Toggle */}
+                    <IconButton
+                      onClick={() => setInvoiceSortOrder(invoiceSortOrder === 'asc' ? 'desc' : 'asc')}
+                      title={invoiceSortOrder === 'asc' ? 'Ascending' : 'Descending'}
+                      size="small"
                     >
-                      Preview ({selectedInvoiceIds.length})
-                    </Button>
-                    <input
-                      accept=".csv"
-                      style={{ display: 'none' }}
-                      id="csv-upload-input"
-                      type="file"
-                      onChange={handleCsvUpload}
-                      disabled={csvUploading}
-                    />
-                    <label htmlFor="csv-upload-input">
-                      <Button
-                        variant="contained"
-                        component="span"
-                        startIcon={csvUploading ? <CircularProgress size={20} /> : <CloudUploadIcon />}
-                        disabled={csvUploading}
-                      >
-                        {csvUploading ? 'Uploading...' : 'Upload CSV'}
-                      </Button>
-                    </label>
+                      {invoiceSortOrder === 'asc' ? <ArrowUpwardIcon /> : <ArrowDownwardIcon />}
+                    </IconButton>
                   </Box>
+                </Box>
+
+                {/* Bulk Actions Bar */}
+                <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, alignItems: 'center', mb: 2 }}>
+                  <FormControl size="small" sx={{ minWidth: 180 }}>
+                    <InputLabel>Chase Stage</InputLabel>
+                    <Select
+                      value={bulkChaseStage}
+                      label="Chase Stage"
+                      onChange={(e) => setBulkChaseStage(Number(e.target.value))}
+                    >
+                      {CHASE_STAGES.map((stage) => (
+                        <MenuItem key={stage.stage} value={stage.stage}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            {stage.stage >= 4 && <GavelIcon fontSize="small" color="error" />}
+                            {stage.stage === 3 && <WarningIcon fontSize="small" color="warning" />}
+                            <span>{stage.label}: {stage.description}</span>
+                          </Box>
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <Button
+                    variant="outlined"
+                    startIcon={<SendIcon />}
+                    disabled={selectedInvoiceIds.length === 0}
+                    onClick={handleBulkPreview}
+                    color={bulkChaseStage >= 3 ? 'warning' : 'primary'}
+                  >
+                    Preview ({selectedInvoiceIds.length})
+                  </Button>
+                  <input
+                    accept=".csv"
+                    style={{ display: 'none' }}
+                    id="csv-upload-input"
+                    type="file"
+                    onChange={handleCsvUpload}
+                    disabled={csvUploading}
+                  />
+                  <label htmlFor="csv-upload-input">
+                    <Button
+                      variant="contained"
+                      component="span"
+                      startIcon={csvUploading ? <CircularProgress size={20} /> : <CloudUploadIcon />}
+                      disabled={csvUploading}
+                    >
+                      {csvUploading ? 'Uploading...' : 'Upload CSV'}
+                    </Button>
+                  </label>
                 </Box>
 
                 {invoicesLoading ? (
@@ -1184,12 +1413,18 @@ export default function BusinessDashboard() {
                         </TableRow>
                       </TableHead>
                       <TableBody>
-                        {invoices.map((invoice) => (
+                        {invoices.map((invoice) => {
+                          const isOverdue = invoice.due_date && new Date(invoice.due_date) < new Date() && invoice.status === 'unpaid';
+                          return (
                           <TableRow
                             key={invoice.id}
                             hover
                             onClick={() => handleInvoiceClick(invoice)}
-                            sx={{ cursor: 'pointer' }}
+                            sx={{ 
+                              cursor: 'pointer',
+                              opacity: invoice.archived ? 0.6 : 1,
+                              backgroundColor: invoice.status === 'paid' ? 'rgba(46, 125, 50, 0.04)' : 'inherit'
+                            }}
                           >
                             <TableCell padding="checkbox" onClick={(e) => e.stopPropagation()}>
                               <Checkbox
@@ -1197,24 +1432,46 @@ export default function BusinessDashboard() {
                                 onChange={() => toggleInvoiceSelection(invoice.id)}
                               />
                             </TableCell>
-                            <TableCell>{invoice.invoice_number}</TableCell>
-                            <TableCell>{invoice.customer_name}</TableCell>
-                            <TableCell>{new Date(invoice.due_date).toLocaleDateString()}</TableCell>
+                            <TableCell>
+                              <Typography fontWeight={500}>{invoice.invoice_number}</Typography>
+                              {invoice.archived && (
+                                <Chip label="Archived" size="small" sx={{ ml: 1 }} variant="outlined" />
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <Typography>{invoice.customer_name}</Typography>
+                              {invoice.customer_email && (
+                                <Typography variant="caption" color="text.secondary">
+                                  {invoice.customer_email}
+                                </Typography>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <Typography color={isOverdue ? 'error.main' : 'text.primary'}>
+                                {new Date(invoice.due_date).toLocaleDateString('en-GB')}
+                              </Typography>
+                            </TableCell>
                             <TableCell align="right">
-                              {invoice.amount.toLocaleString('en-GB', { style: 'currency', currency: invoice.currency || 'GBP' })}
+                              <Typography fontWeight={600}>
+                                {invoice.amount.toLocaleString('en-GB', { style: 'currency', currency: invoice.currency || 'GBP' })}
+                              </Typography>
                             </TableCell>
                             <TableCell>
                               <Chip
-                                label={invoice.status}
+                                label={invoice.status || 'unpaid'}
                                 size="small"
-                                color={invoice.status === 'paid' ? 'success' : invoice.status === 'overdue' ? 'error' : 'warning'}
+                                color={
+                                  invoice.status === 'paid' ? 'success' : 
+                                  invoice.status === 'cancelled' ? 'default' :
+                                  isOverdue ? 'error' : 'warning'
+                                }
                               />
                             </TableCell>
                             <TableCell>
                               <ChaseStageChip stage={invoice.chase_stage} />
                             </TableCell>
                           </TableRow>
-                        ))}
+                        );})}
                       </TableBody>
                     </Table>
                   </TableContainer>
@@ -1236,123 +1493,261 @@ export default function BusinessDashboard() {
         }}
         PaperProps={{ sx: { width: { xs: '100%', sm: 500 } } }}
       >
-        {selectedInvoice && (
+        {selectedInvoice && (() => {
+          const isOverdue = selectedInvoice.due_date && new Date(selectedInvoice.due_date) < new Date() && selectedInvoice.status === 'unpaid';
+          const isPaid = selectedInvoice.status === 'paid';
+          const isCancelled = selectedInvoice.status === 'cancelled';
+          
+          return (
           <Box sx={{ p: 3 }}>
+            {/* Header */}
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-              <Typography variant="h6">Invoice Details</Typography>
+              <Typography variant="h6" fontWeight={600}>
+                Invoice {selectedInvoice.invoice_number}
+              </Typography>
               <IconButton onClick={() => setInvoiceDrawerOpen(false)}>
                 <CloseIcon />
               </IconButton>
             </Box>
-            
-            <Divider sx={{ mb: 2 }} />
-            
-            <List>
-              <ListItem>
-                <ListItemText primary="Invoice Number" secondary={selectedInvoice.invoice_number} />
-              </ListItem>
-              <ListItem>
-                <ListItemText primary="Customer" secondary={selectedInvoice.customer_name} />
-              </ListItem>
-              {selectedInvoice.customer_email && (
-                <ListItem>
-                  <ListItemText primary="Email" secondary={selectedInvoice.customer_email} />
-                </ListItem>
-              )}
-              <ListItem>
-                <ListItemText primary="Due Date" secondary={new Date(selectedInvoice.due_date).toLocaleDateString()} />
-              </ListItem>
-              <ListItem>
-                <ListItemText 
-                  primary="Amount" 
-                  secondary={selectedInvoice.amount.toLocaleString('en-GB', { style: 'currency', currency: selectedInvoice.currency || 'GBP' })} 
-                />
-              </ListItem>
-              <ListItem>
-                <ListItemText primary="Status" secondary={selectedInvoice.status} />
-              </ListItem>
-              <ListItem>
-                <ListItemText primary="Chase Stage" secondary={selectedInvoice.chase_stage} />
-              </ListItem>
-              {selectedInvoice.last_chased_at && (
-                <ListItem>
-                  <ListItemText 
-                    primary="Last Chased" 
-                    secondary={new Date(selectedInvoice.last_chased_at).toLocaleString()} 
-                  />
-                </ListItem>
-              )}
-            </List>
 
-            <Divider sx={{ my: 2 }} />
-
-            <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap' }}>
-              <FormControl size="small" sx={{ minWidth: 220 }}>
-                <InputLabel id="invoice-stage-label">Chase Stage</InputLabel>
-                <Select
-                  labelId="invoice-stage-label"
-                  label="Chase Stage"
-                  value={invoiceStage}
-                  onChange={(e) => setInvoiceStage(Number(e.target.value))}
-                >
-                  {CHASE_STAGES.map((stage) => (
-                    <MenuItem key={stage.stage} value={stage.stage}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        {stage.stage >= 4 && <GavelIcon fontSize="small" color="error" />}
-                        {stage.stage === 3 && <WarningIcon fontSize="small" color="warning" />}
-                        <span>{stage.label}: {stage.description}</span>
-                      </Box>
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={dryRunSend}
-                    onChange={(e) => setDryRunSend(e.target.checked)}
-                  />
+            {/* Status Badge */}
+            <Box sx={{ mb: 3 }}>
+              <Chip
+                label={selectedInvoice.status?.toUpperCase() || 'UNPAID'}
+                color={
+                  isPaid ? 'success' :
+                  isCancelled ? 'default' :
+                  isOverdue ? 'error' : 'warning'
                 }
-                label="Dry run"
+                sx={{ fontWeight: 600 }}
               />
+              {isOverdue && !isPaid && !isCancelled && (
+                <Typography variant="caption" color="error" sx={{ ml: 1 }}>
+                  Overdue
+                </Typography>
+              )}
+              {selectedInvoice.archived && (
+                <Chip label="Archived" size="small" sx={{ ml: 1 }} variant="outlined" />
+              )}
             </Box>
-            
-            {/* Warning for serious stages */}
-            {invoiceStage >= 3 && (
-              <Alert severity={invoiceStage >= 4 ? 'error' : 'warning'} sx={{ mb: 2 }}>
-                {invoiceStage >= 4 
-                  ? 'This will send a formal legal action notice. Only use when all other attempts have failed.'
-                  : 'This will send a final warning before potential legal action.'
-                }
-              </Alert>
+
+            {/* Customer Info */}
+            <Box sx={{ mb: 3 }}>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                Customer
+              </Typography>
+              <Typography variant="body1" fontWeight={500}>
+                {selectedInvoice.customer_name}
+              </Typography>
+              {selectedInvoice.customer_email && (
+                <Typography variant="body2" color="text.secondary">
+                  {selectedInvoice.customer_email}
+                </Typography>
+              )}
+            </Box>
+
+            {/* Amount */}
+            <Box sx={{ mb: 3 }}>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                Amount
+              </Typography>
+              <Typography variant="h4" fontWeight={600} color={isPaid ? 'success.main' : 'text.primary'}>
+                {selectedInvoice.amount.toLocaleString('en-GB', { style: 'currency', currency: selectedInvoice.currency || 'GBP' })}
+              </Typography>
+              {selectedInvoice.paid_amount && selectedInvoice.paid_amount < selectedInvoice.amount && (
+                <Typography variant="body2" color="success.main">
+                  {selectedInvoice.paid_amount.toLocaleString('en-GB', { style: 'currency', currency: selectedInvoice.currency || 'GBP' })} paid
+                </Typography>
+              )}
+            </Box>
+
+            {/* Due Date */}
+            <Box sx={{ mb: 3 }}>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                Due Date
+              </Typography>
+              <Typography variant="body1" color={isOverdue ? 'error.main' : 'text.primary'}>
+                {new Date(selectedInvoice.due_date).toLocaleDateString('en-GB', {
+                  day: 'numeric',
+                  month: 'long',
+                  year: 'numeric'
+                })}
+              </Typography>
+            </Box>
+
+            {/* Paid Date (if paid) */}
+            {isPaid && selectedInvoice.paid_at && (
+              <Box sx={{ mb: 3 }}>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                  Paid On
+                </Typography>
+                <Typography variant="body1" color="success.main">
+                  {new Date(selectedInvoice.paid_at).toLocaleDateString('en-GB', {
+                    day: 'numeric',
+                    month: 'long',
+                    year: 'numeric'
+                  })}
+                </Typography>
+              </Box>
             )}
 
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <Button
-                variant="outlined"
-                startIcon={<PreviewIcon />}
-                onClick={handleGetChaseDraft}
-                fullWidth
-              >
-                Preview chase email
-              </Button>
-              
-              <Button
-                variant="contained"
-                startIcon={<EmailIcon />}
-                onClick={handleSendChaseEmail}
-                fullWidth
-              >
-                Send chase email
-              </Button>
+            {/* Chase Stage */}
+            {!isPaid && !isCancelled && selectedInvoice.chase_stage > 0 && (
+              <Box sx={{ mb: 3 }}>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                  Chase Status
+                </Typography>
+                <Chip
+                  label={`Stage ${selectedInvoice.chase_stage}`}
+                  size="small"
+                  color={selectedInvoice.chase_stage >= 3 ? 'warning' : 'primary'}
+                />
+                {selectedInvoice.last_chased_at && (
+                  <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                    Last chased: {new Date(selectedInvoice.last_chased_at).toLocaleDateString('en-GB')}
+                  </Typography>
+                )}
+              </Box>
+            )}
 
+            <Divider sx={{ my: 3 }} />
+
+            {/* Primary Action: Mark as Paid / Mark as Unpaid */}
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              {!isPaid && !isCancelled && (
+                <Button
+                  variant="contained"
+                  color="success"
+                  size="large"
+                  fullWidth
+                  startIcon={invoiceActionLoading === 'paid' ? <CircularProgress size={20} color="inherit" /> : <CheckCircleIcon />}
+                  onClick={() => handleMarkAsPaid(selectedInvoice.id)}
+                  disabled={invoiceActionLoading !== null}
+                >
+                  Mark as Paid
+                </Button>
+              )}
+
+              {isPaid && (
+                <Button
+                  variant="outlined"
+                  color="warning"
+                  fullWidth
+                  startIcon={invoiceActionLoading === 'unpaid' ? <CircularProgress size={20} /> : <UndoIcon />}
+                  onClick={() => handleMarkAsUnpaid(selectedInvoice.id)}
+                  disabled={invoiceActionLoading !== null}
+                >
+                  Mark as Unpaid
+                </Button>
+              )}
+
+              {/* Chase Email Section (only for unpaid) */}
+              {!isPaid && !isCancelled && (
+                <>
+                  <Divider sx={{ my: 1 }} />
+                  <Typography variant="subtitle2" color="text.secondary">Send Chase Email</Typography>
+                  
+                  <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                    <FormControl size="small" sx={{ flex: 1, minWidth: 180 }}>
+                      <InputLabel id="invoice-stage-label">Chase Stage</InputLabel>
+                      <Select
+                        labelId="invoice-stage-label"
+                        label="Chase Stage"
+                        value={invoiceStage}
+                        onChange={(e) => setInvoiceStage(Number(e.target.value))}
+                      >
+                        {CHASE_STAGES.map((stage) => (
+                          <MenuItem key={stage.stage} value={stage.stage}>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                              {stage.stage >= 4 && <GavelIcon fontSize="small" color="error" />}
+                              {stage.stage === 3 && <WarningIcon fontSize="small" color="warning" />}
+                              <span>{stage.label}: {stage.description}</span>
+                            </Box>
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={dryRunSend}
+                          onChange={(e) => setDryRunSend(e.target.checked)}
+                          size="small"
+                        />
+                      }
+                      label="Dry run"
+                    />
+                  </Box>
+                  
+                  {invoiceStage >= 3 && (
+                    <Alert severity={invoiceStage >= 4 ? 'error' : 'warning'} sx={{ py: 0.5 }}>
+                      {invoiceStage >= 4 
+                        ? 'This will send a formal legal action notice.'
+                        : 'This will send a final warning before potential legal action.'
+                      }
+                    </Alert>
+                  )}
+
+                  <Box sx={{ display: 'flex', gap: 1 }}>
+                    <Button
+                      variant="outlined"
+                      startIcon={<PreviewIcon />}
+                      onClick={handleGetChaseDraft}
+                      sx={{ flex: 1 }}
+                    >
+                      Preview
+                    </Button>
+                    <Button
+                      variant="contained"
+                      startIcon={<SendIcon />}
+                      onClick={handleSendChaseEmail}
+                      sx={{ flex: 1 }}
+                    >
+                      Send
+                    </Button>
+                  </Box>
+                </>
+              )}
+
+              {/* Secondary Actions */}
+              <Divider sx={{ my: 1 }} />
+              <Box sx={{ display: 'flex', gap: 1 }}>
+                <Button
+                  variant="outlined"
+                  color="inherit"
+                  fullWidth
+                  startIcon={invoiceActionLoading === 'archive' ? <CircularProgress size={20} /> : <ArchiveIcon />}
+                  onClick={() => handleArchiveInvoice(selectedInvoice.id)}
+                  disabled={invoiceActionLoading !== null}
+                >
+                  {selectedInvoice.archived ? 'Unarchive' : 'Archive'}
+                </Button>
+
+                {!isCancelled && !isPaid && (
+                  <Button
+                    variant="outlined"
+                    color="warning"
+                    fullWidth
+                    startIcon={<CancelIcon />}
+                    onClick={() => setConfirmDialog({ open: true, action: 'cancel', invoiceId: selectedInvoice.id })}
+                    disabled={invoiceActionLoading !== null}
+                  >
+                    Cancel
+                  </Button>
+                )}
+              </Box>
+
+              {/* Delete (danger zone) */}
               <Button
-                variant="outlined"
-                startIcon={<CheckCircleOutlineIcon />}
-                onClick={handleMarkChased}
-                fullWidth
+                variant="text"
+                color="error"
+                size="small"
+                startIcon={<DeleteIcon />}
+                onClick={() => setConfirmDialog({ open: true, action: 'delete', invoiceId: selectedInvoice.id })}
+                disabled={invoiceActionLoading !== null}
+                sx={{ mt: 2 }}
               >
-                Mark Chased
+                Delete Invoice
               </Button>
             </Box>
 
@@ -1364,7 +1759,7 @@ export default function BusinessDashboard() {
               </Box>
             )}
           </Box>
-        )}
+        );})()}
       </Drawer>
 
       {/* Bulk Send Preview Dialog */}
@@ -1462,6 +1857,44 @@ export default function BusinessDashboard() {
             data-testid="button-save-task"
           >
             {savingTask ? <CircularProgress size={20} /> : 'Create'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Invoice Delete/Cancel Confirmation Dialog */}
+      <Dialog
+        open={confirmDialog.open}
+        onClose={() => setConfirmDialog({ open: false, action: null, invoiceId: null })}
+      >
+        <DialogTitle>
+          {confirmDialog.action === 'delete' ? 'Delete Invoice?' : 'Cancel Invoice?'}
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {confirmDialog.action === 'delete'
+              ? 'This will permanently delete this invoice. This action cannot be undone.'
+              : 'This will mark the invoice as cancelled. You can still view it in the cancelled filter.'}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmDialog({ open: false, action: null, invoiceId: null })}>
+            Go Back
+          </Button>
+          <Button
+            onClick={() => {
+              if (confirmDialog.invoiceId) {
+                if (confirmDialog.action === 'delete') {
+                  handleDeleteInvoice(confirmDialog.invoiceId);
+                } else if (confirmDialog.action === 'cancel') {
+                  handleCancelInvoice(confirmDialog.invoiceId);
+                }
+              }
+            }}
+            color="error"
+            variant="contained"
+            disabled={invoiceActionLoading !== null}
+          >
+            {invoiceActionLoading ? <CircularProgress size={20} /> : confirmDialog.action === 'delete' ? 'Delete' : 'Cancel Invoice'}
           </Button>
         </DialogActions>
       </Dialog>
