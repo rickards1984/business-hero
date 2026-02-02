@@ -132,7 +132,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "list_emails",
-            "description": "List recent emails from the user's connected email account (Gmail or Microsoft).",
+            "description": "List recent emails from the user's connected email account (Gmail or Microsoft). Use detailed=true when the user needs a thorough briefing or when you need to understand email content, not just subjects.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -143,6 +143,10 @@ TOOL_DEFINITIONS = [
                     "query": {
                         "type": "string",
                         "description": "Optional search query to filter emails (e.g., 'is:unread' or 'from:someone@example.com')"
+                    },
+                    "detailed": {
+                        "type": "boolean",
+                        "description": "If true, fetch full email body content for more accurate briefings. Takes slightly longer but provides complete context. Use for thorough briefings or when subject lines aren't enough."
                     }
                 },
                 "required": []
@@ -171,6 +175,23 @@ TOOL_DEFINITIONS = [
                     }
                 },
                 "required": ["to", "subject", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_email_detail",
+            "description": "Get the full content of a specific email by its ID. Use this when you need to read a particular email in full, or when a user asks about a specific email's content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_id": {
+                        "type": "string",
+                        "description": "The email ID (from list_emails results)"
+                    }
+                },
+                "required": ["email_id"]
             }
         }
     },
@@ -254,6 +275,8 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _list_emails(engine, business_id, arguments)
     elif tool_name == "send_email":
         return _send_email(engine, business_id, arguments)
+    elif tool_name == "get_email_detail":
+        return _get_email_detail(engine, business_id, arguments)
     elif tool_name == "list_calendar_events":
         return _list_calendar_events(engine, business_id, arguments)
     elif tool_name == "get_calendar_briefing":
@@ -598,6 +621,7 @@ def _list_emails(engine, business_id: str, args: dict) -> dict:
     """List recent emails from connected email account."""
     limit = min(args.get("limit", 5), 20)  # Default 5 for faster voice responses
     query = args.get("query", "")
+    detailed = args.get("detailed", False)  # Fetch full email content if true
     
     # Get the email account for this business
     with engine.connect() as conn:
@@ -625,14 +649,65 @@ def _list_emails(engine, business_id: str, args: dict) -> dict:
         return {"error": f"Failed to decrypt email token: {str(e)}"}
     
     if provider == "google":
-        return _fetch_gmail_emails(engine, str(account_id), access_token, refresh_token_ciphertext, email_address, limit, query)
+        return _fetch_gmail_emails(engine, str(account_id), access_token, refresh_token_ciphertext, email_address, limit, query, detailed)
     elif provider == "microsoft":
-        return _fetch_microsoft_emails(engine, str(account_id), access_token, refresh_token_ciphertext, email_address, limit, query)
+        return _fetch_microsoft_emails(engine, str(account_id), access_token, refresh_token_ciphertext, email_address, limit, query, detailed)
     else:
         return {"error": f"Unsupported email provider: {provider}"}
 
 
-def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_token_ciphertext: Optional[str], email_address: str, limit: int, query: str) -> dict:
+def _extract_gmail_body(payload: dict) -> str:
+    """Extract plain text body from Gmail message payload."""
+    import base64
+    
+    def get_body_from_part(part: dict) -> str:
+        """Recursively extract body from message parts."""
+        mime_type = part.get("mimeType", "")
+        body = part.get("body", {})
+        
+        # If this part has data, decode it
+        if body.get("data"):
+            try:
+                decoded = base64.urlsafe_b64decode(body["data"]).decode("utf-8", errors="ignore")
+                decoded = decoded.replace("\r\n", "\n").strip()
+                return decoded
+            except Exception:
+                pass
+        
+        # If multipart, look through parts
+        parts = part.get("parts", [])
+        
+        plain_text = ""
+        html_text = ""
+        
+        for p in parts:
+            p_mime = p.get("mimeType", "")
+            if p_mime == "text/plain":
+                plain_text = get_body_from_part(p)
+            elif p_mime == "text/html":
+                html_text = get_body_from_part(p)
+            elif p_mime.startswith("multipart/"):
+                nested = get_body_from_part(p)
+                if nested:
+                    return nested
+        
+        # Prefer plain text, fall back to HTML (stripped of tags)
+        if plain_text:
+            return plain_text
+        elif html_text:
+            # Basic HTML tag stripping
+            text = re.sub(r'<style[^>]*>.*?</style>', '', html_text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<[^>]+>', ' ', text)
+            text = re.sub(r'\s+', ' ', text)
+            return text.strip()
+        
+        return ""
+    
+    return get_body_from_part(payload)
+
+
+def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_token_ciphertext: Optional[str], email_address: str, limit: int, query: str, detailed: bool = False) -> dict:
     """Fetch emails from Gmail API with automatic token refresh and parallel fetching."""
     
     def make_list_request(token: str):
@@ -671,16 +746,23 @@ def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_toke
         message_ids = [m["id"] for m in data.get("messages", [])]
         
         if not message_ids:
-            return {"emails": [], "count": 0, "account": email_address}
+            return {"emails": [], "count": 0, "account": email_address, "detailed": detailed}
+        
+        # Determine format based on detailed flag
+        email_format = "full" if detailed else "metadata"
         
         # Fetch single email details
         def fetch_single_email(msg_id: str) -> Optional[dict]:
             try:
+                params = {"format": email_format}
+                if not detailed:
+                    params["metadataHeaders"] = ["From", "Subject", "Date"]
+                
                 msg_response = httpx.get(
                     f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
                     headers={"Authorization": f"Bearer {current_token}"},
-                    params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]},
-                    timeout=8
+                    params=params,
+                    timeout=15 if detailed else 8
                 )
                 
                 if msg_response.status_code == 200:
@@ -689,35 +771,51 @@ def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_toke
                     
                     email_info = {
                         "id": msg_id,
-                        "snippet": msg_data.get("snippet", "")[:150],  # Shorter for speed
+                        "snippet": msg_data.get("snippet", "")[:200],
                         "from": "",
-                        "from_email": "",  # Just the email address for easy access
+                        "from_email": "",
                         "subject": "",
-                        "date": ""
+                        "date": "",
+                        "body": None
                     }
                     
                     for h in headers_list:
-                        if h["name"] == "From":
+                        name = h.get("name", "").lower()
+                        if name == "from":
                             email_info["from"] = h["value"]
                             email_info["from_email"] = extract_email_address(h["value"])
-                        elif h["name"] == "Subject":
+                        elif name == "subject":
                             email_info["subject"] = h["value"]
-                        elif h["name"] == "Date":
+                        elif name == "date":
                             email_info["date"] = h["value"]
                     
+                    # Extract body if detailed mode
+                    if detailed:
+                        body_text = _extract_gmail_body(msg_data.get("payload", {}))
+                        if body_text:
+                            email_info["body"] = body_text[:1500]
+                            if len(body_text) > 1500:
+                                email_info["body"] += "... [truncated]"
+                    
                     return email_info
-            except:
-                pass
+            except Exception as e:
+                print(f"Error fetching email {msg_id}: {e}")
             return None
         
         # Fetch messages IN PARALLEL (much faster!)
-        ids_to_fetch = message_ids[:min(limit, 10)]
+        ids_to_fetch = message_ids[:min(limit, 20)]
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             results = list(executor.map(fetch_single_email, ids_to_fetch))
             emails = [r for r in results if r is not None]
         
-        return {"emails": emails, "count": len(emails), "account": email_address}
+        return {
+            "emails": emails, 
+            "count": len(emails), 
+            "account": email_address,
+            "detailed": detailed,
+            "note": "Full email content included" if detailed else "Subject and preview only"
+        }
     
     except httpx.TimeoutException:
         return {"error": "Gmail API timeout. Please try again."}
@@ -725,12 +823,22 @@ def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_toke
         return {"error": f"Failed to fetch emails: {str(e)}"}
 
 
-def _fetch_microsoft_emails(engine, account_id: str, access_token: str, refresh_token_ciphertext: Optional[str], email_address: str, limit: int, query: str) -> dict:
+def _fetch_microsoft_emails(engine, account_id: str, access_token: str, refresh_token_ciphertext: Optional[str], email_address: str, limit: int, query: str, detailed: bool = False) -> dict:
     """Fetch emails from Microsoft Graph API with automatic token refresh."""
     
     def make_request(token: str):
         headers = {"Authorization": f"Bearer {token}"}
-        params = {"$top": limit, "$orderby": "receivedDateTime desc", "$select": "id,subject,from,receivedDateTime,bodyPreview"}
+        
+        # If detailed, include body content
+        select_fields = "id,subject,from,receivedDateTime,bodyPreview"
+        if detailed:
+            select_fields = "id,subject,from,receivedDateTime,body"
+        
+        params = {
+            "$top": limit, 
+            "$orderby": "receivedDateTime desc", 
+            "$select": select_fields
+        }
         if query:
             params["$search"] = f'"{query}"'
         
@@ -762,26 +870,203 @@ def _fetch_microsoft_emails(engine, account_id: str, access_token: str, refresh_
         data = response.json()
         
         emails = []
-        for msg in data.get("value", [])[:min(limit, 10)]:
+        for msg in data.get("value", [])[:min(limit, 20)]:
             from_info = msg.get("from", {}).get("emailAddress", {})
             from_email = from_info.get("address", "")
             from_name = from_info.get("name", "")
-            # Microsoft Graph already gives us just the email address
-            emails.append({
+            
+            email_info = {
                 "id": msg.get("id"),
                 "subject": msg.get("subject", ""),
                 "from": f"{from_name} <{from_email}>" if from_name else from_email,
-                "from_email": from_email,  # Just the email address for easy access
+                "from_email": from_email,
                 "date": msg.get("receivedDateTime", ""),
-                "snippet": msg.get("bodyPreview", "")[:150] if msg.get("bodyPreview") else ""
-            })
+                "snippet": msg.get("bodyPreview", "")[:200] if msg.get("bodyPreview") else "",
+                "body": None
+            }
+            
+            if detailed and msg.get("body"):
+                body_content = msg["body"].get("content", "")
+                content_type = msg["body"].get("contentType", "text")
+                
+                # Strip HTML if needed
+                if content_type.lower() == "html":
+                    body_content = re.sub(r'<style[^>]*>.*?</style>', '', body_content, flags=re.DOTALL | re.IGNORECASE)
+                    body_content = re.sub(r'<script[^>]*>.*?</script>', '', body_content, flags=re.DOTALL | re.IGNORECASE)
+                    body_content = re.sub(r'<[^>]+>', ' ', body_content)
+                    body_content = re.sub(r'\s+', ' ', body_content)
+                
+                # Truncate to reasonable length
+                body_content = body_content.strip()[:1500]
+                if len(body_content) == 1500:
+                    body_content += "... [truncated]"
+                
+                email_info["body"] = body_content
+            
+            emails.append(email_info)
         
-        return {"emails": emails, "count": len(emails), "account": email_address}
+        return {
+            "emails": emails, 
+            "count": len(emails), 
+            "account": email_address,
+            "detailed": detailed,
+            "note": "Full email content included" if detailed else "Subject and preview only"
+        }
     
     except httpx.TimeoutException:
         return {"error": "Microsoft Graph API timeout. Please try again."}
     except Exception as e:
         return {"error": f"Failed to fetch emails: {str(e)}"}
+
+
+# ============================================================================
+# GET EMAIL DETAIL TOOL
+# ============================================================================
+
+def _get_email_detail(engine, business_id: str, args: dict) -> dict:
+    """Get full details of a specific email by ID."""
+    email_id = args.get("email_id")
+    
+    if not email_id:
+        return {"error": "email_id is required"}
+    
+    # Get OAuth account
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT id, provider, email_address, token_ciphertext, refresh_token_ciphertext
+            FROM email_accounts
+            WHERE business_id = :business_id AND provider IN ('google', 'microsoft')
+            ORDER BY created_at DESC
+            LIMIT 1
+        """), {"business_id": business_id})
+        row = result.fetchone()
+    
+    if not row:
+        return {"error": "No email account connected."}
+    
+    account_id, provider, email_address, token_ciphertext, refresh_token_ciphertext = row
+    
+    try:
+        access_token = _decrypt_token(token_ciphertext)
+    except Exception as e:
+        return {"error": f"Failed to decrypt token: {str(e)}"}
+    
+    if provider == "google":
+        return _fetch_gmail_single(engine, str(account_id), access_token, refresh_token_ciphertext, email_id)
+    elif provider == "microsoft":
+        return _fetch_microsoft_single(engine, str(account_id), access_token, refresh_token_ciphertext, email_id)
+    else:
+        return {"error": f"Unsupported provider: {provider}"}
+
+
+def _fetch_gmail_single(engine, account_id: str, access_token: str, refresh_token_ciphertext: str, email_id: str) -> dict:
+    """Fetch a single Gmail message in full."""
+    import base64
+    
+    def make_request(token: str):
+        return httpx.get(
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{email_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"format": "full"},
+            timeout=15
+        )
+    
+    try:
+        response = make_request(access_token)
+        
+        if response.status_code == 401 and refresh_token_ciphertext:
+            new_token = _refresh_google_token(engine, account_id, refresh_token_ciphertext)
+            response = make_request(new_token)
+        
+        if response.status_code != 200:
+            return {"error": f"Failed to fetch email: {response.status_code}"}
+        
+        msg_data = response.json()
+        headers_list = msg_data.get("payload", {}).get("headers", [])
+        
+        email_info = {
+            "id": email_id,
+            "from": "",
+            "from_email": "",
+            "to": "",
+            "subject": "",
+            "date": "",
+            "body": ""
+        }
+        
+        for h in headers_list:
+            name = h.get("name", "").lower()
+            if name == "from":
+                email_info["from"] = h["value"]
+                email_info["from_email"] = extract_email_address(h["value"])
+            elif name == "to":
+                email_info["to"] = h["value"]
+            elif name == "subject":
+                email_info["subject"] = h["value"]
+            elif name == "date":
+                email_info["date"] = h["value"]
+        
+        # Get full body
+        body_text = _extract_gmail_body(msg_data.get("payload", {}))
+        email_info["body"] = body_text[:3000] if body_text else ""
+        if body_text and len(body_text) > 3000:
+            email_info["body"] += "\n\n... [truncated - email continues]"
+        
+        return {"email": email_info}
+        
+    except Exception as e:
+        return {"error": f"Failed to fetch email: {str(e)}"}
+
+
+def _fetch_microsoft_single(engine, account_id: str, access_token: str, refresh_token_ciphertext: str, email_id: str) -> dict:
+    """Fetch a single Microsoft email in full."""
+    
+    def make_request(token: str):
+        return httpx.get(
+            f"https://graph.microsoft.com/v1.0/me/messages/{email_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"$select": "id,subject,from,toRecipients,receivedDateTime,body"},
+            timeout=15
+        )
+    
+    try:
+        response = make_request(access_token)
+        
+        if response.status_code == 401 and refresh_token_ciphertext:
+            new_token = _refresh_microsoft_token(engine, account_id, refresh_token_ciphertext)
+            response = make_request(new_token)
+        
+        if response.status_code != 200:
+            return {"error": f"Failed to fetch email: {response.status_code}"}
+        
+        msg = response.json()
+        
+        body_content = ""
+        if msg.get("body"):
+            body_content = msg["body"].get("content", "")
+            if msg["body"].get("contentType", "").lower() == "html":
+                body_content = re.sub(r'<style[^>]*>.*?</style>', '', body_content, flags=re.DOTALL | re.IGNORECASE)
+                body_content = re.sub(r'<script[^>]*>.*?</script>', '', body_content, flags=re.DOTALL | re.IGNORECASE)
+                body_content = re.sub(r'<[^>]+>', ' ', body_content)
+                body_content = re.sub(r'\s+', ' ', body_content).strip()
+        
+        email_info = {
+            "id": email_id,
+            "from": msg.get("from", {}).get("emailAddress", {}).get("name", ""),
+            "from_email": msg.get("from", {}).get("emailAddress", {}).get("address", ""),
+            "to": ", ".join([r.get("emailAddress", {}).get("address", "") for r in msg.get("toRecipients", [])]),
+            "subject": msg.get("subject", ""),
+            "date": msg.get("receivedDateTime", ""),
+            "body": body_content[:3000]
+        }
+        
+        if len(body_content) > 3000:
+            email_info["body"] += "\n\n... [truncated - email continues]"
+        
+        return {"email": email_info}
+        
+    except Exception as e:
+        return {"error": f"Failed to fetch email: {str(e)}"}
 
 
 # ============================================================================
