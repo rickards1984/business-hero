@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Box,
@@ -82,6 +82,7 @@ import {
   Clear as ClearIcon,
   ArrowUpward as ArrowUpwardIcon,
   ArrowDownward as ArrowDownwardIcon,
+  ChevronRight as ChevronRightIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type Business, type Task, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
@@ -164,6 +165,11 @@ export default function BusinessDashboard() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [calls, setCalls] = useState<Call[]>([]);
   const [callFilter, setCallFilter] = useState<'all' | 'new' | 'archived'>('new');
+  const [callSearch, setCallSearch] = useState('');
+  const [callDateFilter, setCallDateFilter] = useState<'all' | 'today' | 'week' | 'month'>('all');
+  const [showArchivedCalls, setShowArchivedCalls] = useState(false);
+  const [selectedCall, setSelectedCall] = useState<Call | null>(null);
+  const [callPanelOpen, setCallPanelOpen] = useState(false);
   const [taskFilter, setTaskFilter] = useState<'open' | 'completed' | 'all'>('open');
   const [settingsAnchor, setSettingsAnchor] = useState<null | HTMLElement>(null);
   const [loading, setLoading] = useState(true);
@@ -385,12 +391,124 @@ export default function BusinessDashboard() {
     }
   };
 
-  // Filter calls based on callFilter
-  const filteredCalls = calls.filter(call => {
-    if (callFilter === 'archived') return call.archived;
-    if (callFilter === 'new') return !call.archived;
-    return true; // 'all'
-  });
+  // Filter calls based on filters
+  const filteredCalls = useMemo(() => {
+    let result = calls;
+    
+    // Filter by archived status
+    if (!showArchivedCalls) {
+      result = result.filter(c => !c.archived);
+    }
+    
+    // Filter by search
+    if (callSearch) {
+      const searchLower = callSearch.toLowerCase();
+      result = result.filter(c =>
+        (c.caller_name?.toLowerCase() || '').includes(searchLower) ||
+        (c.caller_number?.toLowerCase() || '').includes(searchLower) ||
+        (c.phone_number?.toLowerCase() || '').includes(searchLower) ||
+        (c.summary?.toLowerCase() || '').includes(searchLower) ||
+        (c.intent?.toLowerCase() || '').includes(searchLower)
+      );
+    }
+    
+    // Filter by date
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfWeek = new Date(startOfToday);
+    startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    
+    if (callDateFilter === 'today') {
+      result = result.filter(c => new Date(c.created_at) >= startOfToday);
+    } else if (callDateFilter === 'week') {
+      result = result.filter(c => new Date(c.created_at) >= startOfWeek);
+    } else if (callDateFilter === 'month') {
+      result = result.filter(c => new Date(c.created_at) >= startOfMonth);
+    }
+    
+    return result;
+  }, [calls, callSearch, callDateFilter, showArchivedCalls]);
+  
+  // Group calls by date for better display
+  const groupedCalls = useMemo(() => {
+    const groups: { [key: string]: Call[] } = {};
+    
+    filteredCalls.forEach(call => {
+      const date = new Date(call.created_at);
+      const today = new Date();
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+      
+      let key: string;
+      if (date.toDateString() === today.toDateString()) {
+        key = 'Today';
+      } else if (date.toDateString() === yesterday.toDateString()) {
+        key = 'Yesterday';
+      } else {
+        key = date.toLocaleDateString('en-GB', { 
+          weekday: 'long', 
+          day: 'numeric', 
+          month: 'long' 
+        });
+      }
+      
+      if (!groups[key]) {
+        groups[key] = [];
+      }
+      groups[key].push(call);
+    });
+    
+    return groups;
+  }, [filteredCalls]);
+  
+  // Calculate call stats
+  const callStats = useMemo(() => {
+    const today = new Date();
+    const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    
+    const todaysCalls = calls.filter(c => !c.archived && new Date(c.created_at) >= startOfToday);
+    const newCalls = calls.filter(c => !c.archived);
+    
+    return {
+      today: todaysCalls.length,
+      total: newCalls.length,
+    };
+  }, [calls]);
+  
+  // Helper function to calculate call duration
+  const calculateDuration = (start: string, end: string): string => {
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+    const diffMs = endDate.getTime() - startDate.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffSecs = Math.floor((diffMs % 60000) / 1000);
+    
+    if (diffMins > 0) {
+      return `${diffMins}m ${diffSecs}s`;
+    }
+    return `${diffSecs}s`;
+  };
+  
+  // Format date time for call detail panel
+  const formatCallDateTime = (dateString: string) => {
+    if (!dateString) return 'Unknown';
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-GB', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+  
+  // Handle call click to open detail panel
+  const handleCallClick = (call: Call) => {
+    setSelectedCall(call);
+    setCallPanelOpen(true);
+  };
 
   // Filter tasks based on taskFilter
   const filteredTasks = tasks.filter(task => {
@@ -1095,126 +1213,309 @@ export default function BusinessDashboard() {
               </TabPanel>
 
               <TabPanel value={tabValue} index={1}>
-                {/* Filter chips */}
-                <Box sx={{ display: 'flex', gap: 1, mb: 3 }}>
-                  <Chip 
-                    label={`New (${calls.filter(c => !c.archived).length})`}
-                    onClick={() => setCallFilter('new')}
-                    color={callFilter === 'new' ? 'primary' : 'default'}
-                    variant={callFilter === 'new' ? 'filled' : 'outlined'}
-                  />
-                  <Chip 
-                    label={`All (${calls.length})`}
-                    onClick={() => setCallFilter('all')}
-                    color={callFilter === 'all' ? 'primary' : 'default'}
-                    variant={callFilter === 'all' ? 'filled' : 'outlined'}
-                  />
-                  <Chip 
-                    label={`Archived (${calls.filter(c => c.archived).length})`}
-                    onClick={() => setCallFilter('archived')}
-                    color={callFilter === 'archived' ? 'primary' : 'default'}
-                    variant={callFilter === 'archived' ? 'filled' : 'outlined'}
-                  />
+                {/* Stats Cards */}
+                <Box sx={{ display: 'flex', gap: 2, mb: 3 }}>
+                  <Card sx={{ flex: 1, p: 2 }}>
+                    <Typography variant="caption" color="text.secondary">Today's Calls</Typography>
+                    <Typography variant="h4" color="primary.main">{callStats.today}</Typography>
+                  </Card>
+                  <Card sx={{ flex: 1, p: 2 }}>
+                    <Typography variant="caption" color="text.secondary">Total Active</Typography>
+                    <Typography variant="h4">{callStats.total}</Typography>
+                  </Card>
                 </Box>
 
-                {filteredCalls.length === 0 ? (
-                  <Box sx={{ textAlign: 'center', py: 4 }}>
-                    <PhoneIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
-                    <Typography color="text.secondary">
-                      {callFilter === 'archived' ? 'No archived calls' : callFilter === 'new' ? 'No new calls' : 'No calls recorded'}
-                    </Typography>
-                  </Box>
-                ) : (
-                  <Grid container spacing={2}>
-                    {filteredCalls.map((call) => (
-                      <Grid size={{ xs: 12, sm: 6, md: 4 }} key={call.id}>
-                        <Card 
-                          variant="outlined" 
-                          data-testid={`card-call-${call.id}`}
-                          sx={{ 
-                            position: 'relative',
-                            '&:hover': { boxShadow: 3 },
-                            transition: 'box-shadow 0.2s',
-                            opacity: call.archived ? 0.7 : 1,
-                          }}
-                        >
-                          {/* Archive button */}
-                          <IconButton
-                            size="small"
-                            onClick={() => handleArchiveCall(call.id)}
-                            sx={{ 
-                              position: 'absolute', 
-                              top: 8, 
-                              right: 8,
-                              opacity: 0.5,
-                              '&:hover': { opacity: 1, backgroundColor: 'action.hover' }
-                            }}
-                            title={call.archived ? 'Unarchive call' : 'Archive call'}
-                          >
-                            <ArchiveIcon fontSize="small" />
+                {/* Search and Filter Toolbar */}
+                <Box sx={{ mb: 3 }}>
+                  {/* Search Bar */}
+                  <TextField
+                    placeholder="Search by caller name, number, or summary..."
+                    value={callSearch}
+                    onChange={(e) => setCallSearch(e.target.value)}
+                    size="small"
+                    fullWidth
+                    sx={{ mb: 2 }}
+                    InputProps={{
+                      startAdornment: (
+                        <InputAdornment position="start">
+                          <SearchIcon color="action" />
+                        </InputAdornment>
+                      ),
+                      endAdornment: callSearch && (
+                        <InputAdornment position="end">
+                          <IconButton size="small" onClick={() => setCallSearch('')}>
+                            <ClearIcon fontSize="small" />
                           </IconButton>
+                        </InputAdornment>
+                      ),
+                    }}
+                  />
 
-                          <CardContent sx={{ pr: 5 }}>
-                            {/* Caller info */}
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                              <PhoneIcon color="primary" fontSize="small" />
-                              <Typography variant="subtitle1" fontWeight={600}>
-                                {call.caller_name || 'Unknown Caller'}
-                              </Typography>
-                            </Box>
-                            
-                            <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
-                              {call.caller_number || call.phone_number || 'No number'}
-                            </Typography>
-                            
-                            <Typography variant="caption" color="text.secondary">
-                              {formatRelativeTime(call.created_at)}
-                            </Typography>
-                            
-                            {/* Summary */}
-                            {(call.summary || call.notes) && (
-                              <Typography 
-                                variant="body2" 
-                                sx={{ 
-                                  mt: 1.5, 
-                                  color: 'text.secondary',
-                                  display: '-webkit-box',
-                                  WebkitLineClamp: 2,
-                                  WebkitBoxOrient: 'vertical',
-                                  overflow: 'hidden'
-                                }}
-                              >
-                                {call.summary || call.notes}
-                              </Typography>
-                            )}
-                            
-                            {/* Intent badge */}
-                            {call.intent && (
-                              <Chip 
-                                label={call.intent} 
-                                size="small" 
-                                sx={{ mt: 1.5 }}
-                                color="primary"
-                                variant="outlined"
-                              />
-                            )}
+                  {/* Filters Row */}
+                  <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {/* Date Filter Chips */}
+                    <Box sx={{ display: 'flex', gap: 1 }}>
+                      {[
+                        { value: 'today', label: 'Today' },
+                        { value: 'week', label: 'This Week' },
+                        { value: 'month', label: 'This Month' },
+                        { value: 'all', label: 'All Time' },
+                      ].map((filter) => (
+                        <Chip
+                          key={filter.value}
+                          label={filter.label}
+                          onClick={() => setCallDateFilter(filter.value as 'all' | 'today' | 'week' | 'month')}
+                          color={callDateFilter === filter.value ? 'primary' : 'default'}
+                          variant={callDateFilter === filter.value ? 'filled' : 'outlined'}
+                          size="small"
+                        />
+                      ))}
+                    </Box>
 
-                            {/* Archived badge */}
-                            {call.archived && (
-                              <Chip 
-                                label="Archived" 
-                                size="small" 
-                                sx={{ mt: 1.5, ml: call.intent ? 1 : 0 }}
-                                color="default"
-                                variant="outlined"
-                              />
-                            )}
-                          </CardContent>
-                        </Card>
-                      </Grid>
+                    {/* Show Archived Toggle */}
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          size="small"
+                          checked={showArchivedCalls}
+                          onChange={(e) => setShowArchivedCalls(e.target.checked)}
+                        />
+                      }
+                      label="Show archived"
+                      sx={{ ml: 'auto' }}
+                    />
+                  </Box>
+                </Box>
+
+                {/* Calls List */}
+                {filteredCalls.length === 0 ? (
+                  <Card sx={{ p: 4, textAlign: 'center' }}>
+                    <PhoneIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 2 }} />
+                    <Typography color="text.secondary">
+                      {callSearch || callDateFilter !== 'all' ? 'No calls match your filters' : 'No calls yet'}
+                    </Typography>
+                  </Card>
+                ) : (
+                  <Box>
+                    {Object.entries(groupedCalls).map(([date, dateCalls]) => (
+                      <Box key={date} sx={{ mb: 3 }}>
+                        {/* Date Header */}
+                        <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1, ml: 1 }}>
+                          {date} ({dateCalls.length} {dateCalls.length === 1 ? 'call' : 'calls'})
+                        </Typography>
+                        
+                        {/* Calls for this date */}
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                          {dateCalls.map((call) => (
+                            <Card
+                              key={call.id}
+                              data-testid={`card-call-${call.id}`}
+                              sx={{
+                                p: 2,
+                                cursor: 'pointer',
+                                opacity: call.archived ? 0.6 : 1,
+                                '&:hover': { boxShadow: 2, bgcolor: 'action.hover' },
+                                transition: 'all 0.2s',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 2,
+                              }}
+                              onClick={() => handleCallClick(call)}
+                            >
+                              {/* Icon */}
+                              <Box sx={{ 
+                                width: 40, 
+                                height: 40, 
+                                borderRadius: '50%', 
+                                bgcolor: 'primary.light',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                flexShrink: 0
+                              }}>
+                                <PhoneIcon color="primary" fontSize="small" />
+                              </Box>
+                              
+                              {/* Main Content */}
+                              <Box sx={{ flex: 1, minWidth: 0 }}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                  <Typography variant="subtitle1" fontWeight={600} noWrap>
+                                    {call.caller_name || 'Unknown Caller'}
+                                  </Typography>
+                                  {call.archived && (
+                                    <Chip label="Archived" size="small" />
+                                  )}
+                                </Box>
+                                <Typography variant="body2" color="text.secondary" noWrap>
+                                  {call.caller_number || call.phone_number || 'No number'}
+                                  {(call.summary || call.notes) && ` • ${(call.summary || call.notes || '').substring(0, 50)}...`}
+                                </Typography>
+                              </Box>
+                              
+                              {/* Right side: Time and Intent */}
+                              <Box sx={{ textAlign: 'right', flexShrink: 0 }}>
+                                <Typography variant="caption" color="text.secondary">
+                                  {new Date(call.created_at).toLocaleTimeString('en-GB', { 
+                                    hour: '2-digit', 
+                                    minute: '2-digit' 
+                                  })}
+                                </Typography>
+                                {call.intent && (
+                                  <Box>
+                                    <Chip label={call.intent} size="small" variant="outlined" />
+                                  </Box>
+                                )}
+                              </Box>
+                              
+                              {/* Arrow */}
+                              <ChevronRightIcon color="action" />
+                            </Card>
+                          ))}
+                        </Box>
+                      </Box>
                     ))}
-                  </Grid>
+                  </Box>
                 )}
+
+                {/* Call Detail Panel */}
+                <Drawer anchor="right" open={callPanelOpen} onClose={() => { setCallPanelOpen(false); setSelectedCall(null); }}>
+                  <Box sx={{ width: 450, p: 3 }}>
+                    {selectedCall && (
+                      <>
+                        {/* Header */}
+                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <PhoneIcon color="primary" />
+                            <Typography variant="h6" fontWeight={600}>
+                              Call Details
+                            </Typography>
+                          </Box>
+                          <IconButton onClick={() => { setCallPanelOpen(false); setSelectedCall(null); }}>
+                            <CloseIcon />
+                          </IconButton>
+                        </Box>
+
+                        {/* Caller Info */}
+                        <Card sx={{ p: 2, mb: 3, bgcolor: 'primary.light' }}>
+                          <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                            Caller
+                          </Typography>
+                          <Typography variant="h5" fontWeight={600}>
+                            {selectedCall.caller_name || 'Unknown Caller'}
+                          </Typography>
+                          {(selectedCall.caller_number || selectedCall.phone_number) && (
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1 }}>
+                              <PhoneIcon fontSize="small" color="action" />
+                              <Typography variant="body1">{selectedCall.caller_number || selectedCall.phone_number}</Typography>
+                            </Box>
+                          )}
+                        </Card>
+
+                        {/* Date/Time */}
+                        <Box sx={{ mb: 3 }}>
+                          <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                            Date & Time
+                          </Typography>
+                          <Typography variant="body1">
+                            {formatCallDateTime(selectedCall.created_at)}
+                          </Typography>
+                          {selectedCall.started_at && selectedCall.ended_at && (
+                            <Typography variant="caption" color="text.secondary">
+                              Duration: {calculateDuration(selectedCall.started_at, selectedCall.ended_at)}
+                            </Typography>
+                          )}
+                        </Box>
+
+                        {/* Intent Badge */}
+                        {selectedCall.intent && (
+                          <Box sx={{ mb: 3 }}>
+                            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                              Intent
+                            </Typography>
+                            <Chip 
+                              label={selectedCall.intent} 
+                              color="primary" 
+                              variant="outlined"
+                            />
+                          </Box>
+                        )}
+
+                        {/* Summary */}
+                        {(selectedCall.summary || selectedCall.notes) && (
+                          <Box sx={{ mb: 3 }}>
+                            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                              Summary
+                            </Typography>
+                            <Card sx={{ p: 2, bgcolor: 'grey.50' }}>
+                              <Typography variant="body2">
+                                {selectedCall.summary || selectedCall.notes}
+                              </Typography>
+                            </Card>
+                          </Box>
+                        )}
+
+                        {/* Transcript */}
+                        {selectedCall.transcript && (
+                          <Box sx={{ mb: 3 }}>
+                            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                              Transcript
+                            </Typography>
+                            <Card sx={{ p: 2, bgcolor: 'grey.50', maxHeight: 300, overflow: 'auto' }}>
+                              <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+                                {selectedCall.transcript}
+                              </Typography>
+                            </Card>
+                          </Box>
+                        )}
+
+                        {/* No details message */}
+                        {!selectedCall.summary && !selectedCall.notes && !selectedCall.transcript && !selectedCall.intent && (
+                          <Card sx={{ p: 3, textAlign: 'center', bgcolor: 'grey.50', mb: 3 }}>
+                            <Typography color="text.secondary">
+                              No additional details available for this call.
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              Call details will appear here when captured by the AI receptionist.
+                            </Typography>
+                          </Card>
+                        )}
+
+                        <Divider sx={{ my: 3 }} />
+
+                        {/* Actions */}
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                          {/* Create Task from Call */}
+                          <Button
+                            variant="outlined"
+                            startIcon={<TaskIcon />}
+                            fullWidth
+                            onClick={() => {
+                              setTaskDialogOpen(true);
+                              setCallPanelOpen(false);
+                            }}
+                          >
+                            Create Task from Call
+                          </Button>
+
+                          {/* Archive */}
+                          <Button
+                            variant="outlined"
+                            color={selectedCall.archived ? 'primary' : 'inherit'}
+                            startIcon={<ArchiveIcon />}
+                            onClick={() => {
+                              handleArchiveCall(selectedCall.id);
+                              setCallPanelOpen(false);
+                              setSelectedCall(null);
+                            }}
+                            fullWidth
+                          >
+                            {selectedCall.archived ? 'Unarchive' : 'Archive Call'}
+                          </Button>
+                        </Box>
+                      </>
+                    )}
+                  </Box>
+                </Drawer>
               </TabPanel>
 
               <TabPanel value={tabValue} index={2}>
