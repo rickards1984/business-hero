@@ -18,6 +18,7 @@ import AssistantChat from '@/pages/AssistantChat';
 import HelpSupport from '@/pages/HelpSupport';
 import AdminSupport from '@/pages/AdminSupport';
 import BillingSettings from '@/pages/BillingSettings';
+import Accounting from '@/pages/Accounting';
 
 const theme = createTheme({
   palette: {
@@ -120,6 +121,8 @@ function App() {
               <Route path="/app/inbox" element={<Inbox />} />
               <Route path="/app/briefings" element={<Briefings />} />
               <Route path="/app/email/outbox" element={<EmailOutbox />} />
+              <Route path="/app/accounting" element={<Accounting />} />
+              <Route path="/dashboard" element={<Navigate to="/app" replace />} />
               <Route path="/settings/email" element={<Navigate to="/app/settings/email" replace />} />
               <Route path="/inbox" element={<Navigate to="/app/inbox" replace />} />
               <Route path="/briefings" element={<Navigate to="/app/briefings" replace />} />

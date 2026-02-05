@@ -83,6 +83,7 @@ import {
   ArrowUpward as ArrowUpwardIcon,
   ArrowDownward as ArrowDownwardIcon,
   ChevronRight as ChevronRightIcon,
+  AccountBalance as AccountBalanceIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type Business, type Task, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
@@ -883,6 +884,15 @@ export default function BusinessDashboard() {
           
           {/* Right side - User email and logout */}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<AccountBalanceIcon />}
+              onClick={() => navigate('/app/accounting')}
+              sx={{ color: 'inherit', borderColor: 'rgba(255,255,255,0.4)' }}
+            >
+              Accounting
+            </Button>
             <Button
               variant="outlined"
               size="small"
