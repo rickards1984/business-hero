@@ -13,4 +13,5 @@ cryptography
 stripe
 python-multipart
 openpyxl
+# Date parsing for accounting summary endpoint
 python-dateutil>=2.8.0

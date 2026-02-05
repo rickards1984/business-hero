@@ -400,6 +400,7 @@ async def analyze_spreadsheet(
     
     # Use AI to detect column mappings
     mapping_suggestion = await _detect_column_mapping(headers, sample_rows)
+    _logger.info(f"Suggested mapping for columns {headers}: {mapping_suggestion}")
     
     return {
         "filename": file.filename,
@@ -900,8 +901,8 @@ async def _detect_column_mapping(headers: List[str], sample_rows: List[List[str]
             break
     
     # Check for separate credit/debit columns
-    credit_keywords = ['credit', 'income', 'money in', 'deposit', 'cr']
-    debit_keywords = ['debit', 'expense', 'money out', 'withdrawal', 'dr', 'payment']
+    credit_keywords = ['credit', 'income', 'money in', 'deposit', 'cr', 'paid in', 'credits', 'receipts', 'inflow']
+    debit_keywords = ['debit', 'expense', 'money out', 'withdrawal', 'dr', 'payment', 'paid out', 'debits', 'payments', 'outflow']
     
     for kw in credit_keywords:
         for i, h in enumerate(header_lower):
