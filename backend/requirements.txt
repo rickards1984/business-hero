@@ -12,3 +12,5 @@ sqlalchemy
 cryptography
 stripe
 python-multipart
+openpyxl
+python-dateutil

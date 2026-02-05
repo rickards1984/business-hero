@@ -83,6 +83,7 @@ from app.email.router import (
     build_microsoft_oauth_start_url,
 )
 from app.billing.config import get_stripe_config, validate_stripe_config
+from accounting import router as accounting_router
 
 
 # ============================================================================
@@ -378,6 +379,7 @@ app.add_middleware(
 
 app.include_router(email_router)
 app.include_router(email_oauth_router)
+app.include_router(accounting_router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
