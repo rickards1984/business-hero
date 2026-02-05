@@ -76,6 +76,7 @@ import {
 } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 import { apiRequest } from '@/lib/queryClient';
+import { config } from '@/config/env';
 
 // ============== Types ==============
 
@@ -959,7 +960,7 @@ const UploadDialog: React.FC<{
       formData.append('file', selectedFile);
 
       const token = localStorage.getItem('access_token');
-      const response = await fetch(`${import.meta.env.VITE_API_URL || ''}/v1/accounting/upload/analyze`, {
+      const response = await fetch(`${config.apiBaseUrl}/v1/accounting/upload/analyze`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -997,7 +998,7 @@ const UploadDialog: React.FC<{
       formData.append('mapping', JSON.stringify(mapping));
 
       const token = localStorage.getItem('access_token');
-      const response = await fetch(`${import.meta.env.VITE_API_URL || ''}/v1/accounting/upload/import`, {
+      const response = await fetch(`${config.apiBaseUrl}/v1/accounting/upload/import`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
