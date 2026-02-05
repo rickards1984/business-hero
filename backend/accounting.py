@@ -473,6 +473,11 @@ async def import_spreadsheet(
     # Get column indices
     header_map = {h.lower().strip(): i for i, h in enumerate(headers)}
     
+    # Debug logging
+    _logger.info(f"Import mapping received: {mapping_dict}")
+    _logger.info(f"Headers from file: {headers}")
+    _logger.info(f"Header map (lowercase): {header_map}")
+    
     date_col = _find_column_index(header_map, mapping_dict.get('date_column'))
     desc_col = _find_column_index(header_map, mapping_dict.get('description_column'))
     amount_col = _find_column_index(header_map, mapping_dict.get('amount_column'))
@@ -481,6 +486,8 @@ async def import_spreadsheet(
     expense_col = _find_column_index(header_map, mapping_dict.get('expense_column'))
     ref_col = _find_column_index(header_map, mapping_dict.get('reference_column'))
     payee_col = _find_column_index(header_map, mapping_dict.get('payee_column'))
+    
+    _logger.info(f"Column indices - date: {date_col}, desc: {desc_col}, amount: {amount_col}, income: {income_col}, expense: {expense_col}")
     
     for row_num, row in enumerate(data_rows, start=2):
         try:
@@ -500,19 +507,25 @@ async def import_spreadsheet(
             amount = 0.0
             trans_type = 'expense'
             
-            if income_col is not None and expense_col is not None:
-                # Separate income/expense columns
-                income_val = _parse_amount(row[income_col]) if income_col < len(row) else 0
-                expense_val = _parse_amount(row[expense_col]) if expense_col < len(row) else 0
+            if income_col is not None or expense_col is not None:
+                # Separate income/expense columns (one or both may be mapped)
+                income_val = 0
+                expense_val = 0
+                
+                if income_col is not None and income_col < len(row):
+                    income_val = _parse_amount(row[income_col]) or 0
+                if expense_col is not None and expense_col < len(row):
+                    expense_val = _parse_amount(row[expense_col]) or 0
                 
                 if income_val > 0:
                     amount = income_val
                     trans_type = 'income'
                 elif expense_val > 0:
-                    amount = -expense_val
+                    amount = expense_val  # Store as positive, type indicates it's expense
                     trans_type = 'expense'
                 else:
-                    continue  # Skip empty rows
+                    # Both are zero/empty - skip this row silently (likely a header or empty row)
+                    continue
             elif amount_col is not None:
                 # Single amount column
                 amount = _parse_amount(row[amount_col]) if amount_col < len(row) else 0
