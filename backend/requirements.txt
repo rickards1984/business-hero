@@ -13,4 +13,4 @@ cryptography
 stripe
 python-multipart
 openpyxl
-python-dateutil
+python-dateutil>=2.8.0

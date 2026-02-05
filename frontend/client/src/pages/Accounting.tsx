@@ -77,6 +77,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { apiRequest } from '@/lib/queryClient';
 import { config } from '@/config/env';
+import { supabase } from '@/lib/supabase';
 
 // ============== Types ==============
 
@@ -959,7 +960,8 @@ const UploadDialog: React.FC<{
       const formData = new FormData();
       formData.append('file', selectedFile);
 
-      const token = localStorage.getItem('access_token');
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
       const response = await fetch(`${config.apiBaseUrl}/v1/accounting/upload/analyze`, {
         method: 'POST',
         headers: {
@@ -997,7 +999,8 @@ const UploadDialog: React.FC<{
       formData.append('file', file);
       formData.append('mapping', JSON.stringify(mapping));
 
-      const token = localStorage.getItem('access_token');
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
       const response = await fetch(`${config.apiBaseUrl}/v1/accounting/upload/import`, {
         method: 'POST',
         headers: {
