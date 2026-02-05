@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from models import Business
 from database import get_session
-from main import get_current_user_and_business
+from dependencies import get_current_user_and_business
 
 import os
 
