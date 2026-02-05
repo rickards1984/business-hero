@@ -616,7 +616,6 @@ async def get_accounting_summary(
     
     from sqlalchemy import text
     from datetime import datetime, timedelta
-    from dateutil.relativedelta import relativedelta
     
     # Determine date range
     today = date.today()
@@ -718,7 +717,7 @@ async def get_accounting_summary(
             ORDER BY month
         """
         
-        trend_start = today - relativedelta(months=6)
+        trend_start = today - timedelta(days=180)  # Approximately 6 months
         result = conn.execute(
             text(trend_query),
             {"business_id": str(business.id), "trend_start": trend_start}

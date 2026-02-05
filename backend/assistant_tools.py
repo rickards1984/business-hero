@@ -227,6 +227,67 @@ TOOL_DEFINITIONS = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_accounting_summary",
+            "description": "Get financial summary including total income, expenses, and net profit/loss for a period. Use when user asks about finances, money, profit, or business performance.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "enum": ["month", "quarter", "year", "all"],
+                        "description": "Time period for the summary"
+                    }
+                },
+                "required": ["period"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_transactions",
+            "description": "List accounting transactions with optional filters. Use to show recent transactions, search for specific payments, or filter by income/expense.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["income", "expense", "all"],
+                        "description": "Filter by transaction type"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of transactions to return (default 20)"
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": "Search term to filter transactions by description"
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_spending",
+            "description": "Analyze spending patterns and provide insights on expenses by category. Use when user asks about where money is going, spending habits, or cost breakdown.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "enum": ["month", "quarter", "year"],
+                        "description": "Time period to analyze"
+                    }
+                },
+                "required": ["period"]
+            }
+        }
     }
 ]
 
@@ -281,6 +342,12 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _list_calendar_events(engine, business_id, arguments)
     elif tool_name == "get_calendar_briefing":
         return _get_calendar_briefing(engine, business_id, arguments, timezone)
+    elif tool_name == "get_accounting_summary":
+        return _get_accounting_summary(engine, business_id, arguments)
+    elif tool_name == "list_transactions":
+        return _list_transactions(engine, business_id, arguments)
+    elif tool_name == "analyze_spending":
+        return _analyze_spending(engine, business_id, arguments)
     else:
         return {"error": f"Unknown tool: {tool_name}"}
 
@@ -1479,3 +1546,206 @@ def _is_tomorrow(date_str: str, tz) -> bool:
         return event_date == tomorrow
     except Exception:
         return False
+
+
+# ============================================================================
+# ACCOUNTING TOOLS
+# ============================================================================
+
+def _get_accounting_summary(engine, business_id: str, args: dict) -> dict:
+    """Get financial summary for a period."""
+    period = args.get("period", "month")
+    
+    from datetime import date
+    today = date.today()
+    
+    # Determine date range
+    if period == "month":
+        start_date = today.replace(day=1)
+    elif period == "quarter":
+        start_date = today - timedelta(days=90)
+    elif period == "year":
+        start_date = today.replace(month=1, day=1)
+    else:
+        start_date = date(2000, 1, 1)
+    
+    with engine.connect() as conn:
+        query = text("""
+            SELECT 
+                type,
+                COUNT(*) as count,
+                COALESCE(SUM(ABS(amount)), 0) as total
+            FROM accounting_transactions
+            WHERE business_id = :business_id 
+              AND is_archived = false
+              AND transaction_date >= :start_date 
+              AND transaction_date <= :end_date
+            GROUP BY type
+        """)
+        
+        result = conn.execute(query, {
+            "business_id": business_id,
+            "start_date": start_date,
+            "end_date": today
+        })
+        
+        totals = {"income": 0, "expense": 0, "income_count": 0, "expense_count": 0}
+        for row in result.fetchall():
+            if row[0] == "income":
+                totals["income"] = float(row[2])
+                totals["income_count"] = int(row[1])
+            elif row[0] == "expense":
+                totals["expense"] = float(row[2])
+                totals["expense_count"] = int(row[1])
+        
+        net = totals["income"] - totals["expense"]
+        
+        return {
+            "period": period,
+            "start_date": start_date.isoformat(),
+            "end_date": today.isoformat(),
+            "total_income": round(totals["income"], 2),
+            "total_expenses": round(totals["expense"], 2),
+            "net_profit_loss": round(net, 2),
+            "transaction_count": totals["income_count"] + totals["expense_count"],
+            "summary": f"{'Profit' if net >= 0 else 'Loss'} of £{abs(net):,.2f} for {period}"
+        }
+
+
+def _list_transactions(engine, business_id: str, args: dict) -> dict:
+    """List accounting transactions with optional filters."""
+    trans_type = args.get("type", "all")
+    limit = min(args.get("limit", 20), 50)
+    search = args.get("search", "")
+    
+    with engine.connect() as conn:
+        if trans_type != "all" and search:
+            query = text("""
+                SELECT id, transaction_date, description, amount, type, payee_payer, reference
+                FROM accounting_transactions
+                WHERE business_id = :business_id 
+                  AND is_archived = false
+                  AND type = :type
+                  AND description ILIKE :search
+                ORDER BY transaction_date DESC
+                LIMIT :limit
+            """)
+            params = {"business_id": business_id, "type": trans_type, "search": f"%{search}%", "limit": limit}
+        elif trans_type != "all":
+            query = text("""
+                SELECT id, transaction_date, description, amount, type, payee_payer, reference
+                FROM accounting_transactions
+                WHERE business_id = :business_id 
+                  AND is_archived = false
+                  AND type = :type
+                ORDER BY transaction_date DESC
+                LIMIT :limit
+            """)
+            params = {"business_id": business_id, "type": trans_type, "limit": limit}
+        elif search:
+            query = text("""
+                SELECT id, transaction_date, description, amount, type, payee_payer, reference
+                FROM accounting_transactions
+                WHERE business_id = :business_id 
+                  AND is_archived = false
+                  AND description ILIKE :search
+                ORDER BY transaction_date DESC
+                LIMIT :limit
+            """)
+            params = {"business_id": business_id, "search": f"%{search}%", "limit": limit}
+        else:
+            query = text("""
+                SELECT id, transaction_date, description, amount, type, payee_payer, reference
+                FROM accounting_transactions
+                WHERE business_id = :business_id 
+                  AND is_archived = false
+                ORDER BY transaction_date DESC
+                LIMIT :limit
+            """)
+            params = {"business_id": business_id, "limit": limit}
+        
+        result = conn.execute(query, params)
+        
+        transactions = []
+        for row in result.fetchall():
+            transactions.append({
+                "date": row[1].isoformat() if row[1] else None,
+                "description": row[2],
+                "amount": float(row[3]) if row[3] else 0,
+                "type": row[4],
+                "payee": row[5],
+                "reference": row[6]
+            })
+        
+        return {
+            "transactions": transactions,
+            "count": len(transactions),
+            "filter_type": trans_type,
+            "search_term": search if search else None
+        }
+
+
+def _analyze_spending(engine, business_id: str, args: dict) -> dict:
+    """Analyze spending patterns by category."""
+    period = args.get("period", "month")
+    
+    from datetime import date
+    today = date.today()
+    
+    if period == "month":
+        start_date = today - timedelta(days=30)
+    elif period == "quarter":
+        start_date = today - timedelta(days=90)
+    else:
+        start_date = today - timedelta(days=365)
+    
+    with engine.connect() as conn:
+        # Get expenses grouped by category
+        query = text("""
+            SELECT 
+                COALESCE(c.name, 'Uncategorized') as category_name,
+                COUNT(*) as count,
+                COALESCE(SUM(ABS(t.amount)), 0) as total
+            FROM accounting_transactions t
+            LEFT JOIN accounting_categories c ON t.category_id = c.id
+            WHERE t.business_id = :business_id 
+              AND t.is_archived = false
+              AND t.type = 'expense'
+              AND t.transaction_date >= :start_date
+            GROUP BY c.name
+            ORDER BY total DESC
+        """)
+        
+        result = conn.execute(query, {
+            "business_id": business_id,
+            "start_date": start_date
+        })
+        
+        categories = []
+        total_expenses = 0
+        
+        for row in result.fetchall():
+            cat_total = float(row[2])
+            total_expenses += cat_total
+            categories.append({
+                "category": row[0],
+                "count": int(row[1]),
+                "total": round(cat_total, 2)
+            })
+        
+        # Add percentages
+        for cat in categories:
+            cat["percentage"] = round(cat["total"] / total_expenses * 100, 1) if total_expenses > 0 else 0
+        
+        # Get top expense
+        top_expense = categories[0] if categories else None
+        
+        return {
+            "period": period,
+            "start_date": start_date.isoformat(),
+            "end_date": today.isoformat(),
+            "total_expenses": round(total_expenses, 2),
+            "by_category": categories[:10],
+            "top_category": top_expense["category"] if top_expense else "None",
+            "insight": f"Your biggest expense category is {top_expense['category']} at £{top_expense['total']:,.2f} ({top_expense['percentage']}% of total)" if top_expense else "No expenses found for this period"
+        }
