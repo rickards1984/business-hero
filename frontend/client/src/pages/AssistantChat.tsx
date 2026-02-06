@@ -5,6 +5,7 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
   CircularProgress,
   Container,
   FormControlLabel,
@@ -23,6 +24,7 @@ import EmailIcon from '@mui/icons-material/Email';
 import TaskIcon from '@mui/icons-material/Task';
 import PhoneIcon from '@mui/icons-material/Phone';
 import CalendarTodayIcon from '@mui/icons-material/CalendarToday';
+import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
 import { Card } from '@mui/material';
 import { useAuth } from '@/contexts/AuthContext';
 import { apiRequest } from '@/lib/queryClient';
@@ -35,10 +37,11 @@ interface ChatMessage {
 }
 
 const QUICK_ACTIONS = [
-  { icon: <EmailIcon />, label: "Check my emails", action: "Give me a summary of my emails today" },
-  { icon: <CalendarTodayIcon />, label: "Today's schedule", action: "What's on my calendar today?" },
-  { icon: <TaskIcon />, label: "Review tasks", action: "What tasks should I focus on today?" },
-  { icon: <PhoneIcon />, label: "Recent calls", action: "Summarise my recent calls" },
+  { icon: <EmailIcon />, label: "Check my emails", shortLabel: "Emails", action: "Give me a summary of my emails today" },
+  { icon: <CalendarTodayIcon />, label: "Today's schedule", shortLabel: "Schedule", action: "What's on my calendar today?" },
+  { icon: <TaskIcon />, label: "Review tasks", shortLabel: "Tasks", action: "What tasks should I focus on today?" },
+  { icon: <PhoneIcon />, label: "Recent calls", shortLabel: "Calls", action: "Summarise my recent calls" },
+  { icon: <AccountBalanceIcon />, label: "Summarise financials", shortLabel: "Financials", action: "Please provide a detailed summary of my business financials. Include: 1) Total income and gross revenue, 2) Total expenses and net profit/loss, 3) Breakdown of expenses by category showing where most money is being spent, 4) Flag any uncategorized transactions that need attention, 5) Suggestions for potential cost savings to improve profitability. After the summary, please offer to go into more detail on any specific area I'm interested in." },
 ];
 
 const pulseAnimation = keyframes`
@@ -548,6 +551,29 @@ export default function AssistantChat() {
           </Box>
         ) : (
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {/* Compact quick actions - always visible when conversation started */}
+            <Box sx={{ 
+              display: 'flex', 
+              flexWrap: 'wrap', 
+              gap: 1, 
+              pb: 2,
+              borderBottom: 1,
+              borderColor: 'divider'
+            }}>
+              {QUICK_ACTIONS.map((action, index) => (
+                <Chip
+                  key={index}
+                  icon={action.icon}
+                  label={action.shortLabel}
+                  onClick={() => handleQuickAction(action.action)}
+                  variant="outlined"
+                  color="primary"
+                  size="small"
+                  sx={{ cursor: 'pointer' }}
+                />
+              ))}
+            </Box>
+            
             {messages.map((message, idx) => (
               <Box
                 key={`${message.role}-${idx}`}
