@@ -73,12 +73,17 @@ export default function AssistantChat() {
   const lastSpokenIndexRef = useRef<number>(-1);
   const pendingVoiceMessageRef = useRef<string | null>(null);
   const speakRepliesRef = useRef(speakReplies);
+  const useRealtimeVoiceRef = useRef(useRealtimeVoice);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Keep speakRepliesRef in sync
+  // Keep refs in sync
   useEffect(() => {
     speakRepliesRef.current = speakReplies;
   }, [speakReplies]);
+
+  useEffect(() => {
+    useRealtimeVoiceRef.current = useRealtimeVoice;
+  }, [useRealtimeVoice]);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -111,8 +116,12 @@ export default function AssistantChat() {
     recognition.onresult = (event: any) => {
       const transcript = event.results?.[0]?.[0]?.transcript;
       if (transcript) {
+        // Skip if realtime voice is active - it handles its own audio input
+        if (useRealtimeVoiceRef.current) {
+          return;
+        }
         if (speakRepliesRef.current) {
-          // In voice mode, auto-send after recognition
+          // In legacy voice mode, auto-send after recognition
           pendingVoiceMessageRef.current = transcript;
           setInput(transcript);
         } else {
@@ -181,8 +190,8 @@ export default function AssistantChat() {
       audio.onended = () => {
         setSpeaking(false);
         audioRef.current = null;
-        // Auto-listen after speaking if in voice mode
-        if (speakRepliesRef.current && recognitionRef.current) {
+        // Auto-listen after speaking if in legacy voice mode (not realtime)
+        if (speakRepliesRef.current && !useRealtimeVoiceRef.current && recognitionRef.current) {
           setTimeout(() => {
             try {
               recognitionRef.current.start();
@@ -252,7 +261,8 @@ export default function AssistantChat() {
     utterance.onstart = () => setSpeaking(true);
     utterance.onend = () => {
       setSpeaking(false);
-      if (speakRepliesRef.current && recognitionRef.current) {
+      // Auto-listen after speaking if in legacy voice mode (not realtime)
+      if (speakRepliesRef.current && !useRealtimeVoiceRef.current && recognitionRef.current) {
         setTimeout(() => {
           try {
             recognitionRef.current.start();
@@ -265,8 +275,10 @@ export default function AssistantChat() {
     window.speechSynthesis.speak(utterance);
   };
 
-  // Speak new assistant messages
+  // Speak new assistant messages (ONLY for legacy voice mode, NOT realtime)
   useEffect(() => {
+    // Skip if realtime voice is active - it handles its own audio
+    if (useRealtimeVoice) return;
     if (!speakReplies) return;
     if (!messages.length) return;
     const lastIndex = messages.length - 1;
@@ -284,7 +296,7 @@ export default function AssistantChat() {
     } else {
       speakWithBrowser(lastMessage.content);
     }
-  }, [messages, speakReplies, usePremiumVoice]);
+  }, [messages, speakReplies, usePremiumVoice, useRealtimeVoice]);
 
   const handleSendMessage = async (messageText: string) => {
     const message = messageText.trim();
@@ -295,8 +307,8 @@ export default function AssistantChat() {
     setMessages((prev) => [...prev, { role: 'user', content: message }]);
     setInput('');
 
-    // Immediate voice feedback while processing
-    if (speakReplies && window.speechSynthesis) {
+    // Immediate voice feedback while processing (ONLY for legacy voice mode, NOT realtime)
+    if (speakReplies && !useRealtimeVoice && window.speechSynthesis) {
       const lowerMessage = message.toLowerCase();
       let acknowledgment = "One moment...";
       
@@ -357,8 +369,8 @@ export default function AssistantChat() {
       }
     } catch (err: any) {
       setError(err.message || 'Something went wrong');
-      // Speak error in voice mode
-      if (speakReplies && window.speechSynthesis) {
+      // Speak error in legacy voice mode only (realtime handles its own errors)
+      if (speakReplies && !useRealtimeVoice && window.speechSynthesis) {
         const errorUtterance = new SpeechSynthesisUtterance("Sorry, I had trouble with that. Please try again.");
         errorUtterance.lang = 'en-GB';
         window.speechSynthesis.speak(errorUtterance);
