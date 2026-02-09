@@ -19,17 +19,21 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
 
 # Tool definitions for the Realtime API
+# NOTE: Realtime API format is different from Chat Completions API
+# - No nested "function" wrapper
+# - "type" is "function" at top level
+# - "name", "description", "parameters" at top level
 REALTIME_TOOLS = [
     {
         "type": "function",
         "name": "list_emails",
-        "description": "List recent emails from the user's inbox",
+        "description": "List recent emails from the user's inbox. Call this when the user asks about emails, messages, or inbox.",
         "parameters": {
             "type": "object",
             "properties": {
                 "count": {
                     "type": "integer",
-                    "description": "Number of emails to retrieve (default 5, max 10)"
+                    "description": "Number of emails to retrieve (default 5, max 20)"
                 }
             }
         }
@@ -37,7 +41,7 @@ REALTIME_TOOLS = [
     {
         "type": "function",
         "name": "get_schedule",
-        "description": "Get today's calendar events and appointments",
+        "description": "Get today's calendar events and appointments. Call this when the user asks about their schedule, calendar, meetings, or what's on today.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -51,7 +55,7 @@ REALTIME_TOOLS = [
     {
         "type": "function",
         "name": "get_recent_calls",
-        "description": "Get recent phone calls and their details",
+        "description": "Get recent phone calls and their details. Call this when the user asks about calls, phone calls, or who called.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -65,7 +69,7 @@ REALTIME_TOOLS = [
     {
         "type": "function",
         "name": "get_tasks",
-        "description": "Get the user's task list",
+        "description": "Get the user's task list. Call this when the user asks about tasks, to-dos, or what they need to do.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -80,14 +84,14 @@ REALTIME_TOOLS = [
     {
         "type": "function",
         "name": "get_financial_summary",
-        "description": "Get a summary of business finances including income, expenses, and profit/loss",
+        "description": "Get a summary of business finances including total income, total expenses, and net profit or loss. Call this when the user asks about finances, money, profit, how the business is doing financially, or accounting summary.",
         "parameters": {
             "type": "object",
             "properties": {
                 "period": {
                     "type": "string",
                     "enum": ["month", "quarter", "year"],
-                    "description": "Time period for the summary"
+                    "description": "Time period for the summary (default: month)"
                 }
             },
             "required": ["period"]
@@ -96,7 +100,7 @@ REALTIME_TOOLS = [
     {
         "type": "function",
         "name": "analyze_spending",
-        "description": "Analyze spending patterns by category",
+        "description": "Analyze spending patterns by category to see where money is going. Call this when the user asks about expenses, spending breakdown, where money is going, or cost analysis.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -112,13 +116,13 @@ REALTIME_TOOLS = [
     {
         "type": "function",
         "name": "search_transactions",
-        "description": "Search accounting transactions by description or amount",
+        "description": "Search accounting transactions by description. Call this when the user asks to find specific transactions or payments.",
         "parameters": {
             "type": "object",
             "properties": {
                 "search": {
                     "type": "string",
-                    "description": "Search term"
+                    "description": "Search term to find in transaction descriptions"
                 },
                 "type": {
                     "type": "string",
@@ -131,7 +135,7 @@ REALTIME_TOOLS = [
     {
         "type": "function",
         "name": "list_invoices",
-        "description": "List invoices with optional filters for status",
+        "description": "List invoices with optional status filter. Call this when the user asks about invoices, bills sent, or money owed to them.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -150,7 +154,7 @@ REALTIME_TOOLS = [
     {
         "type": "function",
         "name": "get_invoice_summary",
-        "description": "Get a summary of invoices including total outstanding, overdue amounts, and recent payments",
+        "description": "Get a summary of invoices including total outstanding, overdue amounts, and payment status. Call this when the user asks about invoice overview, what's owed, or overdue invoices.",
         "parameters": {
             "type": "object",
             "properties": {}
@@ -510,28 +514,29 @@ def build_system_instructions(business_name: str, user_name: str) -> str:
     """Build the system instructions for the Realtime API."""
     return f"""You are an AI Admin assistant for {business_name}. You're speaking with {user_name}.
 
+IMPORTANT: You have access to real business data through your tools. When the user asks about emails, schedule, calls, tasks, finances, or invoices, you MUST use the appropriate tool to fetch the actual data. Do not make up information - always call the tool first.
+
+Your tools:
+- list_emails: Get actual emails from the inbox
+- get_schedule: Get real calendar events
+- get_recent_calls: Get actual call logs  
+- get_tasks: Get real tasks
+- get_financial_summary: Get actual financial data (income, expenses, profit)
+- analyze_spending: Get real spending breakdown by category
+- list_invoices: Get actual invoices
+- get_invoice_summary: Get real invoice totals
+
 Your personality:
 - Warm, professional, and efficient
 - British English (use £ for currency, UK date formats)
 - Conversational but concise - you're a busy professional's assistant
-- Proactive - offer relevant follow-ups and insights
-- When accessing data, be natural: "Let me check that for you..." then provide the info
-
-Your capabilities:
-- Check and summarise emails
-- Review calendar and schedule
-- Access call logs
-- Manage tasks
-- List and summarise invoices (outstanding, overdue, paid)
-- Provide financial summaries and spending analysis
-- Search and review accounting transactions
+- When fetching data, briefly acknowledge: "Let me check that for you..." then report the real results
 
 Guidelines:
-- For financial data, always mention the time period and currency
-- Offer to go into more detail when relevant
-- If asked about something you can't do, suggest alternatives
-- Keep responses conversational - you're speaking, not writing
-- Use natural speech patterns with brief pauses where appropriate"""
+- ALWAYS use tools when asked about emails, schedule, calls, tasks, money, finances, or invoices
+- Never make up data - if a tool fails, tell the user honestly
+- For financial data, always mention the time period and use pounds (£)
+- Keep responses conversational - you're speaking, not writing"""
 
 
 @router.websocket("/v1/realtime/voice")
@@ -680,6 +685,10 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                     # Log full event for function calls
                     if "function" in event_type or "tool" in event_type:
                         _logger.info(f"Function/Tool event details: {json.dumps(event)[:500]}")
+                    
+                    # Log errors with full details
+                    if event_type == "error":
+                        _logger.error(f"OpenAI Realtime API error: {json.dumps(event)}")
                     
                     # Handle function calls - OpenAI Realtime uses these event types
                     if event_type == "response.function_call_arguments.done":
