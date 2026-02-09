@@ -288,6 +288,40 @@ TOOL_DEFINITIONS = [
                 "required": ["period"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_invoices",
+            "description": "List invoices for the business with optional status filter. Use when the user asks about invoices, bills, what's owed to them, or payment status.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["draft", "sent", "paid", "overdue", "all"],
+                        "description": "Filter by invoice status (default: all)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of invoices to return (default 10)"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_invoice_summary",
+            "description": "Get a summary of invoice status including total outstanding, overdue amounts, and counts. Use when the user asks for an overview of invoices or what's owed.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
     }
 ]
 
@@ -348,6 +382,10 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _list_transactions(engine, business_id, arguments)
     elif tool_name == "analyze_spending":
         return _analyze_spending(engine, business_id, arguments)
+    elif tool_name == "list_invoices":
+        return _list_invoices(engine, business_id, arguments)
+    elif tool_name == "get_invoice_summary":
+        return _get_invoice_summary(engine, business_id, arguments)
     else:
         return {"error": f"Unknown tool: {tool_name}"}
 
@@ -1748,4 +1786,103 @@ def _analyze_spending(engine, business_id: str, args: dict) -> dict:
             "by_category": categories[:10],
             "top_category": top_expense["category"] if top_expense else "None",
             "insight": f"Your biggest expense category is {top_expense['category']} at £{top_expense['total']:,.2f} ({top_expense['percentage']}% of total)" if top_expense else "No expenses found for this period"
+        }
+
+
+def _list_invoices(engine, business_id: str, args: dict) -> dict:
+    """List invoices for the business."""
+    from sqlalchemy import text
+    
+    status = args.get("status", "all")
+    limit = min(args.get("limit", 10), 50)
+    
+    with engine.connect() as conn:
+        if status != "all":
+            query = text("""
+                SELECT id, invoice_number, client_name, total_amount, status, due_date, issued_date, created_at
+                FROM invoices
+                WHERE business_id = :business_id AND status = :status
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """)
+            params = {"business_id": business_id, "status": status, "limit": limit}
+        else:
+            query = text("""
+                SELECT id, invoice_number, client_name, total_amount, status, due_date, issued_date, created_at
+                FROM invoices
+                WHERE business_id = :business_id
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """)
+            params = {"business_id": business_id, "limit": limit}
+        
+        result = conn.execute(query, params)
+        
+        invoices = []
+        for row in result.fetchall():
+            invoices.append({
+                "id": str(row[0]),
+                "invoice_number": row[1],
+                "client_name": row[2],
+                "amount": float(row[3]) if row[3] else 0,
+                "status": row[4],
+                "due_date": row[5].isoformat() if row[5] else None,
+                "issued_date": row[6].isoformat() if row[6] else None
+            })
+        
+        return {
+            "invoices": invoices,
+            "count": len(invoices),
+            "filter": status
+        }
+
+
+def _get_invoice_summary(engine, business_id: str, args: dict) -> dict:
+    """Get invoice summary statistics."""
+    from sqlalchemy import text
+    from datetime import date
+    
+    today = date.today()
+    
+    with engine.connect() as conn:
+        # Get counts and totals by status
+        query = text("""
+            SELECT 
+                status,
+                COUNT(*) as count,
+                COALESCE(SUM(total_amount), 0) as total
+            FROM invoices
+            WHERE business_id = :business_id
+            GROUP BY status
+        """)
+        
+        result = conn.execute(query, {"business_id": business_id})
+        
+        totals = {}
+        for row in result.fetchall():
+            totals[row[0]] = {"count": int(row[1]), "total": float(row[2])}
+        
+        # Get overdue invoices (sent but past due date)
+        overdue_query = text("""
+            SELECT COUNT(*), COALESCE(SUM(total_amount), 0)
+            FROM invoices
+            WHERE business_id = :business_id 
+              AND due_date < :today 
+              AND status NOT IN ('paid', 'cancelled', 'draft')
+        """)
+        overdue_result = conn.execute(overdue_query, {"business_id": business_id, "today": today})
+        overdue_row = overdue_result.fetchone()
+        
+        outstanding = totals.get("sent", {}).get("total", 0) + totals.get("overdue", {}).get("total", 0)
+        
+        return {
+            "total_outstanding": round(outstanding, 2),
+            "total_overdue": round(float(overdue_row[1]) if overdue_row else 0, 2),
+            "overdue_count": int(overdue_row[0]) if overdue_row else 0,
+            "sent_count": totals.get("sent", {}).get("count", 0),
+            "sent_total": round(totals.get("sent", {}).get("total", 0), 2),
+            "draft_count": totals.get("draft", {}).get("count", 0),
+            "paid_count": totals.get("paid", {}).get("count", 0),
+            "paid_total": round(totals.get("paid", {}).get("total", 0), 2),
+            "currency": "GBP"
         }
