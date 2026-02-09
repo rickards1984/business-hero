@@ -610,7 +610,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             "session": {
                 "modalities": ["text", "audio"],
                 "instructions": build_system_instructions(business_name, user_name),
-                "voice": "nova",
+                "voice": "shimmer",
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm16",
                 "input_audio_transcription": {
