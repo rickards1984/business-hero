@@ -159,59 +159,69 @@ REALTIME_TOOLS = [
 ]
 
 
-async def execute_tool(tool_name: str, args: dict, business_id: str) -> str:
+async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: str) -> str:
     """Execute a tool and return the result as a string."""
-    _logger.info(f"Executing tool: {tool_name} with args: {args}")
+    _logger.info(f"Executing tool: {tool_name} with args: {args} for user={user_id}, business={business_id}")
     
     try:
-        from assistant_tools import _get_engine
-        engine = _get_engine()
+        # Import the shared tool executor from assistant_tools
+        from assistant_tools import execute_tool as execute_assistant_tool
         
+        # Map realtime tool names to assistant_tools names if different
+        tool_name_map = {
+            "list_emails": "list_emails",
+            "get_schedule": "get_calendar_briefing", 
+            "get_recent_calls": "list_calls",
+            "get_tasks": "list_tasks",
+            "get_financial_summary": "get_accounting_summary",
+            "analyze_spending": "analyze_spending",
+            "search_transactions": "list_transactions",
+            "list_invoices": "list_invoices",
+            "get_invoice_summary": "get_invoice_summary",
+        }
+        
+        mapped_name = tool_name_map.get(tool_name, tool_name)
+        
+        # Map arguments to what assistant_tools expects
         if tool_name == "list_emails":
-            from assistant_tools import _list_emails
-            result = _list_emails(engine, business_id, {"limit": args.get("count", 5)})
-            return json.dumps(result)
-            
+            mapped_args = {"limit": args.get("count", 5), "detailed": True}
         elif tool_name == "get_schedule":
-            from assistant_tools import _get_calendar_briefing
-            result = _get_calendar_briefing(engine, business_id, {}, "Europe/London")
-            return json.dumps(result)
-            
+            mapped_args = {"days": 1}
         elif tool_name == "get_recent_calls":
-            from assistant_tools import _list_calls
-            result = _list_calls(engine, business_id, {"limit": args.get("count", 5)})
-            return json.dumps(result)
-            
+            mapped_args = {"limit": args.get("count", 5)}
         elif tool_name == "get_tasks":
-            from assistant_tools import _list_tasks
-            result = _list_tasks(engine, business_id, {"status": args.get("status", "open")})
-            return json.dumps(result)
-            
+            mapped_args = {"status": args.get("status", "open")}
         elif tool_name == "get_financial_summary":
-            result = get_accounting_summary(engine, business_id, args.get("period", "month"))
-            return result
-            
+            mapped_args = {"period": args.get("period", "month")}
         elif tool_name == "analyze_spending":
-            result = analyze_spending_patterns(engine, business_id, args.get("period", "month"))
-            return result
-            
+            mapped_args = {"period": args.get("period", "month")}
         elif tool_name == "search_transactions":
-            result = search_transactions(engine, business_id, args.get("search", ""), args.get("type", "all"))
-            return result
-            
+            mapped_args = {"search": args.get("search", ""), "type": args.get("type", "all"), "limit": 20}
         elif tool_name == "list_invoices":
-            result = list_invoices(engine, business_id, args.get("status", "all"), args.get("limit", 10))
-            return result
-            
+            mapped_args = {"status": args.get("status", "all"), "limit": args.get("limit", 10)}
         elif tool_name == "get_invoice_summary":
-            result = get_invoice_summary(engine, business_id)
-            return result
-            
+            mapped_args = {}
         else:
-            return json.dumps({"error": f"Unknown tool: {tool_name}"})
-            
+            mapped_args = args
+        
+        _logger.info(f"Mapped tool call: {mapped_name} with args: {mapped_args}")
+        
+        # Get timezone for the business
+        from assistant_chat import get_business_for_user
+        try:
+            business = get_business_for_user(user_id, business_id)
+            timezone = business.timezone
+        except:
+            timezone = "Europe/London"
+        
+        # Execute using the shared tool executor
+        result = execute_assistant_tool(mapped_name, mapped_args, business_id, timezone)
+        
+        _logger.info(f"Tool {tool_name} completed successfully")
+        return json.dumps(result) if isinstance(result, dict) else result
+        
     except Exception as e:
-        _logger.error(f"Tool execution error: {e}")
+        _logger.error(f"Tool execution error for {tool_name}: {e}", exc_info=True)
         return json.dumps({"error": str(e)})
 
 
@@ -618,6 +628,21 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         # Notify client that we're ready
         await websocket.send_json({"type": "ready"})
         
+        # Keepalive task to prevent timeout
+        async def send_keepalive():
+            """Send periodic pings to keep connection alive."""
+            try:
+                while True:
+                    await asyncio.sleep(15)  # Every 15 seconds
+                    if openai_ws and openai_ws.open:
+                        # OpenAI Realtime API expects session updates or input to stay alive
+                        # A minimal ping-like message
+                        _logger.debug("Sending keepalive")
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                _logger.debug(f"Keepalive ended: {e}")
+        
         # Handle bidirectional communication
         async def forward_to_openai():
             """Forward messages from client to OpenAI."""
@@ -650,18 +675,24 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                 async for message in openai_ws:
                     event = json.loads(message)
                     event_type = event.get("type")
-                    _logger.debug(f"OpenAI -> Client: {event_type}")
+                    _logger.info(f"OpenAI event received: {event_type}")  # Changed to INFO for visibility
                     
-                    # Handle function calls
+                    # Log full event for function calls
+                    if "function" in event_type or "tool" in event_type:
+                        _logger.info(f"Function/Tool event details: {json.dumps(event)[:500]}")
+                    
+                    # Handle function calls - OpenAI Realtime uses these event types
                     if event_type == "response.function_call_arguments.done":
                         call_id = event.get("call_id")
                         name = event.get("name")
                         arguments = json.loads(event.get("arguments", "{}"))
                         
-                        _logger.info(f"Tool call: {name}({arguments})")
+                        _logger.info(f"Tool call received: {name}({arguments})")
                         
                         # Execute the tool
-                        result = await execute_tool(name, arguments, business_id)
+                        result = await execute_tool(name, arguments, user_id, business_id)
+                        
+                        _logger.info(f"Tool result: {result[:200]}...")
                         
                         # Send the result back to OpenAI
                         tool_response = {
@@ -673,9 +704,11 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                             }
                         }
                         await openai_ws.send(json.dumps(tool_response))
+                        _logger.info(f"Sent tool response for {name}")
                         
                         # Trigger response generation
                         await openai_ws.send(json.dumps({"type": "response.create"}))
+                        _logger.info("Triggered response.create after tool call")
                         
                     # Forward audio and other events to client
                     elif event_type in [
@@ -695,12 +728,16 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             except Exception as e:
                 _logger.error(f"Forward to client error: {e}")
         
-        # Run both directions concurrently
-        await asyncio.gather(
-            forward_to_openai(),
-            forward_to_client(),
-            return_exceptions=True
-        )
+        # Run both directions concurrently with keepalive
+        keepalive_task = asyncio.create_task(send_keepalive())
+        try:
+            await asyncio.gather(
+                forward_to_openai(),
+                forward_to_client(),
+                return_exceptions=True
+            )
+        finally:
+            keepalive_task.cancel()
         
     except Exception as e:
         _logger.error(f"Realtime API error: {e}")
