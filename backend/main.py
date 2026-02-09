@@ -84,6 +84,7 @@ from app.email.router import (
 )
 from app.billing.config import get_stripe_config, validate_stripe_config
 from accounting import router as accounting_router
+from realtime_voice import router as realtime_voice_router
 from dependencies import get_current_user_business, get_current_user_and_business
 
 
@@ -311,6 +312,7 @@ app.add_middleware(
 app.include_router(email_router)
 app.include_router(email_oauth_router)
 app.include_router(accounting_router)
+app.include_router(realtime_voice_router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])

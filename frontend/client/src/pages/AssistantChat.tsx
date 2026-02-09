@@ -25,9 +25,11 @@ import TaskIcon from '@mui/icons-material/Task';
 import PhoneIcon from '@mui/icons-material/Phone';
 import CalendarTodayIcon from '@mui/icons-material/CalendarToday';
 import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
-import { Card } from '@mui/material';
+import { Card, Divider } from '@mui/material';
+import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 import { useAuth } from '@/contexts/AuthContext';
 import { apiRequest } from '@/lib/queryClient';
+import RealtimeVoice from '@/components/RealtimeVoice';
 
 type ChatRole = 'user' | 'assistant';
 
@@ -63,6 +65,7 @@ export default function AssistantChat() {
   const [speakReplies, setSpeakReplies] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [usePremiumVoice, setUsePremiumVoice] = useState(true);
+  const [useRealtimeVoice, setUseRealtimeVoice] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
   const lastSpokenIndexRef = useRef<number>(-1);
@@ -436,29 +439,55 @@ export default function AssistantChat() {
             control={
               <Switch
                 checked={speakReplies}
-                onChange={(event) => setSpeakReplies(event.target.checked)}
+                onChange={(event) => {
+                  setSpeakReplies(event.target.checked);
+                  if (!event.target.checked) setUseRealtimeVoice(false);
+                }}
               />
             }
             label="Voice conversation mode"
           />
           {speakReplies && (
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={usePremiumVoice}
-                  onChange={(event) => setUsePremiumVoice(event.target.checked)}
-                  size="small"
+            <>
+              <Divider orientation="vertical" flexItem />
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={useRealtimeVoice}
+                    onChange={(event) => setUseRealtimeVoice(event.target.checked)}
+                    size="small"
+                    color="secondary"
+                  />
+                }
+                label={
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                    <RecordVoiceOverIcon fontSize="small" color={useRealtimeVoice ? 'secondary' : 'disabled'} />
+                    <Typography variant="body2">Realtime Voice (Beta)</Typography>
+                  </Box>
+                }
+              />
+              {!useRealtimeVoice && (
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={usePremiumVoice}
+                      onChange={(event) => setUsePremiumVoice(event.target.checked)}
+                      size="small"
+                    />
+                  }
+                  label={<Typography variant="body2">Premium voice</Typography>}
                 />
-              }
-              label={<Typography variant="body2">Premium voice</Typography>}
-            />
+              )}
+            </>
           )}
           <Typography variant="caption" color="text.secondary">
             {speakReplies 
-              ? (usePremiumVoice ? 'Using OpenAI natural voice' : 'Using browser voice') 
+              ? (useRealtimeVoice 
+                  ? 'Using OpenAI Realtime API for natural conversation' 
+                  : (usePremiumVoice ? 'Using OpenAI natural voice' : 'Using browser voice'))
               : 'Text-only mode'}
           </Typography>
-          {speaking && (
+          {speaking && !useRealtimeVoice && (
             <Button variant="outlined" size="small" onClick={handleStopSpeaking}>
               Stop speaking
             </Button>
@@ -467,7 +496,43 @@ export default function AssistantChat() {
       </Paper>
 
       <Paper sx={{ p: 3, mb: 2, minHeight: 400 }}>
-        {messages.length === 0 ? (
+        {useRealtimeVoice ? (
+          /* Realtime Voice Mode */
+          <Box sx={{ py: 4 }}>
+            <RealtimeVoice 
+              onTranscript={(text, isUser) => {
+                setMessages(prev => [...prev, {
+                  role: isUser ? 'user' : 'assistant',
+                  content: text
+                }]);
+              }}
+            />
+            
+            {/* Show transcript history */}
+            {messages.length > 0 && (
+              <Box sx={{ mt: 4, maxHeight: 300, overflow: 'auto' }}>
+                <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 2 }}>
+                  Conversation Transcript
+                </Typography>
+                {messages.map((msg, i) => (
+                  <Box 
+                    key={i}
+                    sx={{ 
+                      p: 2, 
+                      mb: 1, 
+                      borderRadius: 2,
+                      bgcolor: msg.role === 'user' ? 'grey.100' : 'primary.50',
+                      ml: msg.role === 'user' ? 4 : 0,
+                      mr: msg.role === 'assistant' ? 4 : 0,
+                    }}
+                  >
+                    <Typography variant="body2">{msg.content}</Typography>
+                  </Box>
+                ))}
+              </Box>
+            )}
+          </Box>
+        ) : messages.length === 0 ? (
           /* Modern empty state */
           <Box sx={{ 
             display: 'flex', 
@@ -605,6 +670,7 @@ export default function AssistantChat() {
         </Alert>
       )}
 
+      {!useRealtimeVoice && (
       <Paper sx={{ p: 2 }}>
         <Box sx={{ display: 'flex', gap: 2 }}>
           <TextField
@@ -650,6 +716,7 @@ export default function AssistantChat() {
           </Typography>
         )}
       </Paper>
+      )}
     </Container>
   );
 }
