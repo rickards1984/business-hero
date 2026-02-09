@@ -586,7 +586,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             "OpenAI-Beta": "realtime=v1"
         }
         
-        openai_ws = await websockets.connect(OPENAI_REALTIME_URL, extra_headers=headers)
+        openai_ws = await websockets.connect(OPENAI_REALTIME_URL, additional_headers=headers)
         _logger.info("Connected to OpenAI Realtime API")
         
         # Configure the session
