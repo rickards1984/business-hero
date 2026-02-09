@@ -127,6 +127,34 @@ REALTIME_TOOLS = [
                 }
             }
         }
+    },
+    {
+        "type": "function",
+        "name": "list_invoices",
+        "description": "List invoices with optional filters for status",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["draft", "sent", "paid", "overdue", "all"],
+                    "description": "Filter by invoice status"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of invoices to retrieve (default 10)"
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "name": "get_invoice_summary",
+        "description": "Get a summary of invoices including total outstanding, overdue amounts, and recent payments",
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        }
     }
 ]
 
@@ -169,6 +197,14 @@ async def execute_tool(tool_name: str, args: dict, business_id: str) -> str:
             
         elif tool_name == "search_transactions":
             result = search_transactions(engine, business_id, args.get("search", ""), args.get("type", "all"))
+            return result
+            
+        elif tool_name == "list_invoices":
+            result = list_invoices(engine, business_id, args.get("status", "all"), args.get("limit", 10))
+            return result
+            
+        elif tool_name == "get_invoice_summary":
+            result = get_invoice_summary(engine, business_id)
             return result
             
         else:
@@ -354,6 +390,112 @@ def search_transactions(engine, business_id: str, search: str, trans_type: str) 
         })
 
 
+def list_invoices(engine, business_id: str, status: str, limit: int) -> str:
+    """List invoices for the business."""
+    from sqlalchemy import text
+    
+    with engine.connect() as conn:
+        if status != "all":
+            query = text("""
+                SELECT invoice_number, client_name, total_amount, status, due_date, issued_date
+                FROM invoices
+                WHERE business_id = :business_id AND status = :status
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """)
+            params = {"business_id": business_id, "status": status, "limit": limit}
+        else:
+            query = text("""
+                SELECT invoice_number, client_name, total_amount, status, due_date, issued_date
+                FROM invoices
+                WHERE business_id = :business_id
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """)
+            params = {"business_id": business_id, "limit": limit}
+        
+        result = conn.execute(query, params)
+        
+        invoices = []
+        for row in result.fetchall():
+            invoices.append({
+                "invoice_number": row[0],
+                "client_name": row[1],
+                "amount": float(row[2]) if row[2] else 0,
+                "status": row[3],
+                "due_date": row[4].isoformat() if row[4] else None,
+                "issued_date": row[5].isoformat() if row[5] else None
+            })
+        
+        return json.dumps({
+            "invoices": invoices,
+            "count": len(invoices),
+            "currency": "GBP"
+        })
+
+
+def get_invoice_summary(engine, business_id: str) -> str:
+    """Get invoice summary statistics."""
+    from sqlalchemy import text
+    from datetime import date
+    
+    today = date.today()
+    
+    with engine.connect() as conn:
+        query = text("""
+            SELECT 
+                status,
+                COUNT(*) as count,
+                COALESCE(SUM(total_amount), 0) as total,
+                COALESCE(SUM(CASE WHEN due_date < :today AND status NOT IN ('paid', 'cancelled') THEN total_amount ELSE 0 END), 0) as overdue_amount
+            FROM invoices
+            WHERE business_id = :business_id
+            GROUP BY status
+        """)
+        
+        result = conn.execute(query, {"business_id": business_id, "today": today})
+        
+        totals = {
+            "draft": {"count": 0, "total": 0},
+            "sent": {"count": 0, "total": 0},
+            "paid": {"count": 0, "total": 0},
+            "overdue": {"count": 0, "total": 0},
+            "cancelled": {"count": 0, "total": 0}
+        }
+        total_overdue = 0
+        
+        for row in result.fetchall():
+            status = row[0]
+            if status in totals:
+                totals[status]["count"] = int(row[1])
+                totals[status]["total"] = float(row[2])
+            total_overdue += float(row[3])
+        
+        # Check for actually overdue (sent but past due date)
+        overdue_query = text("""
+            SELECT COUNT(*), COALESCE(SUM(total_amount), 0)
+            FROM invoices
+            WHERE business_id = :business_id 
+              AND due_date < :today 
+              AND status NOT IN ('paid', 'cancelled')
+        """)
+        overdue_result = conn.execute(overdue_query, {"business_id": business_id, "today": today})
+        overdue_row = overdue_result.fetchone()
+        
+        outstanding = totals["sent"]["total"] + totals["draft"]["total"]
+        
+        return json.dumps({
+            "total_outstanding": round(outstanding, 2),
+            "total_overdue": round(float(overdue_row[1]) if overdue_row else 0, 2),
+            "overdue_count": int(overdue_row[0]) if overdue_row else 0,
+            "pending_count": totals["sent"]["count"],
+            "draft_count": totals["draft"]["count"],
+            "paid_count": totals["paid"]["count"],
+            "paid_total": round(totals["paid"]["total"], 2),
+            "currency": "GBP"
+        })
+
+
 def build_system_instructions(business_name: str, user_name: str) -> str:
     """Build the system instructions for the Realtime API."""
     return f"""You are an AI Admin assistant for {business_name}. You're speaking with {user_name}.
@@ -370,6 +512,7 @@ Your capabilities:
 - Review calendar and schedule
 - Access call logs
 - Manage tasks
+- List and summarise invoices (outstanding, overdue, paid)
 - Provide financial summaries and spending analysis
 - Search and review accounting transactions
 

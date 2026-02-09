@@ -25,6 +25,7 @@ import TaskIcon from '@mui/icons-material/Task';
 import PhoneIcon from '@mui/icons-material/Phone';
 import CalendarTodayIcon from '@mui/icons-material/CalendarToday';
 import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
+import ReceiptIcon from '@mui/icons-material/Receipt';
 import { Card, Divider } from '@mui/material';
 import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 import { useAuth } from '@/contexts/AuthContext';
@@ -43,6 +44,7 @@ const QUICK_ACTIONS = [
   { icon: <CalendarTodayIcon />, label: "Today's schedule", shortLabel: "Schedule", action: "What's on my calendar today?" },
   { icon: <TaskIcon />, label: "Review tasks", shortLabel: "Tasks", action: "What tasks should I focus on today?" },
   { icon: <PhoneIcon />, label: "Recent calls", shortLabel: "Calls", action: "Summarise my recent calls" },
+  { icon: <ReceiptIcon />, label: "Review invoices", shortLabel: "Invoices", action: "Please review my invoices and give me a summary of what's outstanding, any that are overdue, and recent payments received." },
   { icon: <AccountBalanceIcon />, label: "Summarise financials", shortLabel: "Financials", action: "Please provide a detailed summary of my business financials. Include: 1) Total income and gross revenue, 2) Total expenses and net profit/loss, 3) Breakdown of expenses by category showing where most money is being spent, 4) Flag any uncategorized transactions that need attention, 5) Suggestions for potential cost savings to improve profitability. After the summary, please offer to go into more detail on any specific area I'm interested in." },
 ];
 
@@ -498,7 +500,32 @@ export default function AssistantChat() {
       <Paper sx={{ p: 3, mb: 2, minHeight: 400 }}>
         {useRealtimeVoice ? (
           /* Realtime Voice Mode */
-          <Box sx={{ py: 4 }}>
+          <Box sx={{ py: 2 }}>
+            {/* Quick access buttons - visible in voice mode */}
+            <Box sx={{ 
+              display: 'flex', 
+              flexWrap: 'wrap', 
+              gap: 1, 
+              mb: 3,
+              pb: 2,
+              justifyContent: 'center',
+              borderBottom: 1,
+              borderColor: 'divider'
+            }}>
+              {QUICK_ACTIONS.map((action, index) => (
+                <Chip
+                  key={index}
+                  icon={action.icon}
+                  label={action.shortLabel}
+                  onClick={() => handleQuickAction(action.action)}
+                  variant="outlined"
+                  color="primary"
+                  size="small"
+                  sx={{ cursor: 'pointer' }}
+                />
+              ))}
+            </Box>
+            
             <RealtimeVoice 
               onTranscript={(text, isUser) => {
                 setMessages(prev => [...prev, {
