@@ -1799,18 +1799,18 @@ def _list_invoices(engine, business_id: str, args: dict) -> dict:
     with engine.connect() as conn:
         if status != "all":
             query = text("""
-                SELECT id, invoice_number, client_name, total_amount, status, due_date, issued_date, created_at
+                SELECT id, invoice_number, customer_name, amount, status, due_date, issue_date, chase_stage, created_at
                 FROM invoices
-                WHERE business_id = :business_id AND status = :status
+                WHERE business_id = :business_id AND status = :status AND (archived IS NULL OR archived = false)
                 ORDER BY created_at DESC
                 LIMIT :limit
             """)
             params = {"business_id": business_id, "status": status, "limit": limit}
         else:
             query = text("""
-                SELECT id, invoice_number, client_name, total_amount, status, due_date, issued_date, created_at
+                SELECT id, invoice_number, customer_name, amount, status, due_date, issue_date, chase_stage, created_at
                 FROM invoices
-                WHERE business_id = :business_id
+                WHERE business_id = :business_id AND (archived IS NULL OR archived = false)
                 ORDER BY created_at DESC
                 LIMIT :limit
             """)
@@ -1823,11 +1823,12 @@ def _list_invoices(engine, business_id: str, args: dict) -> dict:
             invoices.append({
                 "id": str(row[0]),
                 "invoice_number": row[1],
-                "client_name": row[2],
+                "customer_name": row[2],
                 "amount": float(row[3]) if row[3] else 0,
                 "status": row[4],
                 "due_date": row[5].isoformat() if row[5] else None,
-                "issued_date": row[6].isoformat() if row[6] else None
+                "issue_date": row[6].isoformat() if row[6] else None,
+                "chase_stage": row[7] if row[7] else 0
             })
         
         return {
@@ -1850,9 +1851,9 @@ def _get_invoice_summary(engine, business_id: str, args: dict) -> dict:
             SELECT 
                 status,
                 COUNT(*) as count,
-                COALESCE(SUM(total_amount), 0) as total
+                COALESCE(SUM(amount), 0) as total
             FROM invoices
-            WHERE business_id = :business_id
+            WHERE business_id = :business_id AND (archived IS NULL OR archived = false)
             GROUP BY status
         """)
         
@@ -1864,11 +1865,12 @@ def _get_invoice_summary(engine, business_id: str, args: dict) -> dict:
         
         # Get overdue invoices (sent but past due date)
         overdue_query = text("""
-            SELECT COUNT(*), COALESCE(SUM(total_amount), 0)
+            SELECT COUNT(*), COALESCE(SUM(amount), 0)
             FROM invoices
             WHERE business_id = :business_id 
               AND due_date < :today 
               AND status NOT IN ('paid', 'cancelled', 'draft')
+              AND (archived IS NULL OR archived = false)
         """)
         overdue_result = conn.execute(overdue_query, {"business_id": business_id, "today": today})
         overdue_row = overdue_result.fetchone()
