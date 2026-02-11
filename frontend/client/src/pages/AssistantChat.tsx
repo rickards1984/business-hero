@@ -16,7 +16,6 @@ import {
   Typography,
 } from '@mui/material';
 import { keyframes } from '@mui/system';
-import SmartToyIcon from '@mui/icons-material/SmartToy';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
@@ -583,31 +582,37 @@ export default function AssistantChat() {
             textAlign: 'center',
             py: 4
           }}>
-            {/* Animated AI icon */}
+            {/* Aria's avatar */}
             <Box sx={{ 
-              width: 80, 
-              height: 80, 
+              width: 100, 
+              height: 100, 
               borderRadius: '50%', 
-              bgcolor: 'primary.light',
+              overflow: 'hidden',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               mb: 3,
               animation: 'pulse 2s infinite',
+              boxShadow: '0 4px 20px rgba(25, 118, 210, 0.3)',
               '@keyframes pulse': {
-                '0%': { boxShadow: '0 0 0 0 rgba(25, 118, 210, 0.4)' },
-                '70%': { boxShadow: '0 0 0 15px rgba(25, 118, 210, 0)' },
-                '100%': { boxShadow: '0 0 0 0 rgba(25, 118, 210, 0)' },
+                '0%': { boxShadow: '0 4px 20px rgba(25, 118, 210, 0.3)' },
+                '50%': { boxShadow: '0 4px 30px rgba(25, 118, 210, 0.5)' },
+                '100%': { boxShadow: '0 4px 20px rgba(25, 118, 210, 0.3)' },
               }
             }}>
-              <SmartToyIcon sx={{ fontSize: 40, color: 'primary.main' }} />
+              <img 
+                src="/aria-avatar.png" 
+                alt="Aria - AI Assistant" 
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              />
             </Box>
             
             <Typography variant="h5" fontWeight={600} gutterBottom>
-              Hi! I'm your AI Admin
+              Hi! I'm Aria
             </Typography>
             <Typography variant="body1" color="text.secondary" sx={{ mb: 4, maxWidth: 400 }}>
-              I can help you manage emails, tasks, calls, and invoices. Try asking me something or use a quick action below.
+              I'm your AI assistant. I can help you manage emails, tasks, calls, and invoices.
+              Try asking me something or use a quick action below.
             </Typography>
             
             {/* Quick action cards */}
@@ -715,7 +720,7 @@ export default function AssistantChat() {
           <TextField
             inputRef={inputRef}
             fullWidth
-            placeholder="Ask your AI admin..."
+            placeholder="Ask Aria..."
             value={input}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={(event) => {

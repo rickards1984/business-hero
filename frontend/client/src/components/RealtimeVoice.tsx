@@ -281,9 +281,39 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript }) =>
         borderRadius: 4,
       }}
     >
-      <Typography variant="h6" color="text.secondary">
-        AI Admin Voice
-      </Typography>
+      {/* Aria's avatar for voice mode */}
+      <Box sx={{ 
+        display: 'flex', 
+        flexDirection: 'column', 
+        alignItems: 'center',
+        mb: 3 
+      }}>
+        <Box sx={{ 
+          width: 120, 
+          height: 120, 
+          borderRadius: '50%', 
+          overflow: 'hidden',
+          boxShadow: isConnected 
+            ? '0 0 30px rgba(25, 118, 210, 0.6)' 
+            : '0 4px 20px rgba(0, 0, 0, 0.1)',
+          transition: 'box-shadow 0.3s ease',
+          animation: isConnected ? 'speaking 1.5s infinite' : 'none',
+          '@keyframes speaking': {
+            '0%': { boxShadow: '0 0 20px rgba(25, 118, 210, 0.4)' },
+            '50%': { boxShadow: '0 0 40px rgba(25, 118, 210, 0.8)' },
+            '100%': { boxShadow: '0 0 20px rgba(25, 118, 210, 0.4)' },
+          }
+        }}>
+          <img 
+            src="/aria-avatar.png" 
+            alt="Aria" 
+            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          />
+        </Box>
+        <Typography variant="h6" sx={{ mt: 2, fontWeight: 600 }}>
+          {isConnected ? 'Aria is listening...' : 'Aria'}
+        </Typography>
+      </Box>
       
       {/* Main action button */}
       <Box sx={{ position: 'relative' }}>
@@ -367,8 +397,8 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript }) =>
       {/* Instructions */}
       {!isConnected && (
         <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'center' }}>
-          Click the microphone to start a voice conversation with your AI Admin.
-          Speak naturally - I'll respond when you pause.
+          Click the microphone to start a voice conversation with Aria.
+          Speak naturally - she'll respond when you pause.
         </Typography>
       )}
     </Paper>
