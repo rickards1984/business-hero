@@ -83,6 +83,29 @@ REALTIME_TOOLS = [
     },
     {
         "type": "function",
+        "name": "create_task",
+        "description": "Create a new task or to-do item. Call this when the user asks to create a task, add a reminder, make a note to do something, or follow up on something.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "The title or description of the task"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional additional details about the task"
+                },
+                "due_at": {
+                    "type": "string",
+                    "description": "Optional due date in ISO 8601 format (e.g., '2024-12-25T10:00:00Z')"
+                }
+            },
+            "required": ["title"]
+        }
+    },
+    {
+        "type": "function",
         "name": "get_financial_summary",
         "description": "Get a summary of business finances including total income, total expenses, and net profit or loss. Call this when the user asks about finances, money, profit, how the business is doing financially, or accounting summary.",
         "parameters": {
@@ -177,6 +200,7 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
             "get_schedule": "get_calendar_briefing", 
             "get_recent_calls": "list_calls",
             "get_tasks": "list_tasks",
+            "create_task": "create_task",
             "get_financial_summary": "get_accounting_summary",
             "analyze_spending": "analyze_spending",
             "search_transactions": "list_transactions",
@@ -195,6 +219,12 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
             mapped_args = {"limit": args.get("count", 5)}
         elif tool_name == "get_tasks":
             mapped_args = {"status": args.get("status", "open")}
+        elif tool_name == "create_task":
+            mapped_args = {
+                "title": args.get("title", ""),
+                "description": args.get("description"),
+                "due_at": args.get("due_at")
+            }
         elif tool_name == "get_financial_summary":
             mapped_args = {"period": args.get("period", "month")}
         elif tool_name == "analyze_spending":
@@ -536,6 +566,7 @@ Your personality:
    - "schedule", "calendar", "meetings", "appointments", "diary" → get_schedule  
    - "calls", "phone", "who called", "missed calls" → get_recent_calls
    - "tasks", "to-do", "what do I need to do" → get_tasks
+   - "create task", "add task", "remind me", "follow up", "make a note" → create_task
    - "finances", "money", "profit", "how's business", "accounting" → get_financial_summary
    - "spending", "expenses", "costs", "where's money going" → analyze_spending
    - "invoices", "bills", "what's owed", "outstanding", "overdue" → list_invoices or get_invoice_summary
