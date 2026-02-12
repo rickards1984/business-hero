@@ -68,6 +68,21 @@ class ColumnMapping(BaseModel):
     payee_column: Optional[str] = None
 
 
+class BulkDeleteTransactionsRequest(BaseModel):
+    transaction_ids: List[str]
+
+
+class UpdateTransactionRequest(BaseModel):
+    category_id: Optional[str] = None
+    description: Optional[str] = None
+    payee_payer: Optional[str] = None
+
+
+class BulkUpdateCategoryRequest(BaseModel):
+    transaction_ids: List[str]
+    category_id: Optional[str] = None
+
+
 # ============== Categories Endpoints ==============
 
 @router.get("/categories")
@@ -361,6 +376,71 @@ async def delete_transaction(
     
     session.commit()
     return {"success": True}
+
+
+@router.post("/transactions/bulk-delete")
+async def bulk_delete_transactions(
+    request: BulkDeleteTransactionsRequest,
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """Soft delete multiple transactions at once."""
+    _, business = user_business
+    business_id = str(business.id)
+    
+    from sqlalchemy import text
+    
+    result = session.execute(
+        text("""
+            UPDATE accounting_transactions 
+            SET is_archived = true, updated_at = NOW()
+            WHERE business_id = :business_id 
+            AND id = ANY(:transaction_ids::uuid[])
+            AND is_archived = false
+            RETURNING id
+        """),
+        {
+            "business_id": business_id,
+            "transaction_ids": request.transaction_ids
+        }
+    )
+    deleted_ids = [str(row[0]) for row in result.fetchall()]
+    session.commit()
+    
+    return {"deleted_count": len(deleted_ids), "deleted_ids": deleted_ids}
+
+
+@router.post("/transactions/bulk-update-category")
+async def bulk_update_category(
+    request: BulkUpdateCategoryRequest,
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """Assign a category to multiple transactions at once."""
+    _, business = user_business
+    business_id = str(business.id)
+    
+    from sqlalchemy import text
+    
+    result = session.execute(
+        text("""
+            UPDATE accounting_transactions 
+            SET category_id = :category_id, updated_at = NOW()
+            WHERE business_id = :business_id 
+            AND id = ANY(:transaction_ids::uuid[])
+            AND is_archived = false
+            RETURNING id
+        """),
+        {
+            "business_id": business_id,
+            "category_id": request.category_id if request.category_id else None,
+            "transaction_ids": request.transaction_ids
+        }
+    )
+    updated_ids = [str(row[0]) for row in result.fetchall()]
+    session.commit()
+    
+    return {"updated_count": len(updated_ids), "updated_ids": updated_ids}
 
 
 # ============== Upload & Import Endpoints ==============
