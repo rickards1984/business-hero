@@ -27,13 +27,21 @@ REALTIME_TOOLS = [
     {
         "type": "function",
         "name": "list_emails",
-        "description": "List recent emails from the user's inbox. Call this when the user asks about emails, messages, or inbox.",
+        "description": "Fetch emails from the inbox. IMPORTANT: Always use limit=20 or higher to get a complete picture. Never use limit=1 or small numbers.",
         "parameters": {
             "type": "object",
             "properties": {
+                "folder": {
+                    "type": "string",
+                    "description": "Email folder (default: inbox)"
+                },
                 "limit": {
                     "type": "integer",
-                    "description": "Number of emails to fetch (default 20, max 50)"
+                    "description": "Number of emails to fetch. Use 20 for a thorough check. Minimum recommended: 10."
+                },
+                "unread_only": {
+                    "type": "boolean",
+                    "description": "Only return unread emails"
                 }
             }
         }
@@ -212,7 +220,17 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
         
         # Map arguments to what assistant_tools expects
         if tool_name == "list_emails":
-            mapped_args = {"limit": args.get("limit", 20), "detailed": True}
+            # Force a minimum of 20 emails to prevent hallucination from small samples
+            requested_limit = args.get("limit", 20)
+            if requested_limit < 10:
+                requested_limit = 20  # Override low limits to prevent hallucination
+            
+            mapped_args = {
+                "folder": args.get("folder", "inbox"),
+                "limit": requested_limit,
+                "unread_only": args.get("unread_only", False),
+                "detailed": True
+            }
         elif tool_name == "get_schedule":
             mapped_args = {"days": 1}
         elif tool_name == "get_recent_calls":
@@ -566,7 +584,7 @@ Your personality:
 4. **WHEN IN DOUBT, FETCH AGAIN** - If you're unsure about data, call the tool again rather than guessing.
 
 5. **TOOL TRIGGERS** - When you hear these keywords, IMMEDIATELY call the tool:
-   - "emails", "inbox", "messages", "mail" → list_emails (fetch 20 by default)
+   - "emails", "inbox", "messages", "mail" → list_emails with limit=20 (ALWAYS use limit=20, NEVER use limit=1 or small values)
    - "schedule", "calendar", "meetings", "appointments", "diary" → get_schedule
    - "calls", "phone", "who called", "missed calls" → get_recent_calls
    - "tasks", "to-do", "what do I need to do" → get_tasks
@@ -574,6 +592,8 @@ Your personality:
    - "finances", "money", "profit", "how's business", "accounting" → get_financial_summary
    - "spending", "expenses", "costs", "where's money going" → analyze_spending
    - "invoices", "bills", "what's owed", "outstanding", "overdue" → list_invoices or get_invoice_summary
+
+6. **EMAIL FETCHING RULE** - When calling list_emails, ALWAYS set limit=20. Never use limit=1, limit=5, or any small number. You need enough emails to give a proper briefing.
 
 ## HOW TO BRIEF ON EMAILS
 
