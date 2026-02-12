@@ -39,6 +39,7 @@ import {
   Menu,
   ListItemIcon,
   ListItemText,
+  Checkbox,
 } from '@mui/material';
 import {
   ArrowBack as ArrowBackIcon,
@@ -616,6 +617,39 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
   onDelete,
   onRefresh,
 }) => {
+  const [selectedTransactions, setSelectedTransactions] = useState<string[]>([]);
+
+  const handleBulkDelete = async () => {
+    if (!window.confirm(`Are you sure you want to delete ${selectedTransactions.length} transaction${selectedTransactions.length > 1 ? 's' : ''}? This cannot be undone.`)) {
+      return;
+    }
+    
+    try {
+      const session = await supabase.auth.getSession();
+      const response = await fetch(`${config.apiBaseUrl}/v1/accounting/transactions/bulk-delete`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.data.session?.access_token}`
+        },
+        body: JSON.stringify({ transaction_ids: selectedTransactions })
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        alert(`Successfully deleted ${data.deleted_count} transactions`);
+        setSelectedTransactions([]);
+        onRefresh();
+      } else {
+        const error = await response.json();
+        alert(`Failed to delete: ${error.detail || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Bulk delete error:', error);
+      alert('Failed to delete transactions. Please try again.');
+    }
+  };
+
   return (
     <Box>
       {/* Filters */}
@@ -682,11 +716,59 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
         </Box>
       </Card>
 
+      {/* Bulk Actions Toolbar */}
+      {selectedTransactions.length > 0 && (
+        <Box sx={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          gap: 2, 
+          p: 2, 
+          bgcolor: 'action.selected',
+          borderRadius: 1,
+          mb: 2
+        }}>
+          <Typography variant="body2" fontWeight={600}>
+            {selectedTransactions.length} transaction{selectedTransactions.length > 1 ? 's' : ''} selected
+          </Typography>
+          
+          <Button
+            size="small"
+            color="error"
+            variant="outlined"
+            startIcon={<DeleteIcon />}
+            onClick={handleBulkDelete}
+          >
+            Delete Selected
+          </Button>
+          
+          <Button
+            size="small"
+            variant="text"
+            onClick={() => setSelectedTransactions([])}
+          >
+            Clear Selection
+          </Button>
+        </Box>
+      )}
+
       {/* Transactions Table */}
       <TableContainer component={Paper}>
         <Table>
           <TableHead>
             <TableRow>
+              <TableCell padding="checkbox">
+                <Checkbox
+                  indeterminate={selectedTransactions.length > 0 && selectedTransactions.length < transactions.length}
+                  checked={transactions.length > 0 && selectedTransactions.length === transactions.length}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setSelectedTransactions(transactions.map(t => t.id));
+                    } else {
+                      setSelectedTransactions([]);
+                    }
+                  }}
+                />
+              </TableCell>
               <TableCell>Date</TableCell>
               <TableCell>Description</TableCell>
               <TableCell>Category</TableCell>
@@ -698,7 +780,7 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
           <TableBody>
             {transactions.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} align="center" sx={{ py: 4 }}>
+                <TableCell colSpan={7} align="center" sx={{ py: 4 }}>
                   <Typography color="text.secondary">
                     {searchQuery || selectedCategory ? 'No transactions match your filters' : 'No transactions yet'}
                   </Typography>
@@ -706,7 +788,19 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
               </TableRow>
             ) : (
               transactions.map((transaction) => (
-                <TableRow key={transaction.id} hover>
+                <TableRow key={transaction.id} hover selected={selectedTransactions.includes(transaction.id)}>
+                  <TableCell padding="checkbox" onClick={(e) => e.stopPropagation()}>
+                    <Checkbox
+                      checked={selectedTransactions.includes(transaction.id)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedTransactions(prev => [...prev, transaction.id]);
+                        } else {
+                          setSelectedTransactions(prev => prev.filter(id => id !== transaction.id));
+                        }
+                      }}
+                    />
+                  </TableCell>
                   <TableCell>
                     {new Date(transaction.transaction_date).toLocaleDateString('en-GB', {
                       day: 'numeric',
