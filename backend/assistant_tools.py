@@ -138,7 +138,7 @@ TOOL_DEFINITIONS = [
                 "properties": {
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of emails to return (default 10, max 20)"
+                        "description": "Maximum number of emails to return (default 20)"
                     },
                     "query": {
                         "type": "string",
@@ -724,7 +724,7 @@ def _refresh_microsoft_token(engine, account_id: str, refresh_token_ciphertext: 
 
 def _list_emails(engine, business_id: str, args: dict) -> dict:
     """List recent emails from connected email account."""
-    limit = min(args.get("limit", 5), 20)  # Default 5 for faster voice responses
+    limit = min(args.get("limit", 20), 50)  # Default 20, max 50
     query = args.get("query", "")
     detailed = args.get("detailed", False)  # Fetch full email content if true
     
