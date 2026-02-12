@@ -395,12 +395,12 @@ async def bulk_delete_transactions(
             UPDATE accounting_transactions 
             SET is_archived = true, updated_at = NOW()
             WHERE business_id = :business_id 
-            AND id = ANY(:transaction_ids::uuid[])
+            AND id = ANY(CAST(:transaction_ids AS uuid[]))
             AND is_archived = false
             RETURNING id
         """),
         {
-            "business_id": business_id,
+            "business_id": str(business.id),
             "transaction_ids": request.transaction_ids
         }
     )
@@ -418,7 +418,6 @@ async def bulk_update_category(
 ):
     """Assign a category to multiple transactions at once."""
     _, business = user_business
-    business_id = str(business.id)
     
     from sqlalchemy import text
     
@@ -427,12 +426,12 @@ async def bulk_update_category(
             UPDATE accounting_transactions 
             SET category_id = :category_id, updated_at = NOW()
             WHERE business_id = :business_id 
-            AND id = ANY(:transaction_ids::uuid[])
+            AND id = ANY(CAST(:transaction_ids AS uuid[]))
             AND is_archived = false
             RETURNING id
         """),
         {
-            "business_id": business_id,
+            "business_id": str(business.id),
             "category_id": request.category_id if request.category_id else None,
             "transaction_ids": request.transaction_ids
         }
