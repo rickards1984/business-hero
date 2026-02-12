@@ -566,8 +566,18 @@ async def import_spreadsheet(
     expense_col = _find_column_index(header_map, mapping_dict.get('expense_column'))
     ref_col = _find_column_index(header_map, mapping_dict.get('reference_column'))
     payee_col = _find_column_index(header_map, mapping_dict.get('payee_column'))
+    category_col = _find_column_index(header_map, mapping_dict.get('category_column'))
     
-    _logger.info(f"Column indices - date: {date_col}, desc: {desc_col}, amount: {amount_col}, income: {income_col}, expense: {expense_col}")
+    _logger.info(f"Column indices - date: {date_col}, desc: {desc_col}, amount: {amount_col}, income: {income_col}, expense: {expense_col}, category: {category_col}")
+    
+    # Build a lookup dict of existing categories (name -> id)
+    category_lookup = {}
+    if category_col is not None:
+        existing_categories = session.execute(
+            text("SELECT id, name FROM accounting_categories WHERE business_id = :business_id"),
+            {"business_id": str(business.id)}
+        ).fetchall()
+        category_lookup = {cat[1].lower().strip(): str(cat[0]) for cat in existing_categories}
     
     for row_num, row in enumerate(data_rows, start=2):
         try:
@@ -637,12 +647,37 @@ async def import_spreadsheet(
             reference = str(row[ref_col]).strip() if ref_col is not None and ref_col < len(row) else None
             payee = str(row[payee_col]).strip() if payee_col is not None and payee_col < len(row) else None
             
+            # Handle category from CSV
+            category_id = None
+            if category_col is not None and category_col < len(row):
+                category_name = str(row[category_col]).strip() if row[category_col] else None
+                if category_name:
+                    # Look up existing category (case-insensitive)
+                    category_id = category_lookup.get(category_name.lower())
+                    
+                    # If category doesn't exist, create it
+                    if not category_id:
+                        new_cat_result = session.execute(
+                            text("""
+                                INSERT INTO accounting_categories (business_id, name, type, color, created_at, updated_at)
+                                VALUES (:business_id, :name, :cat_type, '#6B7280', NOW(), NOW())
+                                ON CONFLICT (business_id, name) DO UPDATE SET updated_at = NOW()
+                                RETURNING id
+                            """),
+                            {"business_id": str(business.id), "name": category_name, "cat_type": trans_type}
+                        )
+                        new_cat_row = new_cat_result.fetchone()
+                        if new_cat_row:
+                            category_id = str(new_cat_row[0])
+                            # Add to lookup for future rows
+                            category_lookup[category_name.lower()] = category_id
+            
             # Insert transaction
             session.execute(
                 text("""
                     INSERT INTO accounting_transactions 
-                    (business_id, import_id, transaction_date, description, amount, type, reference, payee_payer)
-                    VALUES (:business_id, :import_id, :transaction_date, :description, :amount, :type, :reference, :payee_payer)
+                    (business_id, import_id, transaction_date, description, amount, type, reference, payee_payer, category_id)
+                    VALUES (:business_id, :import_id, :transaction_date, :description, :amount, :type, :reference, :payee_payer, :category_id)
                 """),
                 {
                     "business_id": str(business.id),
@@ -652,7 +687,8 @@ async def import_spreadsheet(
                     "amount": amount,
                     "type": trans_type,
                     "reference": reference,
-                    "payee_payer": payee
+                    "payee_payer": payee,
+                    "category_id": category_id
                 }
             )
             success_count += 1
@@ -1011,5 +1047,15 @@ async def _detect_column_mapping(headers: List[str], sample_rows: List[List[str]
             if h == kw or h.endswith(' ' + kw):
                 mapping['payee_column'] = headers[i]
                 break
+    
+    # Category column
+    category_keywords = ['category', 'category name', 'cat', 'expense type', 'transaction category', 'expense category', 'income category']
+    for kw in category_keywords:
+        for i, h in enumerate(header_lower):
+            if kw in h:
+                mapping['category_column'] = headers[i]
+                break
+        if 'category_column' in mapping:
+            break
     
     return mapping
