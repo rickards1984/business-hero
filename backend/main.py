@@ -573,7 +573,7 @@ async def get_business_health(
         LIMIT 1
         """
     )
-    row = session.exec(query, {"business_id": business_id}).first()
+    row = session.execute(text(query), {"business_id": business_id}).first()
     if not row:
         raise HTTPException(status_code=404, detail="Business not found")
     data = dict(row._mapping)
@@ -709,7 +709,7 @@ async def list_businesses_summary(
         """
     )
     try:
-        rows = session.exec(query).all()
+        rows = session.execute(text(query)).all()
     except Exception:
         logger.warning("admin_businesses_summary_fallback", exc_info=True)
         businesses = session.exec(select(Business).order_by(Business.created_at.desc())).all()
