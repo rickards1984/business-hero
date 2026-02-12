@@ -618,6 +618,47 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
   onRefresh,
 }) => {
   const [selectedTransactions, setSelectedTransactions] = useState<string[]>([]);
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editingTransaction, setEditingTransaction] = useState<Transaction & { category_id?: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const handleSaveTransaction = async () => {
+    if (!editingTransaction) return;
+    
+    setSaving(true);
+    try {
+      const session = await supabase.auth.getSession();
+      const response = await fetch(
+        `${config.apiBaseUrl}/v1/accounting/transactions/${editingTransaction.id}`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.data.session?.access_token}`
+          },
+          body: JSON.stringify({
+            category_id: editingTransaction.category_id || null,
+            description: editingTransaction.description || '',
+            payee_payer: editingTransaction.payee_payer || ''
+          })
+        }
+      );
+      
+      if (response.ok) {
+        setEditModalOpen(false);
+        setEditingTransaction(null);
+        onRefresh();
+      } else {
+        const error = await response.json();
+        alert(`Failed to update: ${error.detail || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Update transaction error:', error);
+      alert('Failed to update transaction. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const handleBulkDelete = async () => {
     if (!window.confirm(`Are you sure you want to delete ${selectedTransactions.length} transaction${selectedTransactions.length > 1 ? 's' : ''}? This cannot be undone.`)) {
@@ -788,7 +829,19 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
               </TableRow>
             ) : (
               transactions.map((transaction) => (
-                <TableRow key={transaction.id} hover selected={selectedTransactions.includes(transaction.id)}>
+                <TableRow
+                  key={transaction.id}
+                  hover
+                  selected={selectedTransactions.includes(transaction.id)}
+                  sx={{ cursor: 'pointer' }}
+                  onClick={() => {
+                    setEditingTransaction({
+                      ...transaction,
+                      category_id: transaction.category?.id || ''
+                    });
+                    setEditModalOpen(true);
+                  }}
+                >
                   <TableCell padding="checkbox" onClick={(e) => e.stopPropagation()}>
                     <Checkbox
                       checked={selectedTransactions.includes(transaction.id)}
@@ -847,7 +900,7 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
                       £{Math.abs(transaction.amount).toLocaleString('en-GB', { minimumFractionDigits: 2 })}
                     </Typography>
                   </TableCell>
-                  <TableCell align="center">
+                  <TableCell align="center" onClick={(e) => e.stopPropagation()}>
                     <IconButton size="small" onClick={() => onDelete(transaction.id)}>
                       <DeleteIcon fontSize="small" />
                     </IconButton>
@@ -858,6 +911,96 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
           </TableBody>
         </Table>
       </TableContainer>
+
+      {/* Edit Transaction Modal */}
+      <Dialog 
+        open={editModalOpen} 
+        onClose={() => {
+          setEditModalOpen(false);
+          setEditingTransaction(null);
+        }} 
+        maxWidth="sm" 
+        fullWidth
+      >
+        <DialogTitle>Edit Transaction</DialogTitle>
+        <DialogContent>
+          {editingTransaction && (
+            <Box sx={{ pt: 2, display: 'flex', flexDirection: 'column', gap: 3 }}>
+              {/* Show transaction date and amount as read-only info */}
+              <Box sx={{ display: 'flex', gap: 2, color: 'text.secondary' }}>
+                <Typography variant="body2">
+                  Date: {new Date(editingTransaction.transaction_date).toLocaleDateString()}
+                </Typography>
+                <Typography variant="body2">
+                  Amount: £{Math.abs(editingTransaction.amount).toFixed(2)}
+                </Typography>
+                <Typography variant="body2">
+                  Type: {editingTransaction.type}
+                </Typography>
+              </Box>
+              
+              <TextField
+                label="Description"
+                fullWidth
+                multiline
+                rows={2}
+                value={editingTransaction.description || ''}
+                onChange={(e) => setEditingTransaction({
+                  ...editingTransaction,
+                  description: e.target.value
+                })}
+              />
+              
+              <FormControl fullWidth>
+                <InputLabel>Category</InputLabel>
+                <Select
+                  value={editingTransaction.category_id || ''}
+                  label="Category"
+                  onChange={(e) => setEditingTransaction({
+                    ...editingTransaction,
+                    category_id: e.target.value
+                  })}
+                >
+                  <MenuItem value="">
+                    <em>Uncategorized</em>
+                  </MenuItem>
+                  {categories.map((cat) => (
+                    <MenuItem key={cat.id} value={cat.id}>{cat.name}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              
+              <TextField
+                label="Payee / Payer"
+                fullWidth
+                value={editingTransaction.payee_payer || ''}
+                onChange={(e) => setEditingTransaction({
+                  ...editingTransaction,
+                  payee_payer: e.target.value
+                })}
+                helperText="Who paid you or who you paid"
+              />
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button 
+            onClick={() => {
+              setEditModalOpen(false);
+              setEditingTransaction(null);
+            }}
+          >
+            Cancel
+          </Button>
+          <Button 
+            variant="contained" 
+            onClick={handleSaveTransaction}
+            disabled={saving}
+          >
+            {saving ? 'Saving...' : 'Save Changes'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };
