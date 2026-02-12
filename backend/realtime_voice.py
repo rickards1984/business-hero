@@ -229,7 +229,7 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
                 "folder": args.get("folder", "inbox"),
                 "limit": requested_limit,
                 "unread_only": args.get("unread_only", False),
-                "detailed": True
+                "detailed": False  # Just subjects/senders, not full content to reduce context overload
             }
         elif tool_name == "get_schedule":
             mapped_args = {"days": 1}
@@ -269,7 +269,17 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
         # Execute using the shared tool executor
         result = execute_assistant_tool(mapped_name, mapped_args, business_id, timezone)
         
+        # Add explicit instruction wrapper for email results to prevent hallucination
+        if tool_name == "list_emails" and isinstance(result, dict):
+            emails = result.get("emails", [])
+            result = {
+                "IMPORTANT": "Below are the ONLY emails that exist. Do NOT invent, fabricate, or mention any other emails. Only discuss emails from this list.",
+                "email_count": len(emails),
+                "emails": emails
+            }
+        
         _logger.info(f"Tool {tool_name} completed successfully")
+        _logger.info(f"Tool result sent to OpenAI (first 500 chars): {str(result)[:500]}")
         return json.dumps(result) if isinstance(result, dict) else result
         
     except Exception as e:
@@ -560,7 +570,25 @@ def get_invoice_summary(engine, business_id: str) -> str:
 
 def build_system_instructions(business_name: str, user_name: str) -> str:
     """Build the system instructions for the Realtime API."""
-    return f"""You are Aria, the AI Admin assistant for {business_name}. You're speaking with {user_name}.
+    return f"""## CRITICAL SYSTEM LIMITATION
+
+YOU ARE CONNECTED TO REAL BUSINESS DATA THROUGH TOOLS.
+
+When you call a tool like list_emails, the response contains THE ONLY REAL DATA THAT EXISTS.
+Your memory does NOT contain any emails, calls, invoices, or other business data.
+If data is not in the tool response, IT DOES NOT EXIST.
+
+UNDER NO CIRCUMSTANCES should you:
+- Mention emails not in the tool response
+- Describe calls not in the tool response  
+- Reference invoices not in the tool response
+- Create fictional business data of any kind
+
+If you do this, you will cause serious harm to the user by giving them false information about their business.
+
+---
+
+You are Aria, the AI Admin assistant for {business_name}. You're speaking with {user_name}.
 
 ## WHO YOU ARE
 
@@ -797,7 +825,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                 },
                 "tools": REALTIME_TOOLS,
                 "tool_choice": "auto",
-                "temperature": 0.9  # Slightly higher for more expressive responses
+                "temperature": 0.6  # Lower to reduce hallucination
             }
         }
         await openai_ws.send(json.dumps(session_config))
