@@ -3,26 +3,26 @@ import {
   Box,
   IconButton,
   Typography,
-  Paper,
+  Button,
   Fade,
 } from '@mui/material';
 import {
   Mic as MicIcon,
-  Stop as StopIcon,
-  VolumeUp as VolumeUpIcon,
+  CallEnd as CallEndIcon,
 } from '@mui/icons-material';
 import { supabase } from '@/lib/supabase';
 import { config } from '@/config/env';
 
 interface RealtimeVoiceProps {
   onTranscript?: (text: string, isUser: boolean) => void;
+  onClose?: () => void;
 }
 
-export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript }) => {
+export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onClose }) => {
   const [isConnected, setIsConnected] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [status, setStatus] = useState<string>('Click to start conversation');
+  const [status, setStatus] = useState<string>('Tap to connect');
   const [currentTranscript, setCurrentTranscript] = useState('');
   
   const wsRef = useRef<WebSocket | null>(null);
@@ -92,7 +92,7 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript }) =>
     
     switch (data.type) {
       case 'ready':
-        setStatus('Ready - start speaking');
+        setStatus('Listening...');
         break;
         
       case 'input_audio_buffer.speech_started':
@@ -119,10 +119,11 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript }) =>
         const assistantText = data.transcript;
         setCurrentTranscript('');
         onTranscript?.(assistantText, false);
-        setStatus('Ready - start speaking');
+        setStatus('Listening...');
         break;
         
       case 'response.audio.delta':
+        setStatus('Aria is speaking...');
         // Decode base64 audio and queue for playback
         const audioData = Uint8Array.from(atob(data.delta), c => c.charCodeAt(0));
         audioQueueRef.current.push(audioData.buffer);
@@ -225,7 +226,7 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript }) =>
       source.connect(processor);
       processor.connect(audioContext.destination);
       
-      setStatus('Ready - start speaking');
+      setStatus('Listening...');
       
     } catch (error) {
       console.error('Microphone access error:', error);
@@ -257,112 +258,101 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript }) =>
     }
     stopAudioCapture();
     setIsConnected(false);
-    setStatus('Click to start conversation');
-  }, []);
+    setStatus('Tap to connect');
+    onClose?.();
+  }, [onClose]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      endSession();
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      stopAudioCapture();
     };
-  }, [endSession]);
+  }, []);
+
+  // Determine avatar glow color based on state
+  const getGlowColor = () => {
+    if (!isConnected) return 'rgba(99, 102, 241, 0.3)';
+    if (isSpeaking) return 'rgba(139, 92, 246, 0.8)'; // Purple when speaking
+    if (isListening) return 'rgba(34, 197, 94, 0.8)'; // Green when listening
+    return 'rgba(99, 102, 241, 0.6)'; // Indigo when idle/connected
+  };
+
+  const getStatusColor = () => {
+    if (isSpeaking) return '#8b5cf6';
+    if (isListening) return '#22c55e';
+    return '#6366f1';
+  };
 
   return (
-    <Paper
-      elevation={3}
+    <Box
       sx={{
-        p: 4,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
         gap: 3,
-        maxWidth: 400,
-        mx: 'auto',
-        borderRadius: 4,
+        py: 4,
       }}
     >
-      {/* Aria's avatar for voice mode */}
-      <Box sx={{ 
-        display: 'flex', 
-        flexDirection: 'column', 
-        alignItems: 'center',
-        mb: 3 
-      }}>
-        <Box sx={{ 
-          width: 120, 
-          height: 120, 
-          borderRadius: '50%', 
-          overflow: 'hidden',
-          boxShadow: isConnected 
-            ? '0 0 30px rgba(25, 118, 210, 0.6)' 
-            : '0 4px 20px rgba(0, 0, 0, 0.1)',
-          transition: 'box-shadow 0.3s ease',
-          animation: isConnected ? 'speaking 1.5s infinite' : 'none',
-          '@keyframes speaking': {
-            '0%': { boxShadow: '0 0 20px rgba(25, 118, 210, 0.4)' },
-            '50%': { boxShadow: '0 0 40px rgba(25, 118, 210, 0.8)' },
-            '100%': { boxShadow: '0 0 20px rgba(25, 118, 210, 0.4)' },
-          }
-        }}>
+      {/* Aria's Avatar - Large and prominent */}
+      <Box sx={{ position: 'relative' }}>
+        <Box 
+          sx={{ 
+            width: 180, 
+            height: 180, 
+            borderRadius: '50%', 
+            overflow: 'hidden',
+            boxShadow: `0 0 ${isConnected ? '60px' : '30px'} ${getGlowColor()}`,
+            border: `4px solid ${getGlowColor()}`,
+            transition: 'all 0.5s ease',
+            animation: (isConnected && (isListening || isSpeaking)) ? 'pulse 2s ease-in-out infinite' : 'gentlePulse 3s ease-in-out infinite',
+            '@keyframes pulse': {
+              '0%, 100%': { 
+                boxShadow: `0 0 40px ${getGlowColor()}`,
+                transform: 'scale(1)'
+              },
+              '50%': { 
+                boxShadow: `0 0 80px ${getGlowColor()}`,
+                transform: 'scale(1.03)'
+              },
+            },
+            '@keyframes gentlePulse': {
+              '0%, 100%': { 
+                boxShadow: `0 0 30px rgba(99, 102, 241, 0.3)`,
+              },
+              '50%': { 
+                boxShadow: `0 0 50px rgba(99, 102, 241, 0.5)`,
+              },
+            }
+          }}
+        >
           <img 
             src="/aria-avatar.png" 
             alt="Aria" 
             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           />
         </Box>
-        <Typography variant="h6" sx={{ mt: 2, fontWeight: 600 }}>
-          {isConnected ? 'Aria is listening...' : 'Aria'}
-        </Typography>
-      </Box>
-      
-      {/* Main action button */}
-      <Box sx={{ position: 'relative' }}>
-        <IconButton
-          onClick={isConnected ? endSession : startSession}
-          sx={{
-            width: 100,
-            height: 100,
-            bgcolor: isConnected 
-              ? (isListening ? 'success.main' : isSpeaking ? 'info.main' : 'primary.main')
-              : 'grey.300',
-            color: 'white',
-            '&:hover': {
-              bgcolor: isConnected 
-                ? (isListening ? 'success.dark' : isSpeaking ? 'info.dark' : 'primary.dark')
-                : 'grey.400',
-            },
-            transition: 'all 0.3s ease',
-          }}
-        >
-          {!isConnected ? (
-            <MicIcon sx={{ fontSize: 48 }} />
-          ) : isListening ? (
-            <MicIcon sx={{ fontSize: 48 }} />
-          ) : isSpeaking ? (
-            <VolumeUpIcon sx={{ fontSize: 48 }} />
-          ) : (
-            <StopIcon sx={{ fontSize: 48 }} />
-          )}
-        </IconButton>
         
-        {/* Pulsing animation when active */}
-        {isConnected && (isListening || isSpeaking) && (
+        {/* Connection status indicator */}
+        {isConnected && (
           <Box
             sx={{
               position: 'absolute',
-              top: -10,
-              left: -10,
-              right: -10,
-              bottom: -10,
+              bottom: 10,
+              right: 10,
+              width: 24,
+              height: 24,
               borderRadius: '50%',
-              border: 3,
-              borderColor: isListening ? 'success.main' : 'info.main',
-              animation: 'pulse 1.5s ease-in-out infinite',
-              '@keyframes pulse': {
-                '0%': { transform: 'scale(1)', opacity: 1 },
-                '50%': { transform: 'scale(1.1)', opacity: 0.5 },
-                '100%': { transform: 'scale(1)', opacity: 1 },
-              },
+              bgcolor: isListening ? '#22c55e' : isSpeaking ? '#8b5cf6' : '#6366f1',
+              border: '3px solid white',
+              animation: 'statusPulse 1.5s ease-in-out infinite',
+              '@keyframes statusPulse': {
+                '0%, 100%': { transform: 'scale(1)' },
+                '50%': { transform: 'scale(1.2)' },
+              }
             }}
           />
         )}
@@ -370,38 +360,91 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript }) =>
       
       {/* Status text */}
       <Typography 
-        variant="body1" 
-        color="text.secondary"
-        sx={{ textAlign: 'center', minHeight: 24 }}
+        variant="h6" 
+        sx={{ 
+          fontWeight: 600,
+          color: getStatusColor(),
+          transition: 'color 0.3s ease'
+        }}
       >
-        {status}
+        {isConnected 
+          ? (isSpeaking ? 'Aria is speaking...' : isListening ? 'Listening...' : 'Ready')
+          : 'Aria'
+        }
       </Typography>
       
-      {/* Current transcript */}
+      {/* Current transcript while speaking */}
       <Fade in={!!currentTranscript}>
         <Typography 
-          variant="body2" 
+          variant="body1" 
           color="text.secondary"
           sx={{ 
             textAlign: 'center', 
             fontStyle: 'italic',
-            maxWidth: '100%',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
+            maxWidth: 400,
+            px: 2,
+            minHeight: 24
           }}
         >
           {currentTranscript}
         </Typography>
       </Fade>
       
-      {/* Instructions */}
+      {/* Main action button */}
+      {!isConnected ? (
+        <IconButton
+          onClick={startSession}
+          sx={{
+            width: 80,
+            height: 80,
+            background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+            color: 'white',
+            boxShadow: '0 8px 32px rgba(99, 102, 241, 0.4)',
+            '&:hover': {
+              background: 'linear-gradient(135deg, #5558e3 0%, #7c4fe0 100%)',
+              boxShadow: '0 12px 40px rgba(99, 102, 241, 0.5)',
+              transform: 'scale(1.05)',
+            },
+            transition: 'all 0.3s ease'
+          }}
+        >
+          <MicIcon sx={{ fontSize: 36 }} />
+        </IconButton>
+      ) : (
+        <Button
+          variant="contained"
+          onClick={endSession}
+          startIcon={<CallEndIcon />}
+          sx={{
+            px: 4,
+            py: 1.5,
+            borderRadius: '50px',
+            bgcolor: '#ef4444',
+            textTransform: 'none',
+            fontWeight: 600,
+            '&:hover': {
+              bgcolor: '#dc2626',
+            }
+          }}
+        >
+          End conversation
+        </Button>
+      )}
+      
+      {/* Instructions when not connected */}
       {!isConnected && (
-        <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'center' }}>
-          Click the microphone to start a voice conversation with Aria.
-          Speak naturally - she'll respond when you pause.
+        <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', maxWidth: 300 }}>
+          Tap the microphone to start talking with Aria. She'll respond naturally when you pause.
         </Typography>
       )}
-    </Paper>
+      
+      {/* Status indicator when connected */}
+      {isConnected && (
+        <Typography variant="caption" color="text.secondary">
+          {status}
+        </Typography>
+      )}
+    </Box>
   );
 };
 

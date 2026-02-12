@@ -731,7 +731,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             "session": {
                 "modalities": ["text", "audio"],
                 "instructions": build_system_instructions(business_name, user_name),
-                "voice": "shimmer",
+                "voice": "coral",  # Warmer, more personable voice
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm16",
                 "input_audio_transcription": {
@@ -739,13 +739,13 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 500
+                    "threshold": 0.6,  # Slightly higher to avoid cutting off
+                    "prefix_padding_ms": 350,  # A bit more padding
+                    "silence_duration_ms": 600  # Slightly longer pause before responding
                 },
                 "tools": REALTIME_TOOLS,
                 "tool_choice": "auto",
-                "temperature": 0.8
+                "temperature": 0.9  # Slightly higher for more expressive responses
             }
         }
         await openai_ws.send(json.dumps(session_config))
