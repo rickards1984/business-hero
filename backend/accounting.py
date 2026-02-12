@@ -657,20 +657,40 @@ async def import_spreadsheet(
                     
                     # If category doesn't exist, create it
                     if not category_id:
-                        new_cat_result = session.execute(
-                            text("""
-                                INSERT INTO accounting_categories (business_id, name, type, color, created_at, updated_at)
-                                VALUES (:business_id, :name, :cat_type, '#6B7280', NOW(), NOW())
-                                ON CONFLICT (business_id, name) DO UPDATE SET updated_at = NOW()
-                                RETURNING id
-                            """),
-                            {"business_id": str(business.id), "name": category_name, "cat_type": trans_type}
-                        )
-                        new_cat_row = new_cat_result.fetchone()
-                        if new_cat_row:
-                            category_id = str(new_cat_row[0])
+                        try:
+                            # First check if it exists (in case lookup missed it)
+                            existing = session.execute(
+                                text("""
+                                    SELECT id FROM accounting_categories 
+                                    WHERE business_id = :business_id AND LOWER(name) = LOWER(:name)
+                                """),
+                                {"business_id": str(business.id), "name": category_name}
+                            ).fetchone()
+                            
+                            if existing:
+                                category_id = str(existing[0])
+                            else:
+                                # Create new category
+                                new_cat_result = session.execute(
+                                    text("""
+                                        INSERT INTO accounting_categories (business_id, name, type, color, created_at, updated_at)
+                                        VALUES (:business_id, :name, :cat_type, '#6B7280', NOW(), NOW())
+                                        RETURNING id
+                                    """),
+                                    {"business_id": str(business.id), "name": category_name, "cat_type": trans_type}
+                                )
+                                new_cat_row = new_cat_result.fetchone()
+                                if new_cat_row:
+                                    category_id = str(new_cat_row[0])
+                            
                             # Add to lookup for future rows
-                            category_lookup[category_name.lower()] = category_id
+                            if category_id:
+                                category_lookup[category_name.lower()] = category_id
+                                
+                        except Exception as e:
+                            # Log but don't fail the entire import for category issues
+                            _logger.warning(f"Could not create category '{category_name}': {e}")
+                            category_id = None
             
             # Insert transaction
             session.execute(
