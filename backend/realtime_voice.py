@@ -839,11 +839,18 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             """Send periodic pings to keep connection alive."""
             try:
                 while True:
-                    await asyncio.sleep(15)  # Every 15 seconds
+                    await asyncio.sleep(20)  # Send ping every 20 seconds
                     if openai_ws and openai_ws.open:
-                        # OpenAI Realtime API expects session updates or input to stay alive
-                        # A minimal ping-like message
-                        _logger.debug("Sending keepalive")
+                        try:
+                            # Send a minimal event to keep connection alive
+                            # input_audio_buffer.commit is a safe no-op if buffer is empty
+                            await openai_ws.send(json.dumps({
+                                "type": "input_audio_buffer.commit"
+                            }))
+                            _logger.debug("Keepalive ping sent")
+                        except Exception as e:
+                            _logger.debug(f"Keepalive send failed: {e}")
+                            break
             except asyncio.CancelledError:
                 pass
             except Exception as e:
@@ -934,9 +941,13 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                         "error"
                     ]:
                         await websocket.send_json(event)
-                        
+            
             except Exception as e:
-                _logger.error(f"Forward to client error: {e}")
+                error_str = str(e).lower()
+                if "disconnect" in error_str or "closed" in error_str or "connectionclosed" in error_str:
+                    _logger.info("WebSocket connection closed")
+                else:
+                    _logger.error(f"Forward to client error: {e}")
         
         # Run both directions concurrently with keepalive
         keepalive_task = asyncio.create_task(send_keepalive())
@@ -947,7 +958,12 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                 return_exceptions=True
             )
         finally:
+            # Cancel keepalive when done
             keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except asyncio.CancelledError:
+                pass
         
     except Exception as e:
         _logger.error(f"Realtime API error: {e}")
