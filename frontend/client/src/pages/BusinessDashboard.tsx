@@ -48,6 +48,8 @@ import {
   Menu,
   Tooltip,
   InputAdornment,
+  Fab,
+  Zoom,
 } from '@mui/material';
 import {
   Business as BusinessIcon,
@@ -896,11 +898,32 @@ export default function BusinessDashboard() {
             <Button
               variant="outlined"
               size="small"
-              startIcon={<SmartToyIcon />}
-              onClick={() => navigate('/app/assistant/chat')}
-              sx={{ color: 'inherit', borderColor: 'rgba(255,255,255,0.4)' }}
+              onClick={() => navigate('/app/assistant')}
+              sx={{ 
+                color: 'inherit', 
+                borderColor: 'rgba(255,255,255,0.4)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                textTransform: 'none'
+              }}
             >
-              AI Admin
+              <Box
+                sx={{
+                  width: 24,
+                  height: 24,
+                  borderRadius: '50%',
+                  overflow: 'hidden',
+                  border: '2px solid rgba(255,255,255,0.3)'
+                }}
+              >
+                <img 
+                  src="/aria-avatar.png" 
+                  alt="Aria" 
+                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                />
+              </Box>
+              <span>Aria</span>
             </Button>
             <Typography
               variant="body2"
@@ -2211,6 +2234,51 @@ export default function BusinessDashboard() {
       </Dialog>
 
       {import.meta.env.DEV && <DebugPanel />}
+
+      {/* Floating Aria Button */}
+      <Tooltip title="Talk to Aria" placement="left" TransitionComponent={Zoom}>
+        <Fab
+          color="primary"
+          aria-label="Talk to Aria"
+          onClick={() => navigate('/app/assistant')}
+          sx={{
+            position: 'fixed',
+            bottom: 24,
+            right: 24,
+            width: 64,
+            height: 64,
+            boxShadow: '0 4px 20px rgba(99, 102, 241, 0.4)',
+            background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+            border: '3px solid white',
+            overflow: 'hidden',
+            transition: 'all 0.3s ease',
+            animation: 'pulse-aria 2s infinite',
+            '&:hover': {
+              transform: 'scale(1.1)',
+              boxShadow: '0 6px 30px rgba(99, 102, 241, 0.6)',
+            },
+            '@keyframes pulse-aria': {
+              '0%, 100%': { 
+                boxShadow: '0 4px 20px rgba(99, 102, 241, 0.4)',
+              },
+              '50%': { 
+                boxShadow: '0 4px 30px rgba(99, 102, 241, 0.7)',
+              },
+            }
+          }}
+        >
+          <img 
+            src="/aria-avatar.png" 
+            alt="Aria" 
+            style={{ 
+              width: '100%', 
+              height: '100%', 
+              objectFit: 'cover',
+              borderRadius: '50%'
+            }}
+          />
+        </Fab>
+      </Tooltip>
     </Box>
   );
 }
