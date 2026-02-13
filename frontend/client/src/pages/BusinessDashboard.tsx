@@ -183,6 +183,7 @@ export default function BusinessDashboard() {
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDescription, setTaskDescription] = useState('');
+  const [taskDueAt, setTaskDueAt] = useState('');
   const [savingTask, setSavingTask] = useState(false);
 
   // Invoice state
@@ -329,6 +330,7 @@ export default function BusinessDashboard() {
           title: taskTitle.trim(),
           description: taskDescription.trim(),
           status: 'pending',
+          due_at: taskDueAt || null,
         });
 
       if (insertError) throw insertError;
@@ -336,6 +338,7 @@ export default function BusinessDashboard() {
       setTaskDialogOpen(false);
       setTaskTitle('');
       setTaskDescription('');
+      setTaskDueAt('');
       await fetchTasks(business.id);
     } catch (err: any) {
       setError(err.message || 'Failed to create task');
@@ -2180,6 +2183,16 @@ export default function BusinessDashboard() {
             value={taskDescription}
             onChange={(e) => setTaskDescription(e.target.value)}
             data-testid="input-task-description"
+          />
+          <TextField
+            label="Due Date (optional)"
+            type="datetime-local"
+            fullWidth
+            value={taskDueAt}
+            onChange={(e) => setTaskDueAt(e.target.value)}
+            InputLabelProps={{ shrink: true }}
+            sx={{ mt: 2 }}
+            data-testid="input-task-due-date"
           />
         </DialogContent>
         <DialogActions>
