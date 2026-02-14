@@ -75,6 +75,7 @@ import {
   Legend,
   LineChart,
   Line,
+  ReferenceLine,
 } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 import { apiRequest } from '@/lib/queryClient';
@@ -618,161 +619,240 @@ const OverviewTab: React.FC<{ summary: Summary | null }> = ({ summary }) => {
 
   return (
     <Grid container spacing={3}>
-      {/* Trend Chart */}
-      <Grid item xs={12}>
-        <Card>
-          <CardContent>
-            <Typography variant="h6" gutterBottom>
-              Income vs Expenses Trend
-            </Typography>
-            {summary.trend.length > 0 ? (
-              <Box sx={{ height: 300 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={summary.trend}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis 
-                      dataKey="month" 
-                      tickFormatter={(value) => {
-                        const [year, month] = value.split('-');
-                        return new Date(parseInt(year), parseInt(month) - 1).toLocaleDateString('en-GB', { month: 'short' });
-                      }}
-                    />
-                    <YAxis tickFormatter={(value) => `£${value.toLocaleString()}`} />
-                    <RechartsTooltip 
-                      formatter={(value: number) => `£${value.toLocaleString('en-GB', { minimumFractionDigits: 2 })}`}
-                    />
-                    <Legend />
-                    <Bar dataKey="income" name="Income" fill="#10B981" />
-                    <Bar dataKey="expense" name="Expenses" fill="#EF4444" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </Box>
-            ) : (
-              <Box sx={{ py: 4, textAlign: 'center' }}>
-                <Typography color="text.secondary">No trend data available yet</Typography>
-              </Box>
-            )}
-          </CardContent>
-        </Card>
+      {/* Row 1: Bar Chart + Line Chart (side by side on desktop) */}
+      
+      {/* Income vs Expenses Trend Bar Chart */}
+      <Grid item xs={12} md={6}>
+        <Paper sx={{ p: 2, height: '100%' }}>
+          <Typography variant="h6" gutterBottom>
+            Income vs Expenses Trend
+          </Typography>
+          {summary.trend.length > 0 ? (
+            <Box sx={{ height: 300 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={summary.trend} margin={{ top: 10, right: 30, left: 10, bottom: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
+                  <XAxis 
+                    dataKey="month" 
+                    tick={{ fontSize: 12 }}
+                    axisLine={{ stroke: '#e0e0e0' }}
+                    tickFormatter={(value) => {
+                      const [year, month] = value.split('-');
+                      return new Date(parseInt(year), parseInt(month) - 1).toLocaleDateString('en-GB', { month: 'short' });
+                    }}
+                  />
+                  <YAxis 
+                    tick={{ fontSize: 12 }}
+                    axisLine={{ stroke: '#e0e0e0' }}
+                    tickFormatter={(value) => `£${value.toLocaleString()}`}
+                  />
+                  <RechartsTooltip 
+                    formatter={(value: number) => `£${value.toLocaleString()}`}
+                    contentStyle={{ borderRadius: 8 }}
+                  />
+                  <Legend />
+                  <Bar dataKey="income" name="Income" fill="#10B981" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="expense" name="Expenses" fill="#EF4444" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </Box>
+          ) : (
+            <Box sx={{ height: 300, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Typography color="text.secondary">No trend data available</Typography>
+            </Box>
+          )}
+        </Paper>
       </Grid>
 
-      {/* Income Breakdown */}
+      {/* Net Profit/Loss Trend Line Chart */}
       <Grid item xs={12} md={6}>
-        <Card sx={{ height: '100%' }}>
-          <CardContent>
-            <Typography variant="h6" gutterBottom>
-              Income by Category
-            </Typography>
-            {summary.categories.income.length > 0 ? (
-              <Box sx={{ height: 250 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={summary.categories.income}
-                      dataKey="total"
-                      nameKey="name"
-                      cx="50%"
-                      cy="50%"
-                      outerRadius={80}
-                      label={({ name, percent }) => `${name} (${(percent * 100).toFixed(0)}%)`}
-                    >
-                      {summary.categories.income.map((entry, index) => (
-                        <Cell key={entry.name} fill={entry.color || COLORS[index % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <RechartsTooltip formatter={(value: number) => `£${value.toLocaleString('en-GB', { minimumFractionDigits: 2 })}`} />
-                  </PieChart>
-                </ResponsiveContainer>
-              </Box>
-            ) : (
-              <Box sx={{ py: 4, textAlign: 'center' }}>
-                <Typography color="text.secondary">No income data yet</Typography>
-              </Box>
-            )}
-          </CardContent>
-        </Card>
+        <Paper sx={{ p: 2, height: '100%' }}>
+          <Typography variant="h6" gutterBottom>
+            Net Profit/Loss Trend
+          </Typography>
+          {summary.trend.length > 0 ? (
+            <Box sx={{ height: 300 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart
+                  data={summary.trend.map(item => ({
+                    ...item,
+                    net: item.income - item.expense
+                  }))}
+                  margin={{ top: 10, right: 30, left: 10, bottom: 10 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
+                  <XAxis 
+                    dataKey="month" 
+                    tick={{ fontSize: 12 }}
+                    axisLine={{ stroke: '#e0e0e0' }}
+                    tickFormatter={(value) => {
+                      const [year, month] = value.split('-');
+                      return new Date(parseInt(year), parseInt(month) - 1).toLocaleDateString('en-GB', { month: 'short' });
+                    }}
+                  />
+                  <YAxis 
+                    tick={{ fontSize: 12 }}
+                    axisLine={{ stroke: '#e0e0e0' }}
+                    tickFormatter={(value) => `£${value.toLocaleString()}`}
+                  />
+                  <RechartsTooltip 
+                    formatter={(value: number) => [`£${value.toLocaleString()}`, 'Net']}
+                    contentStyle={{ borderRadius: 8 }}
+                  />
+                  <ReferenceLine y={0} stroke="#666" strokeDasharray="3 3" />
+                  <Line 
+                    type="monotone" 
+                    dataKey="net" 
+                    stroke="#6366f1" 
+                    strokeWidth={3}
+                    dot={{ fill: '#6366f1', strokeWidth: 2, r: 5 }}
+                    activeDot={{ r: 8, fill: '#8b5cf6' }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </Box>
+          ) : (
+            <Box sx={{ height: 300, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Typography color="text.secondary">No trend data available</Typography>
+            </Box>
+          )}
+        </Paper>
       </Grid>
 
-      {/* Expense Breakdown */}
-      <Grid item xs={12} md={6}>
-        <Card sx={{ height: '100%' }}>
-          <CardContent>
-            <Typography variant="h6" gutterBottom>
-              Expenses by Category
-            </Typography>
-            {summary.categories.expense.length > 0 ? (
-              <Box sx={{ height: 250 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={summary.categories.expense}
-                      dataKey="total"
-                      nameKey="name"
-                      cx="50%"
-                      cy="50%"
-                      outerRadius={80}
-                      label={({ name, percent }) => `${name} (${(percent * 100).toFixed(0)}%)`}
-                    >
-                      {summary.categories.expense.map((entry, index) => (
-                        <Cell key={entry.name} fill={entry.color || COLORS[index % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <RechartsTooltip formatter={(value: number) => `£${value.toLocaleString('en-GB', { minimumFractionDigits: 2 })}`} />
-                  </PieChart>
-                </ResponsiveContainer>
-              </Box>
-            ) : (
-              <Box sx={{ py: 4, textAlign: 'center' }}>
-                <Typography color="text.secondary">No expense data yet</Typography>
-              </Box>
-            )}
-          </CardContent>
-        </Card>
+      {/* Row 2: Pie Charts + Top Lists */}
+      
+      {/* Income by Category */}
+      <Grid item xs={12} sm={6} md={3}>
+        <Paper sx={{ p: 2, height: '100%' }}>
+          <Typography variant="h6" gutterBottom>
+            Income by Category
+          </Typography>
+          {summary.categories.income.length > 0 ? (
+            <Box sx={{ height: 280 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={summary.categories.income}
+                    dataKey="total"
+                    nameKey="name"
+                    cx="50%"
+                    cy="40%"
+                    innerRadius={40}
+                    outerRadius={70}
+                    paddingAngle={2}
+                  >
+                    {summary.categories.income.map((entry, index) => (
+                      <Cell key={entry.name} fill={entry.color || COLORS[index % COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <RechartsTooltip 
+                    formatter={(value: number) => `£${value.toLocaleString()}`}
+                    contentStyle={{ borderRadius: 8 }}
+                  />
+                  <Legend 
+                    layout="horizontal"
+                    verticalAlign="bottom"
+                    align="center"
+                    wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }}
+                    formatter={(value) => value.length > 12 ? value.substring(0, 12) + '...' : value}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+            </Box>
+          ) : (
+            <Box sx={{ height: 280, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Typography color="text.secondary">No income data</Typography>
+            </Box>
+          )}
+        </Paper>
       </Grid>
 
-      {/* Top Categories Lists */}
-      <Grid item xs={12} md={6}>
-        <Card>
-          <CardContent>
-            <Typography variant="subtitle1" fontWeight={600} gutterBottom>
-              Top Income Sources
-            </Typography>
-            {summary.categories.income.slice(0, 5).map((cat) => (
-              <Box key={cat.name} sx={{ display: 'flex', alignItems: 'center', py: 1 }}>
-                <Box sx={{ width: 12, height: 12, borderRadius: '50%', bgcolor: cat.color, mr: 2 }} />
-                <Typography sx={{ flex: 1 }}>{cat.name}</Typography>
-                <Typography fontWeight={600} color="success.main">
-                  £{cat.total.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
-                </Typography>
-              </Box>
-            ))}
-            {summary.categories.income.length === 0 && (
-              <Typography color="text.secondary" sx={{ py: 2 }}>No income recorded</Typography>
-            )}
-          </CardContent>
-        </Card>
+      {/* Expenses by Category */}
+      <Grid item xs={12} sm={6} md={3}>
+        <Paper sx={{ p: 2, height: '100%' }}>
+          <Typography variant="h6" gutterBottom>
+            Expenses by Category
+          </Typography>
+          {summary.categories.expense.length > 0 ? (
+            <Box sx={{ height: 280 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={summary.categories.expense}
+                    dataKey="total"
+                    nameKey="name"
+                    cx="50%"
+                    cy="40%"
+                    innerRadius={40}
+                    outerRadius={70}
+                    paddingAngle={2}
+                  >
+                    {summary.categories.expense.map((entry, index) => (
+                      <Cell key={entry.name} fill={entry.color || COLORS[index % COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <RechartsTooltip 
+                    formatter={(value: number) => `£${value.toLocaleString()}`}
+                    contentStyle={{ borderRadius: 8 }}
+                  />
+                  <Legend 
+                    layout="horizontal"
+                    verticalAlign="bottom"
+                    align="center"
+                    wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }}
+                    formatter={(value) => value.length > 12 ? value.substring(0, 12) + '...' : value}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+            </Box>
+          ) : (
+            <Box sx={{ height: 280, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Typography color="text.secondary">No expense data</Typography>
+            </Box>
+          )}
+        </Paper>
       </Grid>
 
-      <Grid item xs={12} md={6}>
-        <Card>
-          <CardContent>
-            <Typography variant="subtitle1" fontWeight={600} gutterBottom>
-              Top Expenses
-            </Typography>
-            {summary.categories.expense.slice(0, 5).map((cat) => (
-              <Box key={cat.name} sx={{ display: 'flex', alignItems: 'center', py: 1 }}>
-                <Box sx={{ width: 12, height: 12, borderRadius: '50%', bgcolor: cat.color, mr: 2 }} />
-                <Typography sx={{ flex: 1 }}>{cat.name}</Typography>
-                <Typography fontWeight={600} color="error.main">
-                  £{cat.total.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
-                </Typography>
-              </Box>
-            ))}
-            {summary.categories.expense.length === 0 && (
-              <Typography color="text.secondary" sx={{ py: 2 }}>No expenses recorded</Typography>
-            )}
-          </CardContent>
-        </Card>
+      {/* Top Income Sources */}
+      <Grid item xs={12} sm={6} md={3}>
+        <Paper sx={{ p: 2, height: '100%' }}>
+          <Typography variant="subtitle1" fontWeight={600} gutterBottom>
+            Top Income Sources
+          </Typography>
+          {summary.categories.income.slice(0, 5).map((cat) => (
+            <Box key={cat.name} sx={{ display: 'flex', alignItems: 'center', py: 1 }}>
+              <Box sx={{ width: 12, height: 12, borderRadius: '50%', bgcolor: cat.color, mr: 2, flexShrink: 0 }} />
+              <Typography sx={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cat.name}</Typography>
+              <Typography fontWeight={600} color="success.main" sx={{ ml: 1 }}>
+                £{cat.total.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
+              </Typography>
+            </Box>
+          ))}
+          {summary.categories.income.length === 0 && (
+            <Typography color="text.secondary" sx={{ py: 2 }}>No income recorded</Typography>
+          )}
+        </Paper>
+      </Grid>
+
+      {/* Top Expenses */}
+      <Grid item xs={12} sm={6} md={3}>
+        <Paper sx={{ p: 2, height: '100%' }}>
+          <Typography variant="subtitle1" fontWeight={600} gutterBottom>
+            Top Expenses
+          </Typography>
+          {summary.categories.expense.slice(0, 5).map((cat) => (
+            <Box key={cat.name} sx={{ display: 'flex', alignItems: 'center', py: 1 }}>
+              <Box sx={{ width: 12, height: 12, borderRadius: '50%', bgcolor: cat.color, mr: 2, flexShrink: 0 }} />
+              <Typography sx={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cat.name}</Typography>
+              <Typography fontWeight={600} color="error.main" sx={{ ml: 1 }}>
+                £{cat.total.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
+              </Typography>
+            </Box>
+          ))}
+          {summary.categories.expense.length === 0 && (
+            <Typography color="text.secondary" sx={{ py: 2 }}>No expenses recorded</Typography>
+          )}
+        </Paper>
       </Grid>
     </Grid>
   );
