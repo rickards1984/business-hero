@@ -623,12 +623,12 @@ const OverviewTab: React.FC<{ summary: Summary | null }> = ({ summary }) => {
       
       {/* Income vs Expenses Trend Bar Chart */}
       <Grid item xs={12} md={6}>
-        <Paper sx={{ p: 3, height: '100%' }}>
+        <Paper sx={{ p: 3 }}>
           <Typography variant="h6" gutterBottom>
             Income vs Expenses Trend
           </Typography>
           {summary.trend.length > 0 ? (
-            <Box sx={{ height: 350 }}>
+            <Box sx={{ height: 400 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={summary.trend} margin={{ top: 10, right: 30, left: 10, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
@@ -657,7 +657,7 @@ const OverviewTab: React.FC<{ summary: Summary | null }> = ({ summary }) => {
               </ResponsiveContainer>
             </Box>
           ) : (
-            <Box sx={{ height: 350, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Box sx={{ height: 400, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Typography color="text.secondary">No trend data available</Typography>
             </Box>
           )}
@@ -666,12 +666,12 @@ const OverviewTab: React.FC<{ summary: Summary | null }> = ({ summary }) => {
 
       {/* Net Profit/Loss Trend Line Chart */}
       <Grid item xs={12} md={6}>
-        <Paper sx={{ p: 3, height: '100%' }}>
+        <Paper sx={{ p: 3 }}>
           <Typography variant="h6" gutterBottom>
             Net Profit/Loss Trend
           </Typography>
           {summary.trend.length > 0 ? (
-            <Box sx={{ height: 350 }}>
+            <Box sx={{ height: 400 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart
                   data={summary.trend.map(item => ({
@@ -712,34 +712,35 @@ const OverviewTab: React.FC<{ summary: Summary | null }> = ({ summary }) => {
               </ResponsiveContainer>
             </Box>
           ) : (
-            <Box sx={{ height: 350, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Box sx={{ height: 400, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Typography color="text.secondary">No trend data available</Typography>
             </Box>
           )}
         </Paper>
       </Grid>
 
-      {/* Row 2: Pie Charts (side by side, larger) */}
+      {/* Row 2: Pie Charts with side legends */}
       
       {/* Income by Category */}
       <Grid item xs={12} md={6}>
-        <Paper sx={{ p: 3, height: '100%' }}>
+        <Paper sx={{ p: 3 }}>
           <Typography variant="h6" gutterBottom>
             Income by Category
           </Typography>
           {summary.categories.income.length > 0 ? (
-            <Box sx={{ height: 350 }}>
-              <ResponsiveContainer width="100%" height="100%">
+            <Box sx={{ height: 400, display: 'flex', alignItems: 'center' }}>
+              <ResponsiveContainer width="60%" height="100%">
                 <PieChart>
                   <Pie
                     data={summary.categories.income}
                     dataKey="total"
                     nameKey="name"
                     cx="50%"
-                    cy="45%"
-                    innerRadius={60}
-                    outerRadius={100}
+                    cy="50%"
+                    innerRadius={50}
+                    outerRadius={90}
                     paddingAngle={2}
+                    label={false}
                   >
                     {summary.categories.income.map((entry, index) => (
                       <Cell key={entry.name} fill={entry.color || COLORS[index % COLORS.length]} />
@@ -749,21 +750,30 @@ const OverviewTab: React.FC<{ summary: Summary | null }> = ({ summary }) => {
                     formatter={(value: number) => `£${value.toLocaleString()}`}
                     contentStyle={{ borderRadius: 8 }}
                   />
-                  <Legend 
-                    layout="horizontal"
-                    verticalAlign="bottom"
-                    align="center"
-                    wrapperStyle={{ 
-                      fontSize: '12px', 
-                      paddingTop: '20px',
-                      lineHeight: '24px'
-                    }}
-                  />
                 </PieChart>
               </ResponsiveContainer>
+              <Box sx={{ width: '40%', maxHeight: 380, overflowY: 'auto', pl: 2 }}>
+                {summary.categories.income.slice(0, 10).map((entry, index) => (
+                  <Box key={entry.name} sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                    <Box sx={{ 
+                      width: 12, 
+                      height: 12, 
+                      borderRadius: '50%', 
+                      bgcolor: entry.color || COLORS[index % COLORS.length],
+                      flexShrink: 0
+                    }} />
+                    <Typography variant="body2" noWrap sx={{ flex: 1 }}>
+                      {entry.name}
+                    </Typography>
+                    <Typography variant="body2" fontWeight={600} color="success.main" sx={{ flexShrink: 0 }}>
+                      £{entry.total.toLocaleString()}
+                    </Typography>
+                  </Box>
+                ))}
+              </Box>
             </Box>
           ) : (
-            <Box sx={{ height: 350, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Box sx={{ height: 400, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Typography color="text.secondary">No income data</Typography>
             </Box>
           )}
@@ -772,23 +782,24 @@ const OverviewTab: React.FC<{ summary: Summary | null }> = ({ summary }) => {
 
       {/* Expenses by Category */}
       <Grid item xs={12} md={6}>
-        <Paper sx={{ p: 3, height: '100%' }}>
+        <Paper sx={{ p: 3 }}>
           <Typography variant="h6" gutterBottom>
             Expenses by Category
           </Typography>
           {summary.categories.expense.length > 0 ? (
-            <Box sx={{ height: 350 }}>
-              <ResponsiveContainer width="100%" height="100%">
+            <Box sx={{ height: 400, display: 'flex', alignItems: 'center' }}>
+              <ResponsiveContainer width="60%" height="100%">
                 <PieChart>
                   <Pie
                     data={summary.categories.expense}
                     dataKey="total"
                     nameKey="name"
                     cx="50%"
-                    cy="45%"
-                    innerRadius={60}
-                    outerRadius={100}
+                    cy="50%"
+                    innerRadius={50}
+                    outerRadius={90}
                     paddingAngle={2}
+                    label={false}
                   >
                     {summary.categories.expense.map((entry, index) => (
                       <Cell key={entry.name} fill={entry.color || COLORS[index % COLORS.length]} />
@@ -798,92 +809,33 @@ const OverviewTab: React.FC<{ summary: Summary | null }> = ({ summary }) => {
                     formatter={(value: number) => `£${value.toLocaleString()}`}
                     contentStyle={{ borderRadius: 8 }}
                   />
-                  <Legend 
-                    layout="horizontal"
-                    verticalAlign="bottom"
-                    align="center"
-                    wrapperStyle={{ 
-                      fontSize: '12px', 
-                      paddingTop: '20px',
-                      lineHeight: '24px'
-                    }}
-                  />
                 </PieChart>
               </ResponsiveContainer>
+              <Box sx={{ width: '40%', maxHeight: 380, overflowY: 'auto', pl: 2 }}>
+                {summary.categories.expense.slice(0, 10).map((entry, index) => (
+                  <Box key={entry.name} sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                    <Box sx={{ 
+                      width: 12, 
+                      height: 12, 
+                      borderRadius: '50%', 
+                      bgcolor: entry.color || COLORS[index % COLORS.length],
+                      flexShrink: 0
+                    }} />
+                    <Typography variant="body2" noWrap sx={{ flex: 1 }}>
+                      {entry.name}
+                    </Typography>
+                    <Typography variant="body2" fontWeight={600} color="error.main" sx={{ flexShrink: 0 }}>
+                      £{entry.total.toLocaleString()}
+                    </Typography>
+                  </Box>
+                ))}
+              </Box>
             </Box>
           ) : (
-            <Box sx={{ height: 350, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Box sx={{ height: 400, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Typography color="text.secondary">No expense data</Typography>
             </Box>
           )}
-        </Paper>
-      </Grid>
-
-      {/* Row 3: Top Income + Top Expenses Lists (side by side) */}
-      
-      {/* Top Income Sources */}
-      <Grid item xs={12} md={6}>
-        <Paper sx={{ p: 3, height: '100%' }}>
-          <Typography variant="h6" gutterBottom>
-            Top Income Sources
-          </Typography>
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {summary.categories.income.slice(0, 5).map((cat, index) => (
-              <Box key={cat.name} sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-                  <Box 
-                    sx={{ 
-                      width: 12, 
-                      height: 12, 
-                      borderRadius: '50%', 
-                      bgcolor: cat.color || COLORS[index % COLORS.length],
-                      flexShrink: 0
-                    }} 
-                  />
-                  <Typography variant="body1">{cat.name}</Typography>
-                </Box>
-                <Typography variant="body1" fontWeight={600} color="success.main">
-                  £{cat.total.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
-                </Typography>
-              </Box>
-            ))}
-            {summary.categories.income.length === 0 && (
-              <Typography color="text.secondary">No income data</Typography>
-            )}
-          </Box>
-        </Paper>
-      </Grid>
-
-      {/* Top Expenses */}
-      <Grid item xs={12} md={6}>
-        <Paper sx={{ p: 3, height: '100%' }}>
-          <Typography variant="h6" gutterBottom>
-            Top Expenses
-          </Typography>
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {summary.categories.expense.slice(0, 5).map((cat, index) => (
-              <Box key={cat.name} sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-                  <Box 
-                    sx={{ 
-                      width: 12, 
-                      height: 12, 
-                      borderRadius: '50%', 
-                      bgcolor: cat.color || COLORS[index % COLORS.length],
-                      flexShrink: 0
-                    }} 
-                  />
-                  <Typography variant="body1">{cat.name}</Typography>
-                </Box>
-                <Typography variant="body1" fontWeight={600} color="error.main">
-                  £{cat.total.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
-                </Typography>
-              </Box>
-            ))}
-            {summary.categories.expense.length === 0 && (
-              <Typography color="text.secondary">No expense data</Typography>
-            )}
-          </Box>
         </Paper>
       </Grid>
     </Grid>
