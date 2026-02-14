@@ -758,6 +758,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             return
             
         token = auth_message.get("token")
+        quiet_mode = auth_message.get("quietMode", False)
         
         # Verify token using Supabase
         from supabase_auth import verify_supabase_token
@@ -805,6 +806,24 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         openai_ws = await websockets.connect(OPENAI_REALTIME_URL, additional_headers=headers)
         _logger.info("Connected to OpenAI Realtime API")
         
+        # Configure turn detection based on quiet mode
+        if quiet_mode:
+            # Quiet mode - less sensitive, longer pauses required
+            turn_detection_config = {
+                "type": "server_vad",
+                "threshold": 0.7,  # Higher threshold = less sensitive
+                "prefix_padding_ms": 500,  # More padding before speech detected
+                "silence_duration_ms": 800  # Longer silence before turn ends
+            }
+        else:
+            # Normal mode settings
+            turn_detection_config = {
+                "type": "server_vad",
+                "threshold": 0.6,  # Slightly higher to avoid cutting off
+                "prefix_padding_ms": 350,  # A bit more padding
+                "silence_duration_ms": 600  # Slightly longer pause before responding
+            }
+        
         # Configure the session
         session_config = {
             "type": "session.update",
@@ -817,19 +836,14 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                 "input_audio_transcription": {
                     "model": "whisper-1"
                 },
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.6,  # Slightly higher to avoid cutting off
-                    "prefix_padding_ms": 350,  # A bit more padding
-                    "silence_duration_ms": 600  # Slightly longer pause before responding
-                },
+                "turn_detection": turn_detection_config,
                 "tools": REALTIME_TOOLS,
                 "tool_choice": "auto",
                 "temperature": 0.6  # Lower to reduce hallucination
             }
         }
         await openai_ws.send(json.dumps(session_config))
-        _logger.info("Session configured")
+        _logger.info(f"Session configured with quiet_mode={quiet_mode}")
         
         # Notify client that we're ready
         await websocket.send_json({"type": "ready"})
@@ -859,14 +873,48 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         # Handle bidirectional communication
         async def forward_to_openai():
             """Forward messages from client to OpenAI."""
+            nonlocal quiet_mode
             try:
                 while True:
                     data = await websocket.receive()
                     
                     if "text" in data:
                         message = json.loads(data["text"])
-                        _logger.debug(f"Client -> OpenAI: {message.get('type')}")
-                        await openai_ws.send(json.dumps(message))
+                        msg_type = message.get('type')
+                        _logger.debug(f"Client -> OpenAI: {msg_type}")
+                        
+                        # Handle config updates (e.g., quiet mode toggle)
+                        if msg_type == "config":
+                            new_quiet_mode = message.get("quietMode", False)
+                            quiet_mode = new_quiet_mode
+                            
+                            # Update turn detection settings based on quiet mode
+                            if new_quiet_mode:
+                                new_config = {
+                                    "type": "server_vad",
+                                    "threshold": 0.7,
+                                    "prefix_padding_ms": 500,
+                                    "silence_duration_ms": 800
+                                }
+                            else:
+                                new_config = {
+                                    "type": "server_vad",
+                                    "threshold": 0.6,
+                                    "prefix_padding_ms": 350,
+                                    "silence_duration_ms": 600
+                                }
+                            
+                            # Send session update to OpenAI
+                            await openai_ws.send(json.dumps({
+                                "type": "session.update",
+                                "session": {
+                                    "turn_detection": new_config
+                                }
+                            }))
+                            _logger.info(f"Updated turn detection - quiet_mode: {new_quiet_mode}")
+                        else:
+                            # Forward other messages to OpenAI
+                            await openai_ws.send(json.dumps(message))
                         
                     elif "bytes" in data:
                         # Raw audio data - wrap in proper format

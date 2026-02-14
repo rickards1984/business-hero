@@ -8,7 +8,10 @@ import {
 } from '@mui/material';
 import {
   Mic as MicIcon,
+  MicOff as MicOffIcon,
   CallEnd as CallEndIcon,
+  VolumeUp as VolumeUpIcon,
+  VolumeOff as VolumeOffIcon,
 } from '@mui/icons-material';
 import { supabase } from '@/lib/supabase';
 import { config } from '@/config/env';
@@ -24,6 +27,8 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [status, setStatus] = useState<string>('Tap to connect');
   const [currentTranscript, setCurrentTranscript] = useState('');
+  const [isMuted, setIsMuted] = useState(false);
+  const [quietMode, setQuietMode] = useState(false);
   
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -31,6 +36,12 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const audioQueueRef = useRef<ArrayBuffer[]>([]);
   const isPlayingRef = useRef(false);
+  const isMutedRef = useRef(false);
+
+  // Keep muted ref in sync with state
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
 
   // Convert Float32 to Int16 PCM
   const floatTo16BitPCM = (float32Array: Float32Array): ArrayBuffer => {
@@ -160,8 +171,8 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
       wsRef.current = ws;
       
       ws.onopen = () => {
-        // Send auth message
-        ws.send(JSON.stringify({ type: 'auth', token }));
+        // Send auth message with quiet mode preference
+        ws.send(JSON.stringify({ type: 'auth', token, quietMode }));
       };
       
       ws.onmessage = handleMessage;
@@ -216,6 +227,9 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
       processorRef.current = processor;
       
       processor.onaudioprocess = (e) => {
+        // Don't send audio if muted
+        if (isMutedRef.current) return;
+        
         if (wsRef.current?.readyState === WebSocket.OPEN) {
           const inputData = e.inputBuffer.getChannelData(0);
           const pcmData = floatTo16BitPCM(inputData);
@@ -276,12 +290,14 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
   // Determine avatar glow color based on state
   const getGlowColor = () => {
     if (!isConnected) return 'rgba(99, 102, 241, 0.3)';
+    if (isMuted) return 'rgba(239, 68, 68, 0.6)'; // Red when muted
     if (isSpeaking) return 'rgba(139, 92, 246, 0.8)'; // Purple when speaking
     if (isListening) return 'rgba(34, 197, 94, 0.8)'; // Green when listening
     return 'rgba(99, 102, 241, 0.6)'; // Indigo when idle/connected
   };
 
   const getStatusColor = () => {
+    if (isMuted) return '#ef4444';
     if (isSpeaking) return '#8b5cf6';
     if (isListening) return '#22c55e';
     return '#6366f1';
@@ -368,7 +384,7 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
         }}
       >
         {isConnected 
-          ? (isSpeaking ? 'Aria is speaking...' : isListening ? 'Listening...' : 'Ready')
+          ? (isMuted ? 'Muted' : isSpeaking ? 'Aria is speaking...' : isListening ? 'Listening...' : 'Ready')
           : 'Aria'
         }
       </Typography>
@@ -429,6 +445,70 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
         >
           End conversation
         </Button>
+      )}
+      
+      {/* Controls when connected */}
+      {isConnected && (
+        <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', mt: 2 }}>
+          {/* Mute/Unmute Button */}
+          <IconButton
+            onClick={() => setIsMuted(!isMuted)}
+            sx={{
+              width: 56,
+              height: 56,
+              bgcolor: isMuted ? 'error.main' : 'rgba(99, 102, 241, 0.1)',
+              color: isMuted ? 'white' : 'primary.main',
+              border: '2px solid',
+              borderColor: isMuted ? 'error.main' : 'primary.main',
+              '&:hover': {
+                bgcolor: isMuted ? 'error.dark' : 'rgba(99, 102, 241, 0.2)',
+              },
+              transition: 'all 0.2s ease'
+            }}
+          >
+            {isMuted ? <MicOffIcon /> : <MicIcon />}
+          </IconButton>
+          
+          {/* Quiet Mode Toggle */}
+          <Box 
+            onClick={() => {
+              const newQuietMode = !quietMode;
+              setQuietMode(newQuietMode);
+              // Send quiet mode update to backend
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: 'config', quietMode: newQuietMode }));
+              }
+            }}
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1,
+              px: 2,
+              py: 1,
+              borderRadius: '20px',
+              bgcolor: quietMode ? 'rgba(34, 197, 94, 0.1)' : 'rgba(0, 0, 0, 0.05)',
+              border: '1px solid',
+              borderColor: quietMode ? 'success.main' : 'divider',
+              cursor: 'pointer',
+              transition: 'all 0.2s ease',
+              '&:hover': {
+                bgcolor: quietMode ? 'rgba(34, 197, 94, 0.2)' : 'rgba(0, 0, 0, 0.1)',
+              }
+            }}
+          >
+            {quietMode ? <VolumeOffIcon fontSize="small" color="success" /> : <VolumeUpIcon fontSize="small" />}
+            <Typography variant="body2" fontWeight={500}>
+              {quietMode ? 'Quiet Mode' : 'Normal Mode'}
+            </Typography>
+          </Box>
+        </Box>
+      )}
+
+      {/* Mute indicator text */}
+      {isConnected && isMuted && (
+        <Typography variant="caption" color="error" sx={{ mt: 1 }}>
+          Microphone muted - Aria can't hear you
+        </Typography>
       )}
       
       {/* Instructions when not connected */}
