@@ -59,6 +59,7 @@ import {
   FilterList as FilterListIcon,
   FileDownload as FileDownloadIcon,
   Refresh as RefreshIcon,
+  Close as CloseIcon,
 } from '@mui/icons-material';
 import {
   PieChart,
@@ -161,6 +162,14 @@ const Accounting: React.FC = () => {
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [addTransactionOpen, setAddTransactionOpen] = useState(false);
 
+  // AI Insights
+  const [aiInsights, setAiInsights] = useState<{
+    loading: boolean;
+    data: any | null;
+    error: string | null;
+  }>({ loading: false, data: null, error: null });
+  const [showInsights, setShowInsights] = useState(false);
+
   // ============== Data Fetching ==============
 
   const fetchSummary = useCallback(async () => {
@@ -205,6 +214,32 @@ const Accounting: React.FC = () => {
       console.error('Failed to fetch categories:', error);
     }
   }, []);
+
+  const fetchAiInsights = async () => {
+    setAiInsights({ loading: true, data: null, error: null });
+    setShowInsights(true);
+    
+    try {
+      const session = await supabase.auth.getSession();
+      const response = await fetch(
+        `${config.apiBaseUrl}/v1/accounting/ai-insights?period=${period}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${session.data.session?.access_token}`
+          }
+        }
+      );
+      
+      if (response.ok) {
+        const data = await response.json();
+        setAiInsights({ loading: false, data, error: null });
+      } else {
+        setAiInsights({ loading: false, data: null, error: 'Failed to generate insights' });
+      }
+    } catch (error) {
+      setAiInsights({ loading: false, data: null, error: 'Failed to connect to AI service' });
+    }
+  };
 
   useEffect(() => {
     const loadData = async () => {
@@ -373,7 +408,160 @@ const Accounting: React.FC = () => {
 
         {/* Tab Content */}
         {activeTab === 0 && (
-          <OverviewTab summary={summary} />
+          <>
+            {/* AI Insights Button */}
+            <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 2 }}>
+              <Button
+                variant="contained"
+                onClick={fetchAiInsights}
+                disabled={aiInsights.loading}
+                startIcon={
+                  aiInsights.loading ? (
+                    <CircularProgress size={20} color="inherit" />
+                  ) : (
+                    <Box
+                      component="img"
+                      src="/aria-avatar.png"
+                      sx={{ width: 24, height: 24, borderRadius: '50%' }}
+                    />
+                  )
+                }
+                sx={{
+                  background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+                  textTransform: 'none',
+                  px: 3,
+                  py: 1,
+                  '&:hover': {
+                    background: 'linear-gradient(135deg, #5558e3 0%, #7c4fe0 100%)',
+                  }
+                }}
+              >
+                {aiInsights.loading ? 'Analyzing...' : 'Get AI Insights from Aria'}
+              </Button>
+            </Box>
+
+            {/* AI Insights Panel */}
+            {showInsights && (
+              <Paper 
+                elevation={0} 
+                sx={{ 
+                  p: 3, 
+                  mb: 3, 
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  borderRadius: 2,
+                  background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.05) 0%, rgba(139, 92, 246, 0.05) 100%)'
+                }}
+              >
+                {aiInsights.loading && (
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    <CircularProgress size={24} />
+                    <Typography>Aria is analyzing your finances...</Typography>
+                  </Box>
+                )}
+                
+                {aiInsights.error && (
+                  <Alert severity="error" onClose={() => setShowInsights(false)}>
+                    {aiInsights.error}
+                  </Alert>
+                )}
+                
+                {aiInsights.data && (
+                  <Box>
+                    {/* Header with Aria */}
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
+                      <Box
+                        component="img"
+                        src="/aria-avatar.png"
+                        sx={{ width: 48, height: 48, borderRadius: '50%', border: '2px solid #6366f1' }}
+                      />
+                      <Box>
+                        <Typography variant="h6" fontWeight={600}>Aria's Financial Insights</Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          Analysis for {summary?.period?.label || period}
+                        </Typography>
+                      </Box>
+                      <IconButton 
+                        onClick={() => setShowInsights(false)} 
+                        sx={{ ml: 'auto' }}
+                        size="small"
+                      >
+                        <CloseIcon />
+                      </IconButton>
+                    </Box>
+                    
+                    {/* Summary Paragraph with Personality */}
+                    <Paper sx={{ p: 2, mb: 3, bgcolor: 'background.default' }}>
+                      <Typography variant="body1" sx={{ lineHeight: 1.8 }}>
+                        {aiInsights.data.summary}
+                      </Typography>
+                    </Paper>
+                    
+                    {/* Structured Sections */}
+                    <Grid container spacing={2}>
+                      {/* Financial Overview */}
+                      <Grid item xs={12} md={6}>
+                        <Paper sx={{ p: 2, height: '100%' }}>
+                          <Typography variant="subtitle1" fontWeight={600} gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            📊 Financial Overview
+                          </Typography>
+                          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                            {aiInsights.data.overview?.map((item: string, i: number) => (
+                              <Typography key={i} variant="body2">• {item}</Typography>
+                            ))}
+                          </Box>
+                        </Paper>
+                      </Grid>
+                      
+                      {/* Spending Analysis */}
+                      <Grid item xs={12} md={6}>
+                        <Paper sx={{ p: 2, height: '100%' }}>
+                          <Typography variant="subtitle1" fontWeight={600} gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            💸 Spending Analysis
+                          </Typography>
+                          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                            {aiInsights.data.spending?.map((item: string, i: number) => (
+                              <Typography key={i} variant="body2">• {item}</Typography>
+                            ))}
+                          </Box>
+                        </Paper>
+                      </Grid>
+                      
+                      {/* Suggestions */}
+                      <Grid item xs={12} md={6}>
+                        <Paper sx={{ p: 2, height: '100%', borderLeft: '3px solid #10B981' }}>
+                          <Typography variant="subtitle1" fontWeight={600} gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            💡 Suggestions
+                          </Typography>
+                          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                            {aiInsights.data.suggestions?.map((item: string, i: number) => (
+                              <Typography key={i} variant="body2">• {item}</Typography>
+                            ))}
+                          </Box>
+                        </Paper>
+                      </Grid>
+                      
+                      {/* Data Quality */}
+                      <Grid item xs={12} md={6}>
+                        <Paper sx={{ p: 2, height: '100%', borderLeft: '3px solid #F59E0B' }}>
+                          <Typography variant="subtitle1" fontWeight={600} gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            ⚠️ Data Quality
+                          </Typography>
+                          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                            {aiInsights.data.dataQuality?.map((item: string, i: number) => (
+                              <Typography key={i} variant="body2">• {item}</Typography>
+                            ))}
+                          </Box>
+                        </Paper>
+                      </Grid>
+                    </Grid>
+                  </Box>
+                )}
+              </Paper>
+            )}
+
+            <OverviewTab summary={summary} />
+          </>
         )}
         
         {activeTab === 1 && (

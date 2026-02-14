@@ -885,6 +885,139 @@ async def get_accounting_summary(
     }
 
 
+@router.get("/ai-insights")
+async def get_ai_insights(
+    period: str = "month",
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """Generate AI-powered financial insights."""
+    _, business = user_business
+    business_id = str(business.id)
+    
+    from sqlalchemy import text
+    from datetime import datetime, timedelta
+    
+    # Determine date range based on period
+    today = date.today()
+    if period == "month":
+        start_date = today.replace(day=1)
+    elif period == "quarter":
+        month = today.month
+        quarter_start = ((month - 1) // 3) * 3 + 1
+        start_date = today.replace(month=quarter_start, day=1)
+    elif period == "year":
+        start_date = today.replace(month=1, day=1)
+    else:
+        start_date = date(1900, 1, 1)
+    
+    end_date = today
+    
+    # Get totals
+    result = session.execute(text("""
+        SELECT 
+            COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) as total_income,
+            COALESCE(SUM(CASE WHEN type = 'expense' THEN ABS(amount) ELSE 0 END), 0) as total_expenses,
+            COUNT(*) as transaction_count,
+            COUNT(CASE WHEN category_id IS NULL THEN 1 END) as uncategorized_count
+        FROM accounting_transactions
+        WHERE business_id = :business_id 
+        AND transaction_date >= :start_date
+        AND transaction_date <= :end_date
+        AND is_archived = false
+    """), {"business_id": business_id, "start_date": start_date, "end_date": end_date})
+    totals = result.fetchone()
+    
+    total_income = float(totals[0]) if totals else 0
+    total_expenses = float(totals[1]) if totals else 0
+    transaction_count = int(totals[2]) if totals else 0
+    uncategorized = int(totals[3]) if totals else 0
+    net = total_income - total_expenses
+    
+    # Get top expense categories
+    categories_result = session.execute(text("""
+        SELECT c.name, SUM(ABS(t.amount)) as total
+        FROM accounting_transactions t
+        JOIN accounting_categories c ON t.category_id = c.id
+        WHERE t.business_id = :business_id 
+        AND t.type = 'expense'
+        AND t.transaction_date >= :start_date
+        AND t.transaction_date <= :end_date
+        AND t.is_archived = false
+        GROUP BY c.name
+        ORDER BY total DESC
+        LIMIT 5
+    """), {"business_id": business_id, "start_date": start_date, "end_date": end_date})
+    top_expenses = [(row[0], float(row[1])) for row in categories_result.fetchall()]
+    
+    # Generate insights
+    profit_emoji = "📈" if net > 0 else "📉" if net < 0 else "➡️"
+    
+    # Build the summary paragraph with personality
+    if net > 0:
+        summary = f"Good news! You're in the green this {period}. {profit_emoji} With £{total_income:,.2f} coming in and £{total_expenses:,.2f} going out, you're looking at a net profit of £{net:,.2f}. "
+    elif net < 0:
+        summary = f"Let's have a look at the numbers. {profit_emoji} You've brought in £{total_income:,.2f} this {period}, but expenses of £{total_expenses:,.2f} mean you're running at a loss of £{abs(net):,.2f}. "
+    else:
+        summary = f"You're breaking even this {period}. {profit_emoji} Income of £{total_income:,.2f} matches your expenses exactly. "
+    
+    if top_expenses:
+        top_cat = top_expenses[0]
+        summary += f"Your biggest expense category is {top_cat[0]} at £{top_cat[1]:,.2f}. "
+    
+    if uncategorized > 0:
+        summary += f"I've noticed {uncategorized} transactions still need categorizing - worth tidying those up for clearer insights."
+    else:
+        summary += "All your transactions are nicely categorized, which helps keep the picture clear."
+    
+    # Build structured sections
+    overview = [
+        f"Total Income: £{total_income:,.2f}",
+        f"Total Expenses: £{total_expenses:,.2f}",
+        f"Net {'Profit' if net >= 0 else 'Loss'}: £{abs(net):,.2f}",
+        f"Transactions this period: {transaction_count}"
+    ]
+    
+    spending = []
+    for cat, amount in top_expenses:
+        pct = (amount / total_expenses * 100) if total_expenses > 0 else 0
+        spending.append(f"{cat}: £{amount:,.2f} ({pct:.1f}% of expenses)")
+    if not spending:
+        spending.append("No categorized expenses to analyze yet")
+    
+    suggestions = []
+    if top_expenses and total_expenses > 0:
+        top_pct = (top_expenses[0][1] / total_expenses * 100)
+        if top_pct > 40:
+            suggestions.append(f"{top_expenses[0][0]} makes up {top_pct:.0f}% of your spending - might be worth reviewing if there's room to optimize")
+    if net < 0:
+        suggestions.append("Consider reviewing recurring expenses for potential savings")
+        suggestions.append("Look for opportunities to increase income streams")
+    if net > 0:
+        suggestions.append("You're profitable - consider setting aside some surplus for tax or reinvestment")
+    if not suggestions:
+        suggestions.append("Keep doing what you're doing - your finances look healthy!")
+    
+    data_quality = []
+    if uncategorized > 0:
+        data_quality.append(f"{uncategorized} transactions need categorizing")
+    if transaction_count == 0:
+        data_quality.append("No transactions found for this period - have you uploaded your bank data?")
+    if transaction_count > 0 and uncategorized == 0:
+        data_quality.append("All transactions categorized ✓")
+    if transaction_count > 0:
+        data_quality.append(f"Data covers {period} period")
+    
+    return {
+        "summary": summary,
+        "overview": overview,
+        "spending": spending,
+        "suggestions": suggestions,
+        "dataQuality": data_quality,
+        "period": period
+    }
+
+
 @router.get("/imports")
 async def list_imports(
     user_business=Depends(get_current_user_and_business),
