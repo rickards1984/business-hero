@@ -392,3 +392,26 @@ class EmailDraft(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     business: Optional[Business] = Relationship()
+
+
+class XeroConnection(SQLModel, table=True):
+    """Xero OAuth connection - stores encrypted tokens and tenant info per business."""
+    __tablename__ = "xero_connections"
+
+    id: UUID = Field(
+        default_factory=generate_uuid,
+        sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid)
+    )
+    business_id: UUID = Field(foreign_key="businesses.id", index=True, unique=True)
+    tenant_id: str
+    tenant_name: Optional[str] = None
+    token_ciphertext: str
+    refresh_token_ciphertext: str
+    token_expires_at: datetime
+    last_sync_at: Optional[datetime] = None
+    sync_cursor: Optional[str] = None
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    business: Optional[Business] = Relationship()
