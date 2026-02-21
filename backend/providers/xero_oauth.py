@@ -11,7 +11,7 @@ from typing import Optional, Tuple
 
 import httpx
 
-from email_utils import encrypt_value, decrypt_value
+from email_utils import encrypt_str, decrypt_str
 
 _logger = logging.getLogger("xero_oauth")
 
@@ -36,7 +36,7 @@ def get_xero_auth_url(business_id: str, redirect_uri: str) -> str:
         "openid profile email accounting.transactions.read accounting.contacts.read offline_access"
     )
 
-    state = encrypt_value(business_id)
+    state = encrypt_str(business_id)
 
     params = {
         "response_type": "code",
@@ -149,8 +149,8 @@ def get_valid_xero_access_token(xero_connection) -> str:
             - updated_at
         The caller is responsible for committing these changes to the database.
     """
-    access_token = decrypt_value(xero_connection.token_ciphertext)
-    refresh_token = decrypt_value(xero_connection.refresh_token_ciphertext)
+    access_token = decrypt_str(xero_connection.token_ciphertext)
+    refresh_token = decrypt_str(xero_connection.refresh_token_ciphertext)
 
     now = datetime.now(timezone.utc)
     expires_at = xero_connection.token_expires_at
@@ -164,8 +164,8 @@ def get_valid_xero_access_token(xero_connection) -> str:
     _logger.info(f"Xero token expired for business {xero_connection.business_id}, refreshing...")
     new_access, new_refresh, expires_in = refresh_xero_token(refresh_token)
 
-    xero_connection.token_ciphertext = encrypt_value(new_access)
-    xero_connection.refresh_token_ciphertext = encrypt_value(new_refresh)
+    xero_connection.token_ciphertext = encrypt_str(new_access)
+    xero_connection.refresh_token_ciphertext = encrypt_str(new_refresh)
     xero_connection.token_expires_at = now + timedelta(seconds=expires_in)
     xero_connection.updated_at = now
 

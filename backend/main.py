@@ -45,6 +45,7 @@ from models import (
     EmailDraft,
     SupportTicket,
     StripeEvent,
+    XeroConnection,
 )
 from schemas import (
     BusinessCreate, BusinessResponse, BusinessListItem, BusinessProfile,
@@ -86,6 +87,9 @@ from app.billing.config import get_stripe_config, validate_stripe_config
 from accounting import router as accounting_router
 from realtime_voice import router as realtime_voice_router
 from dependencies import get_current_user_business, get_current_user_and_business
+from providers.xero import XeroProvider, get_tenant_connections, map_xero_transaction_to_business_hero, XeroAuthError
+from providers.xero_oauth import get_xero_auth_url, exchange_code_for_tokens, get_valid_xero_access_token
+from email_utils import encrypt_str, decrypt_str
 
 
 # ============================================================================
@@ -3062,6 +3066,411 @@ async def send_chase_bulk(
         failed=failed,
         results=results
     )
+
+
+# ============================================================
+# XERO ACCOUNTING INTEGRATION
+# OAuth connection, sync, and status endpoints
+# ============================================================
+
+@app.get("/v1/oauth/xero")
+async def oauth_xero_start(
+    auth_ctx=Depends(get_user_business_context),
+):
+    """
+    Start Xero OAuth flow. Returns the authorization URL for the frontend
+    to redirect the user to Xero's login page.
+    """
+    # get_user_business_context returns a dict with "user" and "business" keys
+    business_id = str(auth_ctx["business"].id)
+    
+    redirect_uri = os.getenv("XERO_REDIRECT_URI", "").strip()
+    if not redirect_uri:
+        base_url = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_BASE_URL", "")).strip().rstrip("/")
+        redirect_uri = f"{base_url}/v1/oauth/xero/callback"
+
+    url = get_xero_auth_url(business_id=business_id, redirect_uri=redirect_uri)
+    return {"url": url}
+
+
+@app.get("/v1/oauth/xero/callback")
+async def oauth_xero_callback(
+    code: str = Query(...),
+    state: str = Query(...),
+    session: Session = Depends(get_session),
+):
+    """
+    Xero OAuth callback handler.
+    1. Validates state parameter (contains encrypted business_id)
+    2. Exchanges authorization code for tokens
+    3. Fetches tenant connections to get tenant_id
+    4. Encrypts and stores tokens in xero_connections table
+    5. Redirects to frontend accounting page
+    """
+    import logging
+    _xero_logger = logging.getLogger("xero_oauth_callback")
+
+    # 1. Decrypt business_id from state
+    try:
+        business_id = decrypt_str(state)
+        _xero_logger.info(f"Xero OAuth callback for business: {business_id}")
+    except Exception as e:
+        _xero_logger.error(f"Invalid state parameter: {e}")
+        raise HTTPException(status_code=400, detail="Invalid state parameter")
+
+    # 2. Build redirect URI (must match what was used in the auth request)
+    redirect_uri = os.getenv("XERO_REDIRECT_URI", "").strip()
+    if not redirect_uri:
+        base_url = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_BASE_URL", "")).strip().rstrip("/")
+        redirect_uri = f"{base_url}/v1/oauth/xero/callback"
+
+    # 3. Exchange code for tokens
+    try:
+        tokens = await exchange_code_for_tokens(code=code, redirect_uri=redirect_uri)
+    except Exception as e:
+        _xero_logger.error(f"Xero token exchange failed: {e}")
+        frontend_url = os.getenv("FRONTEND_URL", os.getenv("APP_BASE_URL", "https://business-hero.vercel.app")).strip().rstrip("/")
+        return RedirectResponse(f"{frontend_url}/app/accounting?xero=error&reason=token_exchange_failed")
+
+    access_token = tokens["access_token"]
+    refresh_token = tokens.get("refresh_token", "")
+    expires_in = tokens.get("expires_in", 1800)
+
+    # 4. Get tenant connections
+    try:
+        connections = await get_tenant_connections(access_token)
+        if not connections:
+            _xero_logger.error("No Xero tenants found")
+            frontend_url = os.getenv("FRONTEND_URL", os.getenv("APP_BASE_URL", "https://business-hero.vercel.app")).strip().rstrip("/")
+            return RedirectResponse(f"{frontend_url}/app/accounting?xero=error&reason=no_tenants")
+
+        # Use first tenant (most small businesses have one)
+        tenant = connections[0]
+        tenant_id = tenant["tenantId"]
+        tenant_name = tenant.get("tenantName", "Unknown Organisation")
+        _xero_logger.info(f"Connected to Xero tenant: {tenant_name} ({tenant_id})")
+    except Exception as e:
+        _xero_logger.error(f"Failed to get Xero tenants: {e}")
+        frontend_url = os.getenv("FRONTEND_URL", os.getenv("APP_BASE_URL", "https://business-hero.vercel.app")).strip().rstrip("/")
+        return RedirectResponse(f"{frontend_url}/app/accounting?xero=error&reason=tenant_fetch_failed")
+
+    # 5. Encrypt tokens and store/update xero_connections
+    from datetime import timezone, timedelta
+
+    encrypted_access = encrypt_str(access_token)
+    encrypted_refresh = encrypt_str(refresh_token)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+
+    try:
+        # Upsert — update if business already has a connection, insert if not
+        result = session.execute(
+            text("""
+                INSERT INTO xero_connections 
+                    (business_id, tenant_id, tenant_name, token_ciphertext, refresh_token_ciphertext, token_expires_at, is_active, created_at, updated_at)
+                VALUES 
+                    (:business_id, :tenant_id, :tenant_name, :token_ciphertext, :refresh_token_ciphertext, :token_expires_at, true, NOW(), NOW())
+                ON CONFLICT (business_id) DO UPDATE SET
+                    tenant_id = EXCLUDED.tenant_id,
+                    tenant_name = EXCLUDED.tenant_name,
+                    token_ciphertext = EXCLUDED.token_ciphertext,
+                    refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
+                    token_expires_at = EXCLUDED.token_expires_at,
+                    is_active = true,
+                    updated_at = NOW()
+                RETURNING id
+            """),
+            {
+                "business_id": business_id,
+                "tenant_id": tenant_id,
+                "tenant_name": tenant_name,
+                "token_ciphertext": encrypted_access,
+                "refresh_token_ciphertext": encrypted_refresh,
+                "token_expires_at": expires_at,
+            }
+        )
+        connection_id = result.fetchone()[0]
+        session.commit()
+        _xero_logger.info(f"Xero connection saved: {connection_id}")
+    except Exception as e:
+        _xero_logger.error(f"Failed to save Xero connection: {e}")
+        session.rollback()
+        frontend_url = os.getenv("FRONTEND_URL", os.getenv("APP_BASE_URL", "https://business-hero.vercel.app")).strip().rstrip("/")
+        return RedirectResponse(f"{frontend_url}/app/accounting?xero=error&reason=save_failed")
+
+    # 6. Redirect to frontend
+    frontend_url = os.getenv("FRONTEND_URL", os.getenv("APP_BASE_URL", "https://business-hero.vercel.app")).strip().rstrip("/")
+    return RedirectResponse(f"{frontend_url}/app/accounting?xero=connected&org={tenant_name}")
+
+
+@app.get("/v1/accounting/xero/status")
+async def xero_connection_status(
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """
+    Check if the business has an active Xero connection.
+    Returns connection status, tenant name, and last sync time.
+    """
+    _, business = user_business
+
+    result = session.execute(
+        text("""
+            SELECT tenant_id, tenant_name, is_active, last_sync_at, token_expires_at, created_at
+            FROM xero_connections
+            WHERE business_id = :business_id
+            LIMIT 1
+        """),
+        {"business_id": str(business.id)}
+    )
+    row = result.fetchone()
+
+    if not row or not row[2]:  # not found or not active
+        return {
+            "connected": False,
+            "tenant_name": None,
+            "last_sync_at": None,
+        }
+
+    return {
+        "connected": True,
+        "tenant_id": row[0],
+        "tenant_name": row[1],
+        "is_active": row[2],
+        "last_sync_at": row[3].isoformat() if row[3] else None,
+        "token_expires_at": row[4].isoformat() if row[4] else None,
+        "connected_at": row[5].isoformat() if row[5] else None,
+    }
+
+
+@app.post("/v1/accounting/xero/sync")
+async def sync_xero_transactions(
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """
+    Sync bank transactions from Xero into Business Hero's accounting module.
+    
+    Flow:
+    1. Get and validate Xero connection for this business
+    2. Refresh access token if expired
+    3. Fetch transactions from Xero (incremental using last_sync_at)
+    4. Map to Business Hero format
+    5. Upsert into accounting_transactions (dedup on external_id)
+    6. Update last_sync_at timestamp
+    """
+    import logging
+    _sync_logger = logging.getLogger("xero_sync")
+    
+    _, business = user_business
+    business_id = str(business.id)
+    
+    from datetime import timezone, timedelta
+
+    # 1. Get Xero connection
+    result = session.execute(
+        text("""
+            SELECT id, tenant_id, tenant_name, token_ciphertext, refresh_token_ciphertext, 
+                   token_expires_at, last_sync_at, sync_cursor
+            FROM xero_connections
+            WHERE business_id = :business_id AND is_active = true
+            LIMIT 1
+        """),
+        {"business_id": business_id}
+    )
+    row = result.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="No active Xero connection found. Please connect Xero first.")
+
+    connection_id = str(row[0])
+    tenant_id = row[1]
+    tenant_name = row[2]
+    token_ciphertext = row[3]
+    refresh_token_ciphertext = row[4]
+    token_expires_at = row[5]
+    last_sync_at = row[6]
+
+    # 2. Get valid access token (refresh if expired)
+    try:
+        access_token = decrypt_str(token_ciphertext)
+        refresh_token = decrypt_str(refresh_token_ciphertext)
+
+        now = datetime.now(timezone.utc)
+        expires_at = token_expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+        if now >= (expires_at - timedelta(minutes=2)):
+            _sync_logger.info(f"Xero token expired for business {business_id}, refreshing...")
+            from providers.xero_oauth import refresh_xero_token
+            new_access, new_refresh, expires_in = refresh_xero_token(refresh_token)
+
+            # Update stored tokens
+            session.execute(
+                text("""
+                    UPDATE xero_connections 
+                    SET token_ciphertext = :token, refresh_token_ciphertext = :refresh,
+                        token_expires_at = :expires_at, updated_at = NOW()
+                    WHERE id = :conn_id
+                """),
+                {
+                    "token": encrypt_str(new_access),
+                    "refresh": encrypt_str(new_refresh),
+                    "expires_at": now + timedelta(seconds=expires_in),
+                    "conn_id": connection_id,
+                }
+            )
+            session.commit()
+            access_token = new_access
+            _sync_logger.info("Xero token refreshed successfully")
+    except Exception as e:
+        _sync_logger.error(f"Xero token refresh failed: {e}")
+        raise HTTPException(status_code=401, detail=f"Xero authentication failed. Please reconnect Xero. Error: {str(e)}")
+
+    # 3. Fetch transactions from Xero
+    try:
+        provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
+
+        # Use last_sync_at for incremental sync (if available)
+        modified_since = None
+        if last_sync_at:
+            if last_sync_at.tzinfo is None:
+                last_sync_at = last_sync_at.replace(tzinfo=timezone.utc)
+            modified_since = last_sync_at.strftime("%Y-%m-%dT%H:%M:%S")
+
+        xero_transactions = await provider.get_all_bank_transactions(modified_since=modified_since)
+        _sync_logger.info(f"Fetched {len(xero_transactions)} transactions from Xero for {tenant_name}")
+
+    except XeroAuthError:
+        raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
+    except Exception as e:
+        _sync_logger.error(f"Failed to fetch Xero transactions: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch transactions from Xero: {str(e)}")
+
+    # 4. Map and upsert transactions
+    new_count = 0
+    updated_count = 0
+    skipped_count = 0
+    errors = []
+
+    for xero_txn in xero_transactions:
+        try:
+            mapped = map_xero_transaction_to_business_hero(xero_txn)
+
+            if mapped is None:
+                skipped_count += 1
+                continue
+
+            # Upsert: insert new or update existing (based on external_id + external_source)
+            result = session.execute(
+                text("""
+                    INSERT INTO accounting_transactions 
+                        (business_id, transaction_date, description, amount, type, 
+                         reference, payee_payer, external_id, external_source)
+                    VALUES 
+                        (:business_id, :transaction_date, :description, :amount, :type,
+                         :reference, :payee_payer, :external_id, :external_source)
+                    ON CONFLICT (business_id, external_source, external_id) 
+                    WHERE external_id IS NOT NULL
+                    DO UPDATE SET
+                        description = EXCLUDED.description,
+                        amount = EXCLUDED.amount,
+                        type = EXCLUDED.type,
+                        reference = EXCLUDED.reference,
+                        payee_payer = EXCLUDED.payee_payer,
+                        updated_at = NOW()
+                    RETURNING xmax
+                """),
+                {
+                    "business_id": business_id,
+                    "transaction_date": mapped["transaction_date"],
+                    "description": mapped["description"],
+                    "amount": mapped["amount"],
+                    "type": mapped["type"],
+                    "reference": mapped.get("reference"),
+                    "payee_payer": mapped.get("payee_payer"),
+                    "external_id": mapped["external_id"],
+                    "external_source": mapped["external_source"],
+                }
+            )
+            
+            # xmax = 0 means INSERT, xmax > 0 means UPDATE
+            row = result.fetchone()
+            if row and row[0] == 0:
+                new_count += 1
+            else:
+                updated_count += 1
+
+        except Exception as e:
+            error_msg = f"Failed to import transaction {xero_txn.get('BankTransactionID', 'unknown')}: {str(e)}"
+            _sync_logger.warning(error_msg)
+            errors.append(error_msg)
+            if len(errors) >= 10:
+                break
+
+    # 5. Update last_sync_at
+    sync_time = datetime.now(timezone.utc)
+    session.execute(
+        text("""
+            UPDATE xero_connections 
+            SET last_sync_at = :sync_time, sync_cursor = :cursor, updated_at = NOW()
+            WHERE id = :conn_id
+        """),
+        {
+            "sync_time": sync_time,
+            "cursor": sync_time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "conn_id": connection_id,
+        }
+    )
+    session.commit()
+
+    _sync_logger.info(
+        f"Xero sync complete for {tenant_name}: "
+        f"{new_count} new, {updated_count} updated, {skipped_count} skipped, {len(errors)} errors"
+    )
+
+    return {
+        "success": True,
+        "tenant_name": tenant_name,
+        "new_transactions": new_count,
+        "updated_transactions": updated_count,
+        "skipped": skipped_count,
+        "errors": errors[:5],
+        "synced_at": sync_time.isoformat(),
+    }
+
+
+@app.post("/v1/accounting/xero/disconnect")
+async def disconnect_xero(
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """
+    Disconnect Xero integration for this business.
+    Soft-deletes by setting is_active = false (preserves data for potential reconnection).
+    Does NOT delete any previously synced transactions.
+    """
+    _, business = user_business
+
+    result = session.execute(
+        text("""
+            UPDATE xero_connections 
+            SET is_active = false, updated_at = NOW()
+            WHERE business_id = :business_id AND is_active = true
+            RETURNING id, tenant_name
+        """),
+        {"business_id": str(business.id)}
+    )
+    row = result.fetchone()
+    session.commit()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="No active Xero connection found")
+
+    return {
+        "success": True,
+        "message": f"Disconnected from Xero ({row[1]}). Previously synced transactions are preserved.",
+    }
 
 
 if __name__ == "__main__":
