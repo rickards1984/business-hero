@@ -40,6 +40,7 @@ import {
   ListItemIcon,
   ListItemText,
   Checkbox,
+  Snackbar,
 } from '@mui/material';
 import {
   ArrowBack as ArrowBackIcon,
@@ -60,6 +61,10 @@ import {
   FileDownload as FileDownloadIcon,
   Refresh as RefreshIcon,
   Close as CloseIcon,
+  Link as LinkIcon,
+  Sync as SyncIcon,
+  CheckCircleOutline as CheckCircleOutlineIcon,
+  LinkOff as LinkOffIcon,
 } from '@mui/icons-material';
 import {
   PieChart,
@@ -171,6 +176,26 @@ const Accounting: React.FC = () => {
   }>({ loading: false, data: null, error: null });
   const [showInsights, setShowInsights] = useState(false);
 
+  // ─── Xero Integration State ────────────────────────────────
+  const [xeroStatus, setXeroStatus] = useState<{
+    connected: boolean;
+    tenant_name?: string;
+    last_sync_at?: string;
+    connected_at?: string;
+  } | null>(null);
+  const [xeroSyncing, setXeroSyncing] = useState(false);
+  const [xeroSyncResult, setXeroSyncResult] = useState<{
+    new_transactions: number;
+    updated_transactions: number;
+    synced_at: string;
+  } | null>(null);
+  const [xeroLoading, setXeroLoading] = useState(true);
+  const [snackbar, setSnackbar] = useState<{
+    open: boolean;
+    message: string;
+    severity: 'success' | 'error' | 'info';
+  }>({ open: false, message: '', severity: 'info' });
+
   // ============== Data Fetching ==============
 
   const fetchSummary = useCallback(async () => {
@@ -264,6 +289,102 @@ const Accounting: React.FC = () => {
     return () => clearTimeout(timer);
   }, [transactionType, searchQuery, selectedCategory]);
 
+  // ─── Xero: Check connection status on mount ────────────────
+  useEffect(() => {
+    const checkXeroStatus = async () => {
+      try {
+        setXeroLoading(true);
+        const response = await apiRequest('GET', '/v1/accounting/xero/status');
+        if (response.ok) {
+          const data = await response.json();
+          setXeroStatus(data);
+        }
+      } catch (error) {
+        console.error('Failed to check Xero status:', error);
+      } finally {
+        setXeroLoading(false);
+      }
+    };
+    checkXeroStatus();
+  }, []);
+
+  // ─── Xero: Check for OAuth redirect result on mount ────────
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const xeroResult = params.get('xero');
+    const orgName = params.get('org');
+    
+    if (xeroResult === 'connected') {
+      setSnackbar({
+        open: true,
+        message: orgName 
+          ? `Successfully connected to ${orgName}. Syncing transactions...`
+          : 'Successfully connected to Xero. Syncing transactions...',
+        severity: 'success',
+      });
+      // Clean up URL params
+      window.history.replaceState({}, '', window.location.pathname);
+      // Update status
+      setXeroStatus({ connected: true, tenant_name: orgName || 'Xero' });
+    } else if (xeroResult === 'error') {
+      const reason = params.get('reason') || 'unknown';
+      setSnackbar({
+        open: true,
+        message: `Could not connect to Xero (${reason}). Please try again.`,
+        severity: 'error',
+      });
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  // ─── Xero: Auto-sync when connected ────────────────────────
+  useEffect(() => {
+    if (!xeroStatus?.connected || xeroSyncing || xeroLoading) return;
+
+    const autoSync = async () => {
+      try {
+        setXeroSyncing(true);
+        const response = await apiRequest('POST', '/v1/accounting/xero/sync');
+        if (response.ok) {
+          const result = await response.json();
+          setXeroSyncResult(result);
+          
+          // Update last sync time in status
+          setXeroStatus(prev => prev ? {
+            ...prev,
+            last_sync_at: result.synced_at,
+          } : prev);
+
+          // Only show notification and refresh if there are actually new/updated transactions
+          if (result.new_transactions > 0 || result.updated_transactions > 0) {
+            setSnackbar({
+              open: true,
+              message: `Xero sync complete: ${result.new_transactions} new, ${result.updated_transactions} updated transactions.`,
+              severity: 'success',
+            });
+            // Refresh the transactions list
+            fetchTransactions();
+            fetchSummary();
+          }
+        } else if (response.status === 401) {
+          // Token expired — user needs to reconnect
+          setXeroStatus({ connected: false });
+          setSnackbar({
+            open: true,
+            message: 'Xero connection expired. Please reconnect your Xero account.',
+            severity: 'error',
+          });
+        }
+      } catch (error) {
+        console.error('Xero auto-sync failed:', error);
+      } finally {
+        setXeroSyncing(false);
+      }
+    };
+
+    autoSync();
+  }, [xeroStatus?.connected, xeroLoading]);
+
   // ============== Handlers ==============
 
   const handleDeleteTransaction = async (id: string) => {
@@ -284,6 +405,98 @@ const Accounting: React.FC = () => {
     setUploadDialogOpen(false);
     fetchTransactions();
     fetchSummary();
+  };
+
+  // ─── Xero Handlers ─────────────────────────────────────────
+
+  const connectXero = async () => {
+    try {
+      const response = await apiRequest('GET', '/v1/oauth/xero');
+      if (response.ok) {
+        const data = await response.json();
+        // Redirect user to Xero's OAuth login page
+        window.location.href = data.url;
+      } else {
+        setSnackbar({
+          open: true,
+          message: 'Failed to start Xero connection. Please try again.',
+          severity: 'error',
+        });
+      }
+    } catch (error) {
+      console.error('Failed to start Xero OAuth:', error);
+      setSnackbar({
+        open: true,
+        message: 'Failed to connect to Xero. Please try again.',
+        severity: 'error',
+      });
+    }
+  };
+
+  const syncXeroNow = async () => {
+    if (xeroSyncing) return;
+    try {
+      setXeroSyncing(true);
+      const response = await apiRequest('POST', '/v1/accounting/xero/sync');
+      if (response.ok) {
+        const result = await response.json();
+        setXeroSyncResult(result);
+        
+        // Update last sync time in status
+        setXeroStatus(prev => prev ? {
+          ...prev,
+          last_sync_at: result.synced_at,
+        } : prev);
+
+        setSnackbar({
+          open: true,
+          message: result.new_transactions > 0 || result.updated_transactions > 0
+            ? `Xero sync complete: ${result.new_transactions} new, ${result.updated_transactions} updated transactions.`
+            : 'Everything is up to date with Xero.',
+          severity: 'success',
+        });
+
+        // Refresh transactions list if there were changes
+        if (result.new_transactions > 0 || result.updated_transactions > 0) {
+          fetchTransactions();
+          fetchSummary();
+        }
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        setSnackbar({
+          open: true,
+          message: errorData.detail || 'Failed to sync with Xero. Please try again.',
+          severity: 'error',
+        });
+      }
+    } catch (error) {
+      console.error('Xero manual sync failed:', error);
+      setSnackbar({
+        open: true,
+        message: 'Failed to sync with Xero. Please try again.',
+        severity: 'error',
+      });
+    } finally {
+      setXeroSyncing(false);
+    }
+  };
+
+  const disconnectXero = async () => {
+    if (!confirm('Disconnect Xero? Previously synced transactions will be preserved.')) return;
+    try {
+      const response = await apiRequest('POST', '/v1/accounting/xero/disconnect');
+      if (response.ok) {
+        setXeroStatus({ connected: false });
+        setXeroSyncResult(null);
+        setSnackbar({
+          open: true,
+          message: 'Xero disconnected. Your previously synced transactions are preserved.',
+          severity: 'info',
+        });
+      }
+    } catch (error) {
+      console.error('Failed to disconnect Xero:', error);
+    }
   };
 
   // ============== Render ==============
@@ -345,6 +558,141 @@ const Accounting: React.FC = () => {
             />
           ))}
         </Box>
+
+        {/* ─── Xero Connection Banner ─────────────────────────────── */}
+        {!xeroLoading && (
+          <>
+            {xeroStatus?.connected ? (
+              // CONNECTED STATE — green status bar
+              <Paper
+                elevation={0}
+                sx={{
+                  mb: 3,
+                  p: 2,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  bgcolor: 'success.50',
+                  border: '1px solid',
+                  borderColor: 'success.200',
+                  borderRadius: 2,
+                }}
+              >
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                  <Box
+                    sx={{
+                      width: 40,
+                      height: 40,
+                      borderRadius: '50%',
+                      bgcolor: 'success.100',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <CheckCircleOutlineIcon sx={{ color: 'success.main' }} />
+                  </Box>
+                  <Box>
+                    <Typography variant="body1" fontWeight={600} color="success.dark">
+                      Connected to {xeroStatus.tenant_name || 'Xero'}
+                    </Typography>
+                    <Typography variant="body2" color="success.main">
+                      {xeroSyncing 
+                        ? 'Syncing transactions...' 
+                        : xeroStatus.last_sync_at 
+                          ? `Last synced: ${new Date(xeroStatus.last_sync_at).toLocaleString()}`
+                          : 'Not yet synced'
+                      }
+                      {xeroSyncResult && !xeroSyncing && xeroSyncResult.new_transactions > 0 && (
+                        <Box component="span" sx={{ ml: 1, fontWeight: 600 }}>
+                          · {xeroSyncResult.new_transactions} new transactions
+                        </Box>
+                      )}
+                    </Typography>
+                  </Box>
+                </Box>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={syncXeroNow}
+                    disabled={xeroSyncing}
+                    startIcon={xeroSyncing ? <CircularProgress size={16} /> : <SyncIcon />}
+                    sx={{
+                      borderColor: 'success.main',
+                      color: 'success.dark',
+                      '&:hover': {
+                        borderColor: 'success.dark',
+                        bgcolor: 'success.50',
+                      },
+                    }}
+                  >
+                    {xeroSyncing ? 'Syncing...' : 'Sync Now'}
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={disconnectXero}
+                    startIcon={<LinkOffIcon />}
+                    sx={{ color: 'text.secondary', '&:hover': { color: 'error.main' } }}
+                  >
+                    Disconnect
+                  </Button>
+                </Box>
+              </Paper>
+            ) : (
+              // NOT CONNECTED STATE — blue prompt to connect
+              <Paper
+                elevation={0}
+                sx={{
+                  mb: 3,
+                  p: 2,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  bgcolor: 'primary.50',
+                  border: '1px solid',
+                  borderColor: 'primary.200',
+                  borderRadius: 2,
+                }}
+              >
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                  <Box
+                    sx={{
+                      width: 40,
+                      height: 40,
+                      borderRadius: '50%',
+                      bgcolor: 'primary.100',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <LinkIcon sx={{ color: 'primary.main' }} />
+                  </Box>
+                  <Box>
+                    <Typography variant="body1" fontWeight={600} color="primary.dark">
+                      Connect your accounting software
+                    </Typography>
+                    <Typography variant="body2" color="primary.main">
+                      Link Xero to automatically sync your bank transactions — no more manual uploads
+                    </Typography>
+                  </Box>
+                </Box>
+                <Button
+                  variant="contained"
+                  onClick={connectXero}
+                  startIcon={<LinkIcon />}
+                  sx={{
+                    bgcolor: 'primary.main',
+                    '&:hover': { bgcolor: 'primary.dark' },
+                  }}
+                >
+                  Connect Xero
+                </Button>
+              </Paper>
+            )}
+          </>
+        )}
 
         {/* Summary Cards */}
         <Grid container spacing={3} sx={{ mb: 3 }}>
@@ -606,6 +954,22 @@ const Accounting: React.FC = () => {
           fetchSummary();
         }}
       />
+
+      {/* Snackbar for notifications */}
+      <Snackbar
+        open={snackbar.open}
+        autoHideDuration={6000}
+        onClose={() => setSnackbar(prev => ({ ...prev, open: false }))}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert
+          onClose={() => setSnackbar(prev => ({ ...prev, open: false }))}
+          severity={snackbar.severity}
+          sx={{ width: '100%' }}
+        >
+          {snackbar.message}
+        </Alert>
+      </Snackbar>
     </Box>
   );
 };
