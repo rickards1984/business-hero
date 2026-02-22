@@ -3166,9 +3166,9 @@ async def oauth_xero_callback(
         result = session.execute(
             text("""
                 INSERT INTO xero_connections 
-                    (business_id, tenant_id, tenant_name, token_ciphertext, refresh_token_ciphertext, token_expires_at, is_active, created_at, updated_at)
+                    (id, business_id, tenant_id, tenant_name, token_ciphertext, refresh_token_ciphertext, token_expires_at, is_active, created_at, updated_at)
                 VALUES 
-                    (:business_id, :tenant_id, :tenant_name, :token_ciphertext, :refresh_token_ciphertext, :token_expires_at, true, NOW(), NOW())
+                    (gen_random_uuid(), :business_id, :tenant_id, :tenant_name, :token_ciphertext, :refresh_token_ciphertext, :token_expires_at, true, NOW(), NOW())
                 ON CONFLICT (business_id) DO UPDATE SET
                     tenant_id = EXCLUDED.tenant_id,
                     tenant_name = EXCLUDED.tenant_name,
