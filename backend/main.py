@@ -3081,8 +3081,8 @@ async def oauth_xero_start(
     Start Xero OAuth flow. Returns the authorization URL for the frontend
     to redirect the user to Xero's login page.
     """
-    # get_user_business_context returns a dict with "user" and "business" keys
-    business_id = str(auth_ctx["business"].id)
+    # get_user_business_context returns a dict with "user_id" and "business_id" keys
+    business_id = str(auth_ctx["business_id"])
     
     redirect_uri = os.getenv("XERO_REDIRECT_URI", "").strip()
     if not redirect_uri:
