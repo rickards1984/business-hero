@@ -231,6 +231,74 @@ class XeroProvider:
             resp.raise_for_status()
             return resp.json()
 
+    async def get_invoices(
+        self,
+        modified_since: Optional[str] = None,
+        status: Optional[str] = None,
+        page: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Fetch invoices from Xero.
+
+        Args:
+            modified_since: ISO datetime string to only fetch recently modified invoices
+            status: Filter by status (DRAFT, SUBMITTED, AUTHORISED, PAID, VOIDED, DELETED)
+            page: Page number (100 invoices per page)
+        """
+        url = f"{XERO_API_BASE}/Invoices"
+        params: Dict[str, Any] = {"page": page, "order": "Date DESC"}
+        if status:
+            params["Statuses"] = status
+
+        headers = {**self.headers}
+        if modified_since:
+            headers["If-Modified-Since"] = modified_since
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            _logger.info(f"Fetching Xero invoices page={page} status={status}")
+            resp = await client.get(url, headers=headers, params=params)
+
+            if resp.status_code == 401:
+                raise XeroAuthError("Xero access token is expired or invalid")
+            if resp.status_code == 304:
+                return {"Invoices": []}
+            if resp.status_code == 429:
+                raise XeroRateLimitError("Xero API rate limit exceeded")
+
+            resp.raise_for_status()
+            data = resp.json()
+            _logger.info(f"Fetched {len(data.get('Invoices', []))} invoices from Xero")
+            return data
+
+    async def get_all_invoices(
+        self,
+        modified_since: Optional[str] = None,
+        statuses: str = "AUTHORISED,SUBMITTED",
+        max_pages: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch ALL invoices across all pages from Xero.
+        Defaults to only fetching outstanding (unpaid) invoices.
+        """
+        all_invoices: List[Dict[str, Any]] = []
+        page = 1
+
+        while page <= max_pages:
+            data = await self.get_invoices(
+                modified_since=modified_since,
+                status=statuses,
+                page=page,
+            )
+            invoices = data.get("Invoices", [])
+            all_invoices.extend(invoices)
+
+            if len(invoices) < 100:
+                break
+            page += 1
+
+        _logger.info(f"Total Xero invoices fetched: {len(all_invoices)} across {page} page(s)")
+        return all_invoices
+
 
 async def get_tenant_connections(access_token: str) -> List[Dict[str, Any]]:
     """
@@ -333,6 +401,50 @@ def _parse_xero_date(date_value) -> Optional[str]:
     except (ValueError, AttributeError):
         _logger.warning(f"Could not parse Xero date: {date_value}")
         return None
+
+
+def map_xero_invoice_to_business_hero(xero_invoice: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Map a Xero Invoice to Business Hero's invoices table format.
+
+    Xero Invoice fields:
+    - InvoiceID, InvoiceNumber, Type (ACCREC / ACCPAY)
+    - Contact.Name / Contact.EmailAddress
+    - Total, AmountDue, AmountPaid
+    - Status: DRAFT, SUBMITTED, AUTHORISED, PAID, VOIDED, DELETED
+    - Date, DueDate (in /Date(...)/ or ISO format)
+    - Reference, CurrencyCode
+    """
+    xero_status = xero_invoice.get("Status", "")
+    if xero_status == "PAID":
+        bh_status = "paid"
+    elif xero_status == "VOIDED":
+        bh_status = "cancelled"
+    elif xero_status == "DRAFT":
+        bh_status = "draft"
+    elif xero_status in ("AUTHORISED", "SUBMITTED"):
+        bh_status = "unpaid"
+    else:
+        bh_status = "unpaid"
+
+    contact = xero_invoice.get("Contact", {})
+
+    return {
+        "external_id": xero_invoice.get("InvoiceID"),
+        "external_source": "xero",
+        "invoice_number": xero_invoice.get("InvoiceNumber", ""),
+        "customer_name": contact.get("Name", "Unknown"),
+        "customer_email": contact.get("EmailAddress", ""),
+        "amount": float(xero_invoice.get("Total", 0)),
+        "amount_due": float(xero_invoice.get("AmountDue", 0)),
+        "amount_paid": float(xero_invoice.get("AmountPaid", 0)),
+        "status": bh_status,
+        "issue_date": _parse_xero_date(xero_invoice.get("Date")),
+        "due_date": _parse_xero_date(xero_invoice.get("DueDate")),
+        "reference": xero_invoice.get("Reference", ""),
+        "currency": xero_invoice.get("CurrencyCode", "GBP"),
+        "invoice_type": xero_invoice.get("Type", "ACCREC"),
+    }
 
 
 class XeroAuthError(Exception):

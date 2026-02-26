@@ -934,9 +934,17 @@ const Accounting: React.FC = () => {
               </Card>
             </Grid>
 
-            {/* Outstanding Invoices Card */}
+            {/* Outstanding Invoices Card — clickable, navigates to Invoices tab */}
             <Grid item xs={12} sm={6} lg={3}>
-              <Card sx={{ height: '100%' }}>
+              <Card
+                sx={{
+                  height: '100%',
+                  cursor: 'pointer',
+                  transition: 'box-shadow 0.2s, border-color 0.2s',
+                  '&:hover': { boxShadow: 4, borderColor: 'primary.light' },
+                }}
+                onClick={() => navigate('/app?tab=invoices')}
+              >
                 <CardContent>
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
                     <Typography variant="body2" color="text.secondary" fontWeight={500}>
@@ -974,6 +982,9 @@ const Accounting: React.FC = () => {
                           <Typography variant="caption" color="success.main">All paid up!</Typography>
                         )}
                       </Box>
+                      <Typography variant="caption" color="primary.main" sx={{ mt: 1, display: 'block' }}>
+                        View invoices →
+                      </Typography>
                     </>
                   )}
                 </CardContent>

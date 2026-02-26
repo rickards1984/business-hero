@@ -240,6 +240,7 @@ class Invoice(BaseModel):
     chase_stage: int
     source: str
     source_ref: Optional[str] = None
+    external_source: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

@@ -242,9 +242,13 @@ class Invoice(SQLModel, table=True):
     chase_stage: int = Field(default=0)
     source: str = Field(default="csv")
     source_ref: Optional[str] = None
+    external_id: Optional[str] = Field(default=None)
+    external_source: Optional[str] = Field(default=None)
+    amount_due: Optional[float] = Field(default=None, sa_column=Column(Numeric(12, 2)))
+    invoice_type: Optional[str] = Field(default="ACCREC")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    
+
     business: Optional[Business] = Relationship()
 
 

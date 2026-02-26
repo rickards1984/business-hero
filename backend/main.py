@@ -87,7 +87,10 @@ from app.billing.config import get_stripe_config, validate_stripe_config
 from accounting import router as accounting_router
 from realtime_voice import router as realtime_voice_router
 from dependencies import get_current_user_business, get_current_user_and_business
-from providers.xero import XeroProvider, get_tenant_connections, map_xero_transaction_to_business_hero, XeroAuthError
+from providers.xero import (
+    XeroProvider, get_tenant_connections, map_xero_transaction_to_business_hero,
+    map_xero_invoice_to_business_hero, XeroAuthError,
+)
 from providers.xero_oauth import get_xero_auth_url, exchange_code_for_tokens, get_valid_xero_access_token
 from email_utils import encrypt_str, decrypt_str
 
@@ -2404,6 +2407,7 @@ async def list_invoices(
             chase_stage=inv.chase_stage or 0,
             source=inv.source,
             source_ref=inv.source_ref,
+            external_source=inv.external_source,
             created_at=inv.created_at,
             updated_at=inv.updated_at
         )
@@ -3437,6 +3441,190 @@ async def sync_xero_transactions(
         "skipped": skipped_count,
         "errors": errors[:5],
         "synced_at": sync_time.isoformat(),
+    }
+
+
+@app.post("/v1/invoices/xero/sync", tags=["Invoices"])
+async def sync_xero_invoices(
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """
+    Sync invoices from Xero into the local invoices table.
+    Fetches AUTHORISED, SUBMITTED, and PAID invoices.
+    Only syncs sales invoices (ACCREC), not bills (ACCPAY).
+    Upserts using external_id for deduplication.
+    """
+    import logging
+    _inv_sync_logger = logging.getLogger("xero_invoice_sync")
+
+    _, business = user_business
+    business_id = str(business.id)
+
+    from datetime import timezone, timedelta
+
+    result = session.execute(
+        text("""
+            SELECT id, tenant_id, tenant_name, token_ciphertext, refresh_token_ciphertext,
+                   token_expires_at
+            FROM xero_connections
+            WHERE business_id = :business_id AND is_active = true
+            LIMIT 1
+        """),
+        {"business_id": business_id}
+    )
+    row = result.fetchone()
+    if not row:
+        return {"error": "Xero not connected", "synced": 0}
+
+    connection_id = str(row[0])
+    tenant_id = row[1]
+    tenant_name = row[2]
+    token_ciphertext = row[3]
+    refresh_token_ciphertext = row[4]
+    token_expires_at = row[5]
+
+    try:
+        access_token = decrypt_str(token_ciphertext)
+        refresh_token = decrypt_str(refresh_token_ciphertext)
+
+        now = datetime.now(timezone.utc)
+        expires_at = token_expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+        if now >= (expires_at - timedelta(minutes=2)):
+            _inv_sync_logger.info(f"Refreshing Xero token for invoice sync, business {business_id}")
+            from providers.xero_oauth import refresh_xero_token
+            new_access, new_refresh, expires_in = refresh_xero_token(refresh_token)
+
+            session.execute(
+                text("""
+                    UPDATE xero_connections
+                    SET token_ciphertext = :token, refresh_token_ciphertext = :refresh,
+                        token_expires_at = :expires_at, updated_at = NOW()
+                    WHERE id = :conn_id
+                """),
+                {
+                    "token": encrypt_str(new_access),
+                    "refresh": encrypt_str(new_refresh),
+                    "expires_at": now + timedelta(seconds=expires_in),
+                    "conn_id": connection_id,
+                }
+            )
+            session.commit()
+            access_token = new_access
+    except Exception as e:
+        _inv_sync_logger.error(f"Xero token error during invoice sync: {e}")
+        raise HTTPException(status_code=401, detail=f"Xero authentication failed: {str(e)}")
+
+    try:
+        provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
+        outstanding = await provider.get_all_invoices(statuses="AUTHORISED,SUBMITTED")
+        paid = await provider.get_all_invoices(statuses="PAID")
+        all_invoices = outstanding + paid
+        _inv_sync_logger.info(
+            f"Fetched {len(outstanding)} outstanding + {len(paid)} paid invoices "
+            f"from Xero for {tenant_name}"
+        )
+    except XeroAuthError:
+        raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
+    except Exception as e:
+        _inv_sync_logger.error(f"Failed to fetch Xero invoices: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch invoices from Xero: {str(e)}")
+
+    new_count = 0
+    updated_count = 0
+    skipped_count = 0
+
+    for xero_inv in all_invoices:
+        mapped = map_xero_invoice_to_business_hero(xero_inv)
+
+        if mapped["invoice_type"] != "ACCREC":
+            skipped_count += 1
+            continue
+
+        if not mapped.get("due_date"):
+            skipped_count += 1
+            continue
+
+        try:
+            upsert_result = session.execute(
+                text("""
+                    INSERT INTO invoices (
+                        id, business_id, external_id, external_source,
+                        invoice_number, customer_name, customer_email,
+                        amount, amount_due, amount_paid,
+                        status, due_date, issue_date,
+                        currency, invoice_type, source, archived,
+                        created_at, updated_at
+                    ) VALUES (
+                        gen_random_uuid(), :business_id, :external_id, :external_source,
+                        :invoice_number, :customer_name, :customer_email,
+                        :amount, :amount_due, :amount_paid,
+                        :status, :due_date, :issue_date,
+                        :currency, :invoice_type, 'xero', false,
+                        NOW(), NOW()
+                    )
+                    ON CONFLICT (business_id, external_source, external_id)
+                    WHERE external_id IS NOT NULL
+                    DO UPDATE SET
+                        invoice_number = EXCLUDED.invoice_number,
+                        customer_name = EXCLUDED.customer_name,
+                        customer_email = EXCLUDED.customer_email,
+                        amount = EXCLUDED.amount,
+                        amount_due = EXCLUDED.amount_due,
+                        amount_paid = EXCLUDED.amount_paid,
+                        status = EXCLUDED.status,
+                        due_date = EXCLUDED.due_date,
+                        issue_date = EXCLUDED.issue_date,
+                        currency = EXCLUDED.currency,
+                        updated_at = NOW()
+                    RETURNING xmax
+                """),
+                {
+                    "business_id": business_id,
+                    "external_id": mapped["external_id"],
+                    "external_source": mapped["external_source"],
+                    "invoice_number": mapped["invoice_number"],
+                    "customer_name": mapped["customer_name"],
+                    "customer_email": mapped["customer_email"] or None,
+                    "amount": mapped["amount"],
+                    "amount_due": mapped["amount_due"],
+                    "amount_paid": mapped["amount_paid"],
+                    "status": mapped["status"],
+                    "due_date": mapped["due_date"],
+                    "issue_date": mapped.get("issue_date"),
+                    "currency": mapped.get("currency", "GBP"),
+                    "invoice_type": mapped.get("invoice_type", "ACCREC"),
+                }
+            )
+
+            row = upsert_result.fetchone()
+            if row and row[0] == 0:
+                new_count += 1
+            else:
+                updated_count += 1
+
+        except Exception as e:
+            _inv_sync_logger.warning(f"Failed to upsert invoice {mapped.get('invoice_number')}: {e}")
+            skipped_count += 1
+
+    session.commit()
+
+    _inv_sync_logger.info(
+        f"Invoice sync complete for {tenant_name}: "
+        f"{new_count} new, {updated_count} updated, {skipped_count} skipped"
+    )
+
+    return {
+        "success": True,
+        "new_invoices": new_count,
+        "updated_invoices": updated_count,
+        "skipped": skipped_count,
+        "total_fetched": len(all_invoices),
+        "synced": new_count + updated_count,
+        "message": f"Synced {new_count + updated_count} invoices from Xero",
     }
 
 

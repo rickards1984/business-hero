@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Box,
   AppBar,
@@ -159,10 +159,16 @@ const ChaseStageChip: React.FC<{ stage: number }> = ({ stage }) => {
 
 export default function BusinessDashboard() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user, signOut, loading: authLoading } = useAuth();
   const { data: businessProfile, isLoading: profileLoading } = useMe();
   
-  const [tabValue, setTabValue] = useState(0);
+  const [tabValue, setTabValue] = useState(() => {
+    const tab = searchParams.get('tab');
+    if (tab === 'invoices') return 2;
+    if (tab === 'calls') return 1;
+    return 0;
+  });
   const [membership, setMembership] = useState<BusinessMember | null>(null);
   const [business, setBusiness] = useState<Business | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -205,6 +211,7 @@ export default function BusinessDashboard() {
     chase_stage: number;
     source: string;
     source_ref: string | null;
+    external_source: string | null;
   }
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [invoicesLoading, setInvoicesLoading] = useState(false);
@@ -220,6 +227,10 @@ export default function BusinessDashboard() {
   const [bulkPreviewOpen, setBulkPreviewOpen] = useState(false);
   const [bulkPreview, setBulkPreview] = useState<{ invoice_id: string; subject: string; body: string; status: string; stage_description?: string; error_message?: string }[]>([]);
   
+  // Xero invoice sync state
+  const [xeroInvoiceSyncing, setXeroInvoiceSyncing] = useState(false);
+  const [xeroConnected, setXeroConnected] = useState(false);
+
   // Invoice filtering state
   const [invoiceSearch, setInvoiceSearch] = useState('');
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('');
@@ -823,6 +834,45 @@ export default function BusinessDashboard() {
       return () => clearTimeout(timer);
     }
   }, [invoiceSearch]);
+
+  // Xero invoice sync
+  const syncXeroInvoices = async () => {
+    try {
+      setXeroInvoiceSyncing(true);
+      const resp = await apiRequest('POST', '/v1/invoices/xero/sync');
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.synced > 0) {
+          setSuccessMessage(`Synced ${data.synced} invoices from Xero`);
+        }
+        await fetchInvoices();
+      }
+    } catch (e) {
+      console.error('Invoice sync failed:', e);
+    } finally {
+      setXeroInvoiceSyncing(false);
+    }
+  };
+
+  // Check Xero status and auto-sync invoices when invoices tab is first opened
+  useEffect(() => {
+    if (tabValue !== 2 || !business) return;
+    const checkXero = async () => {
+      try {
+        const resp = await apiRequest('GET', '/v1/accounting/xero/status');
+        if (resp.ok) {
+          const data = await resp.json();
+          setXeroConnected(data.connected);
+          if (data.connected) {
+            syncXeroInvoices();
+          }
+        }
+      } catch (e) {
+        console.error('Xero status check failed:', e);
+      }
+    };
+    checkXero();
+  }, [tabValue, business]);
 
   if (authLoading || loading) {
     return (
@@ -1555,6 +1605,37 @@ export default function BusinessDashboard() {
               </TabPanel>
 
               <TabPanel value={tabValue} index={2}>
+                {/* Xero sync indicator */}
+                {xeroConnected && (
+                  <Box
+                    sx={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      mb: 2,
+                      px: 2,
+                      py: 1,
+                      bgcolor: 'grey.50',
+                      borderRadius: 2,
+                    }}
+                  >
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'success.main' }} />
+                      <Typography variant="body2" color="text.secondary">
+                        Synced with Xero
+                      </Typography>
+                      {xeroInvoiceSyncing && <CircularProgress size={14} sx={{ ml: 0.5 }} />}
+                    </Box>
+                    <Button
+                      size="small"
+                      onClick={syncXeroInvoices}
+                      disabled={xeroInvoiceSyncing}
+                    >
+                      Sync now
+                    </Button>
+                  </Box>
+                )}
+
                 {/* Summary Cards */}
                 <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap' }}>
                   <Card variant="outlined" sx={{ p: 2, minWidth: 130 }}>
@@ -1770,10 +1851,15 @@ export default function BusinessDashboard() {
                               />
                             </TableCell>
                             <TableCell>
-                              <Typography fontWeight={500}>{invoice.invoice_number}</Typography>
-                              {invoice.archived && (
-                                <Chip label="Archived" size="small" sx={{ ml: 1 }} variant="outlined" />
-                              )}
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                                <Typography fontWeight={500}>{invoice.invoice_number}</Typography>
+                                {invoice.external_source === 'xero' && (
+                                  <Chip label="Xero" size="small" sx={{ height: 18, fontSize: '0.65rem', bgcolor: 'rgba(25, 118, 210, 0.08)', color: 'primary.main' }} />
+                                )}
+                                {invoice.archived && (
+                                  <Chip label="Archived" size="small" sx={{ ml: 0.5 }} variant="outlined" />
+                                )}
+                              </Box>
                             </TableCell>
                             <TableCell>
                               <Typography>{invoice.customer_name}</Typography>
