@@ -157,7 +157,10 @@ const Accounting: React.FC = () => {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [totalTransactions, setTotalTransactions] = useState(0);
-  
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [perPage, setPerPage] = useState(50);
+
   // Filters
   const [period, setPeriod] = useState<'month' | 'quarter' | 'year' | 'all'>('month');
   const [transactionType, setTransactionType] = useState<'all' | 'income' | 'expense'>('all');
@@ -240,18 +243,20 @@ const Accounting: React.FC = () => {
       if (transactionType !== 'all') params.append('type', transactionType);
       if (searchQuery) params.append('search', searchQuery);
       if (selectedCategory) params.append('category_id', selectedCategory);
-      params.append('limit', '100');
-      
+      params.append('limit', String(perPage));
+      params.append('page', String(currentPage));
+
       const response = await apiRequest('GET', `/v1/accounting/transactions?${params.toString()}`);
       if (response.ok) {
         const data = await response.json();
         setTransactions(data.transactions);
         setTotalTransactions(data.total);
+        setTotalPages(data.total_pages || 1);
       }
     } catch (error) {
       console.error('Failed to fetch transactions:', error);
     }
-  }, [transactionType, searchQuery, selectedCategory]);
+  }, [transactionType, searchQuery, selectedCategory, currentPage, perPage]);
 
   const fetchCategories = useCallback(async () => {
     try {
@@ -305,13 +310,18 @@ const Accounting: React.FC = () => {
     fetchSummary();
   }, [period]);
 
-  // Refresh transactions when filters change
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [transactionType, searchQuery, selectedCategory]);
+
+  // Refresh transactions when filters or page change
   useEffect(() => {
     const timer = setTimeout(() => {
       fetchTransactions();
     }, 300);
     return () => clearTimeout(timer);
-  }, [transactionType, searchQuery, selectedCategory]);
+  }, [transactionType, searchQuery, selectedCategory, currentPage, perPage]);
 
   // ─── Xero: Check connection status on mount ────────────────
   useEffect(() => {
@@ -450,6 +460,7 @@ const Accounting: React.FC = () => {
 
   const handleImportComplete = () => {
     setUploadDialogOpen(false);
+    setCurrentPage(1);
     fetchTransactions();
     fetchSummary();
   };
@@ -1202,6 +1213,12 @@ const Accounting: React.FC = () => {
             setSelectedCategory={setSelectedCategory}
             onDelete={handleDeleteTransaction}
             onRefresh={fetchTransactions}
+            currentPage={currentPage}
+            totalPages={totalPages}
+            totalTransactions={totalTransactions}
+            perPage={perPage}
+            setCurrentPage={setCurrentPage}
+            setPerPage={setPerPage}
           />
         )}
         
@@ -1569,6 +1586,12 @@ interface TransactionsTabProps {
   setSelectedCategory: (id: string) => void;
   onDelete: (id: string) => void;
   onRefresh: () => void;
+  currentPage: number;
+  totalPages: number;
+  totalTransactions: number;
+  perPage: number;
+  setCurrentPage: (page: number | ((p: number) => number)) => void;
+  setPerPage: (size: number) => void;
 }
 
 const TransactionsTab: React.FC<TransactionsTabProps> = ({
@@ -1582,6 +1605,12 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
   setSelectedCategory,
   onDelete,
   onRefresh,
+  currentPage,
+  totalPages,
+  totalTransactions,
+  perPage,
+  setCurrentPage,
+  setPerPage,
 }) => {
   const [selectedTransactions, setSelectedTransactions] = useState<string[]>([]);
   const [editModalOpen, setEditModalOpen] = useState(false);
@@ -1877,6 +1906,78 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
           </TableBody>
         </Table>
       </TableContainer>
+
+      {/* ─── Pagination Controls ──────────────────────────── */}
+      {totalPages > 0 && (
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            mt: 2,
+            pt: 2,
+            borderTop: 1,
+            borderColor: 'divider',
+            flexWrap: 'wrap',
+            gap: 1,
+          }}
+        >
+          <Typography variant="body2" color="text.secondary">
+            Showing {Math.min((currentPage - 1) * perPage + 1, totalTransactions)}–{Math.min(currentPage * perPage, totalTransactions)} of {totalTransactions.toLocaleString()} transactions
+          </Typography>
+
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <Button size="small" disabled={currentPage === 1} onClick={() => setCurrentPage(1)} sx={{ minWidth: 36 }}>
+              ««
+            </Button>
+            <Button size="small" disabled={currentPage === 1} onClick={() => setCurrentPage((p: number) => Math.max(1, p - 1))} sx={{ minWidth: 36 }}>
+              «
+            </Button>
+            {(() => {
+              const pages: number[] = [];
+              let start = Math.max(1, currentPage - 2);
+              const end = Math.min(totalPages, start + 4);
+              if (end - start < 4) start = Math.max(1, end - 4);
+              for (let i = start; i <= end; i++) pages.push(i);
+              return pages.map((p) => (
+                <Button
+                  key={p}
+                  size="small"
+                  variant={p === currentPage ? 'contained' : 'text'}
+                  onClick={() => setCurrentPage(p)}
+                  sx={{ minWidth: 36 }}
+                >
+                  {p}
+                </Button>
+              ));
+            })()}
+            <Button size="small" disabled={currentPage === totalPages} onClick={() => setCurrentPage((p: number) => Math.min(totalPages, p + 1))} sx={{ minWidth: 36 }}>
+              »
+            </Button>
+            <Button size="small" disabled={currentPage === totalPages} onClick={() => setCurrentPage(totalPages)} sx={{ minWidth: 36 }}>
+              »»
+            </Button>
+          </Box>
+
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Typography variant="body2" color="text.secondary">Per page:</Typography>
+            <Select
+              size="small"
+              value={perPage}
+              onChange={(e) => {
+                setPerPage(Number(e.target.value));
+                setCurrentPage(1);
+              }}
+              sx={{ minWidth: 70, height: 32 }}
+            >
+              <MenuItem value={25}>25</MenuItem>
+              <MenuItem value={50}>50</MenuItem>
+              <MenuItem value={100}>100</MenuItem>
+              <MenuItem value={200}>200</MenuItem>
+            </Select>
+          </Box>
+        </Box>
+      )}
 
       {/* Edit Transaction Modal */}
       <Dialog 

@@ -7,6 +7,7 @@ import csv
 import io
 import json
 import logging
+import math
 from datetime import datetime, date
 from decimal import Decimal
 from typing import Optional, List, Dict, Any
@@ -181,16 +182,20 @@ async def list_transactions(
     end_date: Optional[date] = Query(None),
     search: Optional[str] = Query(None),
     is_reconciled: Optional[bool] = Query(None),
-    limit: int = Query(50, le=500),
-    offset: int = Query(0),
+    limit: int = Query(50, ge=1, le=200),
+    page: int = Query(1, ge=1),
+    offset: int = Query(None),
     user_business=Depends(get_current_user_and_business),
     session: Session = Depends(get_session),
 ):
     """List transactions with filtering and pagination."""
     _, business = user_business
-    
+
+    # page param takes precedence; fall back to explicit offset for backwards compat
+    effective_offset = (page - 1) * limit if offset is None else offset
+
     from sqlalchemy import text
-    
+
     query = """
         SELECT 
             t.id, t.transaction_date, t.description, t.amount, t.type,
@@ -202,45 +207,41 @@ async def list_transactions(
         WHERE t.business_id = :business_id AND t.is_archived = false
     """
     params = {"business_id": str(business.id)}
-    
+
     if type:
         query += " AND t.type = :type"
         params["type"] = type
-    
+
     if category_id:
         query += " AND t.category_id = :category_id"
         params["category_id"] = category_id
-    
+
     if start_date:
         query += " AND t.transaction_date >= :start_date"
         params["start_date"] = start_date
-    
+
     if end_date:
         query += " AND t.transaction_date <= :end_date"
         params["end_date"] = end_date
-    
+
     if search:
         query += " AND (t.description ILIKE :search OR t.payee_payer ILIKE :search OR t.reference ILIKE :search)"
         params["search"] = f"%{search}%"
-    
+
     if is_reconciled is not None:
         query += " AND t.is_reconciled = :is_reconciled"
         params["is_reconciled"] = is_reconciled
-    
-    # Count total
+
     count_query = f"SELECT COUNT(*) FROM ({query}) subq"
-    
-    # Add ordering and pagination
+
     query += " ORDER BY t.transaction_date DESC, t.created_at DESC"
     query += " LIMIT :limit OFFSET :offset"
     params["limit"] = limit
-    params["offset"] = offset
-    
+    params["offset"] = effective_offset
+
     with session.connection() as conn:
-        # Get total count
         total = conn.execute(text(count_query), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).scalar()
-        
-        # Get transactions
+
         result = conn.execute(text(query), params)
         transactions = [
             {
@@ -263,12 +264,17 @@ async def list_transactions(
             }
             for row in result.fetchall()
         ]
-    
+
+    total_pages = math.ceil(total / limit) if total > 0 else 1
+
     return {
         "transactions": transactions,
         "total": total,
+        "page": page,
+        "per_page": limit,
+        "total_pages": total_pages,
         "limit": limit,
-        "offset": offset
+        "offset": effective_offset,
     }
 
 
