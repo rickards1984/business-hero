@@ -125,6 +125,19 @@ class XeroProvider:
             resp.raise_for_status()
             return resp.json().get("Contacts", [])
 
+    async def get_contact_email(self, contact_id: str) -> Optional[str]:
+        """Fetch a single contact's email address from the Contacts API."""
+        url = f"{XERO_API_BASE}/Contacts/{contact_id}"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=self.headers)
+            if resp.status_code != 200:
+                _logger.warning(f"Failed to fetch contact {contact_id}: HTTP {resp.status_code}")
+                return None
+            contacts = resp.json().get("Contacts", [])
+            if contacts:
+                return contacts[0].get("EmailAddress") or None
+            return None
+
     async def get_organisation(self) -> Dict[str, Any]:
         """Fetch organisation details — useful to show the connected org name."""
         url = f"{XERO_API_BASE}/Organisation"
@@ -434,7 +447,7 @@ def map_xero_invoice_to_business_hero(xero_invoice: Dict[str, Any]) -> Dict[str,
         "external_source": "xero",
         "invoice_number": xero_invoice.get("InvoiceNumber", ""),
         "customer_name": contact.get("Name", "Unknown"),
-        "customer_email": contact.get("EmailAddress", ""),
+        "customer_email": contact.get("EmailAddress") or None,
         "amount": float(xero_invoice.get("Total", 0)),
         "amount_due": float(xero_invoice.get("AmountDue", 0)),
         "amount_paid": float(xero_invoice.get("AmountPaid", 0)),

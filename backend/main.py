@@ -3538,6 +3538,14 @@ async def sync_xero_invoices(
     skipped_count = 0
 
     for xero_inv in all_invoices:
+        contact_data = xero_inv.get("Contact", {})
+        _inv_sync_logger.info(
+            f"Xero invoice {xero_inv.get('InvoiceNumber')}: "
+            f"Contact={{ID={contact_data.get('ContactID')}, "
+            f"Name={contact_data.get('Name')}, "
+            f"Email={contact_data.get('EmailAddress')}}}"
+        )
+
         mapped = map_xero_invoice_to_business_hero(xero_inv)
 
         if mapped["invoice_type"] != "ACCREC":
@@ -3547,6 +3555,18 @@ async def sync_xero_invoices(
         if not mapped.get("due_date"):
             skipped_count += 1
             continue
+
+        if not mapped.get("customer_email") and contact_data.get("ContactID"):
+            try:
+                contact_email = await provider.get_contact_email(contact_data["ContactID"])
+                if contact_email:
+                    mapped["customer_email"] = contact_email
+                    _inv_sync_logger.info(
+                        f"Fetched email {contact_email} from Contacts API "
+                        f"for {xero_inv.get('InvoiceNumber')}"
+                    )
+            except Exception as e:
+                _inv_sync_logger.warning(f"Contact email lookup failed: {e}")
 
         try:
             upsert_result = session.execute(
