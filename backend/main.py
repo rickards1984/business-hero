@@ -3440,6 +3440,288 @@ async def sync_xero_transactions(
     }
 
 
+@app.get("/v1/accounting/xero/financial-summary")
+async def xero_financial_summary(
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """
+    Fetch a financial summary from Xero including:
+    - Bank account balances (from BankSummary report)
+    - Profit & Loss for current month (from ProfitAndLoss report)
+    - Outstanding invoices summary (from local invoices table)
+    
+    Returns a structured summary for the frontend financial header.
+    """
+    import logging
+    _summary_logger = logging.getLogger("xero_financial_summary")
+    
+    _, business = user_business
+    business_id = str(business.id)
+    
+    from datetime import timezone, timedelta, date
+
+    # 1. Get Xero connection and valid token
+    result = session.execute(
+        text("""
+            SELECT id, tenant_id, token_ciphertext, refresh_token_ciphertext, token_expires_at
+            FROM xero_connections
+            WHERE business_id = :business_id AND is_active = true
+            LIMIT 1
+        """),
+        {"business_id": business_id}
+    )
+    row = result.fetchone()
+
+    # Initialize response structure
+    summary = {
+        "bank_accounts": [],
+        "total_bank_balance": None,
+        "profit_and_loss": {
+            "income": None,
+            "expenses": None,
+            "net_profit": None,
+            "period_start": None,
+            "period_end": None,
+        },
+        "invoices": {
+            "overdue_count": 0,
+            "overdue_amount": 0,
+            "due_count": 0,
+            "due_amount": 0,
+            "total_outstanding": 0,
+        },
+        "xero_connected": row is not None,
+    }
+
+    # 2. If Xero is connected, fetch bank summary and P&L
+    if row:
+        connection_id = str(row[0])
+        tenant_id = row[1]
+        token_ciphertext = row[2]
+        refresh_token_ciphertext = row[3]
+        token_expires_at = row[4]
+
+        # Get valid access token (refresh if needed)
+        try:
+            access_token = decrypt_str(token_ciphertext)
+            refresh_token_val = decrypt_str(refresh_token_ciphertext)
+
+            now = datetime.now(timezone.utc)
+            expires_at = token_expires_at
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+            if now >= (expires_at - timedelta(minutes=2)):
+                from providers.xero_oauth import refresh_xero_token
+                new_access, new_refresh, expires_in = refresh_xero_token(refresh_token_val)
+                session.execute(
+                    text("""
+                        UPDATE xero_connections 
+                        SET token_ciphertext = :token, refresh_token_ciphertext = :refresh,
+                            token_expires_at = :expires_at, updated_at = NOW()
+                        WHERE id = :conn_id
+                    """),
+                    {
+                        "token": encrypt_str(new_access),
+                        "refresh": encrypt_str(new_refresh),
+                        "expires_at": now + timedelta(seconds=expires_in),
+                        "conn_id": connection_id,
+                    }
+                )
+                session.commit()
+                access_token = new_access
+
+            provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
+
+            # --- Fetch Bank Summary ---
+            try:
+                bank_data = await provider.get_bank_summary()
+                bank_accounts = _parse_bank_summary(bank_data)
+                summary["bank_accounts"] = bank_accounts
+                summary["total_bank_balance"] = sum(acc["balance"] for acc in bank_accounts)
+            except Exception as e:
+                _summary_logger.warning(f"Failed to fetch bank summary: {e}")
+
+            # --- Fetch Profit & Loss (current month) ---
+            try:
+                today = date.today()
+                month_start = today.replace(day=1).isoformat()
+                today_str = today.isoformat()
+                
+                pnl_data = await provider.get_profit_and_loss(
+                    from_date=month_start,
+                    to_date=today_str,
+                )
+                pnl = _parse_profit_and_loss(pnl_data)
+                summary["profit_and_loss"] = {
+                    **pnl,
+                    "period_start": month_start,
+                    "period_end": today_str,
+                }
+            except Exception as e:
+                _summary_logger.warning(f"Failed to fetch P&L: {e}")
+
+        except Exception as e:
+            _summary_logger.error(f"Xero token error in financial summary: {e}")
+
+    # 3. Get invoice summary from local database (works whether Xero is connected or not)
+    try:
+        today = date.today()
+        invoice_result = session.execute(
+            text("""
+                SELECT 
+                    COUNT(CASE WHEN due_date < :today AND status = 'unpaid' THEN 1 END) as overdue_count,
+                    COALESCE(SUM(CASE WHEN due_date < :today AND status = 'unpaid' THEN amount ELSE 0 END), 0) as overdue_amount,
+                    COUNT(CASE WHEN due_date >= :today AND status = 'unpaid' THEN 1 END) as due_count,
+                    COALESCE(SUM(CASE WHEN due_date >= :today AND status = 'unpaid' THEN amount ELSE 0 END), 0) as due_amount,
+                    COALESCE(SUM(CASE WHEN status = 'unpaid' THEN amount ELSE 0 END), 0) as total_outstanding
+                FROM invoices
+                WHERE business_id = :business_id AND archived = false
+            """),
+            {"business_id": business_id, "today": today}
+        )
+        inv_row = invoice_result.fetchone()
+        if inv_row:
+            summary["invoices"] = {
+                "overdue_count": inv_row[0] or 0,
+                "overdue_amount": float(inv_row[1] or 0),
+                "due_count": inv_row[2] or 0,
+                "due_amount": float(inv_row[3] or 0),
+                "total_outstanding": float(inv_row[4] or 0),
+            }
+    except Exception as e:
+        _summary_logger.warning(f"Failed to fetch invoice summary: {e}")
+
+    return summary
+
+
+def _parse_bank_summary(report_data: dict) -> list:
+    """
+    Parse Xero's BankSummary report into a simple list of bank accounts with balances.
+    
+    Xero's report format is a nested structure with Rows containing Cells.
+    The BankSummary report has rows where:
+    - Row type "Section" contains the bank account sections
+    - Each section has rows with cells [Account Name, Opening Balance, Cash Received, Cash Spent, Closing Balance]
+    """
+    accounts = []
+    
+    try:
+        reports = report_data.get("Reports", [])
+        if not reports:
+            return accounts
+        
+        report = reports[0]
+        rows = report.get("Rows", [])
+        
+        for row in rows:
+            row_type = row.get("RowType", "")
+            
+            if row_type == "Section":
+                section_rows = row.get("Rows", [])
+                for section_row in section_rows:
+                    if section_row.get("RowType") == "Row":
+                        cells = section_row.get("Cells", [])
+                        if len(cells) >= 5:
+                            account_name = cells[0].get("Value", "Unknown Account")
+                            
+                            # Closing balance is the last cell
+                            closing_balance_str = cells[-1].get("Value", "0")
+                            try:
+                                closing_balance = float(closing_balance_str.replace(",", ""))
+                            except (ValueError, AttributeError):
+                                closing_balance = 0.0
+                            
+                            # Get account ID if available (from Attributes)
+                            account_id = None
+                            attributes = cells[0].get("Attributes", [])
+                            if attributes:
+                                for attr in attributes:
+                                    if attr.get("Id") == "account":
+                                        account_id = attr.get("Value")
+                            
+                            accounts.append({
+                                "name": account_name,
+                                "balance": closing_balance,
+                                "account_id": account_id,
+                            })
+    
+    except Exception as e:
+        import logging
+        logging.getLogger("xero_parse").warning(f"Error parsing bank summary: {e}")
+    
+    return accounts
+
+
+def _parse_profit_and_loss(report_data: dict) -> dict:
+    """
+    Parse Xero's ProfitAndLoss report into simple income/expenses/net figures.
+    
+    The P&L report has sections for Income, Less Cost of Sales, Less Operating Expenses,
+    and a Net Profit row at the bottom.
+    """
+    result = {
+        "income": 0.0,
+        "expenses": 0.0,
+        "net_profit": 0.0,
+    }
+    
+    try:
+        reports = report_data.get("Reports", [])
+        if not reports:
+            return result
+        
+        report = reports[0]
+        rows = report.get("Rows", [])
+        
+        for row in rows:
+            row_type = row.get("RowType", "")
+            
+            # Look for section summary rows
+            if row_type == "Section":
+                section_rows = row.get("Rows", [])
+                for section_row in section_rows:
+                    if section_row.get("RowType") == "SummaryRow":
+                        cells = section_row.get("Cells", [])
+                        if len(cells) >= 2:
+                            label = cells[0].get("Value", "")
+                            value_str = cells[-1].get("Value", "0")
+                            try:
+                                value = float(value_str.replace(",", ""))
+                            except (ValueError, AttributeError):
+                                value = 0.0
+                            
+                            if "Total Income" in label or "Total Revenue" in label:
+                                result["income"] = value
+                            elif "Total Operating Expenses" in label or "Total Expenses" in label:
+                                result["expenses"] = abs(value)
+                            elif "Total Cost of Sales" in label:
+                                result["expenses"] += abs(value)
+            
+            # Net profit is usually in a SummaryRow at the root level
+            elif row_type == "Row":
+                cells = row.get("Cells", [])
+                if len(cells) >= 2:
+                    label = cells[0].get("Value", "")
+                    if "Net Profit" in label or "Net Loss" in label:
+                        value_str = cells[-1].get("Value", "0")
+                        try:
+                            result["net_profit"] = float(value_str.replace(",", ""))
+                        except (ValueError, AttributeError):
+                            pass
+        
+        # If net profit wasn't found in a dedicated row, calculate it
+        if result["net_profit"] == 0.0 and (result["income"] > 0 or result["expenses"] > 0):
+            result["net_profit"] = result["income"] - result["expenses"]
+    
+    except Exception as e:
+        import logging
+        logging.getLogger("xero_parse").warning(f"Error parsing P&L: {e}")
+    
+    return result
+
+
 @app.post("/v1/accounting/xero/disconnect")
 async def disconnect_xero(
     user_business=Depends(get_current_user_and_business),

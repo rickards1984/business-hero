@@ -195,6 +195,26 @@ const Accounting: React.FC = () => {
     message: string;
     severity: 'success' | 'error' | 'info';
   }>({ open: false, message: '', severity: 'info' });
+  const [financialSummary, setFinancialSummary] = useState<{
+    bank_accounts: Array<{ name: string; balance: number; account_id?: string }>;
+    total_bank_balance: number | null;
+    profit_and_loss: {
+      income: number | null;
+      expenses: number | null;
+      net_profit: number | null;
+      period_start: string | null;
+      period_end: string | null;
+    };
+    invoices: {
+      overdue_count: number;
+      overdue_amount: number;
+      due_count: number;
+      due_amount: number;
+      total_outstanding: number;
+    };
+    xero_connected: boolean;
+  } | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
 
   // ============== Data Fetching ==============
 
@@ -355,6 +375,9 @@ const Accounting: React.FC = () => {
             last_sync_at: result.synced_at,
           } : prev);
 
+          // Refresh financial summary after sync
+          fetchFinancialSummary();
+
           // Only show notification and refresh if there are actually new/updated transactions
           if (result.new_transactions > 0 || result.updated_transactions > 0) {
             setSnackbar({
@@ -384,6 +407,26 @@ const Accounting: React.FC = () => {
 
     autoSync();
   }, [xeroStatus?.connected, xeroLoading]);
+
+  // ─── Fetch financial summary (runs on mount) ────────────────
+  const fetchFinancialSummary = useCallback(async () => {
+    try {
+      setSummaryLoading(true);
+      const response = await apiRequest('GET', '/v1/accounting/xero/financial-summary');
+      if (response.ok) {
+        const data = await response.json();
+        setFinancialSummary(data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch financial summary:', error);
+    } finally {
+      setSummaryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchFinancialSummary();
+  }, [fetchFinancialSummary]);
 
   // ============== Handlers ==============
 
@@ -448,6 +491,9 @@ const Accounting: React.FC = () => {
           last_sync_at: result.synced_at,
         } : prev);
 
+        // Refresh financial summary after sync
+        fetchFinancialSummary();
+
         setSnackbar({
           open: true,
           message: result.new_transactions > 0 || result.updated_transactions > 0
@@ -497,6 +543,13 @@ const Accounting: React.FC = () => {
     } catch (error) {
       console.error('Failed to disconnect Xero:', error);
     }
+  };
+
+  // ─── Helper Functions ──────────────────────────────────────
+  const formatCurrency = (amount: number | null, showSign: boolean = false): string => {
+    if (amount === null || amount === undefined) return '—';
+    const prefix = showSign && amount > 0 ? '+' : '';
+    return `${prefix}£${Math.abs(amount).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   };
 
   // ============== Render ==============
@@ -692,6 +745,171 @@ const Accounting: React.FC = () => {
               </Paper>
             )}
           </>
+        )}
+
+        {/* ─── Financial Summary Header (from Xero + Invoices) ─── */}
+        {financialSummary && (xeroStatus?.connected || financialSummary.invoices.total_outstanding > 0) && (
+          <Grid container spacing={2} sx={{ mb: 3 }}>
+            {/* Bank Balance Card */}
+            <Grid item xs={12} sm={6} lg={3}>
+              <Card sx={{ height: '100%' }}>
+                <CardContent>
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+                    <Typography variant="body2" color="text.secondary" fontWeight={500}>
+                      Bank Balance
+                    </Typography>
+                    <AccountBalanceIcon sx={{ color: 'primary.main', fontSize: 20 }} />
+                  </Box>
+                  {summaryLoading ? (
+                    <Box sx={{ height: 32, width: 100, bgcolor: 'grey.200', borderRadius: 1, animation: 'pulse 1.5s infinite' }} />
+                  ) : financialSummary.total_bank_balance !== null ? (
+                    <>
+                      <Typography 
+                        variant="h5" 
+                        fontWeight={700}
+                        color={financialSummary.total_bank_balance >= 0 ? 'text.primary' : 'error.main'}
+                      >
+                        {formatCurrency(financialSummary.total_bank_balance)}
+                      </Typography>
+                      {financialSummary.bank_accounts.length > 1 && (
+                        <Typography variant="caption" color="text.secondary">
+                          {financialSummary.bank_accounts.length} accounts
+                        </Typography>
+                      )}
+                      {financialSummary.bank_accounts.length === 1 && (
+                        <Typography variant="caption" color="text.secondary">
+                          {financialSummary.bank_accounts[0].name}
+                        </Typography>
+                      )}
+                    </>
+                  ) : (
+                    <Typography variant="body2" color="text.secondary">
+                      Connect Xero to see balance
+                    </Typography>
+                  )}
+                </CardContent>
+              </Card>
+            </Grid>
+
+            {/* Monthly P&L Card */}
+            <Grid item xs={12} sm={6} lg={3}>
+              <Card sx={{ height: '100%' }}>
+                <CardContent>
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+                    <Typography variant="body2" color="text.secondary" fontWeight={500}>
+                      Monthly P&L
+                    </Typography>
+                    <TrendingUpIcon sx={{ color: 'success.main', fontSize: 20 }} />
+                  </Box>
+                  {summaryLoading ? (
+                    <Box sx={{ height: 32, width: 100, bgcolor: 'grey.200', borderRadius: 1, animation: 'pulse 1.5s infinite' }} />
+                  ) : financialSummary.profit_and_loss.net_profit !== null ? (
+                    <>
+                      <Typography 
+                        variant="h5" 
+                        fontWeight={700}
+                        color={financialSummary.profit_and_loss.net_profit >= 0 ? 'success.main' : 'error.main'}
+                      >
+                        {formatCurrency(financialSummary.profit_and_loss.net_profit, true)}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {formatCurrency(financialSummary.profit_and_loss.income)} in · {formatCurrency(financialSummary.profit_and_loss.expenses)} out
+                      </Typography>
+                    </>
+                  ) : (
+                    <Typography variant="body2" color="text.secondary">
+                      Connect Xero to see P&L
+                    </Typography>
+                  )}
+                </CardContent>
+              </Card>
+            </Grid>
+
+            {/* Cash Flow Card */}
+            <Grid item xs={12} sm={6} lg={3}>
+              <Card sx={{ height: '100%' }}>
+                <CardContent>
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+                    <Typography variant="body2" color="text.secondary" fontWeight={500}>
+                      Cash Flow
+                    </Typography>
+                    <RefreshIcon sx={{ color: 'secondary.main', fontSize: 20 }} />
+                  </Box>
+                  {summaryLoading ? (
+                    <Box sx={{ height: 48, width: '100%', bgcolor: 'grey.200', borderRadius: 1, animation: 'pulse 1.5s infinite' }} />
+                  ) : financialSummary.profit_and_loss.income !== null ? (
+                    <Box sx={{ mt: 1 }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.5 }}>
+                        <Typography variant="body2" color="success.main">Money in</Typography>
+                        <Typography variant="body2" fontWeight={600} color="success.main">
+                          {formatCurrency(financialSummary.profit_and_loss.income)}
+                        </Typography>
+                      </Box>
+                      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <Typography variant="body2" color="error.main">Money out</Typography>
+                        <Typography variant="body2" fontWeight={600} color="error.main">
+                          {formatCurrency(financialSummary.profit_and_loss.expenses)}
+                        </Typography>
+                      </Box>
+                      <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                        This month
+                      </Typography>
+                    </Box>
+                  ) : (
+                    <Typography variant="body2" color="text.secondary">
+                      Connect Xero to see cash flow
+                    </Typography>
+                  )}
+                </CardContent>
+              </Card>
+            </Grid>
+
+            {/* Outstanding Invoices Card */}
+            <Grid item xs={12} sm={6} lg={3}>
+              <Card sx={{ height: '100%' }}>
+                <CardContent>
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+                    <Typography variant="body2" color="text.secondary" fontWeight={500}>
+                      Invoices Due
+                    </Typography>
+                    <ReceiptIcon sx={{ color: 'warning.main', fontSize: 20 }} />
+                  </Box>
+                  {summaryLoading ? (
+                    <Box sx={{ height: 32, width: 100, bgcolor: 'grey.200', borderRadius: 1, animation: 'pulse 1.5s infinite' }} />
+                  ) : (
+                    <>
+                      <Typography variant="h5" fontWeight={700} color="text.primary">
+                        {formatCurrency(financialSummary.invoices.total_outstanding)}
+                      </Typography>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5, flexWrap: 'wrap' }}>
+                        {financialSummary.invoices.overdue_count > 0 && (
+                          <Chip 
+                            label={`${financialSummary.invoices.overdue_count} overdue`} 
+                            size="small" 
+                            color="error" 
+                            variant="outlined"
+                            sx={{ height: 20, fontSize: '0.7rem' }}
+                          />
+                        )}
+                        {financialSummary.invoices.due_count > 0 && (
+                          <Chip 
+                            label={`${financialSummary.invoices.due_count} due`} 
+                            size="small" 
+                            color="warning" 
+                            variant="outlined"
+                            sx={{ height: 20, fontSize: '0.7rem' }}
+                          />
+                        )}
+                        {financialSummary.invoices.total_outstanding === 0 && (
+                          <Typography variant="caption" color="success.main">All paid up!</Typography>
+                        )}
+                      </Box>
+                    </>
+                  )}
+                </CardContent>
+              </Card>
+            </Grid>
+          </Grid>
         )}
 
         {/* Summary Cards */}

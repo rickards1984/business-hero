@@ -134,6 +134,62 @@ class XeroProvider:
             orgs = resp.json().get("Organisations", [])
             return orgs[0] if orgs else {}
 
+    async def get_bank_summary(self) -> Dict[str, Any]:
+        """
+        Fetch the BankSummary report from Xero.
+        Returns bank account balances (opening and closing) for the current period.
+        
+        Xero endpoint: GET /Reports/BankSummary
+        """
+        url = f"{XERO_API_BASE}/Reports/BankSummary"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=self.headers)
+            if resp.status_code == 401:
+                raise XeroAuthError("Xero access token is expired or invalid")
+            resp.raise_for_status()
+            return resp.json()
+
+    async def get_profit_and_loss(
+        self,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Fetch Profit and Loss report from Xero.
+        
+        Args:
+            from_date: Start date YYYY-MM-DD (defaults to start of current month)
+            to_date: End date YYYY-MM-DD (defaults to today)
+            
+        Xero endpoint: GET /Reports/ProfitAndLoss
+        """
+        url = f"{XERO_API_BASE}/Reports/ProfitAndLoss"
+        params = {}
+        if from_date:
+            params["fromDate"] = from_date
+        if to_date:
+            params["toDate"] = to_date
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=self.headers, params=params)
+            if resp.status_code == 401:
+                raise XeroAuthError("Xero access token is expired or invalid")
+            resp.raise_for_status()
+            return resp.json()
+
+    async def get_balance_sheet(self) -> Dict[str, Any]:
+        """
+        Fetch Balance Sheet report from Xero.
+        Xero endpoint: GET /Reports/BalanceSheet
+        """
+        url = f"{XERO_API_BASE}/Reports/BalanceSheet"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=self.headers)
+            if resp.status_code == 401:
+                raise XeroAuthError("Xero access token is expired or invalid")
+            resp.raise_for_status()
+            return resp.json()
+
 
 async def get_tenant_connections(access_token: str) -> List[Dict[str, Any]]:
     """
