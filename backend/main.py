@@ -17,7 +17,7 @@ from cryptography.fernet import Fernet
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
 from pydantic import ValidationError
 from sqlmodel import Session, select
@@ -3793,6 +3793,389 @@ def _parse_profit_and_loss(report_data: dict) -> dict:
         logging.getLogger("xero_parse").warning(f"Error parsing P&L: {e}")
     
     return result
+
+
+@app.get("/v1/accounting/export/accountant-pack")
+async def export_accountant_pack(
+    period_start: str = Query(None, description="Start date YYYY-MM-DD"),
+    period_end: str = Query(None, description="End date YYYY-MM-DD"),
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """
+    Generate a comprehensive Excel workbook ('Accountant Pack') containing:
+    - Summary, Transactions, P&L, Balance Sheet, Trial Balance,
+      Aged Receivables, Aged Payables, and Invoices.
+    Returns an Excel file download.
+    """
+    import logging
+    import io
+    from datetime import date, datetime, timezone, timedelta
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    _export_logger = logging.getLogger("accountant_pack_export")
+
+    _, business = user_business
+    business_id = str(business.id)
+    business_name = getattr(business, 'name', 'Business') or 'Business'
+
+    today = date.today()
+    if not period_start:
+        if today.month > 4 or (today.month == 4 and today.day >= 6):
+            period_start = f"{today.year}-04-06"
+        else:
+            period_start = f"{today.year - 1}-04-06"
+    if not period_end:
+        period_end = today.isoformat()
+
+    hdr_font = Font(bold=True, color="FFFFFF", size=11)
+    hdr_fill = PatternFill(start_color="2B5797", end_color="2B5797", fill_type="solid")
+    title_font = Font(bold=True, size=14, color="2B5797")
+    subtitle_font = Font(bold=True, size=11, color="555555")
+    cur_fmt = '£#,##0.00'
+    dt_fmt = 'DD/MM/YYYY'
+    border = Border(
+        left=Side(style='thin', color='DDDDDD'),
+        right=Side(style='thin', color='DDDDDD'),
+        top=Side(style='thin', color='DDDDDD'),
+        bottom=Side(style='thin', color='DDDDDD'),
+    )
+
+    def style_hdr(ws, rn, nc):
+        for c in range(1, nc + 1):
+            cell = ws.cell(row=rn, column=c)
+            cell.font = hdr_font
+            cell.fill = hdr_fill
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = border
+
+    def auto_w(ws):
+        for col in ws.columns:
+            ml = 0
+            cl = get_column_letter(col[0].column)
+            for cell in col:
+                if cell.value:
+                    ml = max(ml, len(str(cell.value)))
+            ws.column_dimensions[cl].width = min(ml + 4, 50)
+
+    wb = Workbook()
+
+    # ── TAB 1: SUMMARY ──
+    ws_sum = wb.active
+    ws_sum.title = "Summary"
+    ws_sum.cell(row=1, column=1, value="Accountant Pack").font = title_font
+    ws_sum.cell(row=2, column=1, value=business_name).font = subtitle_font
+    ws_sum.cell(row=3, column=1, value=f"Period: {period_start} to {period_end}").font = subtitle_font
+    ws_sum.cell(row=4, column=1, value=f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M')}").font = Font(italic=True, color="888888")
+    ws_sum.cell(row=5, column=1, value="Prepared by Business Hero").font = Font(italic=True, color="888888")
+    sr = 7
+
+    # ── TAB 2: TRANSACTIONS ──
+    ws_tx = wb.create_sheet("Transactions")
+    tx_hdrs = ["Date", "Description", "Payee/Payer", "Category", "Type", "Amount", "Reference", "Source", "Reconciled"]
+    for ci, h in enumerate(tx_hdrs, 1):
+        ws_tx.cell(row=1, column=ci, value=h)
+    style_hdr(ws_tx, 1, len(tx_hdrs))
+
+    tx_result = session.execute(
+        text("""
+            SELECT t.transaction_date, t.description, t.payee_payer,
+                   c.name as category_name, t.type, t.amount, t.reference,
+                   t.external_source, t.is_reconciled
+            FROM accounting_transactions t
+            LEFT JOIN accounting_categories c ON t.category_id = c.id
+            WHERE t.business_id = :business_id
+              AND t.transaction_date >= :start_date
+              AND t.transaction_date <= :end_date
+              AND t.is_archived = false
+            ORDER BY t.transaction_date ASC, t.created_at ASC
+        """),
+        {"business_id": business_id, "start_date": period_start, "end_date": period_end}
+    )
+
+    total_income = 0.0
+    total_expenses = 0.0
+    txr = 2
+
+    for row in tx_result.fetchall():
+        tx_date, desc, payee, cat, tx_type, amount, ref, source, reconciled = row
+        ws_tx.cell(row=txr, column=1, value=tx_date).number_format = dt_fmt
+        ws_tx.cell(row=txr, column=2, value=desc or "")
+        ws_tx.cell(row=txr, column=3, value=payee or "")
+        ws_tx.cell(row=txr, column=4, value=cat or "Uncategorised")
+        ws_tx.cell(row=txr, column=5, value=(tx_type or "").capitalize())
+        amt = float(amount) if amount else 0.0
+        ws_tx.cell(row=txr, column=6, value=amt).number_format = cur_fmt
+        ws_tx.cell(row=txr, column=7, value=ref or "")
+        ws_tx.cell(row=txr, column=8, value=(source or "manual").capitalize())
+        ws_tx.cell(row=txr, column=9, value="Yes" if reconciled else "No")
+        for c in range(1, len(tx_hdrs) + 1):
+            ws_tx.cell(row=txr, column=c).border = border
+        if tx_type == "income":
+            total_income += abs(amt)
+        else:
+            total_expenses += abs(amt)
+        txr += 1
+
+    ws_tx.cell(row=txr + 1, column=1, value="TOTALS").font = Font(bold=True)
+    ws_tx.cell(row=txr + 1, column=4, value="Total Income:").font = Font(bold=True)
+    ws_tx.cell(row=txr + 1, column=5, value=total_income).number_format = cur_fmt
+    ws_tx.cell(row=txr + 1, column=5).font = Font(bold=True)
+    ws_tx.cell(row=txr + 2, column=4, value="Total Expenses:").font = Font(bold=True)
+    ws_tx.cell(row=txr + 2, column=5, value=total_expenses).number_format = cur_fmt
+    ws_tx.cell(row=txr + 2, column=5).font = Font(bold=True)
+    ws_tx.cell(row=txr + 3, column=4, value="Net:").font = Font(bold=True, color="2B5797")
+    ws_tx.cell(row=txr + 3, column=5, value=total_income - total_expenses).number_format = cur_fmt
+    ws_tx.cell(row=txr + 3, column=5).font = Font(bold=True, color="2B5797")
+    auto_w(ws_tx)
+
+    ws_sum.cell(row=sr, column=1, value="Key Figures").font = subtitle_font
+    ws_sum.cell(row=sr + 1, column=1, value="Total Transactions:")
+    ws_sum.cell(row=sr + 1, column=2, value=txr - 2)
+    ws_sum.cell(row=sr + 2, column=1, value="Total Income:")
+    ws_sum.cell(row=sr + 2, column=2, value=total_income).number_format = cur_fmt
+    ws_sum.cell(row=sr + 3, column=1, value="Total Expenses:")
+    ws_sum.cell(row=sr + 3, column=2, value=total_expenses).number_format = cur_fmt
+    ws_sum.cell(row=sr + 4, column=1, value="Net Profit/Loss:").font = Font(bold=True)
+    ws_sum.cell(row=sr + 4, column=2, value=total_income - total_expenses).number_format = cur_fmt
+    ws_sum.cell(row=sr + 4, column=2).font = Font(bold=True)
+
+    # ── TABS 3-7: XERO REPORTS ──
+    xero_result = session.execute(
+        text("""
+            SELECT tenant_id, token_ciphertext, refresh_token_ciphertext, token_expires_at
+            FROM xero_connections
+            WHERE business_id = :business_id AND is_active = true
+            LIMIT 1
+        """),
+        {"business_id": business_id}
+    )
+    xero_row = xero_result.fetchone()
+
+    if xero_row:
+        tenant_id = xero_row[0]
+        try:
+            # Re-read latest token (another endpoint may have refreshed it)
+            fresh_check = session.execute(
+                text("SELECT token_ciphertext, refresh_token_ciphertext, token_expires_at FROM xero_connections WHERE business_id = :bid AND is_active = true LIMIT 1"),
+                {"bid": business_id}
+            )
+            fresh = fresh_check.fetchone()
+            access_token = decrypt_str(fresh[0])
+            refresh_token_val = decrypt_str(fresh[1])
+            token_expires_at = fresh[2]
+
+            now_utc = datetime.now(timezone.utc)
+            exp = token_expires_at
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+
+            if now_utc >= (exp - timedelta(minutes=2)):
+                from providers.xero_oauth import refresh_xero_token
+                new_access, new_refresh, expires_in = refresh_xero_token(refresh_token_val)
+                session.execute(
+                    text("""
+                        UPDATE xero_connections
+                        SET token_ciphertext = :token, refresh_token_ciphertext = :refresh,
+                            token_expires_at = :expires_at, updated_at = NOW()
+                        WHERE business_id = :bid AND is_active = true
+                    """),
+                    {
+                        "token": encrypt_str(new_access),
+                        "refresh": encrypt_str(new_refresh),
+                        "expires_at": now_utc + timedelta(seconds=expires_in),
+                        "bid": business_id,
+                    }
+                )
+                session.commit()
+                access_token = new_access
+
+            provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
+
+            try:
+                pnl_data = await provider.get_profit_and_loss(from_date=period_start, to_date=period_end)
+                ws_pnl = wb.create_sheet("Profit & Loss")
+                _write_xero_report_to_sheet(ws_pnl, pnl_data, hdr_font, hdr_fill, border, cur_fmt)
+                auto_w(ws_pnl)
+            except Exception as e:
+                _export_logger.warning(f"Failed to fetch P&L for export: {e}")
+
+            try:
+                bs_data = await provider.get_balance_sheet(date=period_end)
+                ws_bs = wb.create_sheet("Balance Sheet")
+                _write_xero_report_to_sheet(ws_bs, bs_data, hdr_font, hdr_fill, border, cur_fmt)
+                auto_w(ws_bs)
+            except Exception as e:
+                _export_logger.warning(f"Failed to fetch Balance Sheet for export: {e}")
+
+            try:
+                tb_data = await provider.get_trial_balance(date=period_end)
+                ws_tb = wb.create_sheet("Trial Balance")
+                _write_xero_report_to_sheet(ws_tb, tb_data, hdr_font, hdr_fill, border, cur_fmt)
+                auto_w(ws_tb)
+            except Exception as e:
+                _export_logger.warning(f"Failed to fetch Trial Balance for export: {e}")
+
+            try:
+                ar_data = await provider.get_aged_receivables()
+                ws_ar = wb.create_sheet("Aged Receivables")
+                _write_xero_report_to_sheet(ws_ar, ar_data, hdr_font, hdr_fill, border, cur_fmt)
+                auto_w(ws_ar)
+            except Exception as e:
+                _export_logger.warning(f"Failed to fetch Aged Receivables for export: {e}")
+
+            try:
+                ap_data = await provider.get_aged_payables()
+                ws_ap = wb.create_sheet("Aged Payables")
+                _write_xero_report_to_sheet(ws_ap, ap_data, hdr_font, hdr_fill, border, cur_fmt)
+                auto_w(ws_ap)
+            except Exception as e:
+                _export_logger.warning(f"Failed to fetch Aged Payables for export: {e}")
+
+            ws_sum.cell(row=sr + 6, column=1, value="Xero Integration").font = subtitle_font
+            ws_sum.cell(row=sr + 7, column=1, value="Connected: Yes")
+            ws_sum.cell(row=sr + 8, column=1, value="Reports included: P&L, Balance Sheet, Trial Balance, Aged Receivables, Aged Payables")
+
+        except Exception as e:
+            _export_logger.error(f"Xero connection error during export: {e}")
+            ws_sum.cell(row=sr + 6, column=1, value="Xero Integration").font = subtitle_font
+            ws_sum.cell(row=sr + 7, column=1, value="Error connecting to Xero — reports not included")
+    else:
+        ws_sum.cell(row=sr + 6, column=1, value="Xero Integration").font = subtitle_font
+        ws_sum.cell(row=sr + 7, column=1, value="Not connected — connect Xero for full reports")
+
+    # ── TAB 8: INVOICES ──
+    ws_inv = wb.create_sheet("Invoices")
+    inv_hdrs = ["Invoice #", "Client", "Amount", "Status", "Issue Date", "Due Date", "Chase Stage"]
+    for ci, h in enumerate(inv_hdrs, 1):
+        ws_inv.cell(row=1, column=ci, value=h)
+    style_hdr(ws_inv, 1, len(inv_hdrs))
+
+    inv_result = session.execute(
+        text("""
+            SELECT invoice_number, customer_name, amount, status,
+                   issue_date, due_date, chase_stage
+            FROM invoices
+            WHERE business_id = :business_id AND (archived IS NULL OR archived = false)
+            ORDER BY due_date DESC NULLS LAST
+        """),
+        {"business_id": business_id}
+    )
+
+    ir = 2
+    for row in inv_result.fetchall():
+        inv_num, client, amount, inv_status, issue_dt, due_dt, chase = row
+        ws_inv.cell(row=ir, column=1, value=inv_num or "")
+        ws_inv.cell(row=ir, column=2, value=client or "")
+        ws_inv.cell(row=ir, column=3, value=float(amount) if amount else 0).number_format = cur_fmt
+        ws_inv.cell(row=ir, column=4, value=(inv_status or "").capitalize())
+        ws_inv.cell(row=ir, column=5, value=issue_dt).number_format = dt_fmt
+        ws_inv.cell(row=ir, column=6, value=due_dt).number_format = dt_fmt
+        ws_inv.cell(row=ir, column=7, value=f"Stage {chase}" if chase else "—")
+        for c in range(1, len(inv_hdrs) + 1):
+            ws_inv.cell(row=ir, column=c).border = border
+        ir += 1
+
+    auto_w(ws_inv)
+    auto_w(ws_sum)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    safe_name = business_name.replace(' ', '-').lower()
+    filename = f"accountant-pack-{safe_name}-{period_start}-to-{period_end}.xlsx"
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.document",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        }
+    )
+
+
+def _write_xero_report_to_sheet(ws, report_data, header_font, header_fill, thin_border, currency_format):
+    """
+    Parse a Xero Report JSON response and write it to an Excel worksheet.
+    Xero reports use a standard nested Rows/Cells format.
+    """
+    from openpyxl.styles import Font
+    try:
+        reports = report_data.get("Reports", [])
+        if not reports:
+            ws.cell(row=1, column=1, value="No data available")
+            return
+
+        report = reports[0]
+        ws.cell(row=1, column=1, value=report.get("ReportName", "Report")).font = Font(bold=True, size=13, color="2B5797")
+
+        report_titles = report.get("ReportTitles", [])
+        for i, title in enumerate(report_titles):
+            ws.cell(row=2 + i, column=1, value=title).font = Font(italic=True, color="888888")
+
+        cr = len(report_titles) + 3
+
+        for row in report.get("Rows", []):
+            rt = row.get("RowType", "")
+            title = row.get("Title", "")
+            cells = row.get("Cells", [])
+
+            if rt == "Header":
+                for ci, cell in enumerate(cells, 1):
+                    ws.cell(row=cr, column=ci, value=cell.get("Value", ""))
+                    ws.cell(row=cr, column=ci).font = header_font
+                    ws.cell(row=cr, column=ci).fill = header_fill
+                    ws.cell(row=cr, column=ci).border = thin_border
+                cr += 1
+
+            elif rt == "Section":
+                if title:
+                    ws.cell(row=cr, column=1, value=title).font = Font(bold=True, size=11)
+                    cr += 1
+                for section_row in row.get("Rows", []):
+                    s_cells = section_row.get("Cells", [])
+                    s_type = section_row.get("RowType", "")
+                    for ci, cell in enumerate(s_cells, 1):
+                        value = cell.get("Value", "")
+                        try:
+                            nv = float(value.replace(",", ""))
+                            ws.cell(row=cr, column=ci, value=nv).number_format = currency_format
+                        except (ValueError, AttributeError):
+                            ws.cell(row=cr, column=ci, value=value)
+                        ws.cell(row=cr, column=ci).border = thin_border
+                        if s_type == "SummaryRow":
+                            ws.cell(row=cr, column=ci).font = Font(bold=True)
+                    cr += 1
+
+            elif rt == "Row":
+                for ci, cell in enumerate(cells, 1):
+                    value = cell.get("Value", "")
+                    try:
+                        nv = float(value.replace(",", ""))
+                        ws.cell(row=cr, column=ci, value=nv).number_format = currency_format
+                    except (ValueError, AttributeError):
+                        ws.cell(row=cr, column=ci, value=value)
+                    ws.cell(row=cr, column=ci).border = thin_border
+                cr += 1
+
+            elif rt == "SummaryRow":
+                for ci, cell in enumerate(cells, 1):
+                    value = cell.get("Value", "")
+                    try:
+                        nv = float(value.replace(",", ""))
+                        ws.cell(row=cr, column=ci, value=nv).number_format = currency_format
+                    except (ValueError, AttributeError):
+                        ws.cell(row=cr, column=ci, value=value)
+                    ws.cell(row=cr, column=ci).font = Font(bold=True)
+                    ws.cell(row=cr, column=ci).border = thin_border
+                cr += 1
+
+    except Exception as e:
+        ws.cell(row=1, column=1, value=f"Error generating report: {str(e)}")
 
 
 @app.post("/v1/accounting/xero/disconnect")

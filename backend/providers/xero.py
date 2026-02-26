@@ -177,12 +177,53 @@ class XeroProvider:
             resp.raise_for_status()
             return resp.json()
 
-    async def get_balance_sheet(self) -> Dict[str, Any]:
+    async def get_balance_sheet(self, date: Optional[str] = None) -> Dict[str, Any]:
         """
         Fetch Balance Sheet report from Xero.
-        Xero endpoint: GET /Reports/BalanceSheet
+        Args:
+            date: Report date YYYY-MM-DD (defaults to today)
         """
         url = f"{XERO_API_BASE}/Reports/BalanceSheet"
+        params = {}
+        if date:
+            params["date"] = date
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=self.headers, params=params)
+            if resp.status_code == 401:
+                raise XeroAuthError("Xero access token is expired or invalid")
+            resp.raise_for_status()
+            return resp.json()
+
+    async def get_trial_balance(self, date: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Fetch Trial Balance report.
+        Args:
+            date: Report date YYYY-MM-DD (defaults to today)
+        """
+        url = f"{XERO_API_BASE}/Reports/TrialBalance"
+        params = {}
+        if date:
+            params["date"] = date
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=self.headers, params=params)
+            if resp.status_code == 401:
+                raise XeroAuthError("Xero access token is expired or invalid")
+            resp.raise_for_status()
+            return resp.json()
+
+    async def get_aged_receivables(self) -> Dict[str, Any]:
+        """Fetch Aged Receivables (who owes you money) report."""
+        url = f"{XERO_API_BASE}/Reports/AgedReceivablesByContact"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=self.headers)
+            if resp.status_code == 401:
+                raise XeroAuthError("Xero access token is expired or invalid")
+            resp.raise_for_status()
+            return resp.json()
+
+    async def get_aged_payables(self) -> Dict[str, Any]:
+        """Fetch Aged Payables (who you owe money to) report."""
+        url = f"{XERO_API_BASE}/Reports/AgedPayablesByContact"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers)
             if resp.status_code == 401:

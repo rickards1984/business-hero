@@ -167,6 +167,10 @@ const Accounting: React.FC = () => {
   // Dialogs
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [addTransactionOpen, setAddTransactionOpen] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportPeriodStart, setExportPeriodStart] = useState('');
+  const [exportPeriodEnd, setExportPeriodEnd] = useState('');
 
   // AI Insights
   const [aiInsights, setAiInsights] = useState<{
@@ -545,6 +549,53 @@ const Accounting: React.FC = () => {
     }
   };
 
+  // ─── Export Accountant Pack ─────────────────────────────────
+  const handleExportAccountantPack = async () => {
+    try {
+      setExportLoading(true);
+      const params = new URLSearchParams();
+      if (exportPeriodStart) params.append('period_start', exportPeriodStart);
+      if (exportPeriodEnd) params.append('period_end', exportPeriodEnd);
+
+      const session = await supabase.auth.getSession();
+      const response = await fetch(
+        `${config.apiBaseUrl}/v1/accounting/export/accountant-pack?${params.toString()}`,
+        {
+          headers: {
+            Authorization: `Bearer ${session.data.session?.access_token}`,
+          },
+        }
+      );
+
+      if (!response.ok) throw new Error('Failed to generate accountant pack');
+
+      const contentDisposition = response.headers.get('Content-Disposition');
+      let filename = 'accountant-pack.xlsx';
+      if (contentDisposition) {
+        const match = contentDisposition.match(/filename="(.+)"/);
+        if (match) filename = match[1];
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      a.remove();
+
+      setShowExportModal(false);
+      setSnackbar({ open: true, message: 'Accountant pack downloaded!', severity: 'success' });
+    } catch (error) {
+      console.error('Export failed:', error);
+      setSnackbar({ open: true, message: 'Failed to generate accountant pack. Please try again.', severity: 'error' });
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
   // ─── Helper Functions ──────────────────────────────────────
   const formatCurrency = (amount: number | null, showSign: boolean = false): string => {
     if (amount === null || amount === undefined) return '—';
@@ -579,6 +630,14 @@ const Accounting: React.FC = () => {
                 Track income, expenses, and financial insights
               </Typography>
             </Box>
+            <Button
+              variant="outlined"
+              startIcon={<FileDownloadIcon />}
+              onClick={() => setShowExportModal(true)}
+              sx={{ mr: 1 }}
+            >
+              Export Accountant Pack
+            </Button>
             <Button
               variant="outlined"
               startIcon={<UploadIcon />}
@@ -1172,6 +1231,79 @@ const Accounting: React.FC = () => {
           fetchSummary();
         }}
       />
+
+      {/* Export Accountant Pack Dialog */}
+      <Dialog
+        open={showExportModal}
+        onClose={() => setShowExportModal(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Export Accountant Pack</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+            Generate a comprehensive Excel workbook with transactions, P&L, Balance Sheet, and more. Ready to send to your accountant.
+          </Typography>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
+            <TextField
+              label="Period Start"
+              type="date"
+              value={exportPeriodStart}
+              onChange={(e) => setExportPeriodStart(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              helperText="Defaults to 6 April (UK tax year start)"
+              fullWidth
+            />
+            <TextField
+              label="Period End"
+              type="date"
+              value={exportPeriodEnd}
+              onChange={(e) => setExportPeriodEnd(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              helperText="Defaults to today's date"
+              fullWidth
+            />
+          </Box>
+          {xeroStatus?.connected ? (
+            <Paper
+              elevation={0}
+              sx={{
+                mt: 2, p: 1.5, display: 'flex', alignItems: 'center', gap: 1.5,
+                bgcolor: 'success.50', border: '1px solid', borderColor: 'success.200', borderRadius: 1,
+              }}
+            >
+              <CheckCircleOutlineIcon sx={{ color: 'success.main', fontSize: 20 }} />
+              <Typography variant="body2" color="success.dark">
+                Xero connected — includes P&L, Balance Sheet, Trial Balance, Aged Reports
+              </Typography>
+            </Paper>
+          ) : (
+            <Paper
+              elevation={0}
+              sx={{
+                mt: 2, p: 1.5, display: 'flex', alignItems: 'center', gap: 1.5,
+                bgcolor: 'warning.50', border: '1px solid', borderColor: 'warning.200', borderRadius: 1,
+              }}
+            >
+              <LinkIcon sx={{ color: 'warning.main', fontSize: 20 }} />
+              <Typography variant="body2" color="warning.dark">
+                Connect Xero for full reports (P&L, Balance Sheet, etc.)
+              </Typography>
+            </Paper>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setShowExportModal(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={handleExportAccountantPack}
+            disabled={exportLoading}
+            startIcon={exportLoading ? <CircularProgress size={16} /> : <FileDownloadIcon />}
+          >
+            {exportLoading ? 'Generating...' : 'Download Accountant Pack'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Snackbar for notifications */}
       <Snackbar
