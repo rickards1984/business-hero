@@ -3532,7 +3532,54 @@ async def xero_financial_summary(
                 session.commit()
                 access_token = new_access
 
+            # Re-read token from DB in case sync endpoint refreshed it concurrently
+            result_fresh = session.execute(
+                text("""
+                    SELECT token_ciphertext
+                    FROM xero_connections
+                    WHERE business_id = :business_id AND is_active = true
+                    LIMIT 1
+                """),
+                {"business_id": business_id}
+            )
+            fresh_row = result_fresh.fetchone()
+            if fresh_row:
+                access_token = decrypt_str(fresh_row[0])
+
             provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
+
+            # Helper to refresh token and create new provider
+            async def refresh_and_retry():
+                nonlocal provider
+                _summary_logger.info("Got 401 from Xero, refreshing token and retrying")
+                from providers.xero_oauth import refresh_xero_token
+                fresh_result = session.execute(
+                    text("SELECT refresh_token_ciphertext FROM xero_connections WHERE business_id = :bid AND is_active = true LIMIT 1"),
+                    {"bid": business_id}
+                )
+                fresh_refresh_row = fresh_result.fetchone()
+                if fresh_refresh_row:
+                    refresh_val = decrypt_str(fresh_refresh_row[0])
+                    new_access, new_refresh, expires_in = refresh_xero_token(refresh_val)
+                    now_refresh = datetime.now(timezone.utc)
+                    session.execute(
+                        text("""
+                            UPDATE xero_connections 
+                            SET token_ciphertext = :token, refresh_token_ciphertext = :refresh,
+                                token_expires_at = :expires_at, updated_at = NOW()
+                            WHERE business_id = :bid AND is_active = true
+                        """),
+                        {
+                            "token": encrypt_str(new_access),
+                            "refresh": encrypt_str(new_refresh),
+                            "expires_at": now_refresh + timedelta(seconds=expires_in),
+                            "bid": business_id,
+                        }
+                    )
+                    session.commit()
+                    provider = XeroProvider(access_token=new_access, tenant_id=tenant_id)
+                    return True
+                return False
 
             # --- Fetch Bank Summary ---
             try:
@@ -3540,6 +3587,16 @@ async def xero_financial_summary(
                 bank_accounts = _parse_bank_summary(bank_data)
                 summary["bank_accounts"] = bank_accounts
                 summary["total_bank_balance"] = sum(acc["balance"] for acc in bank_accounts)
+            except XeroAuthError:
+                # Token was stale — refresh and retry once
+                try:
+                    if await refresh_and_retry():
+                        bank_data = await provider.get_bank_summary()
+                        bank_accounts = _parse_bank_summary(bank_data)
+                        summary["bank_accounts"] = bank_accounts
+                        summary["total_bank_balance"] = sum(acc["balance"] for acc in bank_accounts)
+                except Exception as retry_err:
+                    _summary_logger.warning(f"Bank summary retry also failed: {retry_err}")
             except Exception as e:
                 _summary_logger.warning(f"Failed to fetch bank summary: {e}")
 
@@ -3559,6 +3616,22 @@ async def xero_financial_summary(
                     "period_start": month_start,
                     "period_end": today_str,
                 }
+            except XeroAuthError:
+                # Token was stale — refresh and retry once
+                try:
+                    if await refresh_and_retry():
+                        pnl_data = await provider.get_profit_and_loss(
+                            from_date=month_start,
+                            to_date=today_str,
+                        )
+                        pnl = _parse_profit_and_loss(pnl_data)
+                        summary["profit_and_loss"] = {
+                            **pnl,
+                            "period_start": month_start,
+                            "period_end": today_str,
+                        }
+                except Exception as retry_err:
+                    _summary_logger.warning(f"P&L retry also failed: {retry_err}")
             except Exception as e:
                 _summary_logger.warning(f"Failed to fetch P&L: {e}")
 
