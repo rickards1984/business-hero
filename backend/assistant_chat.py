@@ -125,7 +125,16 @@ When the user asks to send an email:
 2. If you only have a name, look up their email from list_emails or ask the user
 3. WRONG: send_email(to="Robert Morris", ...) - this will FAIL
 4. RIGHT: send_email(to="robert.morris@company.com", ...)
-5. After sending, confirm briefly. If the send fails, tell the user the error honestly.
+5. After sending, confirm briefly: "Done — email sent to [name] at [address]." Do NOT repeat the confirmation.
+6. If the send fails, tell the user the error honestly.
+7. When the user confirms "yes send it" or "go ahead", call send_email IMMEDIATELY with the to, subject, and body from the conversation. Do NOT call list_emails again.
+8. NEVER say you're sending an email without actually calling the send_email tool. If you can't call it, say so.
+
+### Critical Rules
+- NEVER pretend to perform an action. If a tool call is needed, make the tool call. Never describe performing an action in text that requires a tool.
+- Keep confirmations brief — one sentence is enough. Do not repeat yourself.
+- After any action completes (sending email, creating task, etc.), give ONE brief confirmation and move on.
+- If a tool fails, explain briefly and offer an alternative. Do NOT retry endlessly.
 
 ### Accounting & Finances
 You have access to the business's accounting data. You can:
@@ -560,21 +569,29 @@ async def process_chat_message(
     messages.extend(history)
     messages.append({"role": "user", "content": message})
     
-    try:
-        response = client.chat.completions.create(
-            model="gpt-5",
-            messages=messages,
-            tools=TOOL_DEFINITIONS,
-            tool_choice="auto",
-            timeout=120
-        )
-    except Exception as e:
-        logger.error(f"OpenAI API error: {e}")
-        return {"error": f"AI service error: {str(e)}", "status": 500}
-    
-    assistant_message = response.choices[0].message
-    
-    if assistant_message.tool_calls:
+    MAX_TOOL_ROUNDS = 5
+    assistant_reply = None
+    tool_round = 0
+
+    while tool_round < MAX_TOOL_ROUNDS:
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5",
+                messages=messages,
+                tools=TOOL_DEFINITIONS,
+                tool_choice="auto",
+                timeout=120
+            )
+        except Exception as e:
+            logger.error(f"OpenAI API error on round {tool_round}: {e}")
+            return {"error": f"AI service error: {str(e)}", "status": 500}
+
+        assistant_message = response.choices[0].message
+
+        if not assistant_message.tool_calls:
+            assistant_reply = assistant_message.content or ""
+            break
+
         assistant_msg_dict = {
             "role": "assistant",
             "content": assistant_message.content,
@@ -591,50 +608,49 @@ async def process_chat_message(
             ]
         }
         messages.append(assistant_msg_dict)
-        
+
         for tool_call in assistant_message.tool_calls:
             tool_name = tool_call.function.name
             try:
                 arguments = json.loads(tool_call.function.arguments)
             except json.JSONDecodeError:
                 arguments = {}
-            
-            logger.info(f"Executing tool: {tool_name} with args: {arguments}")
-            
+
+            logger.info(f"Executing tool (round {tool_round}): {tool_name} with args: {arguments}")
+
             try:
                 tool_result = execute_tool(tool_name, arguments, business.id, business.timezone)
             except Exception as e:
                 logger.error(f"Tool execution error: {e}")
                 tool_result = {"success": False, "error": str(e)}
-            
-            # Log tool result for debugging (truncated)
+
             result_str = json.dumps(tool_result)
             logger.info(f"Tool {tool_name} result: {result_str[:500]}{'...' if len(result_str) > 500 else ''}")
-            
-            # Format the result so errors are clear to the model
+
             if "error" in tool_result:
                 tool_content = f"ERROR: {tool_result['error']}"
             else:
                 tool_content = json.dumps(tool_result)
-            
+
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "content": tool_content
             })
-        
+
+        tool_round += 1
+
+    if assistant_reply is None:
         try:
             final_response = client.chat.completions.create(
                 model="gpt-5",
                 messages=messages,
                 timeout=120
             )
-            assistant_reply = final_response.choices[0].message.content
+            assistant_reply = final_response.choices[0].message.content or "I've completed the requested actions."
         except Exception as e:
             logger.error(f"OpenAI API error on final response: {e}")
-            return {"error": f"AI service error: {str(e)}", "status": 500}
-    else:
-        assistant_reply = assistant_message.content
+            assistant_reply = "I encountered an error generating a response. Please try again."
     
     # Step 7: Save assistant reply to DB
     save_message(resolved_conv_id, business.id, user.id, "assistant", assistant_reply or "")
