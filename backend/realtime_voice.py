@@ -166,14 +166,14 @@ REALTIME_TOOLS = [
     {
         "type": "function",
         "name": "list_invoices",
-        "description": "List invoices with optional status filter. Call this when the user asks about invoices, bills sent, or money owed to them.",
+        "description": "List invoices with optional status filter. Use 'outstanding' to see all unpaid invoices, 'overdue' for past-due only, 'paid' for paid invoices, or 'all' for everything. Invoices may come from Xero sync or manual entry.",
         "parameters": {
             "type": "object",
             "properties": {
                 "status": {
                     "type": "string",
-                    "enum": ["draft", "sent", "paid", "overdue", "all"],
-                    "description": "Filter by invoice status"
+                    "enum": ["draft", "unpaid", "sent", "outstanding", "paid", "overdue", "all"],
+                    "description": "Filter by status. 'outstanding' includes all unpaid/sent/overdue. Default: 'all'"
                 },
                 "limit": {
                     "type": "integer",

@@ -566,7 +566,7 @@ async def process_chat_message(
             messages=messages,
             tools=TOOL_DEFINITIONS,
             tool_choice="auto",
-            timeout=30  # 30 second timeout
+            timeout=120
         )
     except Exception as e:
         logger.error(f"OpenAI API error: {e}")
@@ -627,7 +627,7 @@ async def process_chat_message(
             final_response = client.chat.completions.create(
                 model="gpt-5",
                 messages=messages,
-                timeout=30
+                timeout=120
             )
             assistant_reply = final_response.choices[0].message.content
         except Exception as e:

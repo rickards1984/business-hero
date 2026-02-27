@@ -293,14 +293,14 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "list_invoices",
-            "description": "List invoices for the business with optional status filter. Use when the user asks about invoices, bills, what's owed to them, or payment status.",
+            "description": "List invoices with optional status filter. Use 'outstanding' to see all unpaid invoices, 'overdue' for past-due only, 'paid' for paid invoices, or 'all' for everything. Invoices may come from Xero sync or manual entry.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "status": {
                         "type": "string",
-                        "enum": ["draft", "sent", "paid", "overdue", "all"],
-                        "description": "Filter by invoice status (default: all)"
+                        "enum": ["draft", "unpaid", "sent", "outstanding", "paid", "overdue", "all"],
+                        "description": "Filter by status. 'outstanding' includes all unpaid/sent/overdue. Default: 'all'"
                     },
                     "limit": {
                         "type": "integer",
@@ -966,9 +966,14 @@ def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_toke
                     msg_data = msg_response.json()
                     headers_list = msg_data.get("payload", {}).get("headers", [])
                     
+                    snippet = msg_data.get("snippet", "")
+                    max_snippet = 100 if limit > 10 else 200
+                    if len(snippet) > max_snippet:
+                        snippet = snippet[:max_snippet] + "..."
+                    
                     email_info = {
                         "id": msg_id,
-                        "snippet": msg_data.get("snippet", "")[:200],
+                        "snippet": snippet,
                         "from": "",
                         "from_email": "",
                         "subject": "",
@@ -1072,13 +1077,18 @@ def _fetch_microsoft_emails(engine, account_id: str, access_token: str, refresh_
             from_email = from_info.get("address", "")
             from_name = from_info.get("name", "")
             
+            ms_snippet = msg.get("bodyPreview", "") or ""
+            ms_max_snippet = 100 if limit > 10 else 200
+            if len(ms_snippet) > ms_max_snippet:
+                ms_snippet = ms_snippet[:ms_max_snippet] + "..."
+            
             email_info = {
                 "id": msg.get("id"),
                 "subject": msg.get("subject", ""),
                 "from": f"{from_name} <{from_email}>" if from_name else from_email,
                 "from_email": from_email,
                 "date": msg.get("receivedDateTime", ""),
-                "snippet": msg.get("bodyPreview", "")[:200] if msg.get("bodyPreview") else "",
+                "snippet": ms_snippet,
                 "body": None
             }
             
@@ -1888,25 +1898,53 @@ def _list_invoices(engine, business_id: str, args: dict) -> dict:
     status = args.get("status", "all")
     limit = min(args.get("limit", 10), 50)
     
+    status_map = {
+        "outstanding": ["unpaid", "sent", "overdue"],
+        "unpaid": ["unpaid", "sent"],
+        "overdue": ["overdue"],
+        "paid": ["paid"],
+        "draft": ["draft"],
+        "cancelled": ["cancelled"],
+    }
+    
     with engine.connect() as conn:
-        if status != "all":
+        if status == "all":
             query = text("""
-                SELECT id, invoice_number, customer_name, amount, status, due_date, issue_date, chase_stage, created_at
-                FROM invoices
-                WHERE business_id = :business_id AND status = :status AND (archived IS NULL OR archived = false)
-                ORDER BY created_at DESC
-                LIMIT :limit
-            """)
-            params = {"business_id": business_id, "status": status, "limit": limit}
-        else:
-            query = text("""
-                SELECT id, invoice_number, customer_name, amount, status, due_date, issue_date, chase_stage, created_at
+                SELECT id, invoice_number, customer_name, customer_email, amount, status,
+                       due_date, issue_date, chase_stage, created_at
                 FROM invoices
                 WHERE business_id = :business_id AND (archived IS NULL OR archived = false)
-                ORDER BY created_at DESC
+                ORDER BY due_date DESC NULLS LAST, created_at DESC
                 LIMIT :limit
             """)
             params = {"business_id": business_id, "limit": limit}
+        elif status in status_map:
+            statuses = status_map[status]
+            placeholders = ", ".join([f":status_{i}" for i in range(len(statuses))])
+            query = text(f"""
+                SELECT id, invoice_number, customer_name, customer_email, amount, status,
+                       due_date, issue_date, chase_stage, created_at
+                FROM invoices
+                WHERE business_id = :business_id
+                  AND status IN ({placeholders})
+                  AND (archived IS NULL OR archived = false)
+                ORDER BY due_date DESC NULLS LAST, created_at DESC
+                LIMIT :limit
+            """)
+            params = {"business_id": business_id, "limit": limit}
+            for i, s in enumerate(statuses):
+                params[f"status_{i}"] = s
+        else:
+            query = text("""
+                SELECT id, invoice_number, customer_name, customer_email, amount, status,
+                       due_date, issue_date, chase_stage, created_at
+                FROM invoices
+                WHERE business_id = :business_id AND status = :status
+                  AND (archived IS NULL OR archived = false)
+                ORDER BY due_date DESC NULLS LAST, created_at DESC
+                LIMIT :limit
+            """)
+            params = {"business_id": business_id, "status": status, "limit": limit}
         
         result = conn.execute(query, params)
         
@@ -1916,11 +1954,12 @@ def _list_invoices(engine, business_id: str, args: dict) -> dict:
                 "id": str(row[0]),
                 "invoice_number": row[1],
                 "customer_name": row[2],
-                "amount": float(row[3]) if row[3] else 0,
-                "status": row[4],
-                "due_date": row[5].isoformat() if row[5] else None,
-                "issue_date": row[6].isoformat() if row[6] else None,
-                "chase_stage": row[7] if row[7] else 0
+                "customer_email": row[3] or None,
+                "amount": float(row[4]) if row[4] else 0,
+                "status": row[5],
+                "due_date": row[6].isoformat() if row[6] else None,
+                "issue_date": row[7].isoformat() if row[7] else None,
+                "chase_stage": row[8] if row[8] else 0,
             })
         
         return {
@@ -1967,12 +2006,18 @@ def _get_invoice_summary(engine, business_id: str, args: dict) -> dict:
         overdue_result = conn.execute(overdue_query, {"business_id": business_id, "today": today})
         overdue_row = overdue_result.fetchone()
         
-        outstanding = totals.get("sent", {}).get("total", 0) + totals.get("overdue", {}).get("total", 0)
+        outstanding = (
+            totals.get("sent", {}).get("total", 0) +
+            totals.get("overdue", {}).get("total", 0) +
+            totals.get("unpaid", {}).get("total", 0)
+        )
         
         return {
             "total_outstanding": round(outstanding, 2),
             "total_overdue": round(float(overdue_row[1]) if overdue_row else 0, 2),
             "overdue_count": int(overdue_row[0]) if overdue_row else 0,
+            "unpaid_count": totals.get("unpaid", {}).get("count", 0),
+            "unpaid_total": round(totals.get("unpaid", {}).get("total", 0), 2),
             "sent_count": totals.get("sent", {}).get("count", 0),
             "sent_total": round(totals.get("sent", {}).get("total", 0), 2),
             "draft_count": totals.get("draft", {}).get("count", 0),
