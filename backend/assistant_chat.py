@@ -562,7 +562,7 @@ async def process_chat_message(
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",  # Fast and capable model
+            model="gpt-5",
             messages=messages,
             tools=TOOL_DEFINITIONS,
             tool_choice="auto",
@@ -625,9 +625,9 @@ async def process_chat_message(
         
         try:
             final_response = client.chat.completions.create(
-                model="gpt-4o",  # Fast and capable model
+                model="gpt-5",
                 messages=messages,
-                timeout=30  # 30 second timeout
+                timeout=30
             )
             assistant_reply = final_response.choices[0].message.content
         except Exception as e:

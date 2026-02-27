@@ -16,7 +16,7 @@ router = APIRouter()
 _logger = logging.getLogger("realtime_voice")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
+OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
 
 # Tool definitions for the Realtime API
 # NOTE: Realtime API format is different from Chat Completions API
@@ -190,6 +190,62 @@ REALTIME_TOOLS = [
             "type": "object",
             "properties": {}
         }
+    },
+    {
+        "type": "function",
+        "name": "get_xero_financials",
+        "description": "Get live Xero financial data: bank balance, profit/loss, cash flow.",
+        "parameters": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "type": "function",
+        "name": "send_chase",
+        "description": "Send a chase email for an unpaid invoice. Say the invoice number and I'll handle it.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "invoice_id": {"type": "string", "description": "Invoice UUID"},
+                "chase_stage": {"type": "integer", "description": "Stage 1-4"}
+            },
+            "required": ["invoice_id"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "get_overdue",
+        "description": "Check which invoices are overdue and recommend chase actions.",
+        "parameters": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "type": "function",
+        "name": "draft_reply",
+        "description": "Generate reply options for an email in different tones.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "email_id": {"type": "string", "description": "Email ID"},
+                "tone": {"type": "string", "description": "professional, friendly, or brief"}
+            },
+            "required": ["email_id"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "business_overview",
+        "description": "Get a full business overview: finances, invoices, tasks, emails, calendar.",
+        "parameters": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "type": "function",
+        "name": "cashflow_forecast",
+        "description": "Get a cashflow forecast for the next 30-90 days.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_ahead": {"type": "integer", "description": "Days to forecast (default 30)"}
+            },
+            "required": []
+        }
     }
 ]
 
@@ -205,7 +261,7 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
         # Map realtime tool names to assistant_tools names if different
         tool_name_map = {
             "list_emails": "list_emails",
-            "get_schedule": "get_calendar_briefing", 
+            "get_schedule": "get_calendar_briefing",
             "get_recent_calls": "list_calls",
             "get_tasks": "list_tasks",
             "create_task": "create_task",
@@ -214,6 +270,12 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
             "search_transactions": "list_transactions",
             "list_invoices": "list_invoices",
             "get_invoice_summary": "get_invoice_summary",
+            "get_xero_financials": "get_xero_financial_summary",
+            "send_chase": "send_invoice_chase",
+            "get_overdue": "get_overdue_invoices",
+            "draft_reply": "draft_email_reply",
+            "business_overview": "get_business_overview",
+            "cashflow_forecast": "get_cashflow_forecast",
         }
         
         mapped_name = tool_name_map.get(tool_name, tool_name)
@@ -253,6 +315,18 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
             mapped_args = {"status": args.get("status", "all"), "limit": args.get("limit", 10)}
         elif tool_name == "get_invoice_summary":
             mapped_args = {}
+        elif tool_name == "get_xero_financials":
+            mapped_args = {}
+        elif tool_name == "send_chase":
+            mapped_args = {"invoice_id": args.get("invoice_id", ""), "chase_stage": args.get("chase_stage")}
+        elif tool_name == "get_overdue":
+            mapped_args = {}
+        elif tool_name == "draft_reply":
+            mapped_args = {"email_id": args.get("email_id", ""), "tone": args.get("tone")}
+        elif tool_name == "business_overview":
+            mapped_args = {}
+        elif tool_name == "cashflow_forecast":
+            mapped_args = {"days_ahead": args.get("days_ahead", 30)}
         else:
             mapped_args = args
         
@@ -620,6 +694,12 @@ Your personality:
    - "finances", "money", "profit", "how's business", "accounting" → get_financial_summary
    - "spending", "expenses", "costs", "where's money going" → analyze_spending
    - "invoices", "bills", "what's owed", "outstanding", "overdue" → list_invoices or get_invoice_summary
+   - "Xero", "Xero figures", "Xero summary", "accounts from Xero" → get_xero_financials
+   - "chase", "chase invoice", "nudge", "send a reminder" → send_chase (requires invoice_id)
+   - "overdue invoices", "who hasn't paid", "late payments" → get_overdue
+   - "reply", "draft a reply", "respond to that email" → draft_reply (requires email_message_id)
+   - "business overview", "how's the business", "give me a summary" → business_overview
+   - "cash flow", "cashflow", "forecast", "will I have enough" → cashflow_forecast
 
 6. **EMAIL FETCHING RULE** - When calling list_emails, ALWAYS set limit=20. Never use limit=1, limit=5, or any small number. You need enough emails to give a proper briefing.
 
@@ -685,6 +765,40 @@ Be practical and action-oriented:
 - "You've got £3,200 outstanding across 4 invoices. Two of those are overdue - one's only a few days late, but the other's been sitting there for 3 weeks now."
 - "Might be worth sending a nudge to Thompson & Co - they're usually pretty good but this one's slipped."
 
+**Briefing on Xero financials:**
+When presenting Xero data, frame it like a financial advisor:
+- "Right, pulling up your Xero figures... So revenue this month is sitting at £12,400 with expenses of £8,100. That's a healthy margin."
+- "Looking at Xero, your profit's up 15% on last month - mainly driven by that big invoice from Carter & Sons coming through."
+- Highlight trends and comparisons when available.
+
+**Chasing invoices:**
+When asked to chase or nudge, be proactive but check first:
+- "Sure, I'll fire off a reminder to Thompson & Co for that £800 invoice. It's 12 days overdue now."
+- After sending: "Done - chase email sent to Thompson & Co. I'll keep an eye on it."
+- If something goes wrong: "I tried to send the chase but hit an issue - looks like we don't have an email on file for that contact. Want me to look it up?"
+
+**Reporting overdue invoices:**
+Lead with the total and then get specific:
+- "You've got 3 overdue invoices right now, totalling £4,200. The biggest one is £2,500 from Davidson Ltd - that's been sitting there for 28 days. Want me to chase any of them?"
+- Offer to take action: "I can send a nudge to all three if you'd like?"
+
+**Drafting email replies:**
+When drafting, be collaborative:
+- "I've drafted a reply to Sarah's email - it's professional but firm about the deadline. Want me to read it out, or shall I just send it?"
+- "Here's what I'd suggest sending back to John..." then read key points.
+- Always offer to adjust the tone: "I can make it more formal or more casual if you prefer."
+
+**Giving business overviews:**
+Paint the big picture naturally:
+- "Alright, here's the snapshot. Revenue's healthy at £15k this month, you've got £3,200 in unpaid invoices but nothing scary. Email-wise, there are a couple of things that need your attention. Overall, you're in good shape."
+- Connect the dots between different areas when relevant.
+
+**Cash flow forecasting:**
+Present forecasts conversationally and flag risks:
+- "Looking at the next 30 days - you've got about £8,000 expected in from outstanding invoices, and your usual outgoings are around £5,500. So you should be comfortable."
+- "One thing to watch though - if that Davidson invoice doesn't come through on time, it could get a bit tight around the 20th."
+- Always caveat that it's a forecast: "Obviously this depends on everything landing when expected."
+
 **When there's nothing to report:**
 Be natural about it:
 - "All quiet on the email front - nothing new since we last checked."
@@ -727,6 +841,12 @@ Be honest and helpful:
 
 **When asked "how's business doing?":**
 "Let me pull up the numbers... Right, so this month you're looking at a profit of about £1,500. Not your biggest month, but solid. Income's been steady, though expenses crept up a bit - looks like that was mainly the new equipment purchase. On the invoice side, you've got £800 outstanding but nothing overdue, so cash flow's healthy. Overall? You're in good shape."
+
+**Chasing an overdue invoice:**
+"Done - I've sent a polite chase to Davidson Ltd for that £2,500 invoice. It mentions it's 28 days overdue and asks them to settle it this week. I'll keep track and let you know if they respond."
+
+**Cash flow forecast:**
+"Looking ahead 30 days - you've got around £6,800 expected in from three outstanding invoices, and your usual outgoings sit at about £4,200. So you should be comfortable. The only thing to watch is that Carter invoice - if it slips past the 15th, you'll want to chase it sharpish."
 
 ## WHAT NOT TO DO
 
@@ -830,7 +950,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             "session": {
                 "modalities": ["text", "audio"],
                 "instructions": build_system_instructions(business_name, user_name),
-                "voice": "coral",  # Warmer, more personable voice
+                "voice": "shimmer",
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm16",
                 "input_audio_transcription": {

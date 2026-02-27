@@ -322,6 +322,86 @@ TOOL_DEFINITIONS = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_xero_financial_summary",
+            "description": "Get live financial data from Xero: bank balance, monthly profit/loss, cash flow. Requires Xero connection.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_invoice_chase",
+            "description": "Send a chase email for an unpaid invoice. Can specify stage 1-4 (1=friendly reminder, 2=firm follow-up, 3=urgent notice, 4=final demand). Use list_invoices first to get invoice IDs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "invoice_id": {"type": "string", "description": "Invoice UUID (from list_invoices results)"},
+                    "chase_stage": {"type": "integer", "description": "Chase stage 1-4. Default: next stage up from current."}
+                },
+                "required": ["invoice_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_overdue_invoices",
+            "description": "Get all overdue invoices with details on how overdue they are and recommended chase actions.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "draft_email_reply",
+            "description": "Generate a draft reply to an email. Returns 3 options: professional, friendly, and brief tones. Use list_emails first to get email IDs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_id": {"type": "string", "description": "Email message ID (from list_emails results)"},
+                    "tone": {"type": "string", "enum": ["professional", "friendly", "brief"], "description": "Preferred tone. If not specified, returns all 3 options."}
+                },
+                "required": ["email_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_business_overview",
+            "description": "Get a comprehensive business overview: financial health, outstanding invoices, pending tasks, recent emails needing attention, upcoming calendar events. Perfect for morning briefings.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_cashflow_forecast",
+            "description": "Get a simple cashflow forecast: current bank balance, expected income (from unpaid invoices), known upcoming expenses, and projected position.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days_ahead": {"type": "integer", "description": "How many days to forecast ahead (default 30, max 90)"}
+                },
+                "required": []
+            }
+        }
     }
 ]
 
@@ -386,6 +466,18 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _list_invoices(engine, business_id, arguments)
     elif tool_name == "get_invoice_summary":
         return _get_invoice_summary(engine, business_id, arguments)
+    elif tool_name == "get_xero_financial_summary":
+        return _get_xero_financial_summary(engine, business_id, arguments)
+    elif tool_name == "send_invoice_chase":
+        return _send_invoice_chase(engine, business_id, arguments)
+    elif tool_name == "get_overdue_invoices":
+        return _get_overdue_invoices(engine, business_id, arguments)
+    elif tool_name == "draft_email_reply":
+        return _draft_email_reply(engine, business_id, arguments)
+    elif tool_name == "get_business_overview":
+        return _get_business_overview(engine, business_id, arguments, timezone)
+    elif tool_name == "get_cashflow_forecast":
+        return _get_cashflow_forecast(engine, business_id, arguments)
     else:
         return {"error": f"Unknown tool: {tool_name}"}
 
@@ -1888,3 +1980,470 @@ def _get_invoice_summary(engine, business_id: str, args: dict) -> dict:
             "paid_total": round(totals.get("paid", {}).get("total", 0), 2),
             "currency": "GBP"
         }
+
+
+# ============================================================================
+# XERO FINANCIAL SUMMARY TOOL
+# ============================================================================
+
+def _get_xero_financial_summary(engine, business_id: str, args: dict) -> dict:
+    """Get live financial data from Xero including bank balance and P&L."""
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT xi.tenant_id, xi.access_token_ciphertext, xi.refresh_token_ciphertext,
+                   xi.token_expires_at, xi.id, b.name as business_name
+            FROM xero_integrations xi
+            JOIN businesses b ON b.id = xi.business_id
+            WHERE xi.business_id = :business_id AND xi.is_active = true
+            LIMIT 1
+        """), {"business_id": business_id})
+        row = result.fetchone()
+
+    if not row:
+        local = _get_accounting_summary(engine, business_id, {"period": "month"})
+        local["source"] = "local_only"
+        local["note"] = "Xero not connected — showing local accounting data"
+        return local
+
+    tenant_id, access_token_cipher, refresh_token_cipher, token_expires_at, integration_id, business_name = row
+
+    try:
+        access_token = _decrypt_token(access_token_cipher)
+
+        import asyncio
+        from providers.xero import XeroProvider
+        xero = XeroProvider(access_token=access_token, tenant_id=tenant_id)
+
+        summary = {}
+
+        loop = asyncio.new_event_loop()
+
+        # Bank balance
+        try:
+            bank_data = loop.run_until_complete(xero.get_bank_summary())
+            if bank_data and "Reports" in bank_data:
+                report = bank_data["Reports"][0]
+                total_balance = 0
+                accounts = []
+                for section in report.get("Rows", []):
+                    for r in section.get("Rows", []):
+                        cells = r.get("Cells", [])
+                        if len(cells) >= 4:
+                            account_name = cells[0].get("Value", "")
+                            balance = cells[3].get("Value", "0")
+                            try:
+                                bal = float(balance.replace(",", ""))
+                                total_balance += bal
+                                accounts.append({"name": account_name, "balance": bal})
+                            except (ValueError, AttributeError):
+                                pass
+                summary["bank_balance"] = round(total_balance, 2)
+                summary["bank_accounts"] = accounts
+        except Exception as e:
+            summary["bank_balance_error"] = str(e)
+
+        # Profit & Loss (current month)
+        try:
+            from datetime import date
+            today = date.today()
+            start = today.replace(day=1)
+            pnl_data = loop.run_until_complete(
+                xero.get_profit_and_loss(from_date=start.isoformat(), to_date=today.isoformat())
+            )
+            if pnl_data and "Reports" in pnl_data:
+                report = pnl_data["Reports"][0]
+                income = 0
+                expenses = 0
+                for section in report.get("Rows", []):
+                    section_title = section.get("Title", "")
+                    for r in section.get("Rows", []):
+                        if r.get("RowType") == "SummaryRow":
+                            cells = r.get("Cells", [])
+                            if len(cells) >= 2:
+                                try:
+                                    val = float(cells[1].get("Value", "0").replace(",", ""))
+                                    if "Income" in section_title:
+                                        income = val
+                                    elif "Expense" in section_title or "Operating" in section_title:
+                                        expenses = abs(val)
+                                except (ValueError, AttributeError):
+                                    pass
+                summary["monthly_income"] = round(income, 2)
+                summary["monthly_expenses"] = round(expenses, 2)
+                summary["monthly_net"] = round(income - expenses, 2)
+                summary["monthly_status"] = "Profit" if income >= expenses else "Loss"
+        except Exception as e:
+            summary["pnl_error"] = str(e)
+        finally:
+            loop.close()
+
+        summary["source"] = "xero_live"
+        summary["business_name"] = business_name
+        return summary
+
+    except Exception as e:
+        local = _get_accounting_summary(engine, business_id, {"period": "month"})
+        local["xero_error"] = str(e)
+        local["source"] = "local_fallback"
+        return local
+
+
+# ============================================================================
+# SEND INVOICE CHASE TOOL
+# ============================================================================
+
+def _send_invoice_chase(engine, business_id: str, args: dict) -> dict:
+    """Send a chase email for an invoice."""
+    invoice_id = args.get("invoice_id", "")
+    chase_stage = args.get("chase_stage")
+
+    if not invoice_id:
+        return {"success": False, "error": "invoice_id is required. Use list_invoices to find the invoice ID."}
+
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT id, invoice_number, customer_name, customer_email, amount, status,
+                   chase_stage, due_date
+            FROM invoices
+            WHERE id = :invoice_id AND business_id = :business_id
+              AND (archived IS NULL OR archived = false)
+        """), {"invoice_id": invoice_id, "business_id": business_id})
+        row = result.fetchone()
+
+    if not row:
+        return {"success": False, "error": f"Invoice {invoice_id} not found."}
+
+    inv_id, inv_number, customer_name, customer_email, amount, status, current_stage, due_date = row
+
+    if not customer_email:
+        return {"success": False, "error": f"Invoice {inv_number} has no customer email address. Add an email in Xero or edit the invoice."}
+
+    if status == "paid":
+        return {"success": False, "error": f"Invoice {inv_number} is already paid. No chase needed."}
+
+    stage = min(max(chase_stage, 1), 4) if chase_stage else min((current_stage or 0) + 1, 4)
+
+    from email_templates import get_chase_email_template, get_stage_description
+
+    invoice_dict = {
+        "customer_name": customer_name,
+        "invoice_number": inv_number,
+        "amount": amount,
+        "due_date": due_date.isoformat() if due_date else "N/A",
+    }
+
+    with engine.connect() as conn:
+        biz_result = conn.execute(text("""
+            SELECT id, name FROM businesses WHERE id = :business_id
+        """), {"business_id": business_id})
+        biz_row = biz_result.fetchone()
+
+    if not biz_row:
+        return {"success": False, "error": "Business not found."}
+
+    template = get_chase_email_template(stage, invoice_dict, biz_row[1])
+
+    with engine.connect() as conn:
+        account_result = conn.execute(text("""
+            SELECT id, provider, email_address, token_ciphertext, refresh_token_ciphertext
+            FROM email_accounts
+            WHERE business_id = :business_id AND provider IN ('google', 'microsoft')
+            ORDER BY created_at DESC LIMIT 1
+        """), {"business_id": business_id})
+        account_row = account_result.fetchone()
+
+    if not account_row:
+        return {"success": False, "error": "No email account connected. Connect Gmail or Microsoft in Email Settings."}
+
+    account_id, provider, from_email, token_ciphertext, refresh_token_ciphertext = account_row
+
+    try:
+        access_token = _decrypt_token(token_ciphertext)
+
+        if provider == "google":
+            send_result = _send_gmail_message(
+                engine, str(account_id), access_token, refresh_token_ciphertext,
+                customer_email, template["subject"], template["body"]
+            )
+        elif provider == "microsoft":
+            send_result = _send_microsoft_message(
+                engine, str(account_id), access_token, refresh_token_ciphertext,
+                customer_email, template["subject"], template["body"]
+            )
+        else:
+            return {"success": False, "error": f"Unsupported email provider: {provider}"}
+
+        with engine.connect() as conn:
+            conn.execute(text("""
+                UPDATE invoices SET chase_stage = :stage, last_chased_at = NOW(), updated_at = NOW()
+                WHERE id = :invoice_id
+            """), {"stage": stage, "invoice_id": invoice_id})
+            conn.commit()
+
+        stage_desc = get_stage_description(stage)
+        return {
+            "success": True,
+            "message": f"Chase email sent to {customer_email} for invoice {inv_number}",
+            "invoice_number": inv_number,
+            "customer": customer_name,
+            "amount": float(amount) if amount else 0,
+            "chase_stage": stage,
+            "stage_description": stage_desc,
+            "sent_from": from_email,
+            "sent_to": customer_email
+        }
+
+    except Exception as e:
+        return {"success": False, "error": f"Failed to send chase email: {str(e)}"}
+
+
+# ============================================================================
+# GET OVERDUE INVOICES TOOL
+# ============================================================================
+
+def _get_overdue_invoices(engine, business_id: str, args: dict) -> dict:
+    """Get all overdue invoices with actionable insights."""
+    from datetime import date
+    today = date.today()
+
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT id, invoice_number, customer_name, customer_email, amount,
+                   due_date, chase_stage, last_chased_at, status
+            FROM invoices
+            WHERE business_id = :business_id
+              AND status IN ('unpaid', 'sent', 'overdue')
+              AND due_date < :today
+              AND (archived IS NULL OR archived = false)
+            ORDER BY due_date ASC
+        """), {"business_id": business_id, "today": today})
+
+        invoices = []
+        total_overdue = 0
+        for row in result.fetchall():
+            days_overdue = (today - row[5]).days if row[5] else 0
+            current_stage = row[6] or 0
+
+            if current_stage == 0:
+                recommended_action = "Send friendly reminder (Stage 1)"
+            elif current_stage == 1:
+                recommended_action = "Send firm follow-up (Stage 2)"
+            elif current_stage == 2:
+                recommended_action = "Send urgent notice (Stage 3)"
+            elif current_stage == 3:
+                recommended_action = "Send final demand (Stage 4)"
+            else:
+                recommended_action = "All chase stages sent — consider phone call or legal action"
+
+            invoices.append({
+                "id": str(row[0]),
+                "invoice_number": row[1],
+                "customer_name": row[2],
+                "customer_email": row[3],
+                "amount": float(row[4]) if row[4] else 0,
+                "due_date": row[5].isoformat() if row[5] else None,
+                "days_overdue": days_overdue,
+                "chase_stage": current_stage,
+                "last_chased": row[7].isoformat() if row[7] else "Never",
+                "recommended_action": recommended_action,
+                "has_email": bool(row[3])
+            })
+            total_overdue += float(row[4]) if row[4] else 0
+
+        return {
+            "overdue_invoices": invoices,
+            "count": len(invoices),
+            "total_overdue_amount": round(total_overdue, 2),
+            "summary": f"{len(invoices)} overdue invoice(s) totalling £{total_overdue:,.2f}" if invoices else "No overdue invoices — all clear!"
+        }
+
+
+# ============================================================================
+# DRAFT EMAIL REPLY TOOL
+# ============================================================================
+
+def _draft_email_reply(engine, business_id: str, args: dict) -> dict:
+    """Generate draft reply options for an email."""
+    import json as _json
+    email_id = args.get("email_id", "")
+    preferred_tone = args.get("tone")
+
+    if not email_id:
+        return {"error": "email_id is required. Use list_emails to find email IDs."}
+
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT id, from_email, from_name, subject, snippet, body_text, received_at
+            FROM email_messages
+            WHERE id = :email_id AND business_id = :business_id
+        """), {"email_id": email_id, "business_id": business_id})
+        row = result.fetchone()
+
+    if not row:
+        return {"error": f"Email {email_id} not found."}
+
+    msg_id, from_email, from_name, subject, snippet, body_text, received_at = row
+
+    with engine.connect() as conn:
+        biz = conn.execute(text("SELECT name FROM businesses WHERE id = :id"), {"id": business_id}).fetchone()
+    business_name = biz[0] if biz else "the business"
+
+    email_content = body_text or snippet or "(no content)"
+
+    try:
+        import openai
+        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+        response = client.chat.completions.create(
+            model="gpt-5",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"Generate 3 reply drafts for a business email. Business: {business_name}.\n\n"
+                        "Tones:\n"
+                        '1. "professional" — Formal, polished corporate tone\n'
+                        '2. "friendly" — Warm, conversational but business-appropriate\n'
+                        '3. "brief" — Ultra-concise, 2-3 sentences max\n\n'
+                        "Return ONLY a JSON array with 3 objects: tone, subject, body\n"
+                        "No markdown, no backticks."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"From: {from_name or from_email}\nSubject: {subject}\nContent: {email_content[:1000]}"
+                }
+            ],
+            max_tokens=1000,
+            temperature=0.4,
+        )
+
+        content = response.choices[0].message.content or ""
+        content = content.strip().strip("`").strip()
+        if content.startswith("json"):
+            content = content[4:].strip()
+
+        drafts = _json.loads(content)
+
+        result_drafts = []
+        for d in drafts:
+            result_drafts.append({
+                "tone": d.get("tone", ""),
+                "subject": d.get("subject", f"Re: {subject}"),
+                "body": d.get("body", ""),
+            })
+
+        if preferred_tone:
+            result_drafts.sort(key=lambda x: 0 if x["tone"] == preferred_tone else 1)
+
+        return {
+            "email_id": email_id,
+            "replying_to": from_email,
+            "original_subject": subject,
+            "drafts": result_drafts,
+            "instruction": "Present these options to the user. They can pick one, and you can send it using send_email."
+        }
+
+    except Exception as e:
+        return {
+            "email_id": email_id,
+            "replying_to": from_email,
+            "drafts": [{
+                "tone": "professional",
+                "subject": f"Re: {subject}",
+                "body": f"Hi {from_name or 'there'},\n\nThank you for your email. I will review and get back to you shortly.\n\nBest regards,\n{business_name}"
+            }],
+            "error": f"AI generation failed ({str(e)}), showing fallback draft"
+        }
+
+
+# ============================================================================
+# BUSINESS OVERVIEW TOOL
+# ============================================================================
+
+def _get_business_overview(engine, business_id: str, args: dict, timezone: str = "Europe/London") -> dict:
+    """Get comprehensive business overview — perfect for morning briefings."""
+    overview = {}
+
+    overview["financials"] = _get_accounting_summary(engine, business_id, {"period": "month"})
+    overview["invoices"] = _get_invoice_summary(engine, business_id, {})
+    overview["overdue"] = _get_overdue_invoices(engine, business_id, {})
+    overview["tasks"] = _list_tasks(engine, business_id, {"status": "open", "limit": 5})
+
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT COUNT(*) FROM email_messages
+            WHERE business_id = :business_id AND is_unread = true
+        """), {"business_id": business_id})
+        unread = result.fetchone()
+        overview["unread_emails"] = int(unread[0]) if unread else 0
+
+    try:
+        overview["calendar"] = _get_calendar_briefing(engine, business_id, {}, timezone)
+    except Exception:
+        overview["calendar"] = {"events": [], "note": "Calendar not connected"}
+
+    overview["briefing_generated_at"] = datetime.utcnow().isoformat()
+
+    return overview
+
+
+# ============================================================================
+# CASHFLOW FORECAST TOOL
+# ============================================================================
+
+def _get_cashflow_forecast(engine, business_id: str, args: dict) -> dict:
+    """Simple cashflow forecast based on current data."""
+    from datetime import date
+    days_ahead = min(args.get("days_ahead", 30), 90)
+    today = date.today()
+
+    with engine.connect() as conn:
+        monthly = conn.execute(text("""
+            SELECT type, COALESCE(SUM(ABS(amount)), 0)
+            FROM accounting_transactions
+            WHERE business_id = :business_id AND is_archived = false
+              AND transaction_date >= :start AND transaction_date <= :end
+            GROUP BY type
+        """), {"business_id": business_id, "start": today.replace(day=1), "end": today})
+
+        current_income = 0
+        current_expenses = 0
+        for row in monthly.fetchall():
+            if row[0] == "income":
+                current_income = float(row[1])
+            elif row[0] == "expense":
+                current_expenses = float(row[1])
+
+        inv_result = conn.execute(text("""
+            SELECT COALESCE(SUM(amount), 0), COUNT(*)
+            FROM invoices
+            WHERE business_id = :business_id
+              AND status IN ('unpaid', 'sent', 'overdue')
+              AND (archived IS NULL OR archived = false)
+        """), {"business_id": business_id})
+        inv_row = inv_result.fetchone()
+        expected_income = float(inv_row[0]) if inv_row else 0
+        outstanding_count = int(inv_row[1]) if inv_row else 0
+
+    forecast = {
+        "period": f"Next {days_ahead} days",
+        "current_monthly_income": round(current_income, 2),
+        "current_monthly_expenses": round(current_expenses, 2),
+        "expected_income_from_invoices": round(expected_income, 2),
+        "outstanding_invoice_count": outstanding_count,
+        "projected_net": round(current_income + expected_income - current_expenses, 2),
+        "note": "Simplified forecast based on current trends and outstanding invoices."
+    }
+
+    try:
+        xero_data = _get_xero_financial_summary(engine, business_id, {})
+        if "bank_balance" in xero_data:
+            forecast["current_bank_balance"] = xero_data["bank_balance"]
+            forecast["projected_bank_balance"] = round(
+                xero_data["bank_balance"] + expected_income - current_expenses, 2
+            )
+    except Exception:
+        pass
+
+    return forecast
