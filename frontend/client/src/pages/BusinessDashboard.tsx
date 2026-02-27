@@ -86,6 +86,7 @@ import {
   ArrowDownward as ArrowDownwardIcon,
   ChevronRight as ChevronRightIcon,
   AccountBalance as AccountBalanceIcon,
+  MailOutline as MailOutlineIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type Business, type Task, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
@@ -93,6 +94,8 @@ import { useMe } from '@/hooks/useMe';
 import { apiRequest } from '@/lib/queryClient';
 import { config } from '@/config/env';
 import DebugPanel from '@/components/DebugPanel';
+import EmailsTab from '@/components/EmailsTab';
+import { fetchEmailMessages } from '@/lib/emailApi';
 
 /**
  * Get business initials from name
@@ -165,6 +168,7 @@ export default function BusinessDashboard() {
   
   const [tabValue, setTabValue] = useState(() => {
     const tab = searchParams.get('tab');
+    if (tab === 'emails') return 3;
     if (tab === 'invoices') return 2;
     if (tab === 'calls') return 1;
     return 0;
@@ -538,6 +542,7 @@ export default function BusinessDashboard() {
   const openTaskCount = tasks.filter(t => t.status !== 'completed').length;
   const overdueInvoiceCount = invoices.filter(inv => new Date(inv.due_date) < new Date() && inv.status !== 'paid').length;
   const newCallCount = calls.filter(c => !c.archived).length;
+  const [unreadEmailCount, setUnreadEmailCount] = useState(0);
 
   const handleSignOut = async () => {
     await signOut();
@@ -834,6 +839,17 @@ export default function BusinessDashboard() {
       return () => clearTimeout(timer);
     }
   }, [invoiceSearch]);
+
+  // Fetch unread email count for tab badge
+  useEffect(() => {
+    if (!business) return;
+    fetchEmailMessages({ limit: 50 })
+      .then(data => {
+        const unread = (data.messages || []).filter(m => m.is_unread).length;
+        setUnreadEmailCount(unread);
+      })
+      .catch(() => setUnreadEmailCount(0));
+  }, [business]);
 
   // Xero invoice sync
   const syncXeroInvoices = async () => {
@@ -1156,6 +1172,22 @@ export default function BusinessDashboard() {
                       </Box>
                     }
                     data-testid="tab-invoices"
+                  />
+                  <Tab
+                    icon={<MailOutlineIcon />}
+                    iconPosition="start"
+                    label={
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        Emails
+                        <Chip 
+                          label={unreadEmailCount} 
+                          size="small" 
+                          color={unreadEmailCount > 0 ? 'primary' : 'default'}
+                          sx={{ minWidth: 24, height: 22 }}
+                        />
+                      </Box>
+                    }
+                    data-testid="tab-emails"
                   />
                 </Tabs>
               </Box>
@@ -1899,6 +1931,10 @@ export default function BusinessDashboard() {
                     </Table>
                   </TableContainer>
                 )}
+              </TabPanel>
+
+              <TabPanel value={tabValue} index={3}>
+                {business && <EmailsTab businessId={business.id} />}
               </TabPanel>
             </Paper>
           </>
