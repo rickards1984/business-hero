@@ -48,6 +48,20 @@ REALTIME_TOOLS = [
     },
     {
         "type": "function",
+        "name": "send_email_reply",
+        "description": "Send an email. ALWAYS confirm the exact content with the user before calling this. Never send without explicit confirmation.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "to_email": {"type": "string", "description": "Recipient email address"},
+                "subject": {"type": "string", "description": "Email subject"},
+                "body": {"type": "string", "description": "Email body text (plain text)"}
+            },
+            "required": ["to_email", "subject", "body"]
+        }
+    },
+    {
+        "type": "function",
         "name": "get_schedule",
         "description": "Get today's calendar events and appointments. Call this when the user asks about their schedule, calendar, meetings, or what's on today.",
         "parameters": {
@@ -261,6 +275,7 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
         # Map realtime tool names to assistant_tools names if different
         tool_name_map = {
             "list_emails": "list_emails",
+            "send_email_reply": "send_email",
             "get_schedule": "get_calendar_briefing",
             "get_recent_calls": "list_calls",
             "get_tasks": "list_tasks",
@@ -281,7 +296,13 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
         mapped_name = tool_name_map.get(tool_name, tool_name)
         
         # Map arguments to what assistant_tools expects
-        if tool_name == "list_emails":
+        if tool_name == "send_email_reply":
+            mapped_args = {
+                "to": args.get("to_email", ""),
+                "subject": args.get("subject", ""),
+                "body": args.get("body", ""),
+            }
+        elif tool_name == "list_emails":
             # Force a minimum of 20 emails to prevent hallucination from small samples
             requested_limit = args.get("limit", 20)
             if requested_limit < 10:
@@ -700,8 +721,15 @@ Your personality:
    - "reply", "draft a reply", "respond to that email" → draft_reply (requires email_message_id)
    - "business overview", "how's the business", "give me a summary" → business_overview
    - "cash flow", "cashflow", "forecast", "will I have enough" → cashflow_forecast
+   - "send", "send it", "send that", "send the email", "email them" → send_email_reply (requires to_email, subject, body — ALWAYS confirm with user first)
 
 6. **EMAIL FETCHING RULE** - When calling list_emails, ALWAYS set limit=20. Never use limit=1, limit=5, or any small number. You need enough emails to give a proper briefing.
+
+7. **NEVER PRETEND TO ACT** - If you don't have a tool for something, say "I can't do that yet" instead of describing yourself doing it. Never loop or repeat the same action. If a tool call fails, explain briefly and offer an alternative — do NOT retry endlessly.
+
+8. **BE CONCISE** - After completing any action, give ONE brief confirmation and move on. Do not repeat confirmations. Do not keep talking about a completed action. One sentence is enough for confirmations.
+
+9. **NO LOOPS** - Never repeat yourself. If you've already said something, do not say it again. If you've confirmed an action, do not re-confirm it.
 
 ## HOW TO BRIEF ON EMAILS
 
@@ -787,6 +815,13 @@ When drafting, be collaborative:
 - "I've drafted a reply to Sarah's email - it's professional but firm about the deadline. Want me to read it out, or shall I just send it?"
 - "Here's what I'd suggest sending back to John..." then read key points.
 - Always offer to adjust the tone: "I can make it more formal or more casual if you prefer."
+
+**Sending emails:**
+- ALWAYS confirm the exact content before sending: read back the to address, subject, and a brief summary of the body.
+- NEVER call send_email_reply without explicit user confirmation like "yes", "send it", "go ahead".
+- After the tool returns success, say ONE short confirmation: "Done — email sent to [name] at [email]."
+- Do NOT repeat the confirmation multiple times or keep talking about the sent email.
+- If the tool returns an error, explain the error briefly and offer to try again.
 
 **Giving business overviews:**
 Paint the big picture naturally:

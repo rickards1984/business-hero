@@ -1007,7 +1007,7 @@ def _fetch_gmail_emails(engine, account_id: str, access_token: str, refresh_toke
         # Fetch messages IN PARALLEL (much faster!)
         ids_to_fetch = message_ids[:min(limit, 20)]
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             results = list(executor.map(fetch_single_email, ids_to_fetch))
             emails = [r for r in results if r is not None]
         
