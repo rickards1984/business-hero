@@ -17,6 +17,10 @@ export interface EmailMessageItem {
   is_unread: boolean;
   has_attachments: boolean;
   labels?: string[] | null;
+  ai_category?: string | null;
+  ai_priority?: number | null;
+  ai_summary?: string | null;
+  ai_suggested_action?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -59,6 +63,7 @@ export interface EmailDraftResponse {
   body_html?: string | null;
   status: string;
   provider_message_id?: string | null;
+  tone?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -71,17 +76,37 @@ export interface EmailDraftSendResponse {
   status?: string | null;
 }
 
+export interface EmailAnalysis {
+  message_id: string;
+  category: string;
+  priority: number;
+  summary: string;
+  suggested_action?: string | null;
+}
+
+export interface EmailAnalyzeResponse {
+  analyses: EmailAnalysis[];
+  analyzed_count: number;
+}
+
+export interface EmailDraftOptionsResponse {
+  drafts: EmailDraftResponse[];
+  message_id: string;
+}
+
 export async function fetchEmailMessages(params?: {
   emailAccountId?: string;
   limit?: number;
+  category?: string;
+  priorityMin?: number;
+  sortBy?: string;
 }): Promise<EmailMessageListResponse> {
   const search = new URLSearchParams();
-  if (params?.emailAccountId) {
-    search.set('email_account_id', params.emailAccountId);
-  }
-  if (params?.limit) {
-    search.set('limit', String(params.limit));
-  }
+  if (params?.emailAccountId) search.set('email_account_id', params.emailAccountId);
+  if (params?.limit) search.set('limit', String(params.limit));
+  if (params?.category) search.set('category', params.category);
+  if (params?.priorityMin) search.set('priority_min', String(params.priorityMin));
+  if (params?.sortBy) search.set('sort_by', params.sortBy);
   const query = search.toString();
   const response = await apiRequest('GET', `/v1/email/messages${query ? `?${query}` : ''}`);
   return response.json();
@@ -96,9 +121,7 @@ export async function fetchEmailBriefings(params?: {
   limit?: number;
 }): Promise<EmailBriefingListResponse> {
   const search = new URLSearchParams();
-  if (params?.limit) {
-    search.set('limit', String(params.limit));
-  }
+  if (params?.limit) search.set('limit', String(params.limit));
   const query = search.toString();
   const response = await apiRequest('GET', `/v1/email/briefings${query ? `?${query}` : ''}`);
   return response.json();
@@ -120,7 +143,22 @@ export async function generateEmailDraft(payload: {
   return response.json();
 }
 
+export async function generateDraftOptions(payload: {
+  email_message_id: string;
+  to_emails?: string[];
+}): Promise<EmailDraftOptionsResponse> {
+  const response = await apiRequest('POST', '/v1/email/drafts/generate-options', payload);
+  return response.json();
+}
+
 export async function sendEmailDraft(id: string): Promise<EmailDraftSendResponse> {
   const response = await apiRequest('POST', `/v1/email/drafts/${id}/send`);
+  return response.json();
+}
+
+export async function analyzeEmails(messageIds?: string[]): Promise<EmailAnalyzeResponse> {
+  const response = await apiRequest('POST', '/v1/email/analyze', {
+    message_ids: messageIds || [],
+  });
   return response.json();
 }

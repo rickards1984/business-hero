@@ -33,6 +33,9 @@ from schemas import (
     EmailDraftRequest,
     EmailDraftResponse,
     EmailDraftSendResponse,
+    EmailAnalysis,
+    EmailAnalyzeResponse,
+    EmailDraftOptionsResponse,
 )
 from .crypto import encrypt_secret
 from .service import (
@@ -45,6 +48,8 @@ from .service import (
     get_provider_for_account,
     generate_email_briefing_markdown,
     generate_email_reply_draft,
+    generate_email_reply_drafts,
+    analyze_email_batch,
     get_or_create_smtp_account,
 )
 from providers.google_gmail import GoogleGmailProvider
@@ -712,6 +717,9 @@ async def list_email_messages(
     email_account_id: Optional[str] = Query(default=None),
     folder: Optional[str] = Query(default="INBOX"),
     unread_only: Optional[bool] = Query(default=None),
+    category: Optional[str] = Query(default=None, description="Filter by AI category"),
+    priority_min: Optional[int] = Query(default=None, ge=1, le=5, description="Minimum AI priority"),
+    sort_by: Optional[str] = Query(default="received_at", description="Sort by: received_at, ai_priority"),
     limit: int = Query(default=50, ge=1, le=200),
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -725,7 +733,17 @@ async def list_email_messages(
         statement = statement.where(EmailMessage.folder == folder)
     if unread_only is True:
         statement = statement.where(EmailMessage.is_unread == True)
-    statement = statement.order_by(EmailMessage.received_at.desc()).limit(limit)
+    if category:
+        statement = statement.where(EmailMessage.ai_category == category)
+    if priority_min is not None:
+        statement = statement.where(EmailMessage.ai_priority >= priority_min)
+
+    if sort_by == "ai_priority":
+        statement = statement.order_by(EmailMessage.ai_priority.desc().nullslast(), EmailMessage.received_at.desc())
+    else:
+        statement = statement.order_by(EmailMessage.received_at.desc())
+
+    statement = statement.limit(limit)
     rows = session.exec(statement).all()
 
     items = [
@@ -746,6 +764,10 @@ async def list_email_messages(
             is_unread=row.is_unread,
             has_attachments=row.has_attachments,
             labels=row.labels,
+            ai_category=row.ai_category,
+            ai_priority=row.ai_priority,
+            ai_summary=row.ai_summary,
+            ai_suggested_action=row.ai_suggested_action,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -831,6 +853,46 @@ async def run_email_sync(
     sync_state.last_error = None
     session.add(sync_state)
     session.commit()
+
+    # Auto-analyze un-analyzed messages (limit 30 per sync)
+    if message_count > 0:
+        try:
+            unanalyzed = session.exec(
+                select(EmailMessage)
+                .where(
+                    EmailMessage.business_id == business.id,
+                    EmailMessage.ai_analyzed_at == None,
+                )
+                .order_by(EmailMessage.received_at.desc())
+                .limit(30)
+            ).all()
+            if unanalyzed:
+                from sqlalchemy import text as sa_text
+                batch_size = 10
+                for i in range(0, len(unanalyzed), batch_size):
+                    batch = unanalyzed[i : i + batch_size]
+                    analyses = analyze_email_batch(batch)
+                    for analysis in analyses:
+                        session.execute(
+                            sa_text("""
+                                UPDATE email_messages
+                                SET ai_category = :category, ai_priority = :priority,
+                                    ai_summary = :summary, ai_suggested_action = :action,
+                                    ai_analyzed_at = NOW()
+                                WHERE id = :id AND business_id = :business_id
+                            """),
+                            {
+                                "category": analysis.category,
+                                "priority": analysis.priority,
+                                "summary": analysis.summary,
+                                "action": analysis.suggested_action,
+                                "id": analysis.message_id,
+                                "business_id": str(business.id),
+                            },
+                        )
+                session.commit()
+        except Exception:
+            pass  # Don't fail sync if analysis fails
 
     return EmailSyncRunResponse(
         email_account_id=str(account.id),
@@ -1025,6 +1087,142 @@ async def get_latest_email_briefing(
         briefing_markdown=briefing.briefing_markdown,
         created_at=briefing.created_at,
     )
+
+
+class EmailAnalyzeRequest(BaseModel):
+    message_ids: List[str] = Field(default_factory=list)
+
+
+@router.post("/analyze", response_model=EmailAnalyzeResponse)
+async def analyze_emails(
+    data: EmailAnalyzeRequest,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Analyze emails with AI: categorise, score priority, summarise."""
+    from sqlalchemy import text as sa_text
+
+    business = get_business_by_id(session, auth_ctx["business_id"])
+
+    if data.message_ids:
+        statement = select(EmailMessage).where(
+            EmailMessage.business_id == business.id,
+            EmailMessage.id.in_(data.message_ids),
+        )
+    else:
+        statement = (
+            select(EmailMessage)
+            .where(
+                EmailMessage.business_id == business.id,
+                EmailMessage.ai_analyzed_at == None,
+            )
+            .order_by(EmailMessage.received_at.desc())
+            .limit(50)
+        )
+
+    messages = session.exec(statement).all()
+    if not messages:
+        return EmailAnalyzeResponse(analyses=[], analyzed_count=0)
+
+    all_analyses: List[EmailAnalysis] = []
+    batch_size = 10
+    for i in range(0, len(messages), batch_size):
+        batch = messages[i : i + batch_size]
+        batch_results = analyze_email_batch(batch)
+        all_analyses.extend(batch_results)
+
+    for analysis in all_analyses:
+        session.execute(
+            sa_text("""
+                UPDATE email_messages
+                SET ai_category = :category, ai_priority = :priority,
+                    ai_summary = :summary, ai_suggested_action = :action,
+                    ai_analyzed_at = NOW()
+                WHERE id = :id AND business_id = :business_id
+            """),
+            {
+                "category": analysis.category,
+                "priority": analysis.priority,
+                "summary": analysis.summary,
+                "action": analysis.suggested_action,
+                "id": analysis.message_id,
+                "business_id": str(business.id),
+            },
+        )
+    session.commit()
+
+    return EmailAnalyzeResponse(analyses=all_analyses, analyzed_count=len(all_analyses))
+
+
+@router.post("/drafts/generate-options", response_model=EmailDraftOptionsResponse)
+async def generate_email_draft_options(
+    data: EmailDraftRequest,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Generate 3 draft reply options with different tones."""
+    from sqlalchemy import text as sa_text
+
+    business = get_business_by_id(session, auth_ctx["business_id"])
+    message = session.exec(
+        select(EmailMessage).where(
+            EmailMessage.id == data.email_message_id,
+            EmailMessage.business_id == business.id,
+        )
+    ).first()
+    if not message:
+        raise HTTPException(status_code=404, detail="Email message not found")
+
+    to_emails = data.to_emails or ([message.from_email] if message.from_email else [])
+    if not to_emails:
+        raise HTTPException(status_code=400, detail="Recipient email not available")
+
+    user_name = None
+    try:
+        result = session.execute(
+            sa_text("SELECT full_name, display_name FROM profiles WHERE id = :user_id"),
+            {"user_id": auth_ctx["user_id"]},
+        )
+        row = result.fetchone()
+        if row:
+            user_name = row[1] or row[0]
+    except Exception:
+        pass
+
+    draft_options = generate_email_reply_drafts(message, business, user_name)
+
+    saved_drafts: List[EmailDraftResponse] = []
+    for option in draft_options:
+        draft = EmailDraft(
+            business_id=business.id,
+            email_message_id=message.id,
+            to_emails=to_emails,
+            subject=option["subject"],
+            body_text=option.get("body_text"),
+            body_html=option.get("body_html"),
+            status="draft",
+        )
+        session.add(draft)
+        session.commit()
+        session.refresh(draft)
+        saved_drafts.append(
+            EmailDraftResponse(
+                id=str(draft.id),
+                business_id=str(draft.business_id),
+                email_message_id=str(draft.email_message_id),
+                to_emails=draft.to_emails,
+                subject=draft.subject,
+                body_text=draft.body_text,
+                body_html=draft.body_html,
+                status=draft.status,
+                provider_message_id=draft.provider_message_id,
+                tone=option.get("tone", "professional"),
+                created_at=draft.created_at,
+                updated_at=draft.updated_at,
+            )
+        )
+
+    return EmailDraftOptionsResponse(drafts=saved_drafts, message_id=str(message.id))
 
 
 @router.post("/drafts/generate", response_model=EmailDraftResponse)

@@ -348,6 +348,11 @@ class EmailMessage(SQLModel, table=True):
     has_attachments: bool = Field(default=False)
     labels: List[str] = Field(default=[], sa_column=Column(ARRAY(Text), nullable=False, server_default="{}"))
     raw_headers: Dict[str, Any] = Field(default={}, sa_column=Column(JSONB, nullable=False, server_default="{}"))
+    ai_category: Optional[str] = None
+    ai_priority: Optional[int] = None
+    ai_summary: Optional[str] = None
+    ai_suggested_action: Optional[str] = None
+    ai_analyzed_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     business: Optional[Business] = Relationship()

@@ -381,6 +381,10 @@ class EmailMessageItem(BaseModel):
     is_unread: bool
     has_attachments: bool
     labels: Optional[List[str]] = None
+    ai_category: Optional[str] = None
+    ai_priority: Optional[int] = None
+    ai_summary: Optional[str] = None
+    ai_suggested_action: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -434,8 +438,27 @@ class EmailDraftResponse(BaseModel):
     body_html: Optional[str] = None
     status: str
     provider_message_id: Optional[str] = None
+    tone: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+
+class EmailAnalysis(BaseModel):
+    message_id: str
+    category: str
+    priority: int
+    summary: str
+    suggested_action: Optional[str] = None
+
+
+class EmailAnalyzeResponse(BaseModel):
+    analyses: List[EmailAnalysis]
+    analyzed_count: int
+
+
+class EmailDraftOptionsResponse(BaseModel):
+    drafts: List[EmailDraftResponse]
+    message_id: str
 
 
 class EmailDraftSendResponse(BaseModel):

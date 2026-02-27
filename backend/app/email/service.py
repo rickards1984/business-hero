@@ -340,11 +340,113 @@ def _text_to_html(text: str) -> str:
     return safe.replace("\n", "<br>")
 
 
+CATEGORIZE_SYSTEM_PROMPT = """You are an email categorisation assistant for a business.
+Analyse each email and return a JSON array with one object per email.
+
+Categories (pick ONE):
+- action_required: Needs a response or action from the user
+- awaiting_reply: User already replied, waiting for the other party
+- fyi: Informational, no action needed
+- marketing: Newsletters, promotions, marketing emails
+- finance: Invoices, payments, receipts, bank notifications
+- scheduling: Meeting requests, calendar invites, appointment changes
+- spam: Junk, phishing, irrelevant
+
+Priority (1-5):
+- 5: Urgent - needs immediate attention (e.g. overdue payment, angry client)
+- 4: High - should handle today (e.g. client question, important request)
+- 3: Medium - handle this week (e.g. general business correspondence)
+- 2: Low - handle when convenient (e.g. FYI emails, non-urgent updates)
+- 1: Minimal - can ignore or archive (e.g. marketing, newsletters)
+
+Return ONLY a JSON array. No markdown, no explanation.
+Each object must have: message_id, category, priority, summary, suggested_action"""
+
+
+def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
+    """Analyze a batch of emails using gpt-4o-mini for categorisation."""
+    import logging
+    _logger = logging.getLogger("email_analysis")
+
+    if not messages:
+        return []
+
+    if not OPENAI_API_KEY:
+        from schemas import EmailAnalysis
+        return [
+            EmailAnalysis(
+                message_id=str(m.id),
+                category="fyi",
+                priority=2,
+                summary=m.subject or "No subject",
+                suggested_action=None,
+            )
+            for m in messages
+        ]
+
+    email_items = []
+    for m in messages:
+        email_items.append(
+            f"message_id: {str(m.id)}\n"
+            f"from_email: {m.from_email or 'Unknown'}\n"
+            f"from_name: {m.from_name or 'Unknown'}\n"
+            f"subject: {m.subject or '(no subject)'}\n"
+            f"snippet: {(m.snippet or '')[:300]}\n"
+            f"received_at: {m.received_at.isoformat() if m.received_at else 'unknown'}"
+        )
+
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": CATEGORIZE_SYSTEM_PROMPT},
+                {"role": "user", "content": "Analyze these emails:\n\n" + "\n---\n".join(email_items)},
+            ],
+            max_tokens=1500,
+            temperature=0.1,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+
+        from schemas import EmailAnalysis
+        parsed = json.loads(content)
+        results = []
+        for item in parsed:
+            results.append(
+                EmailAnalysis(
+                    message_id=item.get("message_id", ""),
+                    category=item.get("category", "fyi"),
+                    priority=max(1, min(5, int(item.get("priority", 2)))),
+                    summary=item.get("summary", ""),
+                    suggested_action=item.get("suggested_action"),
+                )
+            )
+        return results
+    except Exception as e:
+        _logger.error(f"Email analysis failed: {e}")
+        from schemas import EmailAnalysis
+        return [
+            EmailAnalysis(
+                message_id=str(m.id),
+                category="fyi",
+                priority=2,
+                summary=m.subject or "No subject",
+                suggested_action=None,
+            )
+            for m in messages
+        ]
+
+
 def generate_email_briefing_markdown(
     messages: List[EmailMessageModel],
     business: Business,
 ) -> str:
-    """Generate a markdown briefing for recent emails."""
+    """Generate a markdown briefing for recent emails using gpt-5."""
     if not messages:
         return "No recent emails in the selected period."
 
@@ -364,6 +466,25 @@ def generate_email_briefing_markdown(
     if not OPENAI_API_KEY:
         return fallback_text
 
+    # Build structured section from AI analysis data
+    priority_actions = []
+    awaiting_reply = []
+    fyi_items = []
+    for msg in messages:
+        if msg.ai_category == "action_required" and msg.ai_priority and msg.ai_priority >= 4:
+            level = "URGENT" if msg.ai_priority == 5 else "HIGH"
+            priority_actions.append(
+                f"- **[{level}]** {msg.ai_summary or msg.subject or 'No subject'} — {msg.from_email or 'Unknown'}"
+            )
+        elif msg.ai_category == "awaiting_reply":
+            days_ago = ""
+            if msg.received_at:
+                delta = (datetime.utcnow() - msg.received_at).days
+                days_ago = f" ({delta} day{'s' if delta != 1 else ''} ago)"
+                awaiting_reply.append(f"- {msg.subject or 'No subject'} to {msg.from_email or 'Unknown'}{days_ago}")
+        elif msg.ai_category in ("fyi", "marketing", "spam"):
+            fyi_items.append(msg)
+
     try:
         client = OpenAI(api_key=OPENAI_API_KEY)
         items = []
@@ -372,15 +493,18 @@ def generate_email_briefing_markdown(
                 f"From: {msg.from_email or 'Unknown'}\n"
                 f"Subject: {msg.subject or '(no subject)'}\n"
                 f"Snippet: {msg.snippet or ''}\n"
+                f"AI Category: {msg.ai_category or 'unanalyzed'}\n"
+                f"AI Priority: {msg.ai_priority or 'N/A'}\n"
             )
         prompt = "\n---\n".join(items)
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5",
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "Write a concise, action-oriented email briefing in markdown. "
+                        "Group by urgency. Include key actions, deadlines, and suggested next steps. "
                         "Do not hallucinate. If details are missing, say so explicitly."
                     ),
                 },
@@ -393,16 +517,29 @@ def generate_email_briefing_markdown(
                     ),
                 },
             ],
-            max_tokens=800,
+            max_tokens=1200,
             temperature=0.2,
         )
-        return response.choices[0].message.content or fallback_text
+        briefing = response.choices[0].message.content or fallback_text
+
+        # Append structured section
+        structured_parts = []
+        if priority_actions:
+            structured_parts.append("\n## Priority Actions\n" + "\n".join(priority_actions))
+        if awaiting_reply:
+            structured_parts.append(f"\n## Awaiting Reply ({len(awaiting_reply)})\n" + "\n".join(awaiting_reply))
+        if fyi_items:
+            structured_parts.append(f"\n## FYI / Can Archive ({len(fyi_items)})\n- {len(fyi_items)} informational/marketing emails")
+        if structured_parts:
+            briefing += "\n\n---\n" + "\n".join(structured_parts)
+
+        return briefing
     except Exception:
         return fallback_text
 
 
 def generate_email_reply_draft(message: EmailMessageModel, business: Business) -> Dict[str, str]:
-    """Generate a suggested reply for a message."""
+    """Generate a single suggested reply for a message (backwards compat)."""
     subject = message.subject or "Your email"
     reply_subject = f"Re: {subject}"
     fallback_body = (
@@ -453,3 +590,90 @@ def generate_email_reply_draft(message: EmailMessageModel, business: Business) -
         return {"subject": reply_subject, "body_text": body_text, "body_html": body_html}
     except Exception:
         return {"subject": reply_subject, "body_text": fallback_body, "body_html": _text_to_html(fallback_body)}
+
+
+def generate_email_reply_drafts(
+    message: EmailMessageModel,
+    business: Business,
+    user_name: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    """Generate 3 draft reply options with different tones using gpt-5."""
+    import logging
+    _logger = logging.getLogger("email_drafts")
+
+    subject = message.subject or "Your email"
+    reply_subject = f"Re: {subject}"
+    sender_name = message.from_name or "there"
+    sign_off_name = user_name or business.name
+
+    fallback = {
+        "subject": reply_subject,
+        "body_text": (
+            f"Hi {sender_name},\n\n"
+            "Thanks for your email. I will review and get back to you shortly.\n\n"
+            f"Best regards,\n{sign_off_name}"
+        ),
+        "tone": "professional",
+    }
+    fallback["body_html"] = _text_to_html(fallback["body_text"])
+
+    if not OPENAI_API_KEY:
+        return [fallback]
+
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        email_context = (
+            f"From: {message.from_email or 'Unknown'}\n"
+            f"From Name: {message.from_name or 'Unknown'}\n"
+            f"Subject: {message.subject or '(no subject)'}\n"
+            f"Snippet: {message.snippet or ''}\n"
+            f"Body:\n{message.body_text or message.snippet or ''}"
+        )
+
+        response = client.chat.completions.create(
+            model="gpt-5",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"You are a business email assistant for {business.name}. "
+                        f"The user's name is {sign_off_name}.\n\n"
+                        "Generate exactly 3 reply drafts with different tones:\n"
+                        '1. "professional" — Formal, polished, corporate tone.\n'
+                        '2. "friendly" — Warm, conversational but business-appropriate.\n'
+                        '3. "brief" — Ultra-concise, 2-3 sentences max.\n\n'
+                        "Each draft should actually address the email content, "
+                        f"be ready to send, and sign off as {sign_off_name}. "
+                        "Do not hallucinate details.\n\n"
+                        "Return ONLY a JSON array with 3 objects: tone, subject, body_text\n"
+                        "No markdown, no backticks, no explanation."
+                    ),
+                },
+                {"role": "user", "content": f"Generate 3 reply drafts for this email:\n\n{email_context}"},
+            ],
+            max_tokens=1200,
+            temperature=0.4,
+        )
+
+        content = (response.choices[0].message.content or "").strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+
+        drafts = json.loads(content)
+        result = []
+        for draft in drafts:
+            body_text = draft.get("body_text", "")
+            result.append({
+                "subject": draft.get("subject", reply_subject),
+                "body_text": body_text,
+                "body_html": _text_to_html(body_text),
+                "tone": draft.get("tone", "professional"),
+            })
+        return result if result else [fallback]
+
+    except Exception as e:
+        _logger.error(f"Multi-tone draft generation error: {e}")
+        return [fallback]
