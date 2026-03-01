@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import {
   Alert,
@@ -43,6 +43,7 @@ const QUICK_ACTIONS = [
 
 export default function AssistantChat() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user, loading: authLoading } = useAuth();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -63,6 +64,18 @@ export default function AssistantChat() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Auto-send prompt from URL query param (e.g. from "Ask Aria" button)
+  const promptHandled = useRef(false);
+  useEffect(() => {
+    if (promptHandled.current || authLoading || !user) return;
+    const prompt = searchParams.get('prompt');
+    if (prompt) {
+      promptHandled.current = true;
+      setSearchParams({}, { replace: true });
+      setTimeout(() => handleSendMessage(prompt), 300);
+    }
+  }, [authLoading, user]);
 
   const handleSendMessage = async (messageText: string) => {
     const message = messageText.trim();
