@@ -6,3 +6,10 @@ dist/
 build/
 .vscode/
 .DS_Store
+
+# Capacitor native build artifacts
+android/app/build/
+android/.gradle/
+android/build/
+ios/App/Pods/
+ios/DerivedData/
