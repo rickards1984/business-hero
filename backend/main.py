@@ -321,6 +321,10 @@ app.include_router(email_oauth_router)
 app.include_router(accounting_router)
 app.include_router(realtime_voice_router)
 
+from receptionist_api import router as receptionist_router, admin_router as receptionist_admin_router
+app.include_router(receptionist_router)
+app.include_router(receptionist_admin_router)
+
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
