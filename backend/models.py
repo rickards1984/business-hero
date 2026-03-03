@@ -70,6 +70,9 @@ class Task(SQLModel, table=True):
     recurrence: str = Field(default="none")
     status: str = Field(default="open", index=True)
     source: str = Field(default="manual")
+    category: str = Field(default="general")
+    priority: str = Field(default="medium")
+    source_id: Optional[str] = None
     deleted_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

@@ -13,6 +13,14 @@ import {
   IconButton,
   Snackbar,
   Alert,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
 } from '@mui/material';
 import {
   Search as SearchIcon,
@@ -21,6 +29,7 @@ import {
   ChatBubbleOutline as ChatBubbleOutlineIcon,
   AttachFile as AttachFileIcon,
   MailOutline as MailOutlineIcon,
+  PlaylistAdd as PlaylistAddIcon,
 } from '@mui/icons-material';
 import {
   fetchEmailMessages,
@@ -28,6 +37,8 @@ import {
   analyzeEmails,
   type EmailMessageItem,
 } from '@/lib/emailApi';
+import { supabase } from '@/lib/supabase';
+import { TASK_CATEGORIES, TASK_PRIORITIES, getCategoryColor } from '@/lib/taskConstants';
 
 const CATEGORIES = [
   { key: 'all', label: 'All' },
@@ -124,6 +135,18 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' | 'info' }>({ open: false, message: '', severity: 'info' });
   const [hasEmailAccount, setHasEmailAccount] = useState(true);
 
+  const [taskDialogOpen, setTaskDialogOpen] = useState(false);
+  const [taskSaving, setTaskSaving] = useState(false);
+  const [taskForm, setTaskForm] = useState({
+    title: '',
+    category: 'email_followup',
+    priority: 'medium',
+    due_at: '',
+    description: '',
+    source: 'email',
+    source_id: '',
+  });
+
   const loadEmails = useCallback(async () => {
     try {
       setLoading(true);
@@ -189,6 +212,47 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
     const subject = email.subject || 'no subject';
     const prompt = `Check the email from ${sender} about "${subject}" and help me respond`;
     navigate(`/app/assistant/chat?prompt=${encodeURIComponent(prompt)}`);
+  };
+
+  const openCreateTaskFromEmail = (email: EmailMessageItem) => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    setTaskForm({
+      title: `Follow up: ${email.subject || '(no subject)'}`,
+      category: 'email_followup',
+      priority: email.ai_category === 'action_required' ? 'high' : 'medium',
+      due_at: tomorrow.toISOString().slice(0, 16),
+      description: `Email from ${email.from_name || email.from_email || 'Unknown'}\nSubject: ${email.subject || ''}\n\n${email.ai_summary || ''}`,
+      source: 'email',
+      source_id: email.id,
+    });
+    setTaskDialogOpen(true);
+  };
+
+  const handleCreateTask = async () => {
+    if (!taskForm.title.trim()) return;
+    setTaskSaving(true);
+    try {
+      const { error: insertError } = await supabase.from('tasks').insert({
+        business_id: businessId,
+        title: taskForm.title.trim(),
+        description: taskForm.description.trim() || null,
+        category: taskForm.category,
+        priority: taskForm.priority,
+        due_at: taskForm.due_at ? new Date(taskForm.due_at).toISOString() : null,
+        source: taskForm.source,
+        source_id: taskForm.source_id || null,
+        status: 'open',
+      });
+      if (insertError) throw insertError;
+      setSnackbar({ open: true, message: `Task "${taskForm.title}" created`, severity: 'success' });
+      setTaskDialogOpen(false);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to create task';
+      setSnackbar({ open: true, message: msg, severity: 'error' });
+    } finally {
+      setTaskSaving(false);
+    }
   };
 
   const filteredEmails = emails
@@ -438,8 +502,24 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
                     </Typography>
                   </Box>
 
-                  {/* Ask Aria button */}
-                  <Box sx={{ ml: 1, flexShrink: 0, display: 'flex', alignItems: 'center' }}>
+                  {/* Action buttons */}
+                  <Box sx={{ ml: 1, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                    <Tooltip title="Create a follow-up task">
+                      <Button
+                        size="small"
+                        variant="text"
+                        startIcon={<PlaylistAddIcon sx={{ fontSize: 16 }} />}
+                        onClick={() => openCreateTaskFromEmail(email)}
+                        sx={{
+                          textTransform: 'none',
+                          fontSize: '0.75rem',
+                          color: 'text.secondary',
+                          '&:hover': { color: 'primary.main' },
+                        }}
+                      >
+                        Create Task
+                      </Button>
+                    </Tooltip>
                     <Tooltip title="Ask Aria about this email">
                       <Button
                         size="small"
@@ -463,6 +543,88 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
           })}
         </Box>
       )}
+
+      {/* Create Task from Email Dialog */}
+      <Dialog open={taskDialogOpen} onClose={() => setTaskDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Create Task from Email</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Task Title"
+            fullWidth
+            variant="outlined"
+            value={taskForm.title}
+            onChange={e => setTaskForm(prev => ({ ...prev, title: e.target.value }))}
+            sx={{ mb: 2, mt: 1 }}
+          />
+
+          <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: 'block' }}>
+            Category
+          </Typography>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2 }}>
+            {TASK_CATEGORIES.map(cat => (
+              <Chip
+                key={cat.id}
+                label={cat.label}
+                size="small"
+                onClick={() => setTaskForm(prev => ({ ...prev, category: cat.id }))}
+                sx={{
+                  bgcolor: taskForm.category === cat.id ? cat.color : undefined,
+                  color: taskForm.category === cat.id ? '#fff' : undefined,
+                  borderColor: taskForm.category === cat.id ? cat.color : undefined,
+                  '&:hover': { opacity: 0.85 },
+                }}
+                variant={taskForm.category === cat.id ? 'filled' : 'outlined'}
+              />
+            ))}
+          </Box>
+
+          <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
+            <FormControl size="small" sx={{ flex: 1 }}>
+              <InputLabel>Priority</InputLabel>
+              <Select
+                value={taskForm.priority}
+                label="Priority"
+                onChange={e => setTaskForm(prev => ({ ...prev, priority: e.target.value }))}
+              >
+                {TASK_PRIORITIES.map(p => (
+                  <MenuItem key={p.id} value={p.id}>{p.icon} {p.label}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <TextField
+              label="Due Date"
+              type="datetime-local"
+              size="small"
+              sx={{ flex: 1 }}
+              value={taskForm.due_at}
+              onChange={e => setTaskForm(prev => ({ ...prev, due_at: e.target.value }))}
+              InputLabelProps={{ shrink: true }}
+            />
+          </Box>
+
+          <TextField
+            label="Notes"
+            fullWidth
+            multiline
+            rows={3}
+            variant="outlined"
+            value={taskForm.description}
+            onChange={e => setTaskForm(prev => ({ ...prev, description: e.target.value }))}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setTaskDialogOpen(false)}>Cancel</Button>
+          <Button
+            onClick={handleCreateTask}
+            variant="contained"
+            disabled={taskSaving || !taskForm.title.trim()}
+          >
+            {taskSaving ? <CircularProgress size={20} /> : 'Create Task'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Snackbar */}
       <Snackbar

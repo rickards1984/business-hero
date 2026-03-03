@@ -49,7 +49,7 @@ from models import (
 )
 from schemas import (
     BusinessCreate, BusinessResponse, BusinessListItem, BusinessProfile,
-    TaskCreate, TaskResponse, SnoozeRequest,
+    TaskCreate, TaskUpdate, TaskResponse, SnoozeRequest,
     CallCreate, CallResponse,
     BriefingResponse, HealthResponse,
     ChatRequest, ChatResponse, ChatBusinessInfo,
@@ -1295,6 +1295,24 @@ async def update_business_logo(
     )
 
 
+def _task_response(task: Task) -> TaskResponse:
+    return TaskResponse(
+        id=str(task.id),
+        business_id=str(task.business_id),
+        title=task.title,
+        description=task.description,
+        due_at=task.due_at,
+        recurrence=task.recurrence,
+        status=task.status,
+        source=task.source,
+        category=getattr(task, "category", "general") or "general",
+        priority=getattr(task, "priority", "medium") or "medium",
+        source_id=getattr(task, "source_id", None),
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+    )
+
+
 @app.post("/v1/tasks", response_model=TaskResponse, tags=["Tasks"])
 async def create_task(
     data: TaskCreate,
@@ -1308,31 +1326,27 @@ async def create_task(
         description=data.description,
         due_at=data.due_at,
         recurrence=data.recurrence,
-        source=data.source
+        source=data.source,
+        category=data.category,
+        priority=data.priority,
+        source_id=data.source_id,
     )
     session.add(task)
     session.commit()
     session.refresh(task)
     
-    return TaskResponse(
-        id=str(task.id),
-        business_id=str(task.business_id),
-        title=task.title,
-        description=task.description,
-        due_at=task.due_at,
-        recurrence=task.recurrence,
-        status=task.status,
-        source=task.source,
-        created_at=task.created_at,
-        updated_at=task.updated_at
-    )
+    return _task_response(task)
 
 
 @app.get("/v1/tasks", response_model=List[TaskResponse], tags=["Tasks"])
 async def list_tasks(
-    status: Optional[str] = Query(None, description="Filter by status: open, done, snoozed"),
+    status: Optional[str] = Query(None, description="Filter by status: open, pending, completed"),
+    category: Optional[str] = Query(None, description="Filter by category"),
+    priority: Optional[str] = Query(None, description="Filter by priority: high, medium, low"),
     due_before: Optional[datetime] = Query(None, description="Filter tasks due before this datetime"),
     due_after: Optional[datetime] = Query(None, description="Filter tasks due after this datetime"),
+    sort_by: Optional[str] = Query("created_at", description="Sort field: created_at, due_at, priority"),
+    sort_order: Optional[str] = Query("desc", description="Sort order: asc, desc"),
     limit: int = Query(50, le=100, description="Maximum number of tasks to return"),
     business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session)
@@ -1345,29 +1359,20 @@ async def list_tasks(
     
     if status:
         statement = statement.where(Task.status == status)
+    if category:
+        statement = statement.where(Task.category == category)
+    if priority:
+        statement = statement.where(Task.priority == priority)
     if due_before:
         statement = statement.where(Task.due_at <= due_before)
     if due_after:
         statement = statement.where(Task.due_at >= due_after)
     
-    statement = statement.order_by(Task.created_at.desc()).limit(limit)
+    sort_col = getattr(Task, sort_by, Task.created_at)
+    statement = statement.order_by(sort_col.desc() if sort_order == "desc" else sort_col.asc()).limit(limit)
     tasks = session.exec(statement).all()
     
-    return [
-        TaskResponse(
-            id=str(t.id),
-            business_id=str(t.business_id),
-            title=t.title,
-            description=t.description,
-            due_at=t.due_at,
-            recurrence=t.recurrence,
-            status=t.status,
-            source=t.source,
-            created_at=t.created_at,
-            updated_at=t.updated_at
-        )
-        for t in tasks
-    ]
+    return [_task_response(t) for t in tasks]
 
 
 @app.post("/v1/tasks/{task_id}/complete", response_model=TaskResponse, tags=["Tasks"])
@@ -1393,18 +1398,35 @@ async def complete_task(
     session.commit()
     session.refresh(task)
     
-    return TaskResponse(
-        id=str(task.id),
-        business_id=str(task.business_id),
-        title=task.title,
-        description=task.description,
-        due_at=task.due_at,
-        recurrence=task.recurrence,
-        status=task.status,
-        source=task.source,
-        created_at=task.created_at,
-        updated_at=task.updated_at
+    return _task_response(task)
+
+
+@app.patch("/v1/tasks/{task_id}", response_model=TaskResponse, tags=["Tasks"])
+async def update_task(
+    task_id: str,
+    data: TaskUpdate,
+    business: Business = Depends(get_current_user_business),
+    session: Session = Depends(get_session)
+):
+    """Update a task's fields."""
+    statement = select(Task).where(
+        Task.id == task_id,
+        Task.business_id == business.id,
+        Task.deleted_at.is_(None),
     )
+    task = session.exec(statement).first()
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+
+    update_data = data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(task, field, value)
+    task.updated_at = datetime.utcnow()
+
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return _task_response(task)
 
 
 @app.post("/v1/tasks/{task_id}/snooze", response_model=TaskResponse, tags=["Tasks"])
@@ -1441,18 +1463,7 @@ async def snooze_task(
     session.commit()
     session.refresh(task)
     
-    return TaskResponse(
-        id=str(task.id),
-        business_id=str(task.business_id),
-        title=task.title,
-        description=task.description,
-        due_at=task.due_at,
-        recurrence=task.recurrence,
-        status=task.status,
-        source=task.source,
-        created_at=task.created_at,
-        updated_at=task.updated_at
-    )
+    return _task_response(task)
 
 
 @app.delete("/v1/tasks/{task_id}", tags=["Tasks"])

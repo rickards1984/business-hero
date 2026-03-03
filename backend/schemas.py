@@ -54,6 +54,22 @@ class TaskCreate(BaseModel):
     due_at: Optional[datetime] = None
     recurrence: str = "none"
     source: str = "manual"
+    category: str = "general"
+    priority: str = "medium"
+    source_id: Optional[str] = None
+
+
+class TaskUpdate(BaseModel):
+    """Schema for updating a task."""
+    title: Optional[str] = None
+    description: Optional[str] = None
+    due_at: Optional[datetime] = None
+    recurrence: Optional[str] = None
+    status: Optional[str] = None
+    source: Optional[str] = None
+    category: Optional[str] = None
+    priority: Optional[str] = None
+    source_id: Optional[str] = None
 
 
 class TaskResponse(BaseModel):
@@ -66,6 +82,9 @@ class TaskResponse(BaseModel):
     recurrence: str
     status: str
     source: str
+    category: str
+    priority: str
+    source_id: Optional[str]
     created_at: datetime
     updated_at: datetime
 

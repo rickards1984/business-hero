@@ -75,9 +75,17 @@ export interface Task {
   id: string;
   business_id: string;
   title: string;
-  description: string;
-  status: 'pending' | 'completed';
+  description: string | null;
+  due_at: string | null;
+  recurrence: string;
+  status: string;
+  source: string;
+  category: string;
+  priority: string;
+  source_id: string | null;
+  deleted_at: string | null;
   created_at: string;
+  updated_at: string;
 }
 
 export interface Call {

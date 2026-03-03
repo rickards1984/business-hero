@@ -96,6 +96,11 @@ import { config } from '@/config/env';
 import DebugPanel from '@/components/DebugPanel';
 import EmailsTab from '@/components/EmailsTab';
 import { fetchEmailMessages } from '@/lib/emailApi';
+import {
+  TASK_CATEGORIES, TASK_PRIORITIES,
+  getCategoryColor, getCategoryLabel,
+  isOverdue as isTaskOverdue, isToday as isDateToday, formatDueDate,
+} from '@/lib/taskConstants';
 
 /**
  * Get business initials from name
@@ -194,7 +199,12 @@ export default function BusinessDashboard() {
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDescription, setTaskDescription] = useState('');
   const [taskDueAt, setTaskDueAt] = useState('');
+  const [taskCategory, setTaskCategory] = useState('general');
+  const [taskPriority, setTaskPriority] = useState('medium');
   const [savingTask, setSavingTask] = useState(false);
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const [priorityFilter, setPriorityFilter] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState('created_at');
 
   // Invoice state
   interface Invoice {
@@ -314,6 +324,7 @@ export default function BusinessDashboard() {
       .from('tasks')
       .select('*')
       .eq('business_id', businessId)
+      .is('deleted_at', null)
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -343,9 +354,11 @@ export default function BusinessDashboard() {
         .insert({
           business_id: business.id,
           title: taskTitle.trim(),
-          description: taskDescription.trim(),
-          status: 'pending',
-          due_at: taskDueAt || null,
+          description: taskDescription.trim() || null,
+          status: 'open',
+          due_at: taskDueAt ? new Date(taskDueAt).toISOString() : null,
+          category: taskCategory,
+          priority: taskPriority,
         });
 
       if (insertError) throw insertError;
@@ -354,6 +367,9 @@ export default function BusinessDashboard() {
       setTaskTitle('');
       setTaskDescription('');
       setTaskDueAt('');
+      setTaskCategory('general');
+      setTaskPriority('medium');
+      setSuccessMessage('Task created');
       await fetchTasks(business.id);
     } catch (err: any) {
       setError(err.message || 'Failed to create task');
@@ -375,6 +391,24 @@ export default function BusinessDashboard() {
       await fetchTasks(business.id);
     } catch (err: any) {
       setError(err.message || 'Failed to complete task');
+    }
+  };
+
+  const cycleTaskStatus = async (taskId: string, currentStatus: string) => {
+    if (!business) return;
+    const nextStatus =
+      currentStatus === 'open' ? 'pending' :
+      currentStatus === 'pending' ? 'completed' :
+      'open';
+    try {
+      const { error: updateError } = await supabase
+        .from('tasks')
+        .update({ status: nextStatus, updated_at: new Date().toISOString() })
+        .eq('id', taskId);
+      if (updateError) throw updateError;
+      await fetchTasks(business.id);
+    } catch (err: any) {
+      setError(err.message || 'Failed to update task status');
     }
   };
 
@@ -531,14 +565,36 @@ export default function BusinessDashboard() {
     setCallPanelOpen(true);
   };
 
-  // Filter tasks based on taskFilter
-  const filteredTasks = tasks.filter(task => {
-    if (taskFilter === 'open') return task.status !== 'completed';
-    if (taskFilter === 'completed') return task.status === 'completed';
-    return true; // 'all'
-  });
+  // Filter & sort tasks
+  const filteredTasks = useMemo(() => {
+    let result = tasks.filter(t => !t.deleted_at);
 
-  // Task counts for badges
+    if (taskFilter === 'open') result = result.filter(t => t.status !== 'completed');
+    else if (taskFilter === 'completed') result = result.filter(t => t.status === 'completed');
+
+    if (categoryFilter) result = result.filter(t => (t.category || 'general') === categoryFilter);
+    if (priorityFilter) result = result.filter(t => (t.priority || 'medium') === priorityFilter);
+
+    const priorityOrder: Record<string, number> = { high: 0, medium: 1, low: 2 };
+    result.sort((a, b) => {
+      if (sortBy === 'due_at') {
+        if (!a.due_at && !b.due_at) return 0;
+        if (!a.due_at) return 1;
+        if (!b.due_at) return -1;
+        return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
+      }
+      if (sortBy === 'priority') {
+        return (priorityOrder[a.priority] ?? 1) - (priorityOrder[b.priority] ?? 1);
+      }
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
+
+    return result;
+  }, [tasks, taskFilter, categoryFilter, priorityFilter, sortBy]);
+
+  const overdueTasks = tasks.filter(t => t.due_at && new Date(t.due_at) < new Date() && t.status !== 'completed').length;
+  const dueTodayTasks = tasks.filter(t => t.due_at && isDateToday(new Date(t.due_at)) && t.status !== 'completed').length;
+  const pendingTasks = tasks.filter(t => t.status === 'pending').length;
   const openTaskCount = tasks.filter(t => t.status !== 'completed').length;
   const overdueInvoiceCount = invoices.filter(inv => new Date(inv.due_date) < new Date() && inv.status !== 'paid').length;
   const newCallCount = calls.filter(c => !c.archived).length;
@@ -1193,22 +1249,42 @@ export default function BusinessDashboard() {
               </Box>
 
               <TabPanel value={tabValue} index={0}>
-                {/* Header with filter chips and create button */}
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
+                {/* Summary cards */}
+                <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap' }}>
+                  <Card sx={{ flex: '1 1 140px', p: 2, textAlign: 'center' }}>
+                    <Typography variant="h5" fontWeight={700} color="error.main">{overdueTasks}</Typography>
+                    <Typography variant="caption" color="text.secondary">Overdue</Typography>
+                  </Card>
+                  <Card sx={{ flex: '1 1 140px', p: 2, textAlign: 'center' }}>
+                    <Typography variant="h5" fontWeight={700} color="warning.main">{dueTodayTasks}</Typography>
+                    <Typography variant="caption" color="text.secondary">Due Today</Typography>
+                  </Card>
+                  <Card sx={{ flex: '1 1 140px', p: 2, textAlign: 'center' }}>
+                    <Typography variant="h5" fontWeight={700} color="info.main">{pendingTasks}</Typography>
+                    <Typography variant="caption" color="text.secondary">Pending</Typography>
+                  </Card>
+                  <Card sx={{ flex: '1 1 140px', p: 2, textAlign: 'center' }}>
+                    <Typography variant="h5" fontWeight={700}>{openTaskCount}</Typography>
+                    <Typography variant="caption" color="text.secondary">Total Open</Typography>
+                  </Card>
+                </Box>
+
+                {/* Status filter + create button */}
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 2 }}>
                   <Box sx={{ display: 'flex', gap: 1 }}>
-                    <Chip 
+                    <Chip
                       label={`Open (${tasks.filter(t => t.status !== 'completed').length})`}
                       onClick={() => setTaskFilter('open')}
                       color={taskFilter === 'open' ? 'primary' : 'default'}
                       variant={taskFilter === 'open' ? 'filled' : 'outlined'}
                     />
-                    <Chip 
+                    <Chip
                       label={`Completed (${tasks.filter(t => t.status === 'completed').length})`}
                       onClick={() => setTaskFilter('completed')}
                       color={taskFilter === 'completed' ? 'primary' : 'default'}
                       variant={taskFilter === 'completed' ? 'filled' : 'outlined'}
                     />
-                    <Chip 
+                    <Chip
                       label={`All (${tasks.length})`}
                       onClick={() => setTaskFilter('all')}
                       color={taskFilter === 'all' ? 'primary' : 'default'}
@@ -1225,6 +1301,58 @@ export default function BusinessDashboard() {
                   </Button>
                 </Box>
 
+                {/* Category filter chips */}
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2 }}>
+                  <Chip
+                    label="All Categories"
+                    size="small"
+                    onClick={() => setCategoryFilter(null)}
+                    color={!categoryFilter ? 'primary' : 'default'}
+                    variant={!categoryFilter ? 'filled' : 'outlined'}
+                  />
+                  {TASK_CATEGORIES.map(cat => (
+                    <Chip
+                      key={cat.id}
+                      label={cat.label}
+                      size="small"
+                      onClick={() => setCategoryFilter(cat.id)}
+                      sx={{
+                        bgcolor: categoryFilter === cat.id ? cat.color : undefined,
+                        color: categoryFilter === cat.id ? '#fff' : undefined,
+                        borderColor: categoryFilter === cat.id ? cat.color : undefined,
+                        '&:hover': { opacity: 0.85 },
+                      }}
+                      variant={categoryFilter === cat.id ? 'filled' : 'outlined'}
+                    />
+                  ))}
+                </Box>
+
+                {/* Priority filter + sort */}
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 1 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Typography variant="caption" color="text.secondary">Priority:</Typography>
+                    {[{ id: null, label: 'All' }, ...TASK_PRIORITIES].map(p => (
+                      <Chip
+                        key={p.id ?? 'all'}
+                        label={p.label}
+                        size="small"
+                        onClick={() => setPriorityFilter(p.id)}
+                        variant={(p.id === null && !priorityFilter) || priorityFilter === p.id ? 'filled' : 'outlined'}
+                        color={(p.id === null && !priorityFilter) || priorityFilter === p.id ? 'primary' : 'default'}
+                        sx={{ height: 24, fontSize: '0.7rem' }}
+                      />
+                    ))}
+                  </Box>
+                  <FormControl size="small" sx={{ minWidth: 140 }}>
+                    <InputLabel>Sort by</InputLabel>
+                    <Select value={sortBy} label="Sort by" onChange={e => setSortBy(e.target.value)}>
+                      <MenuItem value="created_at">Newest First</MenuItem>
+                      <MenuItem value="due_at">Due Date</MenuItem>
+                      <MenuItem value="priority">Priority</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Box>
+
                 {filteredTasks.length === 0 ? (
                   <Box sx={{ textAlign: 'center', py: 4 }}>
                     <TaskIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
@@ -1235,85 +1363,125 @@ export default function BusinessDashboard() {
                 ) : (
                   <Box>
                     {filteredTasks.map((task) => {
-                      const isOverdue = task.due_at && new Date(task.due_at) < new Date() && task.status !== 'completed';
+                      const overdue = task.due_at && isTaskOverdue(task.due_at, task.status);
+                      const dueToday = task.due_at && isDateToday(new Date(task.due_at)) && task.status !== 'completed';
+                      const catColor = getCategoryColor(task.category || 'general');
                       return (
-                        <Card 
+                        <Card
                           key={task.id}
                           data-testid={`card-task-${task.id}`}
-                          sx={{ 
-                            p: 2, 
+                          sx={{
+                            p: 2,
                             mb: 2,
                             borderLeft: 4,
-                            borderLeftColor: isOverdue ? 'error.main' : task.status === 'completed' ? 'success.main' : 'primary.main',
+                            borderLeftColor: catColor,
                             opacity: task.status === 'completed' ? 0.7 : 1,
                             '&:hover': { boxShadow: 2 },
-                            transition: 'box-shadow 0.2s'
+                            transition: 'box-shadow 0.2s',
                           }}
                         >
                           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                             <Box sx={{ flex: 1 }}>
+                              {/* Title row */}
                               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5, flexWrap: 'wrap' }}>
-                                <Typography 
-                                  variant="subtitle1" 
-                                  fontWeight={600} 
-                                  sx={{
-                                    textDecoration: task.status === 'completed' ? 'line-through' : 'none'
-                                  }}
+                                <Typography
+                                  variant="subtitle1"
+                                  fontWeight={600}
+                                  sx={{ textDecoration: task.status === 'completed' ? 'line-through' : 'none' }}
                                 >
                                   {task.title}
                                 </Typography>
-                                <Chip 
-                                  label={task.status} 
+                                <Chip
+                                  label={getCategoryLabel(task.category || 'general')}
                                   size="small"
-                                  color={task.status === 'completed' ? 'success' : 'primary'}
+                                  sx={{ bgcolor: catColor, color: '#fff', height: 20, fontSize: '0.65rem' }}
+                                />
+                                <Chip
+                                  label={`${(TASK_PRIORITIES.find(p => p.id === task.priority) || TASK_PRIORITIES[1]).icon} ${(task.priority || 'medium').charAt(0).toUpperCase() + (task.priority || 'medium').slice(1)}`}
+                                  size="small"
                                   variant="outlined"
+                                  sx={{
+                                    height: 20,
+                                    fontSize: '0.65rem',
+                                    borderColor: task.priority === 'high' ? '#EF4444' : task.priority === 'low' ? '#10B981' : '#F59E0B',
+                                    color: task.priority === 'high' ? '#EF4444' : task.priority === 'low' ? '#10B981' : '#F59E0B',
+                                  }}
                                 />
                               </Box>
-                              
+
+                              {/* Description preview */}
                               {task.description && (
-                                <Typography 
-                                  variant="body2" 
-                                  color="text.secondary" 
-                                  sx={{ 
+                                <Typography
+                                  variant="body2"
+                                  color="text.secondary"
+                                  sx={{
                                     mb: 1,
                                     display: '-webkit-box',
                                     WebkitLineClamp: 2,
                                     WebkitBoxOrient: 'vertical',
-                                    overflow: 'hidden'
+                                    overflow: 'hidden',
                                   }}
                                 >
                                   {task.description}
                                 </Typography>
                               )}
-                              
+
+                              {/* Meta row */}
                               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
                                 {task.due_at && (
-                                  <Typography variant="caption" color={isOverdue ? 'error.main' : 'text.secondary'}>
-                                    {isOverdue ? '⚠️ Overdue: ' : 'Due: '}
-                                    {new Date(task.due_at).toLocaleDateString('en-GB', { 
-                                      day: 'numeric', 
-                                      month: 'short',
-                                      hour: '2-digit',
-                                      minute: '2-digit'
-                                    })}
+                                  <Typography
+                                    variant="caption"
+                                    fontWeight={overdue || dueToday ? 600 : 400}
+                                    color={overdue ? 'error.main' : dueToday ? 'warning.main' : 'text.secondary'}
+                                  >
+                                    {overdue ? `⚠️ Overdue: ${formatDueDate(task.due_at)}` : dueToday ? '📅 Due today' : formatDueDate(task.due_at)}
                                   </Typography>
                                 )}
-                                {task.source && (
-                                  <Chip label={task.source} size="small" variant="outlined" />
+                                {task.source === 'email' && (
+                                  <Chip label="From email" size="small" variant="outlined" color="info" sx={{ height: 20, fontSize: '0.65rem' }} />
+                                )}
+                                {task.source === 'call' && (
+                                  <Chip label="From call" size="small" variant="outlined" color="success" sx={{ height: 20, fontSize: '0.65rem' }} />
+                                )}
+                                {task.source === 'manual' && (
+                                  <Chip label="Manual" size="small" variant="outlined" sx={{ height: 20, fontSize: '0.65rem' }} />
                                 )}
                                 <Typography variant="caption" color="text.disabled">
-                                  Created: {new Date(task.created_at).toLocaleDateString('en-GB')}
+                                  {new Date(task.created_at).toLocaleDateString('en-GB')}
                                 </Typography>
                               </Box>
                             </Box>
-                            
+
                             {/* Action buttons */}
-                            <Box sx={{ display: 'flex', gap: 0.5, ml: 1 }}>
+                            <Box sx={{ display: 'flex', gap: 0.5, ml: 1, alignItems: 'center' }}>
+                              <Tooltip title={`Status: ${task.status} — click to cycle`}>
+                                <Chip
+                                  label={
+                                    task.status === 'completed' ? '✅ Done' :
+                                    task.status === 'pending' ? '⏳ Pending' :
+                                    '⬜ Open'
+                                  }
+                                  size="small"
+                                  onClick={() => cycleTaskStatus(task.id, task.status)}
+                                  sx={{
+                                    cursor: 'pointer',
+                                    fontWeight: 500,
+                                    bgcolor:
+                                      task.status === 'completed' ? '#dcfce7' :
+                                      task.status === 'pending' ? '#fef3c7' :
+                                      '#f3f4f6',
+                                    color:
+                                      task.status === 'completed' ? '#15803d' :
+                                      task.status === 'pending' ? '#92400e' :
+                                      '#4b5563',
+                                  }}
+                                />
+                              </Tooltip>
                               {task.status !== 'completed' && (
                                 <Tooltip title="Mark complete">
-                                  <IconButton 
-                                    size="small" 
-                                    onClick={() => handleCompleteTask(task.id)} 
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => handleCompleteTask(task.id)}
                                     color="success"
                                     data-testid={`button-complete-task-${task.id}`}
                                   >
@@ -2295,6 +2463,53 @@ export default function BusinessDashboard() {
             sx={{ mb: 2, mt: 1 }}
             data-testid="input-task-title"
           />
+
+          <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: 'block' }}>
+            Category
+          </Typography>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2 }}>
+            {TASK_CATEGORIES.map(cat => (
+              <Chip
+                key={cat.id}
+                label={cat.label}
+                size="small"
+                onClick={() => setTaskCategory(cat.id)}
+                sx={{
+                  bgcolor: taskCategory === cat.id ? cat.color : undefined,
+                  color: taskCategory === cat.id ? '#fff' : undefined,
+                  borderColor: taskCategory === cat.id ? cat.color : undefined,
+                  '&:hover': { opacity: 0.85 },
+                }}
+                variant={taskCategory === cat.id ? 'filled' : 'outlined'}
+              />
+            ))}
+          </Box>
+
+          <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
+            <FormControl size="small" sx={{ flex: 1 }}>
+              <InputLabel>Priority</InputLabel>
+              <Select
+                value={taskPriority}
+                label="Priority"
+                onChange={(e) => setTaskPriority(e.target.value)}
+              >
+                {TASK_PRIORITIES.map(p => (
+                  <MenuItem key={p.id} value={p.id}>{p.icon} {p.label}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <TextField
+              label="Due Date (optional)"
+              type="datetime-local"
+              size="small"
+              sx={{ flex: 1 }}
+              value={taskDueAt}
+              onChange={(e) => setTaskDueAt(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              data-testid="input-task-due-date"
+            />
+          </Box>
+
           <TextField
             margin="dense"
             label="Description (optional)"
@@ -2305,16 +2520,6 @@ export default function BusinessDashboard() {
             value={taskDescription}
             onChange={(e) => setTaskDescription(e.target.value)}
             data-testid="input-task-description"
-          />
-          <TextField
-            label="Due Date (optional)"
-            type="datetime-local"
-            fullWidth
-            value={taskDueAt}
-            onChange={(e) => setTaskDueAt(e.target.value)}
-            InputLabelProps={{ shrink: true }}
-            sx={{ mt: 2 }}
-            data-testid="input-task-due-date"
           />
         </DialogContent>
         <DialogActions>
