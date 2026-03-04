@@ -132,6 +132,11 @@ class KnowledgeBaseItemUpdate(BaseModel):
     sort_order: Optional[int] = None
 
 
+class AssignPhoneNumberRequest(BaseModel):
+    phone_number: str
+    phone_sid: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # Static data
 # ---------------------------------------------------------------------------
@@ -582,6 +587,24 @@ async def admin_toggle_receptionist_flag(
     return {"business_id": business_id, "receptionist_enabled": enabled}
 
 
+@admin_router.get("/{business_id}/config")
+async def admin_get_receptionist_config(
+    business_id: str,
+    auth_ctx=Depends(get_platform_admin_context),
+    session: Session = Depends(get_session),
+):
+    """Admin: Get receptionist config for any business."""
+    _require_platform_admin(auth_ctx, session)
+
+    cfg = session.exec(
+        select(ReceptionistConfig).where(ReceptionistConfig.business_id == business_id)
+    ).first()
+
+    if cfg:
+        return _config_to_dict(cfg)
+    return _default_config_response(business_id)
+
+
 @admin_router.put("/{business_id}/config")
 async def admin_update_receptionist_config(
     business_id: str,
@@ -614,8 +637,7 @@ async def admin_update_receptionist_config(
 @admin_router.put("/{business_id}/phone-number")
 async def admin_assign_phone_number(
     business_id: str,
-    phone_number: str = Query(...),
-    phone_sid: Optional[str] = Query(None),
+    body: AssignPhoneNumberRequest,
     auth_ctx=Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
 ):
@@ -627,19 +649,19 @@ async def admin_assign_phone_number(
     ).first()
 
     if cfg:
-        cfg.twilio_phone_number = phone_number
-        cfg.twilio_phone_sid = phone_sid
+        cfg.twilio_phone_number = body.phone_number
+        cfg.twilio_phone_sid = body.phone_sid
         cfg.updated_at = datetime.utcnow()
     else:
         cfg = ReceptionistConfig(
             business_id=business_id,
-            twilio_phone_number=phone_number,
-            twilio_phone_sid=phone_sid,
+            twilio_phone_number=body.phone_number,
+            twilio_phone_sid=body.phone_sid,
         )
 
     session.add(cfg)
     session.commit()
-    return {"business_id": business_id, "twilio_phone_number": phone_number}
+    return {"business_id": business_id, "twilio_phone_number": body.phone_number}
 
 
 @admin_router.get("/{business_id}/knowledge-base")
