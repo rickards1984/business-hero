@@ -325,6 +325,9 @@ from receptionist_api import router as receptionist_router, admin_router as rece
 app.include_router(receptionist_router)
 app.include_router(receptionist_admin_router)
 
+from receptionist_call_handler import router as receptionist_call_router
+app.include_router(receptionist_call_router)
+
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():

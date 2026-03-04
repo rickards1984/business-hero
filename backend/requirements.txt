@@ -17,3 +17,5 @@ openpyxl
 python-dateutil>=2.8.0
 # WebSocket support for OpenAI Realtime API
 websockets>=12.0
+# Twilio SDK for AI Receptionist call handling
+twilio>=9.0.0
