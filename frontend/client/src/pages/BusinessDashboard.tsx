@@ -95,6 +95,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { config } from '@/config/env';
 import DebugPanel from '@/components/DebugPanel';
 import EmailsTab from '@/components/EmailsTab';
+import ReceptionistTab from '@/components/ReceptionistTab';
 import { fetchEmailMessages } from '@/lib/emailApi';
 import {
   TASK_CATEGORIES, TASK_PRIORITIES,
@@ -173,6 +174,7 @@ export default function BusinessDashboard() {
   
   const [tabValue, setTabValue] = useState(() => {
     const tab = searchParams.get('tab');
+    if (tab === 'receptionist') return 4;
     if (tab === 'emails') return 3;
     if (tab === 'invoices') return 2;
     if (tab === 'calls') return 1;
@@ -1154,6 +1156,10 @@ export default function BusinessDashboard() {
                       <ListItemIcon><PaletteIcon fontSize="small" /></ListItemIcon>
                       <ListItemText>Branding</ListItemText>
                     </MenuItem>
+                    <MenuItem onClick={() => { setSettingsAnchor(null); setTabValue(4); }}>
+                      <ListItemIcon><SmartToyIcon fontSize="small" /></ListItemIcon>
+                      <ListItemText>AI Receptionist</ListItemText>
+                    </MenuItem>
                     <MenuItem onClick={() => { setSettingsAnchor(null); navigate('/app/email/outbox'); }}>
                       <ListItemIcon><OutboxIcon fontSize="small" /></ListItemIcon>
                       <ListItemText>Email Outbox</ListItemText>
@@ -1244,6 +1250,16 @@ export default function BusinessDashboard() {
                       </Box>
                     }
                     data-testid="tab-emails"
+                  />
+                  <Tab
+                    icon={<SmartToyIcon />}
+                    iconPosition="start"
+                    label={
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        Receptionist
+                      </Box>
+                    }
+                    data-testid="tab-receptionist"
                   />
                 </Tabs>
               </Box>
@@ -2103,6 +2119,10 @@ export default function BusinessDashboard() {
 
               <TabPanel value={tabValue} index={3}>
                 {business && <EmailsTab businessId={business.id} />}
+              </TabPanel>
+
+              <TabPanel value={tabValue} index={4}>
+                {business && <ReceptionistTab businessId={business.id} />}
               </TabPanel>
             </Paper>
           </>
