@@ -49,6 +49,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type BusinessMember } from '@/lib/supabase';
 import { apiRequest } from '@/lib/queryClient';
 import DebugPanel from '@/components/DebugPanel';
+import { ReceptionistStatusChip } from '@/components/AdminReceptionistSection';
 
 const TIMEZONES = [
   'America/New_York',
@@ -127,6 +128,8 @@ export default function AdminDashboard() {
   const [filterAwaz, setFilterAwaz] = useState('all');
   const [filterEmail, setFilterEmail] = useState('all');
   const [filterCalendar, setFilterCalendar] = useState('all');
+  const [filterReceptionist, setFilterReceptionist] = useState('all');
+  const [receptionistOverview, setReceptionistOverview] = useState<Record<string, { enabled: boolean; config_exists: boolean }>>({});
   const [toggleDialogOpen, setToggleDialogOpen] = useState(false);
   const [toggleTarget, setToggleTarget] = useState<BusinessSummary | null>(null);
 
@@ -169,6 +172,17 @@ export default function AdminDashboard() {
         business_name: m.businesses?.name,
       }));
       setMembers(formattedMembers);
+
+      // Fetch receptionist overview (non-blocking — don't fail the whole page)
+      try {
+        const recRes = await apiRequest('GET', '/v1/admin/receptionist/overview');
+        const recData: any[] = await recRes.json();
+        const recMap: Record<string, { enabled: boolean; config_exists: boolean }> = {};
+        for (const item of recData) {
+          recMap[item.business_id] = { enabled: !!item.enabled, config_exists: !!item.config_exists };
+        }
+        setReceptionistOverview(recMap);
+      } catch { /* receptionist overview is optional */ }
     } catch (err: any) {
       setError(err.message || 'Failed to fetch data');
     } finally {
@@ -214,6 +228,12 @@ export default function AdminDashboard() {
         const calValue = filterCalendar === 'connected';
         if (Boolean(biz.calendar_connected) !== calValue) return false;
       }
+      if (filterReceptionist !== 'all') {
+        const rec = receptionistOverview[biz.id];
+        if (filterReceptionist === 'active' && !(rec?.enabled)) return false;
+        if (filterReceptionist === 'configured' && !(rec?.config_exists && !rec?.enabled)) return false;
+        if (filterReceptionist === 'not_set_up' && rec?.config_exists) return false;
+      }
       return true;
     });
   }, [
@@ -225,6 +245,8 @@ export default function AdminDashboard() {
     filterAwaz,
     filterEmail,
     filterCalendar,
+    filterReceptionist,
+    receptionistOverview,
     memberEmailMap,
   ]);
 
@@ -573,6 +595,19 @@ export default function AdminDashboard() {
                       <MenuItem value="not_connected">Not connected</MenuItem>
                     </Select>
                   </FormControl>
+                  <FormControl sx={{ minWidth: 180 }}>
+                    <InputLabel>Receptionist</InputLabel>
+                    <Select
+                      value={filterReceptionist}
+                      label="Receptionist"
+                      onChange={(e) => setFilterReceptionist(e.target.value)}
+                    >
+                      <MenuItem value="all">All</MenuItem>
+                      <MenuItem value="active">Active</MenuItem>
+                      <MenuItem value="configured">Configured</MenuItem>
+                      <MenuItem value="not_set_up">Not set up</MenuItem>
+                    </Select>
+                  </FormControl>
                 </Box>
               </Paper>
 
@@ -586,6 +621,7 @@ export default function AdminDashboard() {
                       <TableCell>Awaz</TableCell>
                       <TableCell>Email</TableCell>
                       <TableCell>Calendar</TableCell>
+                      <TableCell>Receptionist</TableCell>
                       <TableCell>Open tickets</TableCell>
                       <TableCell>Last activity</TableCell>
                       <TableCell align="right">Actions</TableCell>
@@ -594,7 +630,7 @@ export default function AdminDashboard() {
                   <TableBody>
                     {filteredBusinesses.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={9} align="center" sx={{ py: 4 }}>
+                        <TableCell colSpan={10} align="center" sx={{ py: 4 }}>
                           <Typography color="text.secondary">No businesses found</Typography>
                         </TableCell>
                       </TableRow>
@@ -637,6 +673,9 @@ export default function AdminDashboard() {
                               size="small"
                               color={business.calendar_connected ? 'success' : 'default'}
                             />
+                          </TableCell>
+                          <TableCell>
+                            <ReceptionistStatusChip overview={receptionistOverview[business.id]} />
                           </TableCell>
                           <TableCell>{business.open_ticket_count}</TableCell>
                           <TableCell>

@@ -26,6 +26,7 @@ import {
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import { supabase, type Business, type BusinessMember } from '@/lib/supabase';
 import { apiRequest } from '@/lib/queryClient';
+import AdminReceptionistSection from '@/components/AdminReceptionistSection';
 
 interface AwazIntegration {
   webhook_url: string;
@@ -576,6 +577,7 @@ export default function AdminBusinessDetail() {
                   <Chip label={`Email: ${health.business.feature_flags?.email ? 'On' : 'Off'}`} size="small" />
                   <Chip label={`Calendar: ${health.business.feature_flags?.calendar ? 'On' : 'Off'}`} size="small" />
                   <Chip label={`Voice: ${health.business.feature_flags?.voice ? 'On' : 'Off'}`} size="small" />
+                  <Chip label={`Receptionist: ${health.business.feature_flags?.receptionist ? 'On' : 'Off'}`} size="small" />
                 </Box>
 
                 <Divider />
@@ -607,6 +609,15 @@ export default function AdminBusinessDetail() {
                     </Typography>
                     <Button variant="outlined" size="small" onClick={handleCalendarSync}>Force calendar sync</Button>
                   </Box>
+                  {id && (
+                    <Box sx={{ display: 'grid', gap: 1 }}>
+                      <AdminReceptionistSection
+                        businessId={id}
+                        featureFlags={health.business.feature_flags}
+                        onFeatureFlagChange={() => { loadBusiness(); loadHealth(); }}
+                      />
+                    </Box>
+                  )}
                 </Box>
 
                 <Divider />
