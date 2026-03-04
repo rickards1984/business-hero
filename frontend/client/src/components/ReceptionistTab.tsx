@@ -213,6 +213,16 @@ export default function ReceptionistTab({ businessId }: ReceptionistTabProps) {
   const [kbDeleteConfirm, setKbDeleteConfirm] = useState<string | null>(null);
   const [configExpanded, setConfigExpanded] = useState(true);
 
+  // Setup wizard state (Option B — guided setup card)
+  const [setupStep, setSetupStep] = useState(0);
+  const [setupVoice, setSetupVoice] = useState('shimmer');
+  const [setupGreeting, setSetupGreeting] = useState('Hello, thank you for calling {business_name}. How can I help you today?');
+  const [setupFaq1, setSetupFaq1] = useState('');
+  const [setupFaq2, setSetupFaq2] = useState('');
+  const [setupFaq3, setSetupFaq3] = useState('');
+  const [setupSaving, setSetupSaving] = useState(false);
+  const [setupDismissed, setSetupDismissed] = useState(false);
+
   // ---- Data fetching ----
   const showSnack = useCallback((message: string, severity: 'success' | 'error') => {
     setSnackbar({ open: true, message, severity });
@@ -389,6 +399,38 @@ export default function ReceptionistTab({ businessId }: ReceptionistTabProps) {
     }
   };
 
+  // ---- Setup wizard: complete ----
+  const handleCompleteSetup = async () => {
+    setSetupSaving(true);
+    try {
+      await apiRequest('PUT', '/v1/receptionist/config', {
+        voice: setupVoice,
+        greeting_message: setupGreeting,
+      });
+
+      const faqs = [
+        { category: 'hours', title: 'Opening Hours', content: setupFaq1 },
+        { category: 'services', title: 'Services Offered', content: setupFaq2 },
+        { category: 'pricing', title: 'Pricing Information', content: setupFaq3 },
+      ];
+      for (const faq of faqs) {
+        if (faq.content.trim()) {
+          try {
+            await apiRequest('POST', '/v1/receptionist/knowledge-base', faq);
+          } catch { /* silently skip individual FAQ failures */ }
+        }
+      }
+
+      showSnack('Your AI receptionist is configured! An admin will assign a phone number to activate it.', 'success');
+      await fetchConfig();
+      await fetchKB();
+    } catch (err: any) {
+      showSnack(`Setup failed: ${err.message}`, 'error');
+    } finally {
+      setSetupSaving(false);
+    }
+  };
+
   // ---- Filtered knowledge base items ----
   const filteredKB = useMemo(() => {
     if (kbFilter === 'all') return kbItems;
@@ -429,16 +471,205 @@ export default function ReceptionistTab({ businessId }: ReceptionistTabProps) {
     return (
       <Card sx={{ p: 4, textAlign: 'center' }}>
         <SmartToyIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 2 }} />
-        <Typography variant="h6" gutterBottom>AI Receptionist is not available</Typography>
+        <Typography variant="h6" gutterBottom>AI Receptionist</Typography>
         <Typography color="text.secondary">
-          This feature hasn't been enabled for your business yet. Contact support to get started.
+          This feature isn't available on your current plan. Contact us to learn more about AI call handling.
         </Typography>
       </Card>
     );
   }
 
+  // ---- Setup wizard card (Option B) ----
+  if (!configExists && !setupDismissed) {
+    const selectedVoice = voices.find((v) => v.id === setupVoice);
+    return (
+      <Box>
+        <Card sx={{ p: 4, mb: 3 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+              <SmartToyIcon color="primary" />
+              <Typography variant="h6" fontWeight={600}>Get Started with Your AI Receptionist</Typography>
+            </Box>
+            <Button size="small" onClick={() => setSetupDismissed(true)} sx={{ textTransform: 'none', color: 'text.secondary' }}>
+              I'll do this later
+            </Button>
+          </Box>
+          <Typography color="text.secondary" sx={{ mb: 3 }}>
+            Set up your AI receptionist in 3 easy steps to start answering calls automatically.
+          </Typography>
+
+          <Typography variant="subtitle2" color="primary" sx={{ mb: 2 }}>
+            Step {setupStep + 1} of 3
+          </Typography>
+
+          {setupStep === 0 && (
+            <Box>
+              <Typography variant="subtitle1" fontWeight={600} sx={{ mb: 2 }}>1. Choose a Voice</Typography>
+              <FormControl size="small" fullWidth sx={{ mb: 2 }}>
+                <InputLabel>Voice</InputLabel>
+                <Select value={setupVoice} label="Voice" onChange={(e) => setSetupVoice(e.target.value)}>
+                  {voices.length > 0
+                    ? voices.map((v) => (
+                        <MenuItem key={v.id} value={v.id}>{v.name} — {v.description}</MenuItem>
+                      ))
+                    : <MenuItem value="shimmer">Shimmer</MenuItem>}
+                </Select>
+              </FormControl>
+              {selectedVoice && (
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  {selectedVoice.name} — {selectedVoice.description}
+                </Typography>
+              )}
+              <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
+                <Button variant="contained" onClick={() => setSetupStep(1)}>Next</Button>
+              </Box>
+            </Box>
+          )}
+
+          {setupStep === 1 && (
+            <Box>
+              <Typography variant="subtitle1" fontWeight={600} sx={{ mb: 2 }}>2. Set Your Greeting</Typography>
+              <TextField
+                multiline
+                minRows={2}
+                maxRows={4}
+                fullWidth
+                size="small"
+                value={setupGreeting}
+                onChange={(e) => setSetupGreeting(e.target.value.slice(0, 200))}
+                helperText={`${setupGreeting.length}/200`}
+                sx={{ mb: 2 }}
+              />
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                <Button onClick={() => setSetupStep(0)}>Back</Button>
+                <Button variant="contained" onClick={() => setSetupStep(2)}>Next</Button>
+              </Box>
+            </Box>
+          )}
+
+          {setupStep === 2 && (
+            <Box>
+              <Typography variant="subtitle1" fontWeight={600} sx={{ mb: 2 }}>
+                3. Add your top 3 FAQs
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Help your AI receptionist answer caller questions accurately. Leave blank to skip.
+              </Typography>
+
+              <Typography variant="body2" fontWeight={500} sx={{ mb: 0.5 }}>What are your opening hours?</Typography>
+              <TextField
+                size="small"
+                fullWidth
+                multiline
+                minRows={1}
+                value={setupFaq1}
+                onChange={(e) => setSetupFaq1(e.target.value)}
+                placeholder="e.g., Monday to Friday 9am-5pm, Saturday 10am-2pm"
+                sx={{ mb: 2 }}
+              />
+
+              <Typography variant="body2" fontWeight={500} sx={{ mb: 0.5 }}>What services do you offer?</Typography>
+              <TextField
+                size="small"
+                fullWidth
+                multiline
+                minRows={1}
+                value={setupFaq2}
+                onChange={(e) => setSetupFaq2(e.target.value)}
+                placeholder="e.g., We offer personal training, group classes, and nutrition plans"
+                sx={{ mb: 2 }}
+              />
+
+              <Typography variant="body2" fontWeight={500} sx={{ mb: 0.5 }}>What are your prices?</Typography>
+              <TextField
+                size="small"
+                fullWidth
+                multiline
+                minRows={1}
+                value={setupFaq3}
+                onChange={(e) => setSetupFaq3(e.target.value)}
+                placeholder="e.g., Monthly membership £30, Annual £300, Student £20/month"
+                sx={{ mb: 2 }}
+              />
+
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                <Button onClick={() => setSetupStep(1)}>Back</Button>
+                <Box sx={{ display: 'flex', gap: 1 }}>
+                  <Button onClick={() => setSetupDismissed(true)} sx={{ textTransform: 'none' }}>
+                    Skip for now
+                  </Button>
+                  <Button
+                    variant="contained"
+                    onClick={handleCompleteSetup}
+                    disabled={setupSaving}
+                    startIcon={setupSaving ? <CircularProgress size={16} color="inherit" /> : undefined}
+                  >
+                    {setupSaving ? 'Saving...' : 'Complete Setup'}
+                  </Button>
+                </Box>
+              </Box>
+            </Box>
+          )}
+        </Card>
+
+        {/* Snackbar for setup */}
+        <Snackbar
+          open={snackbar.open}
+          autoHideDuration={6000}
+          onClose={() => setSnackbar((s) => ({ ...s, open: false }))}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        >
+          <Alert severity={snackbar.severity} onClose={() => setSnackbar((s) => ({ ...s, open: false }))}>
+            {snackbar.message}
+          </Alert>
+        </Snackbar>
+      </Box>
+    );
+  }
+
+  // ---- Bare empty state if setup was dismissed ----
+  if (!configExists && setupDismissed) {
+    return (
+      <Box>
+        <Card sx={{ p: 4, textAlign: 'center' }}>
+          <SmartToyIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 2 }} />
+          <Typography variant="h6" gutterBottom>Your AI Receptionist isn't set up yet</Typography>
+          <Typography color="text.secondary" sx={{ mb: 2 }}>
+            Set up your AI receptionist to automatically answer calls, take messages, and help callers 24/7.
+          </Typography>
+          <Button variant="contained" onClick={() => { setSetupDismissed(false); setSetupStep(0); }}>
+            Get Started
+          </Button>
+        </Card>
+      </Box>
+    );
+  }
+
   return (
     <Box>
+      {/* ================================================================
+          Contextual banners based on config state
+          ================================================================ */}
+      {configExists && config && !config.twilio_phone_number && (
+        <Alert severity="info" sx={{ mb: 2 }} icon={<CheckCircleIcon />}>
+          Your AI receptionist is configured and ready to go. A phone number will be assigned shortly — we'll let you know when it's live.
+        </Alert>
+      )}
+
+      {configExists && config && config.twilio_phone_number && !config.enabled && (
+        <Alert
+          severity="warning"
+          sx={{ mb: 2 }}
+          action={
+            <Button color="inherit" size="small" onClick={handleToggleEnabled}>
+              Turn On
+            </Button>
+          }
+        >
+          Your AI receptionist is currently turned off. Switch it on to start answering calls.
+        </Alert>
+      )}
+
       {/* ================================================================
           SECTION 1: Status & Quick Stats
           ================================================================ */}
@@ -459,12 +690,12 @@ export default function ReceptionistTab({ businessId }: ReceptionistTabProps) {
                   color={config.enabled ? 'success' : 'default'}
                 />
               </Box>
-            ) : configExists ? (
+            ) : (
               <Typography variant="body2" color="text.secondary">
                 No phone number assigned — contact support
               </Typography>
-            ) : null}
-            {configExists && config && (
+            )}
+            {config && (
               <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
                 <Typography variant="body2" color="text.secondary">
                   Voice: <strong>{config.voice}</strong>
@@ -478,7 +709,7 @@ export default function ReceptionistTab({ businessId }: ReceptionistTabProps) {
               </Box>
             )}
           </Box>
-          {configExists && config ? (
+          {config && (
             <FormControlLabel
               control={
                 <Switch
@@ -491,10 +722,6 @@ export default function ReceptionistTab({ businessId }: ReceptionistTabProps) {
               labelPlacement="start"
               sx={{ mr: 0 }}
             />
-          ) : (
-            <Button variant="contained" onClick={() => { setConfigExpanded(true); handleSaveConfig(); }}>
-              Get Started
-            </Button>
           )}
         </Box>
       </Card>
