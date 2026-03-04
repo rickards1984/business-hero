@@ -133,8 +133,8 @@ class KnowledgeBaseItemUpdate(BaseModel):
 
 
 class AssignPhoneNumberRequest(BaseModel):
-    phone_number: str
-    phone_sid: Optional[str] = None
+    twilio_phone_number: str
+    twilio_phone_sid: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -649,19 +649,19 @@ async def admin_assign_phone_number(
     ).first()
 
     if cfg:
-        cfg.twilio_phone_number = body.phone_number
-        cfg.twilio_phone_sid = body.phone_sid
+        cfg.twilio_phone_number = body.twilio_phone_number
+        cfg.twilio_phone_sid = body.twilio_phone_sid
         cfg.updated_at = datetime.utcnow()
     else:
         cfg = ReceptionistConfig(
             business_id=business_id,
-            twilio_phone_number=body.phone_number,
-            twilio_phone_sid=body.phone_sid,
+            twilio_phone_number=body.twilio_phone_number,
+            twilio_phone_sid=body.twilio_phone_sid,
         )
 
     session.add(cfg)
     session.commit()
-    return {"business_id": business_id, "twilio_phone_number": body.phone_number}
+    return {"business_id": business_id, "twilio_phone_number": body.twilio_phone_number}
 
 
 @admin_router.get("/{business_id}/knowledge-base")
