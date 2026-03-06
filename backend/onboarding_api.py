@@ -15,6 +15,7 @@ All endpoints under /v1/admin/onboarding/, guarded by platform-admin auth.
 """
 
 import logging
+import secrets
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
@@ -214,11 +215,12 @@ async def start_onboarding(
 
     biz_row = session.execute(
         text("""
-            INSERT INTO businesses (name, timezone, plan_tier, is_active, feature_flags, limits, onboarding_completed)
-            VALUES (:name, :timezone, :plan_tier, FALSE, :feature_flags, :limits, FALSE)
+            INSERT INTO businesses (name, timezone, plan_tier, is_active, feature_flags, limits, onboarding_completed, api_key)
+            VALUES (:name, :timezone, :plan_tier, FALSE, :feature_flags, :limits, FALSE, :api_key)
             RETURNING *
         """),
         {
+            "api_key": f"sk_{secrets.token_urlsafe(32)}",
             "name": step.name,
             "timezone": step.timezone,
             "plan_tier": step.plan_tier,
