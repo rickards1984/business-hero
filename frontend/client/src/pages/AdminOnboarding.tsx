@@ -23,6 +23,7 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import AddIcon from '@mui/icons-material/Add';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
+import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import { useAuth } from '@/contexts/AuthContext';
 import { apiRequest } from '@/lib/queryClient';
 
@@ -125,6 +126,31 @@ export default function AdminOnboarding() {
 
       <Container maxWidth="lg" sx={{ py: 4 }}>
         {error && <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError('')}>{error}</Alert>}
+
+        {/* Resume banner for in-progress sessions */}
+        {inProgress.length > 0 && (
+          <Alert
+            severity="warning"
+            icon={<WarningAmberIcon />}
+            action={
+              <Button
+                color="inherit"
+                size="small"
+                variant="outlined"
+                startIcon={<PlayArrowIcon />}
+                onClick={() => navigate(`/admin/onboarding/${inProgress[0].business_id}`)}
+              >
+                Resume Onboarding
+              </Button>
+            }
+            sx={{ mb: 3 }}
+          >
+            <Typography variant="subtitle2">You have an onboarding in progress</Typography>
+            <Typography variant="body2">
+              {inProgress[0].business_name} — {inProgress[0].checklist_completed}/{inProgress[0].checklist_total} checklist items completed
+            </Typography>
+          </Alert>
+        )}
 
         {/* Stats cards */}
         <Box sx={{ display: 'flex', gap: 2, mb: 4, flexWrap: 'wrap' }}>

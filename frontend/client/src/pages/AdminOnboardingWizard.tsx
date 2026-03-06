@@ -249,6 +249,15 @@ export default function AdminOnboardingWizard() {
       if (wd.plan_features) {
         setFeatureFlags(wd.plan_features.feature_flags || {});
       }
+
+      const planId = wd.business_details?.plan_tier || 'starter';
+      const matchedPlan = plans.find((p) => p.id === planId);
+      if (matchedPlan) {
+        setPlanFeatureDefaults({ ...matchedPlan.features });
+        if (!wd.plan_features) {
+          setFeatureFlags({ ...matchedPlan.features });
+        }
+      }
       if (wd.email_setup) {
         setEmailNotes(wd.email_setup.notes || '');
       }
@@ -274,6 +283,10 @@ export default function AdminOnboardingWizard() {
 
       const stepIdx = STEP_ORDER.indexOf(data.current_step);
       if (stepIdx >= 0) setCurrentStepIdx(stepIdx);
+
+      if (data.current_step === 'review_activate') {
+        fetchChecklist(bId);
+      }
     } catch {
       setError('No active onboarding session found for this business.');
     }
@@ -300,7 +313,8 @@ export default function AdminOnboardingWizard() {
           plan_tier: bizPlan,
         });
         const data = await res.json();
-        setBusinessId(data.business.id);
+        const newBizId = data.business.id;
+        setBusinessId(newBizId);
         setSession(data.session);
 
         const plan = plans.find((p) => p.id === bizPlan);
@@ -310,6 +324,8 @@ export default function AdminOnboardingWizard() {
         }
 
         setRecGreeting(`Hello, thank you for calling ${bizName.trim()}. How can I help you today?`);
+
+        navigate(`/admin/onboarding/${newBizId}`, { replace: true });
         advanceToNext(currentStepIdx);
         return;
       }
