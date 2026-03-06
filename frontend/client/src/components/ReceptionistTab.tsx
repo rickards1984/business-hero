@@ -7,7 +7,6 @@ import {
   TextField,
   CircularProgress,
   Button,
-  InputAdornment,
   IconButton,
   Snackbar,
   Alert,
@@ -21,7 +20,6 @@ import {
   MenuItem,
   Switch,
   FormControlLabel,
-  Drawer,
   Divider,
   Tooltip,
   Collapse,
@@ -29,9 +27,6 @@ import {
 import {
   SmartToy as SmartToyIcon,
   Phone as PhoneIcon,
-  Search as SearchIcon,
-  Clear as ClearIcon,
-  Close as CloseIcon,
   ChevronRight as ChevronRightIcon,
   Add as AddIcon,
   Edit as EditIcon,
@@ -40,7 +35,6 @@ import {
   ExpandLess as ExpandLessIcon,
   Save as SaveIcon,
   CheckCircle as CheckCircleIcon,
-  Cancel as CancelIcon,
   SwapHoriz as SwapHorizIcon,
   MicNone as MicNoneIcon,
   RecordVoiceOver as RecordVoiceOverIcon,
@@ -51,6 +45,7 @@ import { apiRequest } from '@/lib/queryClient';
 
 interface ReceptionistTabProps {
   businessId: string;
+  onViewCalls?: () => void;
 }
 
 interface ReceptionistConfig {
@@ -106,22 +101,6 @@ interface KBItem {
   updated_at: string;
 }
 
-interface ReceptionistCall {
-  id: string;
-  business_id: string;
-  caller_number: string;
-  caller_name: string | null;
-  started_at: string | null;
-  ended_at: string | null;
-  duration_seconds: number | null;
-  transcript: string | null;
-  summary: string | null;
-  intent: string | null;
-  outcome: string | null;
-  recording_url: string | null;
-  created_at: string;
-}
-
 const DEFAULT_HOURS: Record<string, { enabled: boolean; open: string; close: string }> = {
   monday: { enabled: true, open: '09:00', close: '17:00' },
   tuesday: { enabled: true, open: '09:00', close: '17:00' },
@@ -134,42 +113,14 @@ const DEFAULT_HOURS: Record<string, { enabled: boolean; open: string; close: str
 
 const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
 
-const OUTCOME_STYLES: Record<string, { color: 'success' | 'primary' | 'warning' | 'error' | 'default'; icon: string }> = {
-  handled: { color: 'success', icon: '✅' },
-  transferred: { color: 'primary', icon: '🔄' },
-  voicemail: { color: 'warning', icon: '📩' },
-  missed: { color: 'error', icon: '❌' },
-  error: { color: 'error', icon: '⚠️' },
-};
-
 function formatDuration(seconds: number | null): string {
-  if (!seconds) return '—';
+  if (!seconds) return '\u2014';
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-function groupCallsByDate(calls: ReceptionistCall[]): Record<string, ReceptionistCall[]> {
-  const groups: Record<string, ReceptionistCall[]> = {};
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const yesterday = new Date(today);
-  yesterday.setDate(yesterday.getDate() - 1);
-
-  for (const call of calls) {
-    const d = new Date(call.created_at);
-    d.setHours(0, 0, 0, 0);
-    let label: string;
-    if (d.getTime() === today.getTime()) label = 'Today';
-    else if (d.getTime() === yesterday.getTime()) label = 'Yesterday';
-    else label = d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
-    if (!groups[label]) groups[label] = [];
-    groups[label].push(call);
-  }
-  return groups;
-}
-
-export default function ReceptionistTab({ businessId }: ReceptionistTabProps) {
+export default function ReceptionistTab({ businessId, onViewCalls }: ReceptionistTabProps) {
   // ---- State ----
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -179,7 +130,6 @@ export default function ReceptionistTab({ businessId }: ReceptionistTabProps) {
   const [voices, setVoices] = useState<VoiceOption[]>([]);
   const [kbItems, setKbItems] = useState<KBItem[]>([]);
   const [kbCategories, setKbCategories] = useState<string[]>([]);
-  const [calls, setCalls] = useState<ReceptionistCall[]>([]);
   const [featureEnabled, setFeatureEnabled] = useState(true);
 
   // Form state (mirrors config for editing)
@@ -198,10 +148,6 @@ export default function ReceptionistTab({ businessId }: ReceptionistTabProps) {
 
   // UI state
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' });
-  const [callFilter, setCallFilter] = useState<'today' | 'week' | 'month' | 'all'>('all');
-  const [callSearch, setCallSearch] = useState('');
-  const [selectedCall, setSelectedCall] = useState<ReceptionistCall | null>(null);
-  const [callDrawerOpen, setCallDrawerOpen] = useState(false);
   const [kbFilter, setKbFilter] = useState('all');
   const [kbModalOpen, setKbModalOpen] = useState(false);
   const [kbEditing, setKbEditing] = useState<KBItem | null>(null);
@@ -287,24 +233,15 @@ export default function ReceptionistTab({ businessId }: ReceptionistTabProps) {
     } catch { /* non-critical */ }
   }, []);
 
-  const fetchCalls = useCallback(async () => {
-    try {
-      const res = await apiRequest('GET', `/v1/receptionist/calls?period=${callFilter}&limit=50`);
-      setCalls(await res.json());
-    } catch { /* may fail if feature not enabled */ }
-  }, [callFilter]);
-
   useEffect(() => {
     let mounted = true;
     (async () => {
       setLoading(true);
-      await Promise.all([fetchConfig(), fetchStats(), fetchVoices(), fetchKB(), fetchKBCategories(), fetchCalls()]);
+      await Promise.all([fetchConfig(), fetchStats(), fetchVoices(), fetchKB(), fetchKBCategories()]);
       if (mounted) setLoading(false);
     })();
     return () => { mounted = false; };
-  }, [fetchConfig, fetchStats, fetchVoices, fetchKB, fetchKBCategories, fetchCalls]);
-
-  useEffect(() => { fetchCalls(); }, [callFilter, fetchCalls]);
+  }, [fetchConfig, fetchStats, fetchVoices, fetchKB, fetchKBCategories]);
 
   // ---- Toggle enabled ----
   const handleToggleEnabled = async () => {
@@ -436,20 +373,6 @@ export default function ReceptionistTab({ businessId }: ReceptionistTabProps) {
     if (kbFilter === 'all') return kbItems;
     return kbItems.filter((item) => item.category === kbFilter);
   }, [kbItems, kbFilter]);
-
-  // ---- Filtered + grouped calls ----
-  const filteredCalls = useMemo(() => {
-    if (!callSearch.trim()) return calls;
-    const q = callSearch.toLowerCase();
-    return calls.filter(
-      (c) =>
-        (c.caller_name || '').toLowerCase().includes(q) ||
-        (c.caller_number || '').includes(q) ||
-        (c.summary || '').toLowerCase().includes(q),
-    );
-  }, [calls, callSearch]);
-
-  const groupedCalls = useMemo(() => groupCallsByDate(filteredCalls), [filteredCalls]);
 
   // ---- Unique KB categories for filter tabs ----
   const usedKBCategories = useMemo(() => {
@@ -1133,237 +1056,42 @@ export default function ReceptionistTab({ businessId }: ReceptionistTabProps) {
       </Dialog>
 
       {/* ================================================================
-          SECTION 4: Recent Receptionist Calls
+          SECTION 4: Recent Activity (compact summary + link to Calls tab)
           ================================================================ */}
       <Card sx={{ p: 3 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
           <PhoneIcon color="primary" fontSize="small" />
-          <Typography variant="h6" fontWeight={600}>Recent Receptionist Calls</Typography>
+          <Typography variant="h6" fontWeight={600}>Recent Activity</Typography>
         </Box>
 
-        {/* Time filter chips */}
-        <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
-          {[
-            { value: 'today' as const, label: 'Today' },
-            { value: 'week' as const, label: 'This Week' },
-            { value: 'month' as const, label: 'This Month' },
-            { value: 'all' as const, label: 'All Time' },
-          ].map((f) => (
-            <Chip
-              key={f.value}
-              label={f.label}
-              onClick={() => setCallFilter(f.value)}
-              color={callFilter === f.value ? 'primary' : 'default'}
-              variant={callFilter === f.value ? 'filled' : 'outlined'}
-              size="small"
-            />
-          ))}
+        <Box sx={{ display: 'flex', gap: 3, flexWrap: 'wrap', mb: 2 }}>
+          <Typography variant="body2" color="text.secondary">
+            Today: <strong>{stats?.today_calls ?? 0} calls</strong>
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            This week: <strong>{stats?.this_week_calls ?? 0} calls</strong>
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Handled: <strong>
+              {stats && stats.total_receptionist_calls > 0
+                ? `${Math.round((stats.handled_calls / stats.total_receptionist_calls) * 100)}%`
+                : '\u2014'}
+            </strong>
+          </Typography>
         </Box>
 
-        {/* Search */}
-        <TextField
-          placeholder="Search by caller name, number, or summary..."
-          value={callSearch}
-          onChange={(e) => setCallSearch(e.target.value)}
-          size="small"
-          fullWidth
-          sx={{ mb: 2 }}
-          InputProps={{
-            startAdornment: (
-              <InputAdornment position="start"><SearchIcon color="action" /></InputAdornment>
-            ),
-            endAdornment: callSearch && (
-              <InputAdornment position="end">
-                <IconButton size="small" onClick={() => setCallSearch('')}><ClearIcon fontSize="small" /></IconButton>
-              </InputAdornment>
-            ),
-          }}
-        />
-
-        {/* Call list */}
-        {filteredCalls.length === 0 ? (
-          <Card variant="outlined" sx={{ p: 4, textAlign: 'center' }}>
-            <SmartToyIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 2 }} />
-            <Typography color="text.secondary">
-              {callSearch || callFilter !== 'all'
-                ? 'No calls match your filters'
-                : 'No receptionist calls yet. Once your AI receptionist is active and receiving calls, they\'ll appear here with full transcripts.'}
-            </Typography>
-          </Card>
-        ) : (
-          <Box>
-            {Object.entries(groupedCalls).map(([date, dateCalls]) => (
-              <Box key={date} sx={{ mb: 3 }}>
-                <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1, ml: 1 }}>
-                  {date} ({dateCalls.length} {dateCalls.length === 1 ? 'call' : 'calls'})
-                </Typography>
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                  {dateCalls.map((call) => (
-                    <Card
-                      key={call.id}
-                      sx={{
-                        p: 2,
-                        cursor: 'pointer',
-                        '&:hover': { boxShadow: 2, bgcolor: 'action.hover' },
-                        transition: 'all 0.2s',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 2,
-                      }}
-                      onClick={() => { setSelectedCall(call); setCallDrawerOpen(true); }}
-                    >
-                      {/* AI Icon */}
-                      <Box
-                        sx={{
-                          width: 40,
-                          height: 40,
-                          borderRadius: '50%',
-                          bgcolor: 'primary.light',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          flexShrink: 0,
-                        }}
-                      >
-                        <SmartToyIcon color="primary" fontSize="small" />
-                      </Box>
-
-                      {/* Main content */}
-                      <Box sx={{ flex: 1, minWidth: 0 }}>
-                        <Typography variant="subtitle1" fontWeight={600} noWrap>
-                          {call.caller_name || 'Unknown Caller'}
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary" noWrap>
-                          {call.caller_number || 'No number'}
-                          {call.summary && ` · ${call.summary.substring(0, 60)}...`}
-                        </Typography>
-                      </Box>
-
-                      {/* Right side */}
-                      <Box sx={{ textAlign: 'right', flexShrink: 0 }}>
-                        <Typography variant="caption" color="text.secondary">
-                          {new Date(call.created_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-                        </Typography>
-                        {call.outcome && (
-                          <Box>
-                            <Chip
-                              label={`${OUTCOME_STYLES[call.outcome]?.icon || ''} ${call.outcome}`}
-                              size="small"
-                              color={OUTCOME_STYLES[call.outcome]?.color || 'default'}
-                              variant="outlined"
-                            />
-                          </Box>
-                        )}
-                      </Box>
-
-                      <ChevronRightIcon color="action" />
-                    </Card>
-                  ))}
-                </Box>
-              </Box>
-            ))}
-          </Box>
+        {onViewCalls && (
+          <Button
+            variant="text"
+            size="small"
+            endIcon={<ChevronRightIcon />}
+            onClick={onViewCalls}
+            sx={{ textTransform: 'none' }}
+          >
+            View all calls
+          </Button>
         )}
       </Card>
-
-      {/* ================================================================
-          Call Detail Drawer
-          ================================================================ */}
-      <Drawer anchor="right" open={callDrawerOpen} onClose={() => { setCallDrawerOpen(false); setSelectedCall(null); }}>
-        <Box sx={{ width: { xs: '100vw', sm: 450 }, p: 3 }}>
-          {selectedCall && (
-            <>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <SmartToyIcon color="primary" />
-                  <Typography variant="h6" fontWeight={600}>Call Details</Typography>
-                </Box>
-                <IconButton onClick={() => { setCallDrawerOpen(false); setSelectedCall(null); }}>
-                  <CloseIcon />
-                </IconButton>
-              </Box>
-
-              {/* Caller info */}
-              <Card sx={{ p: 2, mb: 3, bgcolor: 'primary.light' }}>
-                <Typography variant="subtitle2" color="text.secondary" gutterBottom>Caller</Typography>
-                <Typography variant="h5" fontWeight={600}>{selectedCall.caller_name || 'Unknown Caller'}</Typography>
-                {selectedCall.caller_number && (
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1 }}>
-                    <PhoneIcon fontSize="small" color="action" />
-                    <Typography variant="body1">{selectedCall.caller_number}</Typography>
-                  </Box>
-                )}
-              </Card>
-
-              {/* Date & Duration */}
-              <Box sx={{ mb: 3 }}>
-                <Typography variant="subtitle2" color="text.secondary" gutterBottom>Date & Time</Typography>
-                <Typography variant="body1">
-                  {new Date(selectedCall.created_at).toLocaleDateString('en-GB', {
-                    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
-                  })}{' '}
-                  at{' '}
-                  {new Date(selectedCall.created_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-                </Typography>
-                {selectedCall.duration_seconds != null && (
-                  <Typography variant="caption" color="text.secondary">
-                    Duration: {formatDuration(selectedCall.duration_seconds)}
-                  </Typography>
-                )}
-              </Box>
-
-              {/* Outcome */}
-              {selectedCall.outcome && (
-                <Box sx={{ mb: 3 }}>
-                  <Typography variant="subtitle2" color="text.secondary" gutterBottom>Outcome</Typography>
-                  <Chip
-                    label={`${OUTCOME_STYLES[selectedCall.outcome]?.icon || ''} ${selectedCall.outcome}`}
-                    color={OUTCOME_STYLES[selectedCall.outcome]?.color || 'default'}
-                    variant="outlined"
-                  />
-                </Box>
-              )}
-
-              {/* Intent */}
-              {selectedCall.intent && (
-                <Box sx={{ mb: 3 }}>
-                  <Typography variant="subtitle2" color="text.secondary" gutterBottom>Intent</Typography>
-                  <Chip label={selectedCall.intent} color="primary" variant="outlined" />
-                </Box>
-              )}
-
-              {/* Summary */}
-              {selectedCall.summary && (
-                <Box sx={{ mb: 3 }}>
-                  <Typography variant="subtitle2" color="text.secondary" gutterBottom>Summary</Typography>
-                  <Card sx={{ p: 2, bgcolor: 'grey.50' }}>
-                    <Typography variant="body2">{selectedCall.summary}</Typography>
-                  </Card>
-                </Box>
-              )}
-
-              {/* Transcript */}
-              {selectedCall.transcript && (
-                <Box sx={{ mb: 3 }}>
-                  <Typography variant="subtitle2" color="text.secondary" gutterBottom>Transcript</Typography>
-                  <Card sx={{ p: 2, bgcolor: 'grey.50', maxHeight: 300, overflow: 'auto' }}>
-                    <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
-                      {selectedCall.transcript}
-                    </Typography>
-                  </Card>
-                </Box>
-              )}
-
-              {/* No details fallback */}
-              {!selectedCall.summary && !selectedCall.transcript && !selectedCall.intent && (
-                <Card sx={{ p: 3, textAlign: 'center', bgcolor: 'grey.50', mb: 3 }}>
-                  <Typography color="text.secondary">No additional details available for this call.</Typography>
-                </Card>
-              )}
-            </>
-          )}
-        </Box>
-      </Drawer>
 
       {/* ================================================================
           Snackbar

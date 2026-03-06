@@ -142,14 +142,62 @@ class AssignPhoneNumberRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 AVAILABLE_VOICES = [
-    {"id": "shimmer", "name": "Shimmer", "description": "Warm and clear, great for professional businesses", "gender": "female", "accent": "American"},
-    {"id": "alloy", "name": "Alloy", "description": "Balanced and versatile, works well for most use cases", "gender": "neutral", "accent": "American"},
-    {"id": "echo", "name": "Echo", "description": "Smooth and calm, ideal for healthcare or wellness", "gender": "male", "accent": "American"},
-    {"id": "fable", "name": "Fable", "description": "Expressive and engaging, great for creative businesses", "gender": "neutral", "accent": "British"},
-    {"id": "onyx", "name": "Onyx", "description": "Deep and authoritative, perfect for legal or finance", "gender": "male", "accent": "American"},
-    {"id": "nova", "name": "Nova", "description": "Friendly and upbeat, excellent for retail and hospitality", "gender": "female", "accent": "American"},
-    {"id": "cedar", "name": "Cedar", "description": "Natural and warm, OpenAI's latest premium voice", "gender": "male", "accent": "American"},
-    {"id": "marin", "name": "Marin", "description": "Bright and personable, OpenAI's latest premium voice", "gender": "female", "accent": "American"},
+    {
+        "id": "shimmer",
+        "name": "Shimmer",
+        "description": "Warm and clear, confident and friendly. Great for professional businesses.",
+        "gender": "female",
+        "accent": "American",
+    },
+    {
+        "id": "alloy",
+        "name": "Alloy",
+        "description": "Balanced and versatile with a smooth, neutral delivery. Works well for most use cases.",
+        "gender": "neutral",
+        "accent": "American",
+    },
+    {
+        "id": "echo",
+        "name": "Echo",
+        "description": "Smooth, calm, and measured. Ideal for healthcare, wellness, or luxury brands.",
+        "gender": "male",
+        "accent": "American",
+    },
+    {
+        "id": "ash",
+        "name": "Ash",
+        "description": "Soft-spoken and thoughtful. Great for advisory or consultancy businesses.",
+        "gender": "male",
+        "accent": "American",
+    },
+    {
+        "id": "ballad",
+        "name": "Ballad",
+        "description": "Warm and expressive with a natural storytelling quality. Great for creative businesses.",
+        "gender": "female",
+        "accent": "American",
+    },
+    {
+        "id": "coral",
+        "name": "Coral",
+        "description": "Bright, energetic, and personable. Excellent for retail and hospitality.",
+        "gender": "female",
+        "accent": "American",
+    },
+    {
+        "id": "sage",
+        "name": "Sage",
+        "description": "Calm and authoritative. Perfect for legal, finance, or professional services.",
+        "gender": "female",
+        "accent": "American",
+    },
+    {
+        "id": "verse",
+        "name": "Verse",
+        "description": "Dynamic and engaging with a lively, upbeat tone. Great for fitness and entertainment.",
+        "gender": "male",
+        "accent": "American",
+    },
 ]
 
 KNOWLEDGE_BASE_CATEGORIES = [
@@ -300,6 +348,8 @@ async def upsert_receptionist_config(
     ).first()
 
     update_fields = data.model_dump(exclude_unset=True)
+    if "twilio_phone_number" in update_fields and update_fields["twilio_phone_number"]:
+        update_fields["twilio_phone_number"] = update_fields["twilio_phone_number"].replace(" ", "").strip()
 
     if cfg:
         for field, value in update_fields.items():
@@ -620,6 +670,8 @@ async def admin_update_receptionist_config(
     ).first()
 
     update_fields = data.model_dump(exclude_unset=True)
+    if "twilio_phone_number" in update_fields and update_fields["twilio_phone_number"]:
+        update_fields["twilio_phone_number"] = update_fields["twilio_phone_number"].replace(" ", "").strip()
 
     if cfg:
         for field, value in update_fields.items():
@@ -644,24 +696,26 @@ async def admin_assign_phone_number(
     """Admin: Assign a Twilio phone number to a business's receptionist."""
     _require_platform_admin(auth_ctx, session)
 
+    clean_number = body.twilio_phone_number.replace(" ", "").strip() if body.twilio_phone_number else body.twilio_phone_number
+
     cfg = session.exec(
         select(ReceptionistConfig).where(ReceptionistConfig.business_id == business_id)
     ).first()
 
     if cfg:
-        cfg.twilio_phone_number = body.twilio_phone_number
+        cfg.twilio_phone_number = clean_number
         cfg.twilio_phone_sid = body.twilio_phone_sid
         cfg.updated_at = datetime.utcnow()
     else:
         cfg = ReceptionistConfig(
             business_id=business_id,
-            twilio_phone_number=body.twilio_phone_number,
+            twilio_phone_number=clean_number,
             twilio_phone_sid=body.twilio_phone_sid,
         )
 
     session.add(cfg)
     session.commit()
-    return {"business_id": business_id, "twilio_phone_number": body.twilio_phone_number}
+    return {"business_id": business_id, "twilio_phone_number": clean_number}
 
 
 @admin_router.get("/{business_id}/knowledge-base")
@@ -751,6 +805,19 @@ async def build_receptionist_system_prompt(business_id: str, session: Session) -
         else "Stay focused and professional. Avoid jokes or humour."
     )
 
+    lang = cfg.language or "en-GB"
+    accent_instruction = ""
+    if lang == "en-GB":
+        accent_instruction = (
+            "Speak with a British English accent and use British English vocabulary and spelling "
+            "(e.g., 'colour' not 'color', 'enquiry' not 'inquiry', 'mobile' not 'cell phone', "
+            "'ring us' not 'call us')."
+        )
+    elif lang == "en-US":
+        accent_instruction = "Speak with an American English accent and use American English vocabulary."
+    elif lang == "en-AU":
+        accent_instruction = "Speak with an Australian English accent and use Australian English vocabulary."
+
     tz = pytz.timezone(cfg.timezone or "Europe/London")
     now = datetime.now(tz)
     day_name = now.strftime("%A").lower()
@@ -786,6 +853,7 @@ CORE IDENTITY:
 - {tone_inst}
 - {speed_inst}
 - {humor_inst}
+- {accent_instruction}
 {personality_block}
 
 CURRENT CONTEXT:
@@ -797,10 +865,24 @@ CONVERSATION RULES:
 - Keep responses concise and natural. This is a phone call, not an essay.
 - NEVER say you are an AI unless directly asked. If asked, be honest: "I'm the AI assistant for {business_name}."
 - Listen carefully and address the caller's needs efficiently.
-- If you don't know something that isn't in your knowledge base, say: "I don't have that information to hand, but I can take your details and have someone get back to you."
 - Always offer to help with anything else before ending the call.
-- NEVER make up information. Only share facts from your knowledge base.
 - If the caller provides their name, use it naturally in conversation.
+
+STRICT ANTI-HALLUCINATION RULES — THESE ARE CRITICAL:
+- You may ONLY share information that is explicitly listed in the BUSINESS KNOWLEDGE BASE section below.
+- If a caller asks about something NOT covered in your knowledge base, you MUST say: "I don't have specific details on that, but I can take your details and have someone from the team get back to you with that information."
+- NEVER guess, estimate, or infer information that isn't explicitly in your knowledge base. This includes:
+  - Prices, fees, or costs (unless explicitly listed)
+  - Availability, schedules, or dates (unless explicitly listed)
+  - Staff names, qualifications, or specialities (unless explicitly listed)
+  - Policies, terms, or conditions (unless explicitly listed)
+  - Comparisons with competitors
+  - Medical, legal, or financial advice of any kind
+- If a caller asks "how much does X cost?" and X is not in your knowledge base, say: "I'd want to make sure I give you the right price on that — let me take your details and someone will get back to you with accurate pricing."
+- If a caller asks about a service and you're not 100% certain it's offered, say: "I want to make sure I give you accurate information on that. Let me take your details and have the team confirm for you."
+- NEVER say "I think", "I believe", "probably", "usually", or "typically" when discussing business-specific information. Either you KNOW it from the knowledge base, or you take a message.
+- When in doubt, ALWAYS default to taking a message rather than risking inaccurate information.
+- It is far better to say "let me get someone to call you back about that" than to give wrong information.
 
 {transfer_inst}
 

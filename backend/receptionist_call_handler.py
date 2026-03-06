@@ -253,8 +253,8 @@ async def receptionist_incoming_call(request: Request):
     opens a bidirectional Media Stream WebSocket.
     """
     form_data = await request.form()
-    to_number = form_data.get("To", "")
-    from_number = form_data.get("From", "")
+    to_number = form_data.get("To", "").replace(" ", "").strip()
+    from_number = form_data.get("From", "").replace(" ", "").strip()
     call_sid = form_data.get("CallSid", "")
 
     logger.info(f"[Receptionist] Incoming call: {from_number} → {to_number} (CallSid: {call_sid})")

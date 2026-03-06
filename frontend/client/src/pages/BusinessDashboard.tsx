@@ -184,9 +184,9 @@ export default function BusinessDashboard() {
   const [business, setBusiness] = useState<Business | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [calls, setCalls] = useState<Call[]>([]);
-  const [callFilter, setCallFilter] = useState<'all' | 'new' | 'archived'>('new');
   const [callSearch, setCallSearch] = useState('');
   const [callDateFilter, setCallDateFilter] = useState<'all' | 'today' | 'week' | 'month'>('all');
+  const [callSourceFilter, setCallSourceFilter] = useState<'all' | 'receptionist' | 'Awaz'>('all');
   const [showArchivedCalls, setShowArchivedCalls] = useState(false);
   const [selectedCall, setSelectedCall] = useState<Call | null>(null);
   const [callPanelOpen, setCallPanelOpen] = useState(false);
@@ -451,13 +451,15 @@ export default function BusinessDashboard() {
   // Filter calls based on filters
   const filteredCalls = useMemo(() => {
     let result = calls;
-    
-    // Filter by archived status
+
     if (!showArchivedCalls) {
       result = result.filter(c => !c.archived);
     }
-    
-    // Filter by search
+
+    if (callSourceFilter !== 'all') {
+      result = result.filter(c => c.source === callSourceFilter);
+    }
+
     if (callSearch) {
       const searchLower = callSearch.toLowerCase();
       result = result.filter(c =>
@@ -468,14 +470,13 @@ export default function BusinessDashboard() {
         (c.intent?.toLowerCase() || '').includes(searchLower)
       );
     }
-    
-    // Filter by date
+
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const startOfWeek = new Date(startOfToday);
     startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    
+
     if (callDateFilter === 'today') {
       result = result.filter(c => new Date(c.created_at) >= startOfToday);
     } else if (callDateFilter === 'week') {
@@ -483,9 +484,9 @@ export default function BusinessDashboard() {
     } else if (callDateFilter === 'month') {
       result = result.filter(c => new Date(c.created_at) >= startOfMonth);
     }
-    
+
     return result;
-  }, [calls, callSearch, callDateFilter, showArchivedCalls]);
+  }, [calls, callSearch, callDateFilter, callSourceFilter, showArchivedCalls]);
   
   // Group calls by date for better display
   const groupedCalls = useMemo(() => {
@@ -523,28 +524,43 @@ export default function BusinessDashboard() {
   const callStats = useMemo(() => {
     const today = new Date();
     const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    
-    const todaysCalls = calls.filter(c => !c.archived && new Date(c.created_at) >= startOfToday);
-    const newCalls = calls.filter(c => !c.archived);
-    
+
+    const activeCalls = calls.filter(c => !c.archived);
+    const todaysCalls = activeCalls.filter(c => new Date(c.created_at) >= startOfToday);
+    const receptionistCount = activeCalls.filter(c => c.source === 'receptionist').length;
+    const awazCount = activeCalls.filter(c => c.source !== 'receptionist').length;
+
     return {
       today: todaysCalls.length,
-      total: newCalls.length,
+      total: activeCalls.length,
+      receptionist: receptionistCount,
+      awaz: awazCount,
     };
   }, [calls]);
   
-  // Helper function to calculate call duration
   const calculateDuration = (start: string, end: string): string => {
     const startDate = new Date(start);
     const endDate = new Date(end);
     const diffMs = endDate.getTime() - startDate.getTime();
     const diffMins = Math.floor(diffMs / 60000);
     const diffSecs = Math.floor((diffMs % 60000) / 1000);
-    
-    if (diffMins > 0) {
-      return `${diffMins}m ${diffSecs}s`;
-    }
+    if (diffMins > 0) return `${diffMins}m ${diffSecs}s`;
     return `${diffSecs}s`;
+  };
+
+  const formatDurationSec = (seconds: number | null | undefined): string => {
+    if (!seconds) return '';
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  };
+
+  const OUTCOME_BADGE: Record<string, { color: 'success' | 'primary' | 'warning' | 'error' | 'default'; icon: string }> = {
+    handled: { color: 'success', icon: '\u2705' },
+    transferred: { color: 'primary', icon: '\uD83D\uDD04' },
+    voicemail: { color: 'warning', icon: '\uD83D\uDCE9' },
+    missed: { color: 'error', icon: '\u274C' },
+    error: { color: 'error', icon: '\u26A0\uFE0F' },
   };
   
   // Format date time for call detail panel
@@ -1516,14 +1532,31 @@ export default function BusinessDashboard() {
 
               <TabPanel value={tabValue} index={1}>
                 {/* Stats Cards */}
-                <Box sx={{ display: 'flex', gap: 2, mb: 3 }}>
-                  <Card sx={{ flex: 1, p: 2 }}>
+                <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap' }}>
+                  <Card sx={{ flex: '1 1 140px', p: 2 }}>
                     <Typography variant="caption" color="text.secondary">Today's Calls</Typography>
                     <Typography variant="h4" color="primary.main">{callStats.today}</Typography>
                   </Card>
-                  <Card sx={{ flex: 1, p: 2 }}>
+                  <Card sx={{ flex: '1 1 140px', p: 2 }}>
                     <Typography variant="caption" color="text.secondary">Total Active</Typography>
                     <Typography variant="h4">{callStats.total}</Typography>
+                  </Card>
+                  <Card sx={{ flex: '1 1 140px', p: 2 }}>
+                    <Typography variant="caption" color="text.secondary">Source</Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mt: 0.5 }}>
+                      <Tooltip title="AI Receptionist">
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                          <SmartToyIcon fontSize="small" color="primary" />
+                          <Typography variant="h6" fontWeight={600}>{callStats.receptionist}</Typography>
+                        </Box>
+                      </Tooltip>
+                      <Tooltip title="Awaz">
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                          <PhoneIcon fontSize="small" color="action" />
+                          <Typography variant="h6" fontWeight={600}>{callStats.awaz}</Typography>
+                        </Box>
+                      </Tooltip>
+                    </Box>
                   </Card>
                 </Box>
 
@@ -1569,6 +1602,25 @@ export default function BusinessDashboard() {
                           onClick={() => setCallDateFilter(filter.value as 'all' | 'today' | 'week' | 'month')}
                           color={callDateFilter === filter.value ? 'primary' : 'default'}
                           variant={callDateFilter === filter.value ? 'filled' : 'outlined'}
+                          size="small"
+                        />
+                      ))}
+                    </Box>
+
+                    {/* Source Filter Chips */}
+                    <Box sx={{ display: 'flex', gap: 1 }}>
+                      {([
+                        { value: 'all', label: 'All Calls' },
+                        { value: 'receptionist', label: 'AI Receptionist' },
+                        { value: 'Awaz', label: 'Awaz' },
+                      ] as const).map((f) => (
+                        <Chip
+                          key={f.value}
+                          label={f.label}
+                          icon={f.value === 'receptionist' ? <SmartToyIcon /> : undefined}
+                          onClick={() => setCallSourceFilter(f.value)}
+                          color={callSourceFilter === f.value ? 'secondary' : 'default'}
+                          variant={callSourceFilter === f.value ? 'filled' : 'outlined'}
                           size="small"
                         />
                       ))}
@@ -1624,52 +1676,66 @@ export default function BusinessDashboard() {
                               }}
                               onClick={() => handleCallClick(call)}
                             >
-                              {/* Icon */}
-                              <Box sx={{ 
-                                width: 40, 
-                                height: 40, 
-                                borderRadius: '50%', 
-                                bgcolor: 'primary.light',
+                              {/* Icon — different for AI Receptionist vs Awaz */}
+                              <Box sx={{
+                                width: 40,
+                                height: 40,
+                                borderRadius: '50%',
+                                bgcolor: call.source === 'receptionist' ? 'secondary.light' : 'primary.light',
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
-                                flexShrink: 0
+                                flexShrink: 0,
                               }}>
-                                <PhoneIcon color="primary" fontSize="small" />
+                                {call.source === 'receptionist'
+                                  ? <SmartToyIcon color="secondary" fontSize="small" />
+                                  : <PhoneIcon color="primary" fontSize="small" />}
                               </Box>
-                              
+
                               {/* Main Content */}
                               <Box sx={{ flex: 1, minWidth: 0 }}>
                                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                                   <Typography variant="subtitle1" fontWeight={600} noWrap>
                                     {call.caller_name || 'Unknown Caller'}
                                   </Typography>
+                                  {call.source === 'receptionist' && (
+                                    <Chip label="AI" size="small" color="secondary" sx={{ height: 20, fontSize: '0.7rem' }} />
+                                  )}
                                   {call.archived && (
                                     <Chip label="Archived" size="small" />
                                   )}
                                 </Box>
                                 <Typography variant="body2" color="text.secondary" noWrap>
                                   {call.caller_number || call.phone_number || 'No number'}
-                                  {(call.summary || call.notes) && ` • ${(call.summary || call.notes || '').substring(0, 50)}...`}
+                                  {(call.summary || call.notes) && ` \u00B7 ${(call.summary || call.notes || '').substring(0, 50)}...`}
                                 </Typography>
                               </Box>
-                              
-                              {/* Right side: Time and Intent */}
+
+                              {/* Right side */}
                               <Box sx={{ textAlign: 'right', flexShrink: 0 }}>
                                 <Typography variant="caption" color="text.secondary">
-                                  {new Date(call.created_at).toLocaleTimeString('en-GB', { 
-                                    hour: '2-digit', 
-                                    minute: '2-digit' 
+                                  {new Date(call.created_at).toLocaleTimeString('en-GB', {
+                                    hour: '2-digit',
+                                    minute: '2-digit',
                                   })}
+                                  {call.duration_seconds ? ` \u00B7 ${formatDurationSec(call.duration_seconds)}` : ''}
                                 </Typography>
-                                {call.intent && (
-                                  <Box>
-                                    <Chip label={call.intent} size="small" variant="outlined" />
-                                  </Box>
-                                )}
+                                <Box sx={{ display: 'flex', gap: 0.5, justifyContent: 'flex-end', mt: 0.5 }}>
+                                  {call.source === 'receptionist' && call.outcome && OUTCOME_BADGE[call.outcome] && (
+                                    <Chip
+                                      label={`${OUTCOME_BADGE[call.outcome].icon} ${call.outcome}`}
+                                      size="small"
+                                      color={OUTCOME_BADGE[call.outcome].color}
+                                      variant="outlined"
+                                      sx={{ height: 22, fontSize: '0.7rem' }}
+                                    />
+                                  )}
+                                  {call.intent && call.source !== 'receptionist' && (
+                                    <Chip label={call.intent} size="small" variant="outlined" sx={{ height: 22, fontSize: '0.7rem' }} />
+                                  )}
+                                </Box>
                               </Box>
-                              
-                              {/* Arrow */}
+
                               <ChevronRightIcon color="action" />
                             </Card>
                           ))}
@@ -1687,10 +1753,15 @@ export default function BusinessDashboard() {
                         {/* Header */}
                         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            <PhoneIcon color="primary" />
+                            {selectedCall.source === 'receptionist'
+                              ? <SmartToyIcon color="secondary" />
+                              : <PhoneIcon color="primary" />}
                             <Typography variant="h6" fontWeight={600}>
                               Call Details
                             </Typography>
+                            {selectedCall.source === 'receptionist' && (
+                              <Chip label="AI Receptionist" size="small" color="secondary" />
+                            )}
                           </Box>
                           <IconButton onClick={() => { setCallPanelOpen(false); setSelectedCall(null); }}>
                             <CloseIcon />
@@ -1721,12 +1792,30 @@ export default function BusinessDashboard() {
                           <Typography variant="body1">
                             {formatCallDateTime(selectedCall.created_at)}
                           </Typography>
-                          {selectedCall.started_at && selectedCall.ended_at && (
+                          {selectedCall.duration_seconds ? (
+                            <Typography variant="caption" color="text.secondary">
+                              Duration: {formatDurationSec(selectedCall.duration_seconds)}
+                            </Typography>
+                          ) : selectedCall.started_at && selectedCall.ended_at ? (
                             <Typography variant="caption" color="text.secondary">
                               Duration: {calculateDuration(selectedCall.started_at, selectedCall.ended_at)}
                             </Typography>
-                          )}
+                          ) : null}
                         </Box>
+
+                        {/* Outcome (receptionist) */}
+                        {selectedCall.source === 'receptionist' && selectedCall.outcome && (
+                          <Box sx={{ mb: 3 }}>
+                            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                              Outcome
+                            </Typography>
+                            <Chip
+                              label={`${OUTCOME_BADGE[selectedCall.outcome]?.icon || ''} ${selectedCall.outcome}`}
+                              color={OUTCOME_BADGE[selectedCall.outcome]?.color || 'default'}
+                              variant="outlined"
+                            />
+                          </Box>
+                        )}
 
                         {/* Intent Badge */}
                         {selectedCall.intent && (
@@ -1734,9 +1823,9 @@ export default function BusinessDashboard() {
                             <Typography variant="subtitle2" color="text.secondary" gutterBottom>
                               Intent
                             </Typography>
-                            <Chip 
-                              label={selectedCall.intent} 
-                              color="primary" 
+                            <Chip
+                              label={selectedCall.intent}
+                              color="primary"
                               variant="outlined"
                             />
                           </Box>
@@ -1762,10 +1851,38 @@ export default function BusinessDashboard() {
                             <Typography variant="subtitle2" color="text.secondary" gutterBottom>
                               Transcript
                             </Typography>
-                            <Card sx={{ p: 2, bgcolor: 'grey.50', maxHeight: 300, overflow: 'auto' }}>
-                              <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
-                                {selectedCall.transcript}
-                              </Typography>
+                            <Card sx={{ p: 2, bgcolor: 'grey.50', maxHeight: 400, overflow: 'auto' }}>
+                              {selectedCall.source === 'receptionist' ? (
+                                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                                  {selectedCall.transcript.split('\n').filter(Boolean).map((line, idx) => {
+                                    const isCaller = line.startsWith('Caller:');
+                                    const text = line.replace(/^(Caller|Receptionist):\s*/, '');
+                                    return (
+                                      <Box key={idx} sx={{
+                                        display: 'flex',
+                                        justifyContent: isCaller ? 'flex-start' : 'flex-end',
+                                      }}>
+                                        <Box sx={{
+                                          maxWidth: '80%',
+                                          px: 1.5,
+                                          py: 1,
+                                          borderRadius: 2,
+                                          bgcolor: isCaller ? 'grey.200' : 'primary.light',
+                                        }}>
+                                          <Typography variant="caption" fontWeight={600} color="text.secondary">
+                                            {isCaller ? 'Caller' : 'Receptionist'}
+                                          </Typography>
+                                          <Typography variant="body2">{text}</Typography>
+                                        </Box>
+                                      </Box>
+                                    );
+                                  })}
+                                </Box>
+                              ) : (
+                                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+                                  {selectedCall.transcript}
+                                </Typography>
+                              )}
                             </Card>
                           </Box>
                         )}
@@ -2122,7 +2239,7 @@ export default function BusinessDashboard() {
               </TabPanel>
 
               <TabPanel value={tabValue} index={4}>
-                {business && <ReceptionistTab businessId={business.id} />}
+                {business && <ReceptionistTab businessId={business.id} onViewCalls={() => { setCallSourceFilter('receptionist'); setTabValue(1); }} />}
               </TabPanel>
             </Paper>
           </>

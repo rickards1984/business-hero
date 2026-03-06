@@ -93,12 +93,19 @@ export interface Call {
   business_id: string;
   caller_name: string;
   caller_number: string;
-  phone_number?: string; // Alias for caller_number
+  phone_number?: string;
   notes?: string;
   summary?: string;
   intent?: string;
   archived?: boolean;
   created_at: string;
+  source?: string;
+  outcome?: string;
+  duration_seconds?: number | null;
+  transcript?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  recording_url?: string | null;
 }
 
 export interface PlatformAdmin {
