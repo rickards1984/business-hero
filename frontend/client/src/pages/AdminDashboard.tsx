@@ -474,7 +474,7 @@ export default function AdminDashboard() {
   }
 
   return (
-    <Box sx={{ display: 'flex' }}>
+    <Box sx={{ display: 'flex', width: '100%', overflow: 'hidden' }}>
       <AppBar position="fixed" sx={{ zIndex: theme.zIndex.drawer + 1 }}>
         <Toolbar>
           {isMobile && (
@@ -513,8 +513,8 @@ export default function AdminDashboard() {
         </Drawer>
       )}
 
-      <Box component="main" sx={{ flexGrow: 1, p: 3, mt: 8, ml: isMobile ? 0 : '240px' }}>
-        <Container maxWidth="xl">
+      <Box component="main" sx={{ flexGrow: 1, minWidth: 0, p: 3, mt: 8, ml: isMobile ? 0 : '240px', overflowX: 'auto' }}>
+        <Container maxWidth="xl" sx={{ px: { xs: 1, sm: 2, md: 3 } }}>
           {error && (
             <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')} data-testid="alert-error">
               {error}
@@ -559,15 +559,16 @@ export default function AdminDashboard() {
             </Box>
           ) : activeTab === 'businesses' ? (
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <Paper sx={{ p: 2 }}>
-                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+              <Paper sx={{ p: 2, overflow: 'hidden' }}>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5 }}>
                   <TextField
                     label="Search businesses"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    sx={{ minWidth: 240 }}
+                    sx={{ minWidth: 180, flex: '1 1 180px' }}
+                    size="small"
                   />
-                  <FormControl sx={{ minWidth: 140 }}>
+                  <FormControl size="small" sx={{ minWidth: 110 }}>
                     <InputLabel>Plan</InputLabel>
                     <Select value={filterPlan} label="Plan" onChange={(e) => setFilterPlan(e.target.value)}>
                       <MenuItem value="all">All</MenuItem>
@@ -578,7 +579,7 @@ export default function AdminDashboard() {
                       ))}
                     </Select>
                   </FormControl>
-                  <FormControl sx={{ minWidth: 140 }}>
+                  <FormControl size="small" sx={{ minWidth: 110 }}>
                     <InputLabel>Status</InputLabel>
                     <Select value={filterActive} label="Status" onChange={(e) => setFilterActive(e.target.value)}>
                       <MenuItem value="all">All</MenuItem>
@@ -586,7 +587,7 @@ export default function AdminDashboard() {
                       <MenuItem value="paused">Paused</MenuItem>
                     </Select>
                   </FormControl>
-                  <FormControl sx={{ minWidth: 180 }}>
+                  <FormControl size="small" sx={{ minWidth: 130 }}>
                     <InputLabel>Subscription</InputLabel>
                     <Select
                       value={filterSubscription}
@@ -601,7 +602,7 @@ export default function AdminDashboard() {
                       ))}
                     </Select>
                   </FormControl>
-                  <FormControl sx={{ minWidth: 160 }}>
+                  <FormControl size="small" sx={{ minWidth: 110 }}>
                     <InputLabel>Awaz</InputLabel>
                     <Select value={filterAwaz} label="Awaz" onChange={(e) => setFilterAwaz(e.target.value)}>
                       <MenuItem value="all">All</MenuItem>
@@ -609,7 +610,7 @@ export default function AdminDashboard() {
                       <MenuItem value="not_connected">Not connected</MenuItem>
                     </Select>
                   </FormControl>
-                  <FormControl sx={{ minWidth: 160 }}>
+                  <FormControl size="small" sx={{ minWidth: 110 }}>
                     <InputLabel>Email</InputLabel>
                     <Select value={filterEmail} label="Email" onChange={(e) => setFilterEmail(e.target.value)}>
                       <MenuItem value="all">All</MenuItem>
@@ -617,7 +618,7 @@ export default function AdminDashboard() {
                       <MenuItem value="not_connected">Not connected</MenuItem>
                     </Select>
                   </FormControl>
-                  <FormControl sx={{ minWidth: 170 }}>
+                  <FormControl size="small" sx={{ minWidth: 120 }}>
                     <InputLabel>Calendar</InputLabel>
                     <Select
                       value={filterCalendar}
@@ -629,7 +630,7 @@ export default function AdminDashboard() {
                       <MenuItem value="not_connected">Not connected</MenuItem>
                     </Select>
                   </FormControl>
-                  <FormControl sx={{ minWidth: 180 }}>
+                  <FormControl size="small" sx={{ minWidth: 130 }}>
                     <InputLabel>Receptionist</InputLabel>
                     <Select
                       value={filterReceptionist}
@@ -645,19 +646,19 @@ export default function AdminDashboard() {
                 </Box>
               </Paper>
 
-              <TableContainer component={Paper} elevation={1}>
-                <Table>
+              <TableContainer component={Paper} elevation={1} sx={{ overflowX: 'auto' }}>
+                <Table size="small" sx={{ minWidth: 1100 }}>
                   <TableHead>
                     <TableRow>
                       <TableCell>Name</TableCell>
                       <TableCell>Plan</TableCell>
-                      <TableCell>Subscription</TableCell>
+                      <TableCell>Sub</TableCell>
                       <TableCell>Awaz</TableCell>
                       <TableCell>Email</TableCell>
                       <TableCell>Calendar</TableCell>
-                      <TableCell>Receptionist</TableCell>
-                      <TableCell>Onboarding</TableCell>
-                      <TableCell>Open tickets</TableCell>
+                      <TableCell>Recept.</TableCell>
+                      <TableCell>Onboard.</TableCell>
+                      <TableCell>Tickets</TableCell>
                       <TableCell>Last activity</TableCell>
                       <TableCell align="right">Actions</TableCell>
                     </TableRow>
