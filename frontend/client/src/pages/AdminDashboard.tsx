@@ -44,6 +44,7 @@ import {
   People as PeopleIcon,
   Add as AddIcon,
   Logout as LogoutIcon,
+  RocketLaunch as RocketLaunchIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type BusinessMember } from '@/lib/supabase';
@@ -130,6 +131,7 @@ export default function AdminDashboard() {
   const [filterCalendar, setFilterCalendar] = useState('all');
   const [filterReceptionist, setFilterReceptionist] = useState('all');
   const [receptionistOverview, setReceptionistOverview] = useState<Record<string, { enabled: boolean; config_exists: boolean }>>({});
+  const [onboardingStatus, setOnboardingStatus] = useState<Record<string, { onboarding_completed: boolean; checklist_progress: number; checklist_total: number }>>({});
   const [toggleDialogOpen, setToggleDialogOpen] = useState(false);
   const [toggleTarget, setToggleTarget] = useState<BusinessSummary | null>(null);
 
@@ -183,6 +185,16 @@ export default function AdminDashboard() {
         }
         setReceptionistOverview(recMap);
       } catch { /* receptionist overview is optional */ }
+
+      try {
+        const obRes = await apiRequest('GET', '/v1/admin/onboarding/status');
+        const obData: any[] = await obRes.json();
+        const obMap: Record<string, { onboarding_completed: boolean; checklist_progress: number; checklist_total: number }> = {};
+        for (const item of obData) {
+          obMap[item.business_id] = { onboarding_completed: !!item.onboarding_completed, checklist_progress: item.checklist_progress || 0, checklist_total: item.checklist_total || 0 };
+        }
+        setOnboardingStatus(obMap);
+      } catch { /* onboarding status is optional */ }
     } catch (err: any) {
       setError(err.message || 'Failed to fetch data');
     } finally {
@@ -413,6 +425,20 @@ export default function AdminDashboard() {
         <ListItem disablePadding>
           <ListItemButton
             onClick={() => {
+              navigate('/admin/onboarding');
+              setDrawerOpen(false);
+            }}
+            data-testid="nav-onboarding"
+          >
+            <ListItemIcon>
+              <RocketLaunchIcon />
+            </ListItemIcon>
+            <ListItemText primary="Onboarding" />
+          </ListItemButton>
+        </ListItem>
+        <ListItem disablePadding>
+          <ListItemButton
+            onClick={() => {
               navigate('/admin/support');
               setDrawerOpen(false);
             }}
@@ -502,11 +528,19 @@ export default function AdminDashboard() {
             <Box sx={{ display: 'flex', gap: 1 }}>
               <Button
                 variant="contained"
+                startIcon={<RocketLaunchIcon />}
+                onClick={() => navigate('/admin/onboarding/new')}
+                data-testid="button-onboard-business"
+              >
+                Onboard Business
+              </Button>
+              <Button
+                variant="outlined"
                 startIcon={<AddIcon />}
                 onClick={() => setBusinessDialogOpen(true)}
                 data-testid="button-create-business"
               >
-                Create Business
+                Quick Create
               </Button>
               <Button
                 variant="outlined"
@@ -622,6 +656,7 @@ export default function AdminDashboard() {
                       <TableCell>Email</TableCell>
                       <TableCell>Calendar</TableCell>
                       <TableCell>Receptionist</TableCell>
+                      <TableCell>Onboarding</TableCell>
                       <TableCell>Open tickets</TableCell>
                       <TableCell>Last activity</TableCell>
                       <TableCell align="right">Actions</TableCell>
@@ -630,7 +665,7 @@ export default function AdminDashboard() {
                   <TableBody>
                     {filteredBusinesses.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={10} align="center" sx={{ py: 4 }}>
+                        <TableCell colSpan={11} align="center" sx={{ py: 4 }}>
                           <Typography color="text.secondary">No businesses found</Typography>
                         </TableCell>
                       </TableRow>
@@ -676,6 +711,14 @@ export default function AdminDashboard() {
                           </TableCell>
                           <TableCell>
                             <ReceptionistStatusChip overview={receptionistOverview[business.id]} />
+                          </TableCell>
+                          <TableCell>
+                            {(() => {
+                              const ob = onboardingStatus[business.id];
+                              if (!ob || ob.checklist_total === 0) return <Chip label="Not onboarded" size="small" />;
+                              if (ob.onboarding_completed) return <Chip label="Complete" size="small" color="success" />;
+                              return <Chip label={`${ob.checklist_progress}%`} size="small" color="warning" />;
+                            })()}
                           </TableCell>
                           <TableCell>{business.open_ticket_count}</TableCell>
                           <TableCell>
