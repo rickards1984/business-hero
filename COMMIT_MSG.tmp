@@ -1,18 +1,24 @@
-Add user-facing support panel UI (prompt 2 of 3)
+Add admin support dashboard (prompt 3 of 3)
 
-New components:
-- SupportPanel.tsx: slide-out panel with three views (home, chat, article)
-- SupportHelpButton.tsx: floating ? button with unread badge
+New page: AdminSupportDashboard.tsx replaces the basic legacy support
+page at /admin/support (legacy preserved at /admin/support-legacy).
 
-Features:
-- Searchable help articles grouped by category
-- AI-powered chat with typing indicator and auto-scroll
-- Escalation to human support (manual or AI-triggered)
-- Past conversation list with status badges
-- Article detail view with feedback buttons
-- Responsive: full-screen on mobile, 420px panel on desktop
+Ticket management:
+- Stat cards: awaiting admin, in progress, AI resolution rate, total open
+- Filter pills by status and priority
+- Ticket cards with priority dots, status badges, AI indicators
+- Slide-out detail panel with full conversation thread
+- Inline status/priority dropdowns that update immediately
+- AI draft generation for suggested responses
+- Reply form with internal note toggle
+- Admin notes (not visible to user)
+- Mark Resolved action
 
-Integration:
-- Floating ? button at bottom-left (opposite Aria button)
-- Settings dropdown Help and Support opens panel instead of /app/help
-- All CSS in design-system.css using existing design tokens
+Knowledge base manager:
+- Article list with published/draft badges
+- Create/edit modal with title, category, summary, content, tags
+- Toggle publish/unpublish
+- Delete with confirmation dialog
+
+CSS additions in design-system.css for ticket cards, internal note
+messages, detail panel, and KB row styles.

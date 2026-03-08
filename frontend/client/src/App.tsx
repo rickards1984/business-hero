@@ -17,6 +17,7 @@ import AwazSettings from '@/pages/AwazSettings';
 import AssistantChat from '@/pages/AssistantChat';
 import HelpSupport from '@/pages/HelpSupport';
 import AdminSupport from '@/pages/AdminSupport';
+import AdminSupportDashboard from '@/pages/AdminSupportDashboard';
 import AdminOnboarding from '@/pages/AdminOnboarding';
 import AdminOnboardingWizard from '@/pages/AdminOnboardingWizard';
 import BillingSettings from '@/pages/BillingSettings';
@@ -263,7 +264,8 @@ function App() {
               <Route path="/login" element={<Login />} />
               <Route path="/admin" element={<AdminDashboard />} />
               <Route path="/admin/businesses/:id" element={<AdminBusinessDetail />} />
-              <Route path="/admin/support" element={<AdminSupport />} />
+              <Route path="/admin/support" element={<AdminSupportDashboard />} />
+              <Route path="/admin/support-legacy" element={<AdminSupport />} />
               <Route path="/admin/onboarding" element={<AdminOnboarding />} />
               <Route path="/admin/onboarding/new" element={<AdminOnboardingWizard />} />
               <Route path="/admin/onboarding/:businessId" element={<AdminOnboardingWizard />} />
