@@ -98,6 +98,8 @@ import ReceptionistTab from '@/components/ReceptionistTab';
 import BottomNav from '@/components/BottomNav';
 import { fetchEmailMessages } from '@/lib/emailApi';
 import { applyBrandColor } from '@/pages/BrandingSettings';
+import SupportPanel from '@/components/SupportPanel';
+import SupportHelpButton from '@/components/SupportHelpButton';
 import {
   TASK_CATEGORIES, TASK_PRIORITIES,
   getCategoryColor, getCategoryLabel,
@@ -199,6 +201,7 @@ export default function BusinessDashboard() {
   const [callPanelOpen, setCallPanelOpen] = useState(false);
   const [taskFilter, setTaskFilter] = useState<'open' | 'completed' | 'all'>('open');
   const [settingsAnchor, setSettingsAnchor] = useState<null | HTMLElement>(null);
+  const [supportPanelOpen, setSupportPanelOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   
@@ -1274,7 +1277,7 @@ export default function BusinessDashboard() {
                       <ListItemText>Email Outbox</ListItemText>
                     </MenuItem>
                     <Divider />
-                    <MenuItem onClick={() => { setSettingsAnchor(null); navigate('/app/help'); }}>
+                    <MenuItem onClick={() => { setSettingsAnchor(null); setSupportPanelOpen(true); }}>
                       <ListItemIcon><HelpIcon fontSize="small" /></ListItemIcon>
                       <ListItemText>Help & Support</ListItemText>
                     </MenuItem>
@@ -2856,6 +2859,12 @@ export default function BusinessDashboard() {
           />
         </Fab>
       </Tooltip>
+
+      {/* Floating Support Help Button */}
+      <SupportHelpButton onClick={() => setSupportPanelOpen(true)} />
+
+      {/* Support Panel */}
+      <SupportPanel open={supportPanelOpen} onClose={() => setSupportPanelOpen(false)} />
 
       {/* Mobile Bottom Navigation */}
       <BottomNav

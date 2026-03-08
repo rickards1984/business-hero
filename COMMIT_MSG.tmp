@@ -1,27 +1,18 @@
-Add support ticket system backend API (prompt 1 of 3)
+Add user-facing support panel UI (prompt 2 of 3)
 
-New files:
-- backend/support_api.py: AI-first support system with knowledge base
-- supabase/migrations/018_support_system.sql: tables for articles,
-  conversations, and messages
+New components:
+- SupportPanel.tsx: slide-out panel with three views (home, chat, article)
+- SupportHelpButton.tsx: floating ? button with unread badge
 
-User endpoints (/v1/support/):
-- POST /chat: AI-powered support chat with auto-escalation
-- POST /escalate: explicit escalation to human
-- GET /conversations: list user's conversations
-- GET /conversations/{id}: get conversation with messages
-- GET /articles: browse published help articles
-- GET /articles/{id}: read full article
+Features:
+- Searchable help articles grouped by category
+- AI-powered chat with typing indicator and auto-scroll
+- Escalation to human support (manual or AI-triggered)
+- Past conversation list with status badges
+- Article detail view with feedback buttons
+- Responsive: full-screen on mobile, 420px panel on desktop
 
-Admin endpoints (/v1/admin/support/):
-- GET /tickets: list all tickets with filters
-- GET /tickets/{id}: full ticket with internal notes
-- POST /tickets/{id}/reply: admin reply (or internal note)
-- PUT /tickets/{id}/status: update status/priority
-- POST /tickets/{id}/ai-draft: AI-drafted response suggestion
-- GET /stats: dashboard statistics
-- CRUD on /articles: knowledge base management
-
-AI agent references knowledge base articles, parses category and
-confidence metadata, and auto-escalates when it can't help or the
-user requests a human.
+Integration:
+- Floating ? button at bottom-left (opposite Aria button)
+- Settings dropdown Help and Support opens panel instead of /app/help
+- All CSS in design-system.css using existing design tokens
