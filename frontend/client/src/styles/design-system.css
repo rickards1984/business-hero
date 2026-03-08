@@ -477,3 +477,89 @@ h1, h2, h3, h4, h5, h6 {
 .MuiBackdrop-root {
   backdrop-filter: blur(4px) !important;
 }
+
+/* ================================================
+   RESPONSIVE LAYOUT HELPERS
+   ================================================ */
+
+.bh-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-4);
+}
+
+@media (max-width: 1023px) {
+  .bh-stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 480px) {
+  .bh-stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-3);
+  }
+
+  .bh-stat-card {
+    padding: var(--space-3);
+  }
+
+  .bh-stat-card__value {
+    font-size: var(--text-xl);
+  }
+}
+
+/* Mobile list items: edge-to-edge feel */
+@media (max-width: 767px) {
+  .bh-card {
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+  }
+}
+
+/* Detail panel: full-screen on mobile */
+@media (max-width: 767px) {
+  .MuiDrawer-paper {
+    width: 100% !important;
+    max-width: 100% !important;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0 !important;
+  }
+}
+
+/* Accounting/Charts grid */
+.accounting-charts-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-4);
+}
+
+@media (max-width: 1023px) {
+  .accounting-charts-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 767px) {
+  .accounting-charts-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ================================================
+   TAB CONTENT TRANSITION
+   ================================================ */
+
+[role="tabpanel"] > div {
+  animation: tabFadeIn var(--transition-base);
+}
+
+@keyframes tabFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

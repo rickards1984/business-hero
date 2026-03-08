@@ -52,7 +52,6 @@ import {
   Zoom,
 } from '@mui/material';
 import {
-  Business as BusinessIcon,
   Task as TaskIcon,
   Phone as PhoneIcon,
   Add as AddIcon,
@@ -96,6 +95,7 @@ import { config } from '@/config/env';
 import DebugPanel from '@/components/DebugPanel';
 import EmailsTab from '@/components/EmailsTab';
 import ReceptionistTab from '@/components/ReceptionistTab';
+import BottomNav from '@/components/BottomNav';
 import { fetchEmailMessages } from '@/lib/emailApi';
 import {
   TASK_CATEGORIES, TASK_PRIORITIES,
@@ -973,120 +973,162 @@ export default function BusinessDashboard() {
   }
 
   return (
-    <Box sx={{ minHeight: '100vh', bgcolor: 'grey.100' }}>
-      <AppBar position="static">
-        <Toolbar sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          {/* Logo/Avatar - Fixed size */}
-          <Box sx={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+    <Box sx={{ minHeight: '100vh', bgcolor: 'var(--color-neutral-25)' }}>
+      <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}>
+        <Toolbar
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1.5,
+            minHeight: '56px !important',
+            height: 56,
+            px: { xs: 2, sm: 3 },
+          }}
+        >
+          {/* Logo */}
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1.5,
+              flexShrink: 0,
+              cursor: 'pointer',
+            }}
+            onClick={() => setTabValue(0)}
+          >
             {logoUrl ? (
               <img
                 src={logoUrl}
                 alt={businessProfile?.name || 'Business Logo'}
-                style={{
-                  width: '40px',
-                  height: '40px',
-                  objectFit: 'contain',
-                  display: 'block',
-                }}
+                style={{ width: 32, height: 32, objectFit: 'contain', borderRadius: 6 }}
               />
-            ) : businessProfile?.name ? (
-              <Avatar
+            ) : (
+              <Box
                 sx={{
-                  width: 40,
-                  height: 40,
-                  bgcolor: 'primary.main',
-                  fontSize: '0.875rem',
+                  width: 32,
+                  height: 32,
+                  borderRadius: '8px',
+                  bgcolor: 'rgba(255,255,255,0.15)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '0.75rem',
+                  fontWeight: 700,
+                  color: 'white',
                 }}
               >
-                {getBusinessInitials(businessProfile.name)}
-              </Avatar>
-            ) : (
-              <BusinessIcon sx={{ fontSize: 40 }} />
+                {getBusinessInitials(businessProfile?.name || business?.name || 'BH')}
+              </Box>
             )}
-          </Box>
-          
-          {/* Business Name - Flexible with text overflow */}
-          <Box
-            sx={{
-              flex: 1,
-              minWidth: 0,
-              overflow: 'hidden',
-              display: 'flex',
-              alignItems: 'center',
-            }}
-          >
             <Typography
-              variant="h6"
               sx={{
+                fontWeight: 700,
+                fontSize: '0.875rem',
+                color: 'white',
+                display: { xs: 'none', sm: 'block' },
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
+                maxWidth: 200,
               }}
             >
-              {businessProfile?.name || business?.name || 'Business Dashboard'}
+              {businessProfile?.name || business?.name || 'Business Hero'}
             </Typography>
           </Box>
-          
-          {/* Right side - User email and logout */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+
+          <Box sx={{ flex: 1 }} />
+
+          {/* Nav items */}
+          <Box sx={{ display: { xs: 'none', sm: 'flex' }, alignItems: 'center', gap: 0.5 }}>
             <Button
-              variant="outlined"
               size="small"
-              startIcon={<AccountBalanceIcon />}
+              startIcon={<AccountBalanceIcon sx={{ fontSize: '16px !important' }} />}
               onClick={() => navigate('/app/accounting')}
-              sx={{ color: 'inherit', borderColor: 'rgba(255,255,255,0.4)' }}
+              sx={{
+                color: 'rgba(255,255,255,0.8)',
+                fontSize: '0.8125rem',
+                fontWeight: 500,
+                px: 1.5,
+                borderRadius: '8px',
+                textTransform: 'none',
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.1)', color: 'white' },
+              }}
             >
               Accounting
             </Button>
             <Button
-              variant="outlined"
               size="small"
               onClick={() => navigate('/app/assistant/chat')}
-              sx={{ 
-                color: 'inherit', 
-                borderColor: 'rgba(255,255,255,0.4)',
-                display: 'flex',
-                alignItems: 'center',
+              sx={{
+                color: 'rgba(255,255,255,0.8)',
+                fontSize: '0.8125rem',
+                fontWeight: 500,
+                px: 1.5,
+                borderRadius: '8px',
+                textTransform: 'none',
                 gap: 1,
-                textTransform: 'none'
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.1)', color: 'white' },
               }}
             >
               <Box
                 sx={{
-                  width: 24,
-                  height: 24,
+                  width: 22,
+                  height: 22,
                   borderRadius: '50%',
                   overflow: 'hidden',
-                  border: '2px solid rgba(255,255,255,0.3)'
+                  border: '2px solid rgba(167,139,250,0.6)',
+                  flexShrink: 0,
+                  animation: 'ariaRing 3s ease-in-out infinite',
+                  '@keyframes ariaRing': {
+                    '0%, 100%': { borderColor: 'rgba(167,139,250,0.4)' },
+                    '50%': { borderColor: 'rgba(167,139,250,0.8)' },
+                  },
                 }}
               >
-                <img 
-                  src="/aria-avatar.png" 
-                  alt="Aria" 
+                <img
+                  src="/aria-avatar.png"
+                  alt="Aria"
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 />
               </Box>
-              <span>Aria</span>
+              Aria
             </Button>
+          </Box>
+
+          {/* User area */}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, ml: 1 }}>
             <Typography
               variant="body2"
               sx={{
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
-                maxWidth: { xs: '120px', sm: '200px', md: 'none' },
+                maxWidth: { xs: 0, sm: 100, md: 180 },
+                color: 'rgba(255,255,255,0.7)',
+                fontSize: '0.75rem',
+                display: { xs: 'none', sm: 'block' },
               }}
             >
               {user?.email}
             </Typography>
-            <IconButton color="inherit" onClick={handleSignOut} data-testid="button-signout">
-              <LogoutIcon />
+            <IconButton
+              size="small"
+              onClick={handleSignOut}
+              data-testid="button-signout"
+              sx={{
+                color: 'rgba(255,255,255,0.7)',
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.1)', color: 'white' },
+              }}
+            >
+              <LogoutIcon sx={{ fontSize: 20 }} />
             </IconButton>
           </Box>
         </Toolbar>
       </AppBar>
+      {/* Toolbar spacer for fixed AppBar */}
+      <Box sx={{ height: 56 }} />
 
-      <Container maxWidth="xl" sx={{ py: 4 }}>
+      <Container maxWidth="xl" sx={{ py: { xs: 2, sm: 3, md: 4 }, pb: { xs: 12, md: 4 } }}>
         {error && (
           <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError('')} data-testid="alert-error">
             {error}
@@ -1105,39 +1147,72 @@ export default function BusinessDashboard() {
         ) : (
           <>
             {/* Compact Business Header */}
-            <Card sx={{ mb: 3, p: 2 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 2 }}>
+            <Card
+              sx={{
+                mb: 3,
+                px: { xs: 2, sm: 2.5 },
+                py: 1.5,
+                border: '1px solid var(--color-neutral-100)',
+                boxShadow: 'var(--shadow-sm)',
+              }}
+            >
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1.5 }}>
                 {/* Left: Logo and business info */}
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                   {logoUrl ? (
                     <Avatar 
                       src={logoUrl} 
                       alt={businessProfile?.name || business?.name || 'Business'}
-                      sx={{ width: 48, height: 48, borderRadius: 1 }}
+                      sx={{
+                        width: 44,
+                        height: 44,
+                        borderRadius: '10px',
+                        boxShadow: 'var(--shadow-xs)',
+                      }}
                       variant="rounded"
                     />
                   ) : (
-                    <Avatar sx={{ width: 48, height: 48, borderRadius: 1, bgcolor: 'primary.main' }} variant="rounded">
+                    <Avatar
+                      sx={{
+                        width: 44,
+                        height: 44,
+                        borderRadius: '10px',
+                        bgcolor: 'primary.main',
+                        boxShadow: 'var(--shadow-xs)',
+                        fontSize: '0.875rem',
+                        fontWeight: 700,
+                      }}
+                      variant="rounded"
+                    >
                       {getBusinessInitials(businessProfile?.name || business?.name || 'B')}
                     </Avatar>
                   )}
                   <Box>
-                    <Typography variant="h6" fontWeight={600} data-testid="text-business-name">
+                    <Typography
+                      sx={{
+                        fontSize: '1.0625rem',
+                        fontWeight: 700,
+                        color: 'var(--color-neutral-900)',
+                        lineHeight: 1.3,
+                      }}
+                      data-testid="text-business-name"
+                    >
                       {businessProfile?.name || business.name}
                     </Typography>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-                      <Chip 
-                        icon={<AccessTimeIcon />} 
-                        label={business.timezone || 'Europe/London'} 
-                        size="small" 
-                        variant="outlined"
-                      />
-                      <Chip 
-                        label={membership?.role || 'owner'} 
-                        size="small" 
-                        color="primary"
-                      />
-                    </Box>
+                    <Typography
+                      sx={{
+                        fontSize: '0.75rem',
+                        color: 'var(--color-neutral-500)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 0.5,
+                      }}
+                    >
+                      <AccessTimeIcon sx={{ fontSize: 13 }} />
+                      {business.timezone || 'Europe/London'}
+                      <span style={{ margin: '0 4px' }}>&middot;</span>
+                      {membership?.role || 'Owner'}
+                    </Typography>
                   </Box>
                 </Box>
                 
@@ -1145,8 +1220,19 @@ export default function BusinessDashboard() {
                 <Box>
                   <Button
                     variant="outlined"
+                    size="small"
                     onClick={(e) => setSettingsAnchor(e.currentTarget)}
-                    endIcon={<SettingsIcon />}
+                    endIcon={<SettingsIcon sx={{ fontSize: '16px !important' }} />}
+                    sx={{
+                      borderColor: 'var(--color-neutral-200)',
+                      color: 'var(--color-neutral-600)',
+                      fontWeight: 500,
+                      fontSize: '0.8125rem',
+                      '&:hover': {
+                        borderColor: 'var(--color-neutral-300)',
+                        bgcolor: 'var(--color-neutral-50)',
+                      },
+                    }}
                   >
                     Settings
                   </Button>
@@ -1190,17 +1276,37 @@ export default function BusinessDashboard() {
               </Box>
             </Card>
 
-            <Paper sx={{ p: 3 }} elevation={1}>
-              <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 0 }}>
-                <Tabs 
-                  value={tabValue} 
+            <Paper sx={{ p: { xs: 2, sm: 3 }, border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-sm)' }} elevation={0}>
+              <Box
+                sx={{
+                  borderBottom: 1,
+                  borderColor: 'divider',
+                  mb: 0,
+                  position: 'sticky',
+                  top: 56,
+                  zIndex: 10,
+                  bgcolor: 'white',
+                  mx: { xs: -2, sm: -3 },
+                  px: { xs: 2, sm: 3 },
+                }}
+              >
+                <Tabs
+                  value={tabValue}
                   onChange={(_, v) => setTabValue(v)}
-                  sx={{ 
+                  variant="scrollable"
+                  scrollButtons="auto"
+                  allowScrollButtonsMobile
+                  sx={{
                     '& .MuiTab-root': {
-                      minHeight: 56,
+                      minHeight: 48,
                       textTransform: 'none',
                       fontWeight: 500,
-                    }
+                      fontSize: { xs: '0.75rem', sm: '0.8125rem' },
+                      px: { xs: 1.5, sm: 2 },
+                    },
+                    '& .MuiTabs-scrollButtons': {
+                      '&.Mui-disabled': { opacity: 0.3 },
+                    },
                   }}
                 >
                   <Tab
@@ -2720,33 +2826,45 @@ export default function BusinessDashboard() {
           onClick={() => navigate('/app/assistant/chat')}
           sx={{
             position: 'fixed',
-            bottom: 24,
+            bottom: { xs: `calc(72px + env(safe-area-inset-bottom, 0px))`, md: 24 },
             right: 24,
-            width: 64,
-            height: 64,
-            boxShadow: '0 4px 20px rgba(99, 102, 241, 0.4)',
+            width: { xs: 48, md: 56 },
+            height: { xs: 48, md: 56 },
+            boxShadow: '0 4px 20px rgba(139, 92, 246, 0.3)',
             background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-            border: '3px solid white',
+            border: '3px solid var(--color-aria-400)',
             overflow: 'hidden',
-            transition: 'all 0.3s ease',
-            animation: 'pulse-aria 2s infinite',
+            transition: 'all 200ms cubic-bezier(0.4,0,0.2,1)',
+            animation: 'ariaPulse 3s ease-in-out infinite',
+            zIndex: 60,
             '&:hover': {
-              transform: 'scale(1.1)',
-              boxShadow: '0 6px 30px rgba(99, 102, 241, 0.6)',
+              transform: 'scale(1.08)',
+              boxShadow: '0 6px 28px rgba(139, 92, 246, 0.4)',
+              borderColor: 'var(--color-aria-500)',
             },
-            '@keyframes pulse-aria': {
-              '0%, 100%': { boxShadow: '0 4px 20px rgba(99, 102, 241, 0.4)' },
-              '50%': { boxShadow: '0 4px 30px rgba(99, 102, 241, 0.7)' },
-            }
+            '@keyframes ariaPulse': {
+              '0%, 100%': { boxShadow: '0 4px 20px rgba(139, 92, 246, 0.3)' },
+              '50%': { boxShadow: '0 4px 30px rgba(139, 92, 246, 0.5)' },
+            },
           }}
         >
-          <img 
-            src="/aria-avatar.png" 
-            alt="Aria" 
+          <img
+            src="/aria-avatar.png"
+            alt="Aria"
             style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '50%' }}
           />
         </Fab>
       </Tooltip>
+
+      {/* Mobile Bottom Navigation */}
+      <BottomNav
+        activeTab={tabValue}
+        onTabChange={setTabValue}
+        counts={{
+          tasks: openTaskCount,
+          calls: newCallCount,
+        }}
+      />
     </Box>
   );
 }
