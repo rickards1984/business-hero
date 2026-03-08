@@ -202,7 +202,7 @@ export default function BusinessDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   
-  const logoUrl = resolveLogoSrc(businessProfile?.logo_url);
+  const logoUrl = resolveLogoSrc(businessProfile?.logo_url ?? business?.logo_url);
 
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
