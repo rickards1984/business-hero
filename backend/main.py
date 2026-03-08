@@ -332,6 +332,10 @@ app.include_router(receptionist_call_router)
 from onboarding_api import router as onboarding_router
 app.include_router(onboarding_router)
 
+from support_api import router as support_router, admin_router as support_admin_router
+app.include_router(support_router)
+app.include_router(support_admin_router)
+
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():

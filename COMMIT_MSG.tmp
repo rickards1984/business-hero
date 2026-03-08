@@ -1,6 +1,27 @@
-Fix business logo not displaying in header card
+Add support ticket system backend API (prompt 1 of 3)
 
-logoUrl only read from businessProfile (useMe /v1/me) which may not
-have resolved yet when the header renders. Fall back to business.logo_url
-from the direct Supabase query so the logo displays from whichever
-source loads first.
+New files:
+- backend/support_api.py: AI-first support system with knowledge base
+- supabase/migrations/018_support_system.sql: tables for articles,
+  conversations, and messages
+
+User endpoints (/v1/support/):
+- POST /chat: AI-powered support chat with auto-escalation
+- POST /escalate: explicit escalation to human
+- GET /conversations: list user's conversations
+- GET /conversations/{id}: get conversation with messages
+- GET /articles: browse published help articles
+- GET /articles/{id}: read full article
+
+Admin endpoints (/v1/admin/support/):
+- GET /tickets: list all tickets with filters
+- GET /tickets/{id}: full ticket with internal notes
+- POST /tickets/{id}/reply: admin reply (or internal note)
+- PUT /tickets/{id}/status: update status/priority
+- POST /tickets/{id}/ai-draft: AI-drafted response suggestion
+- GET /stats: dashboard statistics
+- CRUD on /articles: knowledge base management
+
+AI agent references knowledge base articles, parses category and
+confidence metadata, and auto-escalates when it can't help or the
+user requests a human.
