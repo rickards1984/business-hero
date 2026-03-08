@@ -29,45 +29,71 @@ const BRAND_COLOUR_PRESETS = [
   { id: 'slate', label: 'Slate', value: '#475569', hover: '#334155' },
 ] as const;
 
-function hexToHSL(hex: string): { h: number; s: number; l: number } {
-  const r = parseInt(hex.slice(1, 3), 16) / 255;
-  const g = parseInt(hex.slice(3, 5), 16) / 255;
-  const b = parseInt(hex.slice(5, 7), 16) / 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  let h = 0, s = 0;
-  const l = (max + min) / 2;
-  if (max !== min) {
-    const d = max - min;
-    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    switch (max) {
-      case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
-      case g: h = ((b - r) / d + 2) / 6; break;
-      case b: h = ((r - g) / d + 4) / 6; break;
-    }
-  }
-  return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
+type ShadeMap = Record<number, string>;
+
+const COLOUR_SHADE_MAPS: Record<string, ShadeMap> = {
+  '#3B82F6': { 50:'#EFF6FF',100:'#DBEAFE',200:'#BFDBFE',300:'#93C5FD',400:'#60A5FA',500:'#3B82F6',600:'#2563EB',700:'#1D4ED8' },
+  '#6366F1': { 50:'#EEF2FF',100:'#E0E7FF',200:'#C7D2FE',300:'#A5B4FC',400:'#818CF8',500:'#6366F1',600:'#4F46E5',700:'#4338CA' },
+  '#8B5CF6': { 50:'#F5F3FF',100:'#EDE9FE',200:'#DDD6FE',300:'#C4B5FD',400:'#A78BFA',500:'#8B5CF6',600:'#7C3AED',700:'#6D28D9' },
+  '#14B8A6': { 50:'#F0FDFA',100:'#CCFBF1',200:'#99F6E4',300:'#5EEAD4',400:'#2DD4BF',500:'#14B8A6',600:'#0D9488',700:'#0F766E' },
+  '#10B981': { 50:'#ECFDF5',100:'#D1FAE5',200:'#A7F3D0',300:'#6EE7B7',400:'#34D399',500:'#10B981',600:'#059669',700:'#047857' },
+  '#F59E0B': { 50:'#FFFBEB',100:'#FEF3C7',200:'#FDE68A',300:'#FCD34D',400:'#FBBF24',500:'#F59E0B',600:'#D97706',700:'#B45309' },
+  '#F43F5E': { 50:'#FFF1F2',100:'#FFE4E6',200:'#FECDD3',300:'#FDA4AF',400:'#FB7185',500:'#F43F5E',600:'#E11D48',700:'#BE123C' },
+  '#475569': { 50:'#F8FAFC',100:'#F1F5F9',200:'#E2E8F0',300:'#CBD5E1',400:'#94A3B8',500:'#475569',600:'#334155',700:'#1E293B' },
+};
+
+function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.replace('#', ''), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function shiftHex(hex: string, amount: number): string {
+  const [r, g, b] = hexToRgb(hex);
+  const clamp = (v: number) => Math.max(0, Math.min(255, v));
+  const R = clamp(r + amount);
+  const G = clamp(g + amount);
+  const B = clamp(b + amount);
+  return `#${((1 << 24) | (R << 16) | (G << 8) | B).toString(16).slice(1).toUpperCase()}`;
 }
 
 export function applyBrandColor(hex: string | null | undefined) {
   if (!hex) return;
-  const hsl = hexToHSL(hex);
+  const upper = hex.toUpperCase();
   const root = document.documentElement;
-  root.style.setProperty('--color-primary-500', hex);
-  const darkerL = Math.max(hsl.l - 10, 10);
-  root.style.setProperty('--color-primary-600', `hsl(${hsl.h}, ${hsl.s}%, ${darkerL}%)`);
-  const lighterL = Math.min(hsl.l + 35, 96);
-  root.style.setProperty('--color-primary-50', `hsl(${hsl.h}, ${hsl.s}%, ${lighterL}%)`);
-  const lightL = Math.min(hsl.l + 25, 92);
-  root.style.setProperty('--color-primary-100', `hsl(${hsl.h}, ${hsl.s}%, ${lightL}%)`);
-  const midL = Math.min(hsl.l + 10, 80);
-  root.style.setProperty('--color-primary-300', `hsl(${hsl.h}, ${hsl.s}%, ${midL}%)`);
-  root.style.setProperty('--color-primary-400', `hsl(${hsl.h}, ${hsl.s}%, ${Math.max(hsl.l - 5, 15)}%)`);
-  root.style.setProperty('--color-primary-700', `hsl(${hsl.h}, ${hsl.s}%, ${Math.max(hsl.l - 20, 10)}%)`);
+  const shades = COLOUR_SHADE_MAPS[upper];
+
+  if (shades) {
+    root.style.setProperty('--color-primary-50', shades[50]);
+    root.style.setProperty('--color-primary-100', shades[100]);
+    root.style.setProperty('--color-primary-200', shades[200]);
+    root.style.setProperty('--color-primary-300', shades[300]);
+    root.style.setProperty('--color-primary-400', shades[400]);
+    root.style.setProperty('--color-primary-500', shades[500]);
+    root.style.setProperty('--color-primary-600', shades[600]);
+    root.style.setProperty('--color-primary-700', shades[700]);
+  } else {
+    root.style.setProperty('--color-primary-50', shiftHex(hex, 180));
+    root.style.setProperty('--color-primary-100', shiftHex(hex, 150));
+    root.style.setProperty('--color-primary-200', shiftHex(hex, 120));
+    root.style.setProperty('--color-primary-300', shiftHex(hex, 80));
+    root.style.setProperty('--color-primary-400', shiftHex(hex, 30));
+    root.style.setProperty('--color-primary-500', hex);
+    root.style.setProperty('--color-primary-600', shiftHex(hex, -30));
+    root.style.setProperty('--color-primary-700', shiftHex(hex, -60));
+  }
+
+  const [r, g, b] = hexToRgb(hex);
+  root.style.setProperty('--shadow-primary', `0 4px 14px 0 rgba(${r},${g},${b},0.25)`);
+  root.style.setProperty('--shadow-primary-hover', `0 6px 20px 0 rgba(${r},${g},${b},0.35)`);
 }
 
 export function resetBrandColor() {
   const root = document.documentElement;
-  const props = ['--color-primary-50', '--color-primary-100', '--color-primary-300', '--color-primary-400', '--color-primary-500', '--color-primary-600', '--color-primary-700'];
+  const props = [
+    '--color-primary-50','--color-primary-100','--color-primary-200','--color-primary-300',
+    '--color-primary-400','--color-primary-500','--color-primary-600','--color-primary-700',
+    '--shadow-primary','--shadow-primary-hover',
+  ];
   props.forEach(p => root.style.removeProperty(p));
 }
 

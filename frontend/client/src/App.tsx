@@ -94,9 +94,9 @@ const theme = createTheme({
           transition: 'all 150ms cubic-bezier(0.4, 0, 0.2, 1)',
         },
         containedPrimary: {
-          boxShadow: '0 4px 14px 0 rgba(37, 99, 235, 0.25)',
+          boxShadow: 'var(--shadow-primary)',
           '&:hover': {
-            boxShadow: '0 6px 20px 0 rgba(37, 99, 235, 0.35)',
+            boxShadow: 'var(--shadow-primary-hover)',
             transform: 'translateY(-1px)',
           },
           '&:active': {
@@ -166,7 +166,7 @@ const theme = createTheme({
     MuiAppBar: {
       styleOverrides: {
         root: {
-          background: 'linear-gradient(135deg, #1D4ED8 0%, #2563EB 100%)',
+          background: 'linear-gradient(135deg, var(--color-primary-700) 0%, var(--color-primary-600) 100%)',
           boxShadow: '0 1px 3px rgba(0, 0, 0, 0.12)',
         },
       },

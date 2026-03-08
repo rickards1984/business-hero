@@ -1,0 +1,6 @@
+Fix business logo not displaying in header card
+
+logoUrl only read from businessProfile (useMe /v1/me) which may not
+have resolved yet when the header renders. Fall back to business.logo_url
+from the direct Supabase query so the logo displays from whichever
+source loads first.

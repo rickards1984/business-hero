@@ -22,6 +22,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHea
 from pydantic import BaseModel as PydanticBaseModel, ValidationError
 from sqlmodel import Session, select
 from sqlalchemy import text, func, or_
+from sqlalchemy.orm.attributes import flag_modified
 import pytz
 import csv
 import io
@@ -1324,8 +1325,10 @@ async def update_brand_color(
     else:
         flags.pop("brand_color", None)
     business.feature_flags = flags
+    flag_modified(business, "feature_flags")
     session.add(business)
     session.commit()
+    session.refresh(business)
     return {"ok": True, "brand_color": flags.get("brand_color")}
 
 
