@@ -97,6 +97,7 @@ import EmailsTab from '@/components/EmailsTab';
 import ReceptionistTab from '@/components/ReceptionistTab';
 import BottomNav from '@/components/BottomNav';
 import { fetchEmailMessages } from '@/lib/emailApi';
+import { applyBrandColor } from '@/pages/BrandingSettings';
 import {
   TASK_CATEGORIES, TASK_PRIORITIES,
   getCategoryColor, getCategoryLabel,
@@ -171,6 +172,12 @@ export default function BusinessDashboard() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { user, signOut, loading: authLoading } = useAuth();
   const { data: businessProfile, isLoading: profileLoading } = useMe();
+
+  useEffect(() => {
+    if (businessProfile?.brand_color) {
+      applyBrandColor(businessProfile.brand_color);
+    }
+  }, [businessProfile?.brand_color]);
   
   const [tabValue, setTabValue] = useState(() => {
     const tab = searchParams.get('tab');
@@ -1954,42 +1961,36 @@ export default function BusinessDashboard() {
                         {/* Transcript */}
                         {selectedCall.transcript && (
                           <Box sx={{ mb: 3 }}>
-                            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                            <Typography sx={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-neutral-500)', textTransform: 'uppercase', letterSpacing: '0.05em', mb: 1.5 }}>
                               Transcript
                             </Typography>
-                            <Card sx={{ p: 2, bgcolor: 'grey.50', maxHeight: 400, overflow: 'auto' }}>
+                            <Box sx={{ maxHeight: 400, overflow: 'auto', px: 0.5 }}>
                               {selectedCall.source === 'receptionist' ? (
-                                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                                  {selectedCall.transcript.split('\n').filter(Boolean).map((line, idx) => {
+                                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                                  {selectedCall.transcript.split('\n').filter(Boolean).map((line: string, idx: number) => {
                                     const isCaller = line.startsWith('Caller:');
                                     const text = line.replace(/^(Caller|Receptionist):\s*/, '');
                                     return (
-                                      <Box key={idx} sx={{
-                                        display: 'flex',
-                                        justifyContent: isCaller ? 'flex-start' : 'flex-end',
-                                      }}>
-                                        <Box sx={{
-                                          maxWidth: '80%',
-                                          px: 1.5,
-                                          py: 1,
-                                          borderRadius: 2,
-                                          bgcolor: isCaller ? 'grey.200' : 'primary.light',
-                                        }}>
-                                          <Typography variant="caption" fontWeight={600} color="text.secondary">
+                                      <Box key={idx} sx={{ display: 'flex', justifyContent: isCaller ? 'flex-start' : 'flex-end' }}>
+                                        <Box
+                                          className={`transcript-bubble ${isCaller ? 'transcript-bubble--caller' : 'transcript-bubble--receptionist'}`}
+                                          sx={{ maxWidth: '85%', px: 2, py: 1 }}
+                                        >
+                                          <Typography sx={{ fontSize: '0.625rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', mb: '2px', color: isCaller ? 'var(--color-neutral-500)' : 'var(--color-primary-600)' }}>
                                             {isCaller ? 'Caller' : 'Receptionist'}
                                           </Typography>
-                                          <Typography variant="body2">{text}</Typography>
+                                          <Typography sx={{ fontSize: '0.8125rem', lineHeight: 1.625 }}>{text}</Typography>
                                         </Box>
                                       </Box>
                                     );
                                   })}
                                 </Box>
                               ) : (
-                                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+                                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: 'var(--color-neutral-700)' }}>
                                   {selectedCall.transcript}
                                 </Typography>
                               )}
-                            </Card>
+                            </Box>
                           </Box>
                         )}
 

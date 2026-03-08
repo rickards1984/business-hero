@@ -6,6 +6,7 @@ export interface BusinessProfile {
   name: string;
   timezone: string;
   logo_url: string | null;
+  brand_color?: string | null;
 }
 
 /**

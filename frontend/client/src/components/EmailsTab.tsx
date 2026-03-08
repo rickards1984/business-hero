@@ -330,27 +330,27 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
 
       {/* Summary stat cards */}
       <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap' }}>
-        <Card sx={{ flex: '1 1 150px', p: 2, textAlign: 'center' }}>
-          <Typography variant="h5" fontWeight={700} color="error.main">
+        <Card sx={{ flex: '1 1 150px', p: 2, textAlign: 'center', border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-xs)' }}>
+          <Typography sx={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--color-danger-500)' }}>
             {counts.action_required}
           </Typography>
-          <Typography variant="caption" color="text.secondary">
+          <Typography sx={{ fontSize: '0.6875rem', fontWeight: 500, color: 'var(--color-neutral-500)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
             Action Required
           </Typography>
         </Card>
-        <Card sx={{ flex: '1 1 150px', p: 2, textAlign: 'center' }}>
-          <Typography variant="h5" fontWeight={700} color="warning.main">
+        <Card sx={{ flex: '1 1 150px', p: 2, textAlign: 'center', border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-xs)' }}>
+          <Typography sx={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--color-warning-500)' }}>
             {counts.awaiting_reply}
           </Typography>
-          <Typography variant="caption" color="text.secondary">
+          <Typography sx={{ fontSize: '0.6875rem', fontWeight: 500, color: 'var(--color-neutral-500)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
             Awaiting Reply
           </Typography>
         </Card>
-        <Card sx={{ flex: '1 1 150px', p: 2, textAlign: 'center' }}>
-          <Typography variant="h5" fontWeight={700} color="primary.main">
+        <Card sx={{ flex: '1 1 150px', p: 2, textAlign: 'center', border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-xs)' }}>
+          <Typography sx={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--color-primary-500)' }}>
             {counts.unread}
           </Typography>
-          <Typography variant="caption" color="text.secondary">
+          <Typography sx={{ fontSize: '0.6875rem', fontWeight: 500, color: 'var(--color-neutral-500)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
             Unread
           </Typography>
         </Card>
@@ -427,12 +427,18 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
                 key={email.id}
                 sx={{
                   p: 2,
-                  mb: 2,
+                  mb: 1.5,
                   borderLeft: 4,
                   borderLeftColor: borderColor,
-                  opacity: email.is_unread ? 1 : 0.85,
-                  '&:hover': { boxShadow: 2 },
-                  transition: 'box-shadow 0.2s',
+                  opacity: email.is_unread ? 1 : 0.8,
+                  cursor: 'pointer',
+                  transition: 'all 150ms cubic-bezier(0.4,0,0.2,1)',
+                  '&:hover': {
+                    boxShadow: 'var(--shadow-md)',
+                    bgcolor: 'var(--color-neutral-50)',
+                    transform: 'translateY(-1px)',
+                    '& .email-actions': { opacity: 1 },
+                  },
                 }}
               >
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -503,7 +509,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
                   </Box>
 
                   {/* Action buttons */}
-                  <Box sx={{ ml: 1, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <Box className="email-actions" sx={{ ml: 1, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 0.5, opacity: { xs: 1, md: 0 }, transition: 'opacity 150ms ease' }}>
                     <Tooltip title="Create a follow-up task">
                       <Button
                         size="small"

@@ -19,7 +19,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, s
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
-from pydantic import ValidationError
+from pydantic import BaseModel as PydanticBaseModel, ValidationError
 from sqlmodel import Session, select
 from sqlalchemy import text, func, or_
 import pytz
@@ -1022,11 +1022,13 @@ async def get_my_profile(
     
     # Include business profile fields for the frontend
     if business:
+        flags = business.feature_flags or {}
         response.update({
             "id": str(business.id),
             "name": business.name,
             "timezone": business.timezone,
             "logo_url": business.logo_url,
+            "brand_color": flags.get("brand_color", None),
         })
     
     return response
@@ -1303,6 +1305,28 @@ async def update_business_logo(
         timezone=business.timezone,
         logo_url=business.logo_url
     )
+
+
+class BrandColorRequest(PydanticBaseModel):
+    brand_color: Optional[str] = None
+
+
+@app.put("/v1/business/brand-color", tags=["Business"])
+async def update_brand_color(
+    data: BrandColorRequest,
+    business: Business = Depends(get_current_user_business),
+    session: Session = Depends(get_session),
+):
+    """Save the selected brand colour to feature_flags."""
+    flags = dict(business.feature_flags or {})
+    if data.brand_color:
+        flags["brand_color"] = data.brand_color
+    else:
+        flags.pop("brand_color", None)
+    business.feature_flags = flags
+    session.add(business)
+    session.commit()
+    return {"ok": True, "brand_color": flags.get("brand_color")}
 
 
 def _task_response(task: Task) -> TaskResponse:

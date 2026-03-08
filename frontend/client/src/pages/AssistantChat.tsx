@@ -123,321 +123,325 @@ export default function AssistantChat() {
   }
 
   return (
-    <Container maxWidth="md" sx={{ py: 3, minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
-      {/* Header */}
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Button
-          variant="text"
-          startIcon={<ArrowBackIcon />}
-          onClick={() => navigate('/app')}
-          sx={{ color: 'text.secondary' }}
-        >
-          Back
-        </Button>
-        {(messages.length > 0 || realtimeMode) && (
+    <Box
+      sx={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        background: 'linear-gradient(180deg, var(--color-neutral-25) 0%, var(--color-aria-50) 30%, var(--color-neutral-25) 100%)',
+      }}
+    >
+      <Container maxWidth="md" sx={{ py: 3, flex: 1, display: 'flex', flexDirection: 'column' }}>
+        {/* Header */}
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
           <Button
             variant="text"
-            onClick={() => {
-              setMessages([]);
-              setConversationId(null);
-              setRealtimeMode(false);
-            }}
-            sx={{ color: 'text.secondary' }}
+            startIcon={<ArrowBackIcon />}
+            onClick={() => navigate('/app')}
+            sx={{ color: 'var(--color-neutral-500)', fontWeight: 500, fontSize: '0.8125rem' }}
           >
-            New conversation
+            Back
           </Button>
-        )}
-      </Box>
-
-      {/* Main Content */}
-      {realtimeMode ? (
-        /* Realtime Voice Mode - Full screen experience */
-        <Box sx={{ 
-          flex: 1,
-          display: 'flex', 
-          flexDirection: 'column', 
-          alignItems: 'center', 
-          justifyContent: 'center',
-          minHeight: '70vh',
-        }}>
-          <RealtimeVoice 
-            onTranscript={(text, isUser) => {
-              setMessages(prev => [...prev, {
-                role: isUser ? 'user' : 'assistant',
-                content: text
-              }]);
-            }}
-            onClose={() => setRealtimeMode(false)}
-          />
-          
-          {/* Transcript below */}
-          {messages.length > 0 && (
-            <Paper sx={{ 
-              mt: 4, 
-              p: 2, 
-              maxHeight: 200, 
-              overflow: 'auto', 
-              width: '100%',
-              maxWidth: 500,
-              bgcolor: 'grey.50'
-            }}>
-              <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>
-                Transcript
-              </Typography>
-              {messages.slice(-6).map((msg, i) => (
-                <Typography 
-                  key={i} 
-                  variant="body2" 
-                  sx={{ 
-                    mb: 0.5,
-                    color: msg.role === 'user' ? 'primary.main' : 'text.primary',
-                    fontStyle: msg.role === 'user' ? 'italic' : 'normal'
-                  }}
-                >
-                  {msg.role === 'user' ? 'You: ' : 'Aria: '}{msg.content.slice(0, 100)}{msg.content.length > 100 ? '...' : ''}
-                </Typography>
-              ))}
-            </Paper>
+          {(messages.length > 0 || realtimeMode) && (
+            <Button
+              variant="text"
+              onClick={() => {
+                setMessages([]);
+                setConversationId(null);
+                setRealtimeMode(false);
+              }}
+              sx={{ color: 'var(--color-neutral-500)', fontWeight: 500, fontSize: '0.8125rem' }}
+            >
+              New conversation
+            </Button>
           )}
         </Box>
-      ) : messages.length === 0 ? (
-        /* Welcome Screen - Sleek and modern */
-        <Box sx={{ 
-          flex: 1,
-          display: 'flex', 
-          flexDirection: 'column', 
-          alignItems: 'center', 
-          justifyContent: 'center',
-          minHeight: '60vh',
-          textAlign: 'center',
-          px: 3
-        }}>
-          {/* Aria's Avatar with glow effect */}
-          <Box sx={{ position: 'relative', mb: 4 }}>
-            <Box sx={{ 
-              width: 140, 
-              height: 140, 
-              borderRadius: '50%', 
-              overflow: 'hidden',
-              boxShadow: '0 0 40px rgba(99, 102, 241, 0.4)',
-              border: '3px solid rgba(99, 102, 241, 0.3)',
-              animation: 'avatarPulse 3s ease-in-out infinite',
-              '@keyframes avatarPulse': {
-                '0%, 100%': { 
-                  boxShadow: '0 0 40px rgba(99, 102, 241, 0.4)',
-                  transform: 'scale(1)'
-                },
-                '50%': { 
-                  boxShadow: '0 0 60px rgba(99, 102, 241, 0.6)',
-                  transform: 'scale(1.02)'
-                },
-              }
-            }}>
-              <img 
-                src="/aria-avatar.png" 
-                alt="Aria" 
-                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              />
-            </Box>
+
+        {/* Main Content */}
+        {realtimeMode ? (
+          <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '70vh' }}>
+            <RealtimeVoice
+              onTranscript={(text, isUser) => {
+                setMessages(prev => [...prev, { role: isUser ? 'user' : 'assistant', content: text }]);
+              }}
+              onClose={() => setRealtimeMode(false)}
+            />
+            {messages.length > 0 && (
+              <Paper sx={{ mt: 4, p: 2, maxHeight: 200, overflow: 'auto', width: '100%', maxWidth: 500, bgcolor: 'var(--color-neutral-50)', border: '1px solid var(--color-neutral-100)' }}>
+                <Typography variant="caption" sx={{ mb: 1, display: 'block', color: 'var(--color-neutral-500)' }}>Transcript</Typography>
+                {messages.slice(-6).map((msg, i) => (
+                  <Typography key={i} variant="body2" sx={{ mb: 0.5, color: msg.role === 'user' ? 'var(--color-primary-600)' : 'var(--color-neutral-700)', fontStyle: msg.role === 'user' ? 'italic' : 'normal' }}>
+                    {msg.role === 'user' ? 'You: ' : 'Aria: '}{msg.content.slice(0, 100)}{msg.content.length > 100 ? '...' : ''}
+                  </Typography>
+                ))}
+              </Paper>
+            )}
           </Box>
-          
-          <Typography variant="h4" fontWeight={700} sx={{ 
-            mb: 1,
-            background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-            backgroundClip: 'text',
-            WebkitBackgroundClip: 'text',
-            WebkitTextFillColor: 'transparent',
-          }}>
-            Meet Aria
-          </Typography>
-          
-          <Typography variant="body1" color="text.secondary" sx={{ mb: 4, maxWidth: 400 }}>
-            Your AI business assistant. I can help with emails, tasks, calls, invoices, and finances.
-          </Typography>
-          
-          {/* Main CTA - Talk to Aria button */}
-          <Button
-            variant="contained"
-            size="large"
-            onClick={() => setRealtimeMode(true)}
-            startIcon={<MicIcon />}
-            sx={{
-              px: 5,
-              py: 2,
-              borderRadius: '50px',
-              fontSize: '1.1rem',
-              fontWeight: 600,
-              background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-              boxShadow: '0 8px 32px rgba(99, 102, 241, 0.35)',
-              textTransform: 'none',
-              mb: 3,
-              '&:hover': {
-                background: 'linear-gradient(135deg, #5558e3 0%, #7c4fe0 100%)',
-                boxShadow: '0 12px 40px rgba(99, 102, 241, 0.45)',
-                transform: 'translateY(-2px)',
-              },
-              transition: 'all 0.3s ease'
-            }}
-          >
-            Talk to Aria
-          </Button>
-          
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 4 }}>
-            or type a message below
-          </Typography>
-          
-          {/* Quick action chips */}
-          <Box sx={{ 
-            display: 'flex', 
-            flexWrap: 'wrap', 
-            gap: 1.5, 
-            justifyContent: 'center',
-            maxWidth: 500
-          }}>
-            {QUICK_ACTIONS.map((action) => (
-              <Chip
-                key={action.label}
-                icon={action.icon}
-                label={action.label}
-                onClick={() => handleQuickAction(action.action)}
-                clickable
+        ) : messages.length === 0 ? (
+          <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '60vh', textAlign: 'center', px: 3 }}>
+            {/* Aria Avatar with breathing ring */}
+            <Box sx={{ position: 'relative', width: 120, height: 120, mb: 4 }}>
+              <Box
                 sx={{
-                  px: 1,
-                  py: 2.5,
-                  borderRadius: '20px',
-                  border: '1px solid',
-                  borderColor: 'divider',
-                  bgcolor: 'background.paper',
-                  '&:hover': {
-                    bgcolor: 'action.hover',
-                    borderColor: 'primary.main',
-                  }
+                  position: 'absolute',
+                  inset: -6,
+                  borderRadius: '50%',
+                  border: '2px solid var(--color-aria-300)',
+                  animation: 'avatarBreathing 4s ease-in-out infinite',
+                  '@keyframes avatarBreathing': {
+                    '0%, 100%': { transform: 'scale(1)', borderColor: 'var(--color-aria-300)', boxShadow: '0 0 0 0 rgba(139,92,246,0)' },
+                    '50%': { transform: 'scale(1.03)', borderColor: 'var(--color-aria-400)', boxShadow: '0 0 20px 5px rgba(139,92,246,0.1)' },
+                  },
                 }}
               />
-            ))}
+              <img
+                src="/aria-avatar.png"
+                alt="Aria"
+                style={{ width: 120, height: 120, borderRadius: '50%', objectFit: 'cover', boxShadow: '0 8px 30px rgba(139,92,246,0.2)', position: 'relative' }}
+              />
+            </Box>
+
+            <Typography
+              sx={{
+                fontSize: '1.5rem',
+                fontWeight: 800,
+                mb: 1,
+                background: 'linear-gradient(135deg, var(--color-aria-600) 0%, var(--color-aria-400) 100%)',
+                backgroundClip: 'text',
+                WebkitBackgroundClip: 'text',
+                WebkitTextFillColor: 'transparent',
+              }}
+            >
+              Meet Aria
+            </Typography>
+
+            <Typography sx={{ fontSize: '0.875rem', color: 'var(--color-neutral-500)', mb: 5, maxWidth: 360 }}>
+              Your AI business assistant. I can help with emails, tasks, calls, invoices, and finances.
+            </Typography>
+
+            <Button
+              variant="contained"
+              size="large"
+              onClick={() => setRealtimeMode(true)}
+              startIcon={<MicIcon />}
+              sx={{
+                px: 5,
+                py: 1.5,
+                borderRadius: '9999px',
+                fontSize: '0.9375rem',
+                fontWeight: 600,
+                background: 'linear-gradient(135deg, var(--color-aria-500) 0%, var(--color-aria-600) 100%)',
+                boxShadow: '0 4px 20px rgba(139,92,246,0.35)',
+                textTransform: 'none',
+                height: 52,
+                mb: 2,
+                '&:hover': {
+                  background: 'linear-gradient(135deg, var(--color-aria-600) 0%, #6D28D9 100%)',
+                  boxShadow: '0 8px 30px rgba(139,92,246,0.45)',
+                  transform: 'translateY(-2px)',
+                },
+                transition: 'all 200ms cubic-bezier(0.4,0,0.2,1)',
+              }}
+            >
+              Talk to Aria
+            </Button>
+
+            <Typography sx={{ fontSize: '0.8125rem', color: 'var(--color-neutral-400)', mb: 4 }}>
+              or type a message below
+            </Typography>
+
+            {/* Quick action chips */}
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, justifyContent: 'center', maxWidth: 500 }}>
+              {QUICK_ACTIONS.map((action) => (
+                <Chip
+                  key={action.label}
+                  icon={action.icon}
+                  label={action.label}
+                  onClick={() => handleQuickAction(action.action)}
+                  clickable
+                  sx={{
+                    px: 1.5,
+                    py: 2.5,
+                    borderRadius: '9999px',
+                    border: '1px solid var(--color-neutral-200)',
+                    bgcolor: 'white',
+                    fontSize: '0.8125rem',
+                    fontWeight: 500,
+                    boxShadow: 'var(--shadow-xs)',
+                    transition: 'all 150ms cubic-bezier(0.4,0,0.2,1)',
+                    '&:hover': {
+                      borderColor: 'var(--color-aria-300)',
+                      bgcolor: 'var(--color-aria-50)',
+                      color: 'var(--color-aria-700)',
+                      boxShadow: 'var(--shadow-sm)',
+                      transform: 'translateY(-1px)',
+                    },
+                  }}
+                />
+              ))}
+            </Box>
           </Box>
-        </Box>
-      ) : (
-        /* Chat Messages View */
-        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-          {/* Quick actions bar */}
-          <Box sx={{ 
-            display: 'flex', 
-            flexWrap: 'wrap', 
-            gap: 1, 
-            pb: 2,
-            mb: 2,
-            borderBottom: 1,
-            borderColor: 'divider'
-          }}>
-            {QUICK_ACTIONS.map((action) => (
-              <Chip
-                key={action.label}
-                icon={action.icon}
-                label={action.label}
-                onClick={() => handleQuickAction(action.action)}
+        ) : (
+          /* Chat Messages View */
+          <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, pb: 2, mb: 2, borderBottom: '1px solid var(--color-neutral-100)' }}>
+              {QUICK_ACTIONS.map((action) => (
+                <Chip
+                  key={action.label}
+                  icon={action.icon}
+                  label={action.label}
+                  onClick={() => handleQuickAction(action.action)}
+                  variant="outlined"
+                  size="small"
+                  sx={{
+                    cursor: 'pointer',
+                    borderColor: 'var(--color-neutral-200)',
+                    '&:hover': { borderColor: 'var(--color-aria-300)', bgcolor: 'var(--color-aria-50)' },
+                  }}
+                />
+              ))}
+              <Box sx={{ flex: 1 }} />
+              <Button
                 variant="outlined"
                 size="small"
-                sx={{ cursor: 'pointer' }}
-              />
-            ))}
-            <Box sx={{ flex: 1 }} />
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={<MicIcon />}
-              onClick={() => setRealtimeMode(true)}
-              sx={{ borderRadius: '20px' }}
-            >
-              Voice
-            </Button>
-          </Box>
-          
-          {/* Messages */}
-          <Paper sx={{ flex: 1, p: 2, mb: 2, overflow: 'auto', maxHeight: '50vh', bgcolor: 'grey.50' }}>
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                startIcon={<MicIcon />}
+                onClick={() => setRealtimeMode(true)}
+                sx={{
+                  borderRadius: '9999px',
+                  borderColor: 'var(--color-aria-200)',
+                  color: 'var(--color-aria-600)',
+                  '&:hover': { borderColor: 'var(--color-aria-400)', bgcolor: 'var(--color-aria-50)' },
+                }}
+              >
+                Voice
+              </Button>
+            </Box>
+
+            {/* Messages */}
+            <Box sx={{ flex: 1, mb: 2, overflow: 'auto', maxHeight: '55vh', display: 'flex', flexDirection: 'column', gap: 1.5 }}>
               {messages.map((message, idx) => (
                 <Box
                   key={`${message.role}-${idx}`}
                   sx={{
                     alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start',
-                    bgcolor: message.role === 'user' ? 'primary.main' : 'white',
-                    color: message.role === 'user' ? 'primary.contrastText' : 'text.primary',
+                    bgcolor: message.role === 'user' ? 'var(--color-primary-600)' : 'white',
+                    color: message.role === 'user' ? 'white' : 'var(--color-neutral-700)',
                     px: 2.5,
                     py: 1.5,
-                    borderRadius: message.role === 'user' ? '20px 20px 4px 20px' : '20px 20px 20px 4px',
-                    maxWidth: '85%',
-                    boxShadow: 1,
+                    borderRadius: message.role === 'user' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
+                    maxWidth: '80%',
+                    boxShadow: message.role === 'user' ? 'var(--shadow-md)' : 'var(--shadow-xs)',
+                    border: message.role === 'assistant' ? '1px solid var(--color-neutral-100)' : 'none',
+                    fontSize: '0.875rem',
+                    lineHeight: 1.625,
+                    animation: 'messageAppear 200ms ease-out',
+                    '@keyframes messageAppear': {
+                      from: { opacity: 0, transform: 'translateY(8px)' },
+                      to: { opacity: 1, transform: 'translateY(0)' },
+                    },
                   }}
                 >
                   {message.role === 'assistant' ? (
                     <ReactMarkdown>{message.content}</ReactMarkdown>
                   ) : (
-                    <Typography variant="body2">{message.content}</Typography>
+                    <Typography variant="body2" sx={{ color: 'inherit' }}>{message.content}</Typography>
                   )}
                 </Box>
               ))}
               {loading && (
                 <Box sx={{ alignSelf: 'flex-start', p: 2 }}>
-                  <CircularProgress size={20} />
+                  <CircularProgress size={20} sx={{ color: 'var(--color-aria-500)' }} />
                 </Box>
               )}
               <div ref={messagesEndRef} />
             </Box>
-          </Paper>
-        </Box>
-      )}
+          </Box>
+        )}
 
-      {/* Error display */}
-      {error && (
-        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
-          {error}
-        </Alert>
-      )}
+        {/* Error display */}
+        {error && (
+          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
+            {error}
+          </Alert>
+        )}
 
-      {/* Input area - show when not in realtime mode */}
-      {!realtimeMode && (
-        <Paper sx={{ p: 2, mt: 'auto' }}>
-          <Box sx={{ display: 'flex', gap: 2, alignItems: 'flex-end' }}>
-            <TextField
-              inputRef={inputRef}
-              fullWidth
-              placeholder="Ask Aria anything..."
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  handleSend();
-                }
-              }}
-              multiline
-              minRows={1}
-              maxRows={4}
-              disabled={loading}
+        {/* Input area */}
+        {!realtimeMode && (
+          <Box
+            sx={{
+              position: 'sticky',
+              bottom: 0,
+              pt: 2,
+              pb: 2,
+              mt: 'auto',
+              background: 'linear-gradient(180deg, transparent 0%, var(--color-neutral-25) 30%)',
+            }}
+          >
+            <Box
               sx={{
-                '& .MuiOutlinedInput-root': {
-                  borderRadius: '24px',
-                }
-              }}
-            />
-            <Button 
-              variant="contained" 
-              onClick={handleSend} 
-              disabled={loading || !input.trim()}
-              sx={{ 
-                minWidth: 'auto',
-                width: 48,
-                height: 48,
-                borderRadius: '50%',
-                background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1.5,
+                maxWidth: 700,
+                mx: 'auto',
+                p: '8px 8px 8px 20px',
+                bgcolor: 'white',
+                border: '1px solid var(--color-neutral-200)',
+                borderRadius: '9999px',
+                boxShadow: 'var(--shadow-md)',
+                transition: 'all 150ms cubic-bezier(0.4,0,0.2,1)',
+                '&:focus-within': {
+                  borderColor: 'var(--color-aria-400)',
+                  boxShadow: '0 0 0 3px rgba(139,92,246,0.1), var(--shadow-md)',
+                },
               }}
             >
-              {loading ? <CircularProgress size={20} color="inherit" /> : <SendIcon />}
-            </Button>
+              <TextField
+                inputRef={inputRef}
+                fullWidth
+                placeholder="Ask Aria anything..."
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    handleSend();
+                  }
+                }}
+                multiline
+                minRows={1}
+                maxRows={4}
+                disabled={loading}
+                variant="standard"
+                InputProps={{ disableUnderline: true }}
+                sx={{
+                  '& .MuiInputBase-root': { fontSize: '0.875rem', color: 'var(--color-neutral-700)' },
+                  '& .MuiInputBase-input::placeholder': { color: 'var(--color-neutral-400)', opacity: 1 },
+                }}
+              />
+              <Button
+                variant="contained"
+                onClick={handleSend}
+                disabled={loading || !input.trim()}
+                sx={{
+                  minWidth: 'auto',
+                  width: 40,
+                  height: 40,
+                  borderRadius: '50%',
+                  flexShrink: 0,
+                  background: 'var(--color-aria-500)',
+                  boxShadow: 'none',
+                  '&:hover': { background: 'var(--color-aria-600)', transform: 'scale(1.05)' },
+                  '&.Mui-disabled': { background: 'var(--color-neutral-200)' },
+                  transition: 'all 150ms cubic-bezier(0.4,0,0.2,1)',
+                }}
+              >
+                {loading ? <CircularProgress size={18} color="inherit" /> : <SendIcon sx={{ fontSize: 18 }} />}
+              </Button>
+            </Box>
           </Box>
-        </Paper>
-      )}
-    </Container>
+        )}
+      </Container>
+    </Box>
   );
 }

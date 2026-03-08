@@ -1075,13 +1075,20 @@ const Accounting: React.FC = () => {
                   )
                 }
                 sx={{
-                  background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+                  background: 'linear-gradient(135deg, var(--color-aria-500) 0%, var(--color-aria-600) 100%)',
                   textTransform: 'none',
+                  borderRadius: '9999px',
                   px: 3,
                   py: 1,
+                  fontWeight: 600,
+                  fontSize: '0.8125rem',
+                  boxShadow: '0 4px 14px rgba(139,92,246,0.25)',
+                  transition: 'all 150ms cubic-bezier(0.4,0,0.2,1)',
                   '&:hover': {
-                    background: 'linear-gradient(135deg, #5558e3 0%, #7c4fe0 100%)',
-                  }
+                    background: 'linear-gradient(135deg, var(--color-aria-600) 0%, #6D28D9 100%)',
+                    boxShadow: '0 6px 20px rgba(139,92,246,0.35)',
+                    transform: 'translateY(-1px)',
+                  },
                 }}
               >
                 {aiInsights.loading ? 'Analyzing...' : 'Get AI Insights from Aria'}
@@ -1095,10 +1102,10 @@ const Accounting: React.FC = () => {
                 sx={{ 
                   p: 3, 
                   mb: 3, 
-                  border: '1px solid',
-                  borderColor: 'divider',
-                  borderRadius: 2,
-                  background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.05) 0%, rgba(139, 92, 246, 0.05) 100%)'
+                  border: '1px solid var(--color-aria-100)',
+                  borderRadius: '12px',
+                  background: 'linear-gradient(135deg, rgba(245,243,255,0.5) 0%, rgba(237,233,254,0.3) 100%)',
+                  boxShadow: 'var(--shadow-sm)',
                 }}
               >
                 {aiInsights.loading && (
