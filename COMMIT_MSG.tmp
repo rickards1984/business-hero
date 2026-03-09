@@ -1,24 +1,19 @@
-Add admin support dashboard (prompt 3 of 3)
+Receptionist voice improvements: British accent and voice previews
 
-New page: AdminSupportDashboard.tsx replaces the basic legacy support
-page at /admin/support (legacy preserved at /admin/support-legacy).
+Backend changes (receptionist_api.py):
+- Strengthen British accent instruction in system prompt with
+  detailed pronunciation, vocabulary, and phrasing rules placed
+  prominently before CORE IDENTITY section
+- Add GET /v1/receptionist/voices/{voice_id}/preview endpoint that
+  generates MP3 audio via OpenAI TTS with in-memory caching
+- Update AVAILABLE_VOICES with UK-friendly descriptions and
+  recommended flag for Shimmer and Ballad
+- Add preview text for each voice
 
-Ticket management:
-- Stat cards: awaiting admin, in progress, AI resolution rate, total open
-- Filter pills by status and priority
-- Ticket cards with priority dots, status badges, AI indicators
-- Slide-out detail panel with full conversation thread
-- Inline status/priority dropdowns that update immediately
-- AI draft generation for suggested responses
-- Reply form with internal note toggle
-- Admin notes (not visible to user)
-- Mark Resolved action
-
-Knowledge base manager:
-- Article list with published/draft badges
-- Create/edit modal with title, category, summary, content, tags
-- Toggle publish/unpublish
-- Delete with confirmation dialog
-
-CSS additions in design-system.css for ticket cards, internal note
-messages, detail panel, and KB row styles.
+Frontend changes:
+- ReceptionistTab: replace disabled Preview button with working
+  audio playback (play/stop toggle), add recommended badge to
+  voice dropdown items, add preview to setup wizard
+- AdminOnboardingWizard: add voice preview button and recommended
+  badges to receptionist step voice selector
+- design-system.css: add voice-preview-btn styles with playing state

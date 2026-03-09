@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Alert,
@@ -72,6 +72,7 @@ interface VoiceOption {
   description: string;
   gender: string;
   accent: string;
+  recommended?: boolean;
 }
 
 interface ChecklistItem {
@@ -177,6 +178,30 @@ export default function AdminOnboardingWizard() {
   const [activateNow, setActivateNow] = useState(true);
   const [sendWelcome, setSendWelcome] = useState(true);
   const [adminNotes, setAdminNotes] = useState('');
+
+  // Voice preview
+  const [vpPlaying, setVpPlaying] = useState(false);
+  const [vpVoiceId, setVpVoiceId] = useState<string | null>(null);
+  const vpAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  const playVoicePreview = useCallback(async (voiceId: string) => {
+    if (vpAudioRef.current) { vpAudioRef.current.pause(); vpAudioRef.current = null; }
+    if (vpVoiceId === voiceId && vpPlaying) { setVpPlaying(false); setVpVoiceId(null); return; }
+    setVpPlaying(true);
+    setVpVoiceId(voiceId);
+    try {
+      const res = await apiRequest('GET', `/v1/receptionist/voices/${voiceId}/preview`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      vpAudioRef.current = audio;
+      audio.onended = () => { setVpPlaying(false); setVpVoiceId(null); };
+      audio.onerror = () => { setVpPlaying(false); setVpVoiceId(null); };
+      await audio.play();
+    } catch { setVpPlaying(false); setVpVoiceId(null); }
+  }, [vpVoiceId, vpPlaying]);
+
+  useEffect(() => { return () => { if (vpAudioRef.current) vpAudioRef.current.pause(); }; }, []);
 
   const selectedPlan = useMemo(() => plans.find((p) => p.id === bizPlan), [plans, bizPlan]);
 
@@ -746,15 +771,22 @@ export default function AdminOnboardingWizard() {
 
               <Divider sx={{ my: 2 }} />
 
-              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 2 }}>
+              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 2, alignItems: 'flex-start' }}>
                 <FormControl sx={{ minWidth: 200, flex: 1 }}>
                   <InputLabel>Voice</InputLabel>
                   <Select value={recVoice} label="Voice" onChange={(e) => setRecVoice(e.target.value)}>
                     {voices.map((v) => (
-                      <MenuItem key={v.id} value={v.id}>{v.name} — {v.description}</MenuItem>
+                      <MenuItem key={v.id} value={v.id}>{v.name} — {v.description}{v.recommended ? ' ⭐ Recommended' : ''}</MenuItem>
                     ))}
                   </Select>
                 </FormControl>
+                <button
+                  className={`voice-preview-btn${vpPlaying && vpVoiceId === recVoice ? ' voice-preview-btn--playing' : ''}`}
+                  onClick={() => playVoicePreview(recVoice)}
+                  style={{ marginTop: 8 }}
+                >
+                  {vpPlaying && vpVoiceId === recVoice ? '■ Stop' : '▶ Preview'}
+                </button>
                 <FormControl sx={{ minWidth: 180 }}>
                   <InputLabel>Language</InputLabel>
                   <Select value={recLanguage} label="Language" onChange={(e) => setRecLanguage(e.target.value)}>

@@ -145,60 +145,81 @@ AVAILABLE_VOICES = [
     {
         "id": "shimmer",
         "name": "Shimmer",
-        "description": "Warm and clear, confident and friendly. Great for professional businesses.",
+        "description": "Warm and clear, confident and friendly. Our most popular voice for UK businesses.",
         "gender": "female",
-        "accent": "American",
+        "accent": "Neutral (adapts to British English)",
+        "recommended": True,
     },
     {
         "id": "alloy",
         "name": "Alloy",
-        "description": "Balanced and versatile with a smooth, neutral delivery. Works well for most use cases.",
+        "description": "Balanced and versatile with a smooth delivery. Works well across all business types.",
         "gender": "neutral",
-        "accent": "American",
+        "accent": "Neutral (adapts to British English)",
+        "recommended": False,
     },
     {
         "id": "echo",
         "name": "Echo",
         "description": "Smooth, calm, and measured. Ideal for healthcare, wellness, or luxury brands.",
         "gender": "male",
-        "accent": "American",
+        "accent": "Neutral",
+        "recommended": False,
     },
     {
         "id": "ash",
         "name": "Ash",
-        "description": "Soft-spoken and thoughtful. Great for advisory or consultancy businesses.",
+        "description": "Soft-spoken and thoughtful. Great for advisory, consultancy, or professional services.",
         "gender": "male",
-        "accent": "American",
+        "accent": "Neutral",
+        "recommended": False,
     },
     {
         "id": "ballad",
         "name": "Ballad",
-        "description": "Warm and expressive with a natural storytelling quality. Great for creative businesses.",
+        "description": "Warm and expressive with a natural storytelling quality. Lovely for boutique businesses.",
         "gender": "female",
-        "accent": "American",
+        "accent": "Neutral (adapts to British English)",
+        "recommended": True,
     },
     {
         "id": "coral",
         "name": "Coral",
-        "description": "Bright, energetic, and personable. Excellent for retail and hospitality.",
+        "description": "Bright, energetic, and personable. Excellent for gyms, retail, and hospitality.",
         "gender": "female",
-        "accent": "American",
+        "accent": "Neutral",
+        "recommended": False,
     },
     {
         "id": "sage",
         "name": "Sage",
-        "description": "Calm and authoritative. Perfect for legal, finance, or professional services.",
+        "description": "Calm and authoritative. Perfect for legal, finance, or estate agents.",
         "gender": "female",
-        "accent": "American",
+        "accent": "Neutral",
+        "recommended": False,
     },
     {
         "id": "verse",
         "name": "Verse",
-        "description": "Dynamic and engaging with a lively, upbeat tone. Great for fitness and entertainment.",
+        "description": "Dynamic and engaging with a lively tone. Great for fitness, entertainment, and events.",
         "gender": "male",
-        "accent": "American",
+        "accent": "Neutral",
+        "recommended": False,
     },
 ]
+
+VOICE_PREVIEW_TEXT = {
+    "shimmer": "Hello, thank you for calling. I'm Shimmer, and I'd be happy to help you with your enquiry today.",
+    "alloy": "Good morning! I'm Alloy. How can I assist you today? I'm here to help with whatever you need.",
+    "echo": "Welcome. I'm Echo. Please let me know how I can help you, and I'll do my very best to assist.",
+    "ash": "Hi there. I'm Ash. I'm here to help with any questions you might have about our services.",
+    "ballad": "Hello! I'm Ballad. It's lovely to hear from you. What can I help you with today?",
+    "coral": "Hi! I'm Coral, and I'm really glad you called. How can I make your day a little easier?",
+    "sage": "Good day. I'm Sage. I'd be pleased to assist you with your enquiry. How may I help?",
+    "verse": "Hey there! I'm Verse. Great to hear from you! What can I do for you today?",
+}
+
+_voice_preview_cache: dict = {}
 
 KNOWLEDGE_BASE_CATEGORIES = [
     {"id": "services", "label": "Services", "description": "What your business offers", "icon": "Briefcase"},
@@ -489,6 +510,56 @@ async def delete_knowledge_base_item(
 async def list_voices():
     """Return available voice options for the AI receptionist."""
     return AVAILABLE_VOICES
+
+
+@router.get("/voices/{voice_id}/preview")
+async def preview_voice(voice_id: str):
+    """Generate a voice preview audio clip using OpenAI TTS."""
+    import io
+    import openai as _openai
+    from fastapi.responses import StreamingResponse
+
+    valid_voices = [v["id"] for v in AVAILABLE_VOICES]
+    if voice_id not in valid_voices:
+        raise HTTPException(status_code=404, detail=f"Unknown voice: {voice_id}")
+
+    if voice_id in _voice_preview_cache:
+        return StreamingResponse(
+            io.BytesIO(_voice_preview_cache[voice_id]),
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": f"inline; filename=preview-{voice_id}.mp3",
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
+
+    preview_text = VOICE_PREVIEW_TEXT.get(
+        voice_id, f"Hello, I'm {voice_id}. This is a preview of how I sound."
+    )
+
+    try:
+        client = _openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice=voice_id,
+            input=preview_text,
+            response_format="mp3",
+            speed=1.0,
+        )
+        audio_bytes = response.content
+        _voice_preview_cache[voice_id] = audio_bytes
+
+        return StreamingResponse(
+            io.BytesIO(audio_bytes),
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": f"inline; filename=preview-{voice_id}.mp3",
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
+    except Exception as exc:
+        _logger.error("[Voice Preview] Failed for %s: %s", voice_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to generate voice preview")
 
 
 # ======================== Call history & stats ========================
@@ -808,15 +879,28 @@ async def build_receptionist_system_prompt(business_id: str, session: Session) -
     lang = cfg.language or "en-GB"
     accent_instruction = ""
     if lang == "en-GB":
-        accent_instruction = (
-            "Speak with a British English accent and use British English vocabulary and spelling "
-            "(e.g., 'colour' not 'color', 'enquiry' not 'inquiry', 'mobile' not 'cell phone', "
-            "'ring us' not 'call us')."
-        )
+        accent_instruction = """ACCENT AND SPEECH STYLE — THIS IS CRITICAL:
+You MUST speak with a clear, natural Southern English accent (similar to a well-spoken London or Home Counties accent). Think of how a friendly, professional receptionist in Surrey or Kent would speak.
+
+Specific requirements:
+- Use British pronunciation throughout: "schedule" as "SHED-yool", "can't" as "cahnt", "bath" as "bahth", "glass" as "glahss"
+- Say "whilst" not "while", "amongst" not "among", "towards" not "toward"
+- Say "straightaway" not "right away", "ring us" not "call us", "pop in" not "stop by"
+- Say "lovely" and "brilliant" as positive affirmations naturally
+- Say "sorry" as "soh-ree" not "sah-ree"
+- Use "mobile" not "cell phone", "post" not "mail", "holiday" not "vacation"
+- Use "enquiry" not "inquiry", "colour" not "color", "favourite" not "favorite"
+- Say "Monday to Friday" not "Monday through Friday"
+- Use "£" and "pence" for currency references, never "$" or "cents"
+- Say "half past" not "thirty", e.g., "half past nine" not "nine thirty"
+- Use "fortnight" for two weeks where natural
+- Never use American expressions like "awesome", "you guys", "gotten", "I guess", or "no problem"
+- Instead use: "wonderful", "everyone", "received", "I think", "not at all" or "you're welcome"
+- Maintain a warm, professional, and approachable tone throughout — never stiff or overly formal"""
     elif lang == "en-US":
-        accent_instruction = "Speak with an American English accent and use American English vocabulary."
+        accent_instruction = "Speak with a natural American English accent and use American English vocabulary and spelling."
     elif lang == "en-AU":
-        accent_instruction = "Speak with an Australian English accent and use Australian English vocabulary."
+        accent_instruction = "Speak with a natural Australian English accent and use Australian English vocabulary."
 
     tz = pytz.timezone(cfg.timezone or "Europe/London")
     now = datetime.now(tz)
@@ -847,13 +931,14 @@ CALL TRANSFER RULES:
 
     system_prompt = f"""You are the AI receptionist for {business_name}. You are answering a phone call.
 
+{accent_instruction}
+
 CORE IDENTITY:
 - You represent {business_name} and should speak as a member of the team, using "we" and "our" when referring to the business.
 - You are warm, helpful, and knowledgeable about the business.
 - {tone_inst}
 - {speed_inst}
 - {humor_inst}
-- {accent_instruction}
 {personality_block}
 
 CURRENT CONTEXT:

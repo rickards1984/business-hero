@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Box,
   Typography,
@@ -87,6 +87,7 @@ interface VoiceOption {
   description: string;
   accent?: string;
   gender?: string;
+  recommended?: boolean;
 }
 
 interface KBItem {
@@ -168,6 +169,42 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
   const [setupFaq3, setSetupFaq3] = useState('');
   const [setupSaving, setSetupSaving] = useState(false);
   const [setupDismissed, setSetupDismissed] = useState(false);
+
+  // Voice preview
+  const [previewPlaying, setPreviewPlaying] = useState(false);
+  const [previewVoiceId, setPreviewVoiceId] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const playPreview = useCallback(async (voiceId: string) => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    if (previewVoiceId === voiceId && previewPlaying) {
+      setPreviewPlaying(false);
+      setPreviewVoiceId(null);
+      return;
+    }
+    setPreviewPlaying(true);
+    setPreviewVoiceId(voiceId);
+    try {
+      const res = await apiRequest('GET', `/v1/receptionist/voices/${voiceId}/preview`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.onended = () => { setPreviewPlaying(false); setPreviewVoiceId(null); };
+      audio.onerror = () => { setPreviewPlaying(false); setPreviewVoiceId(null); };
+      await audio.play();
+    } catch {
+      setPreviewPlaying(false);
+      setPreviewVoiceId(null);
+    }
+  }, [previewVoiceId, previewPlaying]);
+
+  useEffect(() => {
+    return () => { if (audioRef.current) audioRef.current.pause(); };
+  }, []);
 
   // ---- Data fetching ----
   const showSnack = useCallback((message: string, severity: 'success' | 'error') => {
@@ -428,16 +465,25 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
           {setupStep === 0 && (
             <Box>
               <Typography variant="subtitle1" fontWeight={600} sx={{ mb: 2 }}>1. Choose a Voice</Typography>
-              <FormControl size="small" fullWidth sx={{ mb: 2 }}>
-                <InputLabel>Voice</InputLabel>
-                <Select value={setupVoice} label="Voice" onChange={(e) => setSetupVoice(e.target.value)}>
-                  {voices.length > 0
-                    ? voices.map((v) => (
-                        <MenuItem key={v.id} value={v.id}>{v.name} — {v.description}</MenuItem>
-                      ))
-                    : <MenuItem value="shimmer">Shimmer</MenuItem>}
-                </Select>
-              </FormControl>
+              <Box sx={{ display: 'flex', gap: 1, mb: 2, alignItems: 'flex-start' }}>
+                <FormControl size="small" sx={{ flex: 1 }}>
+                  <InputLabel>Voice</InputLabel>
+                  <Select value={setupVoice} label="Voice" onChange={(e) => setSetupVoice(e.target.value)}>
+                    {voices.length > 0
+                      ? voices.map((v) => (
+                          <MenuItem key={v.id} value={v.id}>{v.name} — {v.description}{v.recommended ? ' ⭐ Recommended' : ''}</MenuItem>
+                        ))
+                      : <MenuItem value="shimmer">Shimmer</MenuItem>}
+                  </Select>
+                </FormControl>
+                <button
+                  className={`voice-preview-btn${previewPlaying && previewVoiceId === setupVoice ? ' voice-preview-btn--playing' : ''}`}
+                  onClick={() => playPreview(setupVoice)}
+                  style={{ marginTop: 2 }}
+                >
+                  {previewPlaying && previewVoiceId === setupVoice ? '■ Stop' : '▶ Preview'}
+                </button>
+              </Box>
               {selectedVoice && (
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
                   {selectedVoice.name} — {selectedVoice.description}
@@ -701,19 +747,18 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
                     {voices.length > 0
                       ? voices.map((v) => (
                           <MenuItem key={v.id} value={v.id}>
-                            {v.name} — {v.description}
+                            {v.name} — {v.description}{v.recommended ? ' ⭐ Recommended' : ''}
                           </MenuItem>
                         ))
                       : <MenuItem value={formVoice}>{formVoice}</MenuItem>}
                   </Select>
                 </FormControl>
-                <Tooltip title="Preview coming soon">
-                  <span>
-                    <Button variant="outlined" size="small" disabled startIcon={<MicNoneIcon />}>
-                      Preview
-                    </Button>
-                  </span>
-                </Tooltip>
+                <button
+                  className={`voice-preview-btn${previewPlaying && previewVoiceId === formVoice ? ' voice-preview-btn--playing' : ''}`}
+                  onClick={() => playPreview(formVoice)}
+                >
+                  {previewPlaying && previewVoiceId === formVoice ? '■ Stop' : '▶ Preview'}
+                </button>
               </Box>
 
               <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>Tone</Typography>
