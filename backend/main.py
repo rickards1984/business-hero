@@ -3247,6 +3247,42 @@ async def oauth_xero_callback(
         connection_id = result.fetchone()[0]
         session.commit()
         _xero_logger.info(f"Xero connection saved: {connection_id}")
+
+        # Dual-write to accounting_connections for provider-agnostic layer
+        try:
+            session.execute(
+                text("""
+                    INSERT INTO accounting_connections
+                        (id, business_id, provider, tenant_id, tenant_name,
+                         token_ciphertext, refresh_token_ciphertext,
+                         token_expires_at, is_active, created_at, updated_at)
+                    VALUES
+                        (gen_random_uuid(), :business_id, 'xero', :tenant_id, :tenant_name,
+                         :token_ciphertext, :refresh_token_ciphertext,
+                         :token_expires_at, true, NOW(), NOW())
+                    ON CONFLICT (business_id, provider) DO UPDATE SET
+                        tenant_id = EXCLUDED.tenant_id,
+                        tenant_name = EXCLUDED.tenant_name,
+                        token_ciphertext = EXCLUDED.token_ciphertext,
+                        refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
+                        token_expires_at = EXCLUDED.token_expires_at,
+                        is_active = true,
+                        updated_at = NOW()
+                """),
+                {
+                    "business_id": business_id,
+                    "tenant_id": tenant_id,
+                    "tenant_name": tenant_name,
+                    "token_ciphertext": encrypted_access,
+                    "refresh_token_ciphertext": encrypted_refresh,
+                    "token_expires_at": expires_at,
+                },
+            )
+            session.commit()
+            _xero_logger.info("Xero connection also synced to accounting_connections")
+        except Exception as ac_err:
+            _xero_logger.warning(f"Failed to sync to accounting_connections (non-fatal): {ac_err}")
+
     except Exception as e:
         _xero_logger.error(f"Failed to save Xero connection: {e}")
         session.rollback()
@@ -3379,6 +3415,28 @@ async def sync_xero_transactions(
             session.commit()
             access_token = new_access
             _sync_logger.info("Xero token refreshed successfully")
+
+            # Dual-write refreshed token to accounting_connections
+            try:
+                session.execute(
+                    text("""
+                        UPDATE accounting_connections
+                        SET token_ciphertext = :token,
+                            refresh_token_ciphertext = :refresh,
+                            token_expires_at = :expires_at,
+                            updated_at = NOW()
+                        WHERE business_id = :business_id AND provider = 'xero'
+                    """),
+                    {
+                        "token": encrypt_str(new_access),
+                        "refresh": encrypt_str(new_refresh),
+                        "expires_at": now + timedelta(seconds=expires_in),
+                        "business_id": business_id,
+                    },
+                )
+                session.commit()
+            except Exception:
+                pass
     except Exception as e:
         _sync_logger.error(f"Xero token refresh failed: {e}")
         raise HTTPException(status_code=401, detail=f"Xero authentication failed. Please reconnect Xero. Error: {str(e)}")
@@ -3480,6 +3538,26 @@ async def sync_xero_transactions(
     )
     session.commit()
 
+    # Dual-write sync timestamp to accounting_connections
+    try:
+        session.execute(
+            text("""
+                UPDATE accounting_connections
+                SET last_sync_at = :sync_time,
+                    sync_cursor = :cursor,
+                    updated_at = NOW()
+                WHERE business_id = :business_id AND provider = 'xero'
+            """),
+            {
+                "sync_time": sync_time,
+                "cursor": sync_time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "business_id": business_id,
+            },
+        )
+        session.commit()
+    except Exception:
+        pass
+
     _sync_logger.info(
         f"Xero sync complete for {tenant_name}: "
         f"{new_count} new, {updated_count} updated, {skipped_count} skipped, {len(errors)} errors"
@@ -3550,6 +3628,10 @@ async def sync_xero_invoices(
             from providers.xero_oauth import refresh_xero_token
             new_access, new_refresh, expires_in = refresh_xero_token(refresh_token)
 
+            encrypted_new_access = encrypt_str(new_access)
+            encrypted_new_refresh = encrypt_str(new_refresh)
+            new_expires_at = now + timedelta(seconds=expires_in)
+
             session.execute(
                 text("""
                     UPDATE xero_connections
@@ -3558,14 +3640,36 @@ async def sync_xero_invoices(
                     WHERE id = :conn_id
                 """),
                 {
-                    "token": encrypt_str(new_access),
-                    "refresh": encrypt_str(new_refresh),
-                    "expires_at": now + timedelta(seconds=expires_in),
+                    "token": encrypted_new_access,
+                    "refresh": encrypted_new_refresh,
+                    "expires_at": new_expires_at,
                     "conn_id": connection_id,
                 }
             )
             session.commit()
             access_token = new_access
+
+            # Dual-write refreshed token to accounting_connections
+            try:
+                session.execute(
+                    text("""
+                        UPDATE accounting_connections
+                        SET token_ciphertext = :token,
+                            refresh_token_ciphertext = :refresh,
+                            token_expires_at = :expires_at,
+                            updated_at = NOW()
+                        WHERE business_id = :business_id AND provider = 'xero'
+                    """),
+                    {
+                        "token": encrypted_new_access,
+                        "refresh": encrypted_new_refresh,
+                        "expires_at": new_expires_at,
+                        "business_id": business_id,
+                    },
+                )
+                session.commit()
+            except Exception:
+                pass
     except Exception as e:
         _inv_sync_logger.error(f"Xero token error during invoice sync: {e}")
         raise HTTPException(status_code=401, detail=f"Xero authentication failed: {str(e)}")
@@ -3775,6 +3879,9 @@ async def xero_financial_summary(
             if now >= (expires_at - timedelta(minutes=2)):
                 from providers.xero_oauth import refresh_xero_token
                 new_access, new_refresh, expires_in = refresh_xero_token(refresh_token_val)
+                encrypted_new_a = encrypt_str(new_access)
+                encrypted_new_r = encrypt_str(new_refresh)
+                new_exp = now + timedelta(seconds=expires_in)
                 session.execute(
                     text("""
                         UPDATE xero_connections 
@@ -3783,14 +3890,36 @@ async def xero_financial_summary(
                         WHERE id = :conn_id
                     """),
                     {
-                        "token": encrypt_str(new_access),
-                        "refresh": encrypt_str(new_refresh),
-                        "expires_at": now + timedelta(seconds=expires_in),
+                        "token": encrypted_new_a,
+                        "refresh": encrypted_new_r,
+                        "expires_at": new_exp,
                         "conn_id": connection_id,
                     }
                 )
                 session.commit()
                 access_token = new_access
+
+                # Dual-write to accounting_connections
+                try:
+                    session.execute(
+                        text("""
+                            UPDATE accounting_connections
+                            SET token_ciphertext = :token,
+                                refresh_token_ciphertext = :refresh,
+                                token_expires_at = :expires_at,
+                                updated_at = NOW()
+                            WHERE business_id = :business_id AND provider = 'xero'
+                        """),
+                        {
+                            "token": encrypted_new_a,
+                            "refresh": encrypted_new_r,
+                            "expires_at": new_exp,
+                            "business_id": business_id,
+                        },
+                    )
+                    session.commit()
+                except Exception:
+                    pass
 
             # Re-read token from DB in case sync endpoint refreshed it concurrently
             result_fresh = session.execute(
@@ -4053,6 +4182,160 @@ def _parse_profit_and_loss(report_data: dict) -> dict:
         logging.getLogger("xero_parse").warning(f"Error parsing P&L: {e}")
     
     return result
+
+
+# ============================================================================
+# PROVIDER-AGNOSTIC ACCOUNTING ENDPOINTS
+# These run alongside existing Xero-specific endpoints — both work.
+# ============================================================================
+
+@app.get("/v1/accounting/providers", tags=["accounting"])
+async def list_accounting_providers(
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """List available accounting providers with configuration status."""
+    result = session.execute(
+        text("""
+            SELECT id, name, description, is_available, features, sort_order
+            FROM accounting_providers
+            WHERE is_available = true
+            ORDER BY sort_order
+        """)
+    )
+    rows = result.fetchall()
+
+    providers = []
+    for row in rows:
+        provider_id = row[0]
+        is_configured = False
+        if provider_id == "xero":
+            is_configured = bool(os.getenv("XERO_CLIENT_ID")) and bool(os.getenv("XERO_CLIENT_SECRET"))
+        elif provider_id == "freeagent":
+            is_configured = bool(os.getenv("FREEAGENT_CLIENT_ID")) and bool(os.getenv("FREEAGENT_CLIENT_SECRET"))
+        elif provider_id == "quickbooks":
+            is_configured = bool(os.getenv("QUICKBOOKS_CLIENT_ID")) and bool(os.getenv("QUICKBOOKS_CLIENT_SECRET"))
+
+        providers.append({
+            "id": row[0],
+            "name": row[1],
+            "description": row[2],
+            "is_available": row[3],
+            "features": row[4],
+            "sort_order": row[5],
+            "is_configured": is_configured,
+        })
+
+    return providers
+
+
+@app.get("/v1/accounting/connection/status", tags=["accounting"])
+async def accounting_connection_status(
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Check accounting connection status — works for any provider."""
+    business_id = str(auth_ctx["business_id"])
+    if not business_id:
+        return {"connected": False, "provider": None, "tenant_name": None, "last_sync_at": None}
+
+    from providers.accounting_service import AccountingService
+    service = AccountingService(business_id, session)
+    return service.get_status()
+
+
+@app.get("/v1/oauth/{provider}", tags=["accounting"])
+async def oauth_start(
+    provider: str,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Start OAuth flow for any accounting provider."""
+    valid_providers = ["xero", "freeagent", "quickbooks"]
+    if provider not in valid_providers:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+
+    business_id = str(auth_ctx["business_id"])
+    base_url = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_BASE_URL", "")).strip().rstrip("/")
+    redirect_uri = f"{base_url}/v1/oauth/{provider}/callback"
+
+    if provider == "xero":
+        url = get_xero_auth_url(business_id=business_id, redirect_uri=redirect_uri)
+    elif provider == "freeagent":
+        from providers.freeagent_oauth import get_freeagent_auth_url  # type: ignore[import-not-found]
+        url = get_freeagent_auth_url(business_id=business_id, redirect_uri=redirect_uri)
+    elif provider == "quickbooks":
+        from providers.quickbooks_oauth import get_quickbooks_auth_url  # type: ignore[import-not-found]
+        url = get_quickbooks_auth_url(business_id=business_id, redirect_uri=redirect_uri)
+    else:
+        raise HTTPException(status_code=400, detail=f"Provider not yet supported: {provider}")
+
+    return {"url": url, "provider": provider}
+
+
+@app.post("/v1/accounting/disconnect", tags=["accounting"])
+async def accounting_disconnect(
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Disconnect the active accounting provider."""
+    business_id = str(auth_ctx["business_id"])
+
+    session.execute(
+        text("""
+            UPDATE accounting_connections
+            SET is_active = false, updated_at = NOW()
+            WHERE business_id = :business_id AND is_active = true
+        """),
+        {"business_id": business_id},
+    )
+    session.commit()
+
+    # Also deactivate xero_connections for backwards compatibility
+    try:
+        session.execute(
+            text("""
+                UPDATE xero_connections
+                SET is_active = false, updated_at = NOW()
+                WHERE business_id = :business_id
+            """),
+            {"business_id": business_id},
+        )
+        session.commit()
+    except Exception:
+        pass
+
+    return {"status": "disconnected"}
+
+
+@app.get("/v1/admin/accounting/overview", tags=["admin-accounting"])
+async def admin_accounting_overview(
+    auth_ctx=Depends(get_platform_admin_context),
+    session: Session = Depends(get_session),
+):
+    """Admin: see accounting connections across all businesses."""
+    result = session.execute(
+        text("""
+            SELECT ac.business_id, ac.provider, ac.tenant_name, ac.is_active,
+                   ac.last_sync_at, b.name AS business_name
+            FROM accounting_connections ac
+            LEFT JOIN businesses b ON b.id = ac.business_id
+            WHERE ac.is_active = true
+            ORDER BY ac.updated_at DESC
+        """)
+    )
+    rows = result.fetchall()
+    return [
+        {
+            "business_id": str(r[0]),
+            "provider": r[1],
+            "tenant_name": r[2],
+            "is_active": r[3],
+            "last_sync_at": r[4].isoformat() if r[4] else None,
+            "business_name": r[5],
+        }
+        for r in rows
+    ]
 
 
 @app.get("/v1/accounting/export/accountant-pack")
