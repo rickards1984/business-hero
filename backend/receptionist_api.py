@@ -539,13 +539,33 @@ async def preview_voice(voice_id: str):
 
     try:
         client = _openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
-        response = client.audio.speech.create(
-            model="tts-1",
-            voice=voice_id,
-            input=preview_text,
-            response_format="mp3",
-            speed=1.0,
-        )
+        try:
+            response = client.audio.speech.create(
+                model="gpt-4o-mini-tts",
+                voice=voice_id,
+                input=preview_text,
+                response_format="mp3",
+                speed=1.0,
+            )
+        except Exception as _e1:
+            _logger.warning("[Voice Preview] gpt-4o-mini-tts failed for %s, trying tts-1-hd: %s", voice_id, _e1)
+            try:
+                response = client.audio.speech.create(
+                    model="tts-1-hd",
+                    voice=voice_id,
+                    input=preview_text,
+                    response_format="mp3",
+                    speed=1.0,
+                )
+            except Exception as _e2:
+                _logger.warning("[Voice Preview] tts-1-hd failed for %s, trying tts-1: %s", voice_id, _e2)
+                response = client.audio.speech.create(
+                    model="tts-1",
+                    voice=voice_id,
+                    input=preview_text,
+                    response_format="mp3",
+                    speed=1.0,
+                )
         audio_bytes = response.content
         _voice_preview_cache[voice_id] = audio_bytes
 

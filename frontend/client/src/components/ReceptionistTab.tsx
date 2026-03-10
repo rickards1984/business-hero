@@ -194,13 +194,14 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
       const audio = new Audio(url);
       audioRef.current = audio;
       audio.onended = () => { setPreviewPlaying(false); setPreviewVoiceId(null); };
-      audio.onerror = () => { setPreviewPlaying(false); setPreviewVoiceId(null); };
+      audio.onerror = () => { setPreviewPlaying(false); setPreviewVoiceId(null); showSnack('Voice preview not available. Please try another voice.', 'error'); };
       await audio.play();
     } catch {
       setPreviewPlaying(false);
       setPreviewVoiceId(null);
+      showSnack('Failed to load voice preview.', 'error');
     }
-  }, [previewVoiceId, previewPlaying]);
+  }, [previewVoiceId, previewPlaying, showSnack]);
 
   useEffect(() => {
     return () => { if (audioRef.current) audioRef.current.pause(); };

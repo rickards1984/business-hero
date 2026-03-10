@@ -196,9 +196,9 @@ export default function AdminOnboardingWizard() {
       const audio = new Audio(url);
       vpAudioRef.current = audio;
       audio.onended = () => { setVpPlaying(false); setVpVoiceId(null); };
-      audio.onerror = () => { setVpPlaying(false); setVpVoiceId(null); };
+      audio.onerror = () => { setVpPlaying(false); setVpVoiceId(null); setError('Voice preview not available. Please try another voice.'); };
       await audio.play();
-    } catch { setVpPlaying(false); setVpVoiceId(null); }
+    } catch { setVpPlaying(false); setVpVoiceId(null); setError('Failed to load voice preview.'); }
   }, [vpVoiceId, vpPlaying]);
 
   useEffect(() => { return () => { if (vpAudioRef.current) vpAudioRef.current.pause(); }; }, []);

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Box,
@@ -126,9 +126,14 @@ interface TabPanelProps {
 
 function TabPanel(props: TabPanelProps) {
   const { children, value, index, ...other } = props;
+  const active = value === index;
   return (
-    <div role="tabpanel" hidden={value !== index} {...other}>
-      {value === index && <Box sx={{ pt: 3 }}>{children}</Box>}
+    <div
+      role="tabpanel"
+      style={{ display: active ? 'block' : 'none' }}
+      {...other}
+    >
+      <Box sx={{ pt: 3 }}>{children}</Box>
     </div>
   );
 }
@@ -204,6 +209,8 @@ export default function BusinessDashboard() {
   const [supportPanelOpen, setSupportPanelOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const initialLoadDone = useRef(false);
+  const [mountedTabs, setMountedTabs] = useState<Set<number>>(() => new Set([tabValue]));
   
   const logoUrl = resolveLogoSrc(businessProfile?.logo_url ?? business?.logo_url);
 
@@ -278,8 +285,19 @@ export default function BusinessDashboard() {
     }
   }, [user]);
 
+  useEffect(() => {
+    setMountedTabs(prev => {
+      if (prev.has(tabValue)) return prev;
+      const next = new Set(prev);
+      next.add(tabValue);
+      return next;
+    });
+  }, [tabValue]);
+
   const fetchUserBusiness = async () => {
-    setLoading(true);
+    if (!initialLoadDone.current) {
+      setLoading(true);
+    }
     setError('');
 
     try {
@@ -328,6 +346,7 @@ export default function BusinessDashboard() {
       setError(err.message || 'Failed to fetch business data');
     } finally {
       setLoading(false);
+      initialLoadDone.current = true;
     }
   };
 
@@ -2345,11 +2364,11 @@ export default function BusinessDashboard() {
               </TabPanel>
 
               <TabPanel value={tabValue} index={3}>
-                {business && <EmailsTab businessId={business.id} />}
+                {mountedTabs.has(3) && business && <EmailsTab businessId={business.id} />}
               </TabPanel>
 
               <TabPanel value={tabValue} index={4}>
-                {business && <ReceptionistTab businessId={business.id} onViewCalls={() => { setCallSourceFilter('receptionist'); setTabValue(1); }} />}
+                {mountedTabs.has(4) && business && <ReceptionistTab businessId={business.id} onViewCalls={() => { setCallSourceFilter('receptionist'); setTabValue(1); }} />}
               </TabPanel>
             </Paper>
           </>
