@@ -86,6 +86,7 @@ import { useNavigate } from 'react-router-dom';
 import { apiRequest } from '@/lib/queryClient';
 import { config } from '@/config/env';
 import { supabase } from '@/lib/supabase';
+import ProviderSelector from '@/components/ProviderSelector';
 
 // ============== Types ==============
 
@@ -183,7 +184,7 @@ const Accounting: React.FC = () => {
   }>({ loading: false, data: null, error: null });
   const [showInsights, setShowInsights] = useState(false);
 
-  // ─── Xero Integration State ────────────────────────────────
+  // ─── Accounting Integration State ──────────────────────────
   const [xeroStatus, setXeroStatus] = useState<{
     connected: boolean;
     tenant_name?: string;
@@ -197,6 +198,10 @@ const Accounting: React.FC = () => {
     synced_at: string;
   } | null>(null);
   const [xeroLoading, setXeroLoading] = useState(true);
+  const [accountingProvider, setAccountingProvider] = useState<string | null>(null);
+  const [availableProviders, setAvailableProviders] = useState<any[]>([]);
+  const [providersLoading, setProvidersLoading] = useState(true);
+  const [connectingProviderId, setConnectingProviderId] = useState<string | null>(null);
   const [snackbar, setSnackbar] = useState<{
     open: boolean;
     message: string;
@@ -323,97 +328,158 @@ const Accounting: React.FC = () => {
     return () => clearTimeout(timer);
   }, [transactionType, searchQuery, selectedCategory, currentPage, perPage]);
 
-  // ─── Xero: Check connection status on mount ────────────────
+  // ─── Check accounting connection status on mount ────────────
   useEffect(() => {
-    const checkXeroStatus = async () => {
+    const checkAccountingStatus = async () => {
       try {
         setXeroLoading(true);
-        const response = await apiRequest('GET', '/v1/accounting/xero/status');
-        if (response.ok) {
-          const data = await response.json();
-          setXeroStatus(data);
+
+        // Try the provider-agnostic endpoint first
+        try {
+          const resp = await apiRequest('GET', '/v1/accounting/connection/status');
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data.connected) {
+              setXeroStatus({
+                connected: true,
+                tenant_name: data.tenant_name,
+                last_sync_at: data.last_sync_at,
+              });
+              setAccountingProvider(data.provider);
+              return;
+            }
+          }
+        } catch {
+          // New endpoint may not be deployed yet — fall back to Xero-specific
         }
-      } catch (error) {
-        console.error('Failed to check Xero status:', error);
+
+        // Fallback: try existing Xero-specific endpoint
+        try {
+          const resp = await apiRequest('GET', '/v1/accounting/xero/status');
+          if (resp.ok) {
+            const data = await resp.json();
+            setXeroStatus(data);
+            if (data.connected) setAccountingProvider('xero');
+          }
+        } catch {
+          // Neither connected
+        }
       } finally {
         setXeroLoading(false);
       }
     };
-    checkXeroStatus();
+    checkAccountingStatus();
   }, []);
 
-  // ─── Xero: Check for OAuth redirect result on mount ────────
+  // ─── Fetch available providers on mount ────────────────────
+  useEffect(() => {
+    const fetchProviders = async () => {
+      try {
+        setProvidersLoading(true);
+        const resp = await apiRequest('GET', '/v1/accounting/providers');
+        if (resp.ok) {
+          setAvailableProviders(await resp.json());
+          return;
+        }
+      } catch {
+        // endpoint not available
+      }
+      // Fallback: just show Xero
+      setAvailableProviders([{
+        id: 'xero',
+        name: 'Xero',
+        description: 'Cloud accounting software for small businesses. Popular in the UK, Australia, and New Zealand.',
+        is_available: true,
+        is_configured: true,
+      }]);
+      setProvidersLoading(false);
+    };
+    fetchProviders().finally(() => setProvidersLoading(false));
+  }, []);
+
+  // ─── Check for OAuth redirect result on mount ──────────────
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const xeroResult = params.get('xero');
     const orgName = params.get('org');
-    
-    if (xeroResult === 'connected') {
+
+    const providerKeys = ['xero', 'freeagent', 'quickbooks'] as const;
+    for (const key of providerKeys) {
+      const result = params.get(key);
+      if (result === 'connected') {
+        const label = key === 'freeagent' ? 'FreeAgent' : key === 'quickbooks' ? 'QuickBooks' : 'Xero';
+        setSnackbar({
+          open: true,
+          message: orgName
+            ? `Successfully connected to ${orgName} via ${label}. Syncing transactions...`
+            : `Successfully connected to ${label}. Syncing transactions...`,
+          severity: 'success',
+        });
+        window.history.replaceState({}, '', window.location.pathname);
+        setXeroStatus({ connected: true, tenant_name: orgName || label });
+        setAccountingProvider(key);
+        return;
+      }
+    }
+
+    // Handle error from any provider
+    const errorParam = params.get('error');
+    const xeroError = params.get('xero');
+    if (errorParam || xeroError === 'error') {
+      const reason = params.get('reason') || errorParam || 'unknown';
       setSnackbar({
         open: true,
-        message: orgName 
-          ? `Successfully connected to ${orgName}. Syncing transactions...`
-          : 'Successfully connected to Xero. Syncing transactions...',
-        severity: 'success',
-      });
-      // Clean up URL params
-      window.history.replaceState({}, '', window.location.pathname);
-      // Update status
-      setXeroStatus({ connected: true, tenant_name: orgName || 'Xero' });
-    } else if (xeroResult === 'error') {
-      const reason = params.get('reason') || 'unknown';
-      setSnackbar({
-        open: true,
-        message: `Could not connect to Xero (${reason}). Please try again.`,
+        message: `Could not connect accounting software (${reason}). Please try again.`,
         severity: 'error',
       });
       window.history.replaceState({}, '', window.location.pathname);
     }
   }, []);
 
-  // ─── Xero: Auto-sync when connected ────────────────────────
+  // ─── Auto-sync when connected ──────────────────────────────
   useEffect(() => {
     if (!xeroStatus?.connected || xeroSyncing || xeroLoading) return;
 
     const autoSync = async () => {
+      const providerLabel = accountingProvider === 'freeagent' ? 'FreeAgent'
+        : accountingProvider === 'quickbooks' ? 'QuickBooks' : 'Xero';
       try {
         setXeroSyncing(true);
-        const response = await apiRequest('POST', '/v1/accounting/xero/sync');
+
+        let response: Response | null = null;
+        if (accountingProvider && accountingProvider !== 'xero') {
+          try { response = await apiRequest('POST', `/v1/accounting/${accountingProvider}/sync`); } catch { /* fallback */ }
+        }
+        if (!response || !response.ok) {
+          response = await apiRequest('POST', '/v1/accounting/xero/sync');
+        }
+
         if (response.ok) {
           const result = await response.json();
           setXeroSyncResult(result);
-          
-          // Update last sync time in status
-          setXeroStatus(prev => prev ? {
-            ...prev,
-            last_sync_at: result.synced_at,
-          } : prev);
 
-          // Refresh financial summary after sync
+          setXeroStatus(prev => prev ? { ...prev, last_sync_at: result.synced_at } : prev);
           fetchFinancialSummary();
 
-          // Only show notification and refresh if there are actually new/updated transactions
           if (result.new_transactions > 0 || result.updated_transactions > 0) {
             setSnackbar({
               open: true,
-              message: `Xero sync complete: ${result.new_transactions} new, ${result.updated_transactions} updated transactions.`,
+              message: `${providerLabel} sync complete: ${result.new_transactions} new, ${result.updated_transactions} updated transactions.`,
               severity: 'success',
             });
-            // Refresh the transactions list
             fetchTransactions();
             fetchSummary();
           }
         } else if (response.status === 401) {
-          // Token expired — user needs to reconnect
           setXeroStatus({ connected: false });
+          setAccountingProvider(null);
           setSnackbar({
             open: true,
-            message: 'Xero connection expired. Please reconnect your Xero account.',
+            message: `${providerLabel} connection expired. Please reconnect your account.`,
             severity: 'error',
           });
         }
       } catch (error) {
-        console.error('Xero auto-sync failed:', error);
+        console.error('Auto-sync failed:', error);
       } finally {
         setXeroSyncing(false);
       }
@@ -467,57 +533,75 @@ const Accounting: React.FC = () => {
 
   // ─── Xero Handlers ─────────────────────────────────────────
 
-  const connectXero = async () => {
+  const connectProvider = async (providerId: string) => {
     try {
-      const response = await apiRequest('GET', '/v1/oauth/xero');
+      setConnectingProviderId(providerId);
+      const response = await apiRequest('GET', `/v1/oauth/${providerId}`);
       if (response.ok) {
         const data = await response.json();
-        // Redirect user to Xero's OAuth login page
         window.location.href = data.url;
       } else {
+        const label = providerId === 'freeagent' ? 'FreeAgent' : providerId === 'quickbooks' ? 'QuickBooks' : 'Xero';
         setSnackbar({
           open: true,
-          message: 'Failed to start Xero connection. Please try again.',
+          message: `Failed to start ${label} connection. Please try again.`,
           severity: 'error',
         });
       }
     } catch (error) {
-      console.error('Failed to start Xero OAuth:', error);
+      console.error(`Failed to start ${providerId} OAuth:`, error);
       setSnackbar({
         open: true,
-        message: 'Failed to connect to Xero. Please try again.',
+        message: 'Failed to connect accounting software. Please try again.',
         severity: 'error',
       });
+    } finally {
+      setConnectingProviderId(null);
     }
   };
 
+  const connectXero = () => connectProvider('xero');
+
   const syncXeroNow = async () => {
     if (xeroSyncing) return;
+    const providerLabel = accountingProvider === 'freeagent' ? 'FreeAgent'
+      : accountingProvider === 'quickbooks' ? 'QuickBooks' : 'Xero';
+
     try {
       setXeroSyncing(true);
-      const response = await apiRequest('POST', '/v1/accounting/xero/sync');
+
+      // Use the appropriate sync endpoint per provider
+      let response: Response | null = null;
+      if (accountingProvider && accountingProvider !== 'xero') {
+        try {
+          response = await apiRequest('POST', `/v1/accounting/${accountingProvider}/sync`);
+        } catch {
+          // provider-specific sync not available yet — fall back to Xero
+        }
+      }
+      if (!response || !response.ok) {
+        response = await apiRequest('POST', '/v1/accounting/xero/sync');
+      }
+
       if (response.ok) {
         const result = await response.json();
         setXeroSyncResult(result);
-        
-        // Update last sync time in status
+
         setXeroStatus(prev => prev ? {
           ...prev,
           last_sync_at: result.synced_at,
         } : prev);
 
-        // Refresh financial summary after sync
         fetchFinancialSummary();
 
         setSnackbar({
           open: true,
           message: result.new_transactions > 0 || result.updated_transactions > 0
-            ? `Xero sync complete: ${result.new_transactions} new, ${result.updated_transactions} updated transactions.`
-            : 'Everything is up to date with Xero.',
+            ? `${providerLabel} sync complete: ${result.new_transactions} new, ${result.updated_transactions} updated transactions.`
+            : `Everything is up to date with ${providerLabel}.`,
           severity: 'success',
         });
 
-        // Refresh transactions list if there were changes
         if (result.new_transactions > 0 || result.updated_transactions > 0) {
           fetchTransactions();
           fetchSummary();
@@ -526,15 +610,15 @@ const Accounting: React.FC = () => {
         const errorData = await response.json().catch(() => ({}));
         setSnackbar({
           open: true,
-          message: errorData.detail || 'Failed to sync with Xero. Please try again.',
+          message: errorData.detail || `Failed to sync with ${providerLabel}. Please try again.`,
           severity: 'error',
         });
       }
     } catch (error) {
-      console.error('Xero manual sync failed:', error);
+      console.error('Manual sync failed:', error);
       setSnackbar({
         open: true,
-        message: 'Failed to sync with Xero. Please try again.',
+        message: `Failed to sync with ${providerLabel}. Please try again.`,
         severity: 'error',
       });
     } finally {
@@ -543,20 +627,32 @@ const Accounting: React.FC = () => {
   };
 
   const disconnectXero = async () => {
-    if (!confirm('Disconnect Xero? Previously synced transactions will be preserved.')) return;
+    const providerLabel = accountingProvider === 'freeagent' ? 'FreeAgent'
+      : accountingProvider === 'quickbooks' ? 'QuickBooks' : 'Xero';
+    if (!confirm(`Disconnect ${providerLabel}? Previously synced transactions will be preserved.`)) return;
     try {
-      const response = await apiRequest('POST', '/v1/accounting/xero/disconnect');
-      if (response.ok) {
+      // Try generic disconnect first, then fall back to Xero-specific
+      let ok = false;
+      try {
+        const resp = await apiRequest('POST', '/v1/accounting/disconnect');
+        ok = resp.ok;
+      } catch { /* fallback below */ }
+      if (!ok) {
+        const resp = await apiRequest('POST', '/v1/accounting/xero/disconnect');
+        ok = resp.ok;
+      }
+      if (ok) {
         setXeroStatus({ connected: false });
         setXeroSyncResult(null);
+        setAccountingProvider(null);
         setSnackbar({
           open: true,
-          message: 'Xero disconnected. Your previously synced transactions are preserved.',
+          message: `${providerLabel} disconnected. Your previously synced transactions are preserved.`,
           severity: 'info',
         });
       }
     } catch (error) {
-      console.error('Failed to disconnect Xero:', error);
+      console.error('Failed to disconnect:', error);
     }
   };
 
@@ -718,6 +814,11 @@ const Accounting: React.FC = () => {
                   <Box>
                     <Typography variant="body1" fontWeight={600} color="success.dark">
                       Connected to {xeroStatus.tenant_name || 'Xero'}
+                      {accountingProvider && accountingProvider !== 'xero' && (
+                        <span className="accounting-provider-badge">
+                          via {accountingProvider === 'freeagent' ? 'FreeAgent' : 'QuickBooks'}
+                        </span>
+                      )}
                     </Typography>
                     <Typography variant="body2" color="success.main">
                       {xeroSyncing 
@@ -763,55 +864,14 @@ const Accounting: React.FC = () => {
                 </Box>
               </Paper>
             ) : (
-              // NOT CONNECTED STATE — blue prompt to connect
-              <Paper
-                elevation={0}
-                sx={{
-                  mb: 3,
-                  p: 2,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  bgcolor: 'primary.50',
-                  border: '1px solid',
-                  borderColor: 'primary.200',
-                  borderRadius: 2,
-                }}
-              >
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                  <Box
-                    sx={{
-                      width: 40,
-                      height: 40,
-                      borderRadius: '50%',
-                      bgcolor: 'primary.100',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    <LinkIcon sx={{ color: 'primary.main' }} />
-                  </Box>
-                  <Box>
-                    <Typography variant="body1" fontWeight={600} color="primary.dark">
-                      Connect your accounting software
-                    </Typography>
-                    <Typography variant="body2" color="primary.main">
-                      Link Xero to automatically sync your bank transactions — no more manual uploads
-                    </Typography>
-                  </Box>
-                </Box>
-                <Button
-                  variant="contained"
-                  onClick={connectXero}
-                  startIcon={<LinkIcon />}
-                  sx={{
-                    bgcolor: 'primary.main',
-                    '&:hover': { bgcolor: 'primary.dark' },
-                  }}
-                >
-                  Connect Xero
-                </Button>
+              // NOT CONNECTED STATE — provider selection
+              <Paper elevation={0} sx={{ mb: 3, border: '1px solid', borderColor: 'neutral.200', borderRadius: 2 }}>
+                <ProviderSelector
+                  providers={availableProviders}
+                  loading={providersLoading}
+                  connectingId={connectingProviderId}
+                  onConnect={connectProvider}
+                />
               </Paper>
             )}
           </>

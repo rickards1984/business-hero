@@ -1287,6 +1287,10 @@ export default function BusinessDashboard() {
                       <ListItemIcon><PaletteIcon fontSize="small" /></ListItemIcon>
                       <ListItemText>Branding</ListItemText>
                     </MenuItem>
+                    <MenuItem onClick={() => { setSettingsAnchor(null); navigate('/app/accounting'); }}>
+                      <ListItemIcon><AccountBalanceIcon fontSize="small" /></ListItemIcon>
+                      <ListItemText>Accounting</ListItemText>
+                    </MenuItem>
                     <MenuItem onClick={() => { setSettingsAnchor(null); setTabValue(4); }}>
                       <ListItemIcon><SmartToyIcon fontSize="small" /></ListItemIcon>
                       <ListItemText>AI Receptionist</ListItemText>
