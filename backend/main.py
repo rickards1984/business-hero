@@ -3294,6 +3294,213 @@ async def oauth_xero_callback(
     return RedirectResponse(f"{frontend_url}/app/accounting?xero=connected&org={tenant_name}")
 
 
+# ============================================================================
+# FREEAGENT OAUTH CALLBACK
+# ============================================================================
+
+@app.get("/v1/oauth/freeagent/callback")
+async def oauth_freeagent_callback(
+    code: str = Query(""),
+    state: str = Query(""),
+    error: str = Query(""),
+    session: Session = Depends(get_session),
+):
+    """FreeAgent OAuth callback — exchanges code for tokens, stores connection."""
+    import logging as _logging
+    _fa_logger = _logging.getLogger("freeagent_oauth_callback")
+
+    frontend_url = os.getenv(
+        "FRONTEND_URL",
+        os.getenv("APP_BASE_URL", "https://business-hero.vercel.app"),
+    ).strip().rstrip("/")
+
+    if error:
+        _fa_logger.error(f"FreeAgent OAuth error: {error}")
+        return RedirectResponse(f"{frontend_url}/app/accounting?error=freeagent_auth_failed")
+
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Invalid FreeAgent OAuth callback")
+
+    try:
+        business_id = decrypt_str(state)
+        _fa_logger.info(f"FreeAgent OAuth callback for business: {business_id}")
+    except Exception as e:
+        _fa_logger.error(f"Invalid state parameter: {e}")
+        raise HTTPException(status_code=400, detail="Invalid state parameter")
+
+    base_url = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_BASE_URL", "")).strip().rstrip("/")
+    redirect_uri = f"{base_url}/v1/oauth/freeagent/callback"
+
+    try:
+        from providers.freeagent_oauth import exchange_freeagent_code_for_tokens, get_freeagent_company
+
+        token_data = exchange_freeagent_code_for_tokens(code, redirect_uri)
+        access_token = token_data["access_token"]
+        refresh_token = token_data.get("refresh_token", "")
+        expires_in = token_data.get("expires_in", 3600)
+
+        company = await get_freeagent_company(access_token)
+        company_name = company.get("name", "FreeAgent Company")
+        company_url = company.get("url", "")
+        subdomain = company.get("subdomain", "")
+    except Exception as e:
+        _fa_logger.error(f"FreeAgent token exchange failed: {e}")
+        return RedirectResponse(f"{frontend_url}/app/accounting?error=freeagent_token_failed")
+
+    from datetime import timezone as _tz
+    encrypted_access = encrypt_str(access_token)
+    encrypted_refresh = encrypt_str(refresh_token)
+    expires_at = datetime.now(_tz.utc) + timedelta(seconds=expires_in)
+
+    try:
+        session.execute(
+            text("""
+                INSERT INTO accounting_connections
+                    (id, business_id, provider, tenant_id, tenant_name,
+                     token_ciphertext, refresh_token_ciphertext,
+                     token_expires_at, is_active, provider_metadata,
+                     created_at, updated_at)
+                VALUES
+                    (gen_random_uuid(), :business_id, 'freeagent', :tenant_id, :tenant_name,
+                     :token_ciphertext, :refresh_token_ciphertext,
+                     :token_expires_at, true, :provider_metadata::jsonb,
+                     NOW(), NOW())
+                ON CONFLICT (business_id, provider) DO UPDATE SET
+                    tenant_id = EXCLUDED.tenant_id,
+                    tenant_name = EXCLUDED.tenant_name,
+                    token_ciphertext = EXCLUDED.token_ciphertext,
+                    refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
+                    token_expires_at = EXCLUDED.token_expires_at,
+                    is_active = true,
+                    provider_metadata = EXCLUDED.provider_metadata,
+                    updated_at = NOW()
+            """),
+            {
+                "business_id": business_id,
+                "tenant_id": company_url,
+                "tenant_name": company_name,
+                "token_ciphertext": encrypted_access,
+                "refresh_token_ciphertext": encrypted_refresh,
+                "token_expires_at": expires_at,
+                "provider_metadata": json.dumps({
+                    "company_url": company_url,
+                    "subdomain": subdomain,
+                }),
+            },
+        )
+        session.commit()
+        _fa_logger.info(f"FreeAgent connection saved for business {business_id}")
+    except Exception as e:
+        _fa_logger.error(f"Failed to save FreeAgent connection: {e}")
+        session.rollback()
+        return RedirectResponse(f"{frontend_url}/app/accounting?error=freeagent_save_failed")
+
+    return RedirectResponse(f"{frontend_url}/app/accounting?freeagent=connected&org={company_name}")
+
+
+# ============================================================================
+# QUICKBOOKS OAUTH CALLBACK
+# ============================================================================
+
+@app.get("/v1/oauth/quickbooks/callback")
+async def oauth_quickbooks_callback(
+    code: str = Query(""),
+    state: str = Query(""),
+    realmId: str = Query(""),
+    error: str = Query(""),
+    session: Session = Depends(get_session),
+):
+    """QuickBooks OAuth callback — exchanges code for tokens, stores connection."""
+    import logging as _logging
+    _qb_logger = _logging.getLogger("quickbooks_oauth_callback")
+
+    frontend_url = os.getenv(
+        "FRONTEND_URL",
+        os.getenv("APP_BASE_URL", "https://business-hero.vercel.app"),
+    ).strip().rstrip("/")
+
+    if error:
+        _qb_logger.error(f"QuickBooks OAuth error: {error}")
+        return RedirectResponse(f"{frontend_url}/app/accounting?error=quickbooks_auth_failed")
+
+    if not code or not state or not realmId:
+        raise HTTPException(status_code=400, detail="Invalid QuickBooks OAuth callback")
+
+    try:
+        business_id = decrypt_str(state)
+        _qb_logger.info(f"QuickBooks OAuth callback for business: {business_id}, realmId: {realmId}")
+    except Exception as e:
+        _qb_logger.error(f"Invalid state parameter: {e}")
+        raise HTTPException(status_code=400, detail="Invalid state parameter")
+
+    base_url = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_BASE_URL", "")).strip().rstrip("/")
+    redirect_uri = f"{base_url}/v1/oauth/quickbooks/callback"
+
+    try:
+        from providers.quickbooks_oauth import exchange_quickbooks_code_for_tokens, get_quickbooks_company_info
+
+        token_data = exchange_quickbooks_code_for_tokens(code, redirect_uri)
+        access_token = token_data["access_token"]
+        refresh_token = token_data.get("refresh_token", "")
+        expires_in = token_data.get("expires_in", 3600)
+
+        company = await get_quickbooks_company_info(access_token, realmId)
+        company_name = company.get("CompanyName", "QuickBooks Company")
+    except Exception as e:
+        _qb_logger.error(f"QuickBooks token exchange failed: {e}")
+        return RedirectResponse(f"{frontend_url}/app/accounting?error=quickbooks_token_failed")
+
+    from datetime import timezone as _tz
+    encrypted_access = encrypt_str(access_token)
+    encrypted_refresh = encrypt_str(refresh_token)
+    expires_at = datetime.now(_tz.utc) + timedelta(seconds=expires_in)
+
+    try:
+        session.execute(
+            text("""
+                INSERT INTO accounting_connections
+                    (id, business_id, provider, tenant_id, tenant_name,
+                     token_ciphertext, refresh_token_ciphertext,
+                     token_expires_at, is_active, provider_metadata,
+                     created_at, updated_at)
+                VALUES
+                    (gen_random_uuid(), :business_id, 'quickbooks', :realm_id, :tenant_name,
+                     :token_ciphertext, :refresh_token_ciphertext,
+                     :token_expires_at, true, :provider_metadata::jsonb,
+                     NOW(), NOW())
+                ON CONFLICT (business_id, provider) DO UPDATE SET
+                    tenant_id = EXCLUDED.tenant_id,
+                    tenant_name = EXCLUDED.tenant_name,
+                    token_ciphertext = EXCLUDED.token_ciphertext,
+                    refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
+                    token_expires_at = EXCLUDED.token_expires_at,
+                    is_active = true,
+                    provider_metadata = EXCLUDED.provider_metadata,
+                    updated_at = NOW()
+            """),
+            {
+                "business_id": business_id,
+                "realm_id": realmId,
+                "tenant_name": company_name,
+                "token_ciphertext": encrypted_access,
+                "refresh_token_ciphertext": encrypted_refresh,
+                "token_expires_at": expires_at,
+                "provider_metadata": json.dumps({
+                    "realm_id": realmId,
+                    "minor_version": 75,
+                }),
+            },
+        )
+        session.commit()
+        _qb_logger.info(f"QuickBooks connection saved for business {business_id}")
+    except Exception as e:
+        _qb_logger.error(f"Failed to save QuickBooks connection: {e}")
+        session.rollback()
+        return RedirectResponse(f"{frontend_url}/app/accounting?error=quickbooks_save_failed")
+
+    return RedirectResponse(f"{frontend_url}/app/accounting?quickbooks=connected&org={company_name}")
+
+
 @app.get("/v1/accounting/xero/status")
 async def xero_connection_status(
     user_business=Depends(get_current_user_and_business),
@@ -4262,10 +4469,10 @@ async def oauth_start(
     if provider == "xero":
         url = get_xero_auth_url(business_id=business_id, redirect_uri=redirect_uri)
     elif provider == "freeagent":
-        from providers.freeagent_oauth import get_freeagent_auth_url  # type: ignore[import-not-found]
+        from providers.freeagent_oauth import get_freeagent_auth_url
         url = get_freeagent_auth_url(business_id=business_id, redirect_uri=redirect_uri)
     elif provider == "quickbooks":
-        from providers.quickbooks_oauth import get_quickbooks_auth_url  # type: ignore[import-not-found]
+        from providers.quickbooks_oauth import get_quickbooks_auth_url
         url = get_quickbooks_auth_url(business_id=business_id, redirect_uri=redirect_uri)
     else:
         raise HTTPException(status_code=400, detail=f"Provider not yet supported: {provider}")

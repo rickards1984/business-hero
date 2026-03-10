@@ -86,17 +86,19 @@ class AccountingService:
                 tenant_id=connection["tenant_id"],
             )
         elif provider_type == "freeagent":
-            from providers.freeagent import FreeAgentProvider  # type: ignore[import-not-found]
+            from providers.freeagent import FreeAgentProvider
             self._provider = FreeAgentProvider(
                 access_token=access_token,
                 company_url=(connection.get("provider_metadata") or {}).get("company_url", ""),
                 subdomain=(connection.get("provider_metadata") or {}).get("subdomain", ""),
             )
         elif provider_type == "quickbooks":
-            from providers.quickbooks import QuickBooksProvider  # type: ignore[import-not-found]
+            from providers.quickbooks import QuickBooksProvider
+            metadata = connection.get("provider_metadata") or {}
             self._provider = QuickBooksProvider(
                 access_token=access_token,
                 realm_id=connection["tenant_id"],
+                minor_version=metadata.get("minor_version", 75),
             )
         else:
             _logger.warning(f"Unknown provider type: {provider_type}")
@@ -150,10 +152,10 @@ class AccountingService:
             from providers.xero_oauth import refresh_xero_token
             return refresh_xero_token(refresh_token)
         elif provider == "freeagent":
-            from providers.freeagent_oauth import refresh_freeagent_token  # type: ignore[import-not-found]
+            from providers.freeagent_oauth import refresh_freeagent_token
             return refresh_freeagent_token(refresh_token)
         elif provider == "quickbooks":
-            from providers.quickbooks_oauth import refresh_quickbooks_token  # type: ignore[import-not-found]
+            from providers.quickbooks_oauth import refresh_quickbooks_token
             return refresh_quickbooks_token(refresh_token)
         else:
             raise ValueError(f"Unknown provider: {provider}")
