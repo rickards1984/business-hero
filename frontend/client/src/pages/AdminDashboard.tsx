@@ -132,6 +132,7 @@ export default function AdminDashboard() {
   const [filterReceptionist, setFilterReceptionist] = useState('all');
   const [receptionistOverview, setReceptionistOverview] = useState<Record<string, { enabled: boolean; config_exists: boolean }>>({});
   const [onboardingStatus, setOnboardingStatus] = useState<Record<string, { onboarding_completed: boolean; checklist_progress: number; checklist_total: number }>>({});
+  const [accountingConnections, setAccountingConnections] = useState<Record<string, { provider: string; tenant_name?: string; is_active: boolean; last_sync_at?: string | null }>>({});
   const [toggleDialogOpen, setToggleDialogOpen] = useState(false);
   const [toggleTarget, setToggleTarget] = useState<BusinessSummary | null>(null);
 
@@ -195,6 +196,16 @@ export default function AdminDashboard() {
         }
         setOnboardingStatus(obMap);
       } catch { /* onboarding status is optional */ }
+
+      try {
+        const acctRes = await apiRequest('GET', '/v1/admin/accounting/overview');
+        const acctData: any[] = await acctRes.json();
+        const acctMap: Record<string, { provider: string; tenant_name?: string; is_active: boolean; last_sync_at?: string | null }> = {};
+        for (const conn of acctData) {
+          acctMap[conn.business_id] = { provider: conn.provider, tenant_name: conn.tenant_name, is_active: !!conn.is_active, last_sync_at: conn.last_sync_at };
+        }
+        setAccountingConnections(acctMap);
+      } catch { /* accounting overview is optional */ }
     } catch (err: any) {
       setError(err.message || 'Failed to fetch data');
     } finally {
@@ -656,6 +667,7 @@ export default function AdminDashboard() {
                       <TableCell>Awaz</TableCell>
                       <TableCell>Email</TableCell>
                       <TableCell>Calendar</TableCell>
+                      <TableCell>Accounting</TableCell>
                       <TableCell>Recept.</TableCell>
                       <TableCell>Onboard.</TableCell>
                       <TableCell>Tickets</TableCell>
@@ -666,7 +678,7 @@ export default function AdminDashboard() {
                   <TableBody>
                     {filteredBusinesses.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={11} align="center" sx={{ py: 4 }}>
+                        <TableCell colSpan={12} align="center" sx={{ py: 4 }}>
                           <Typography color="text.secondary">No businesses found</Typography>
                         </TableCell>
                       </TableRow>
@@ -709,6 +721,27 @@ export default function AdminDashboard() {
                               size="small"
                               color={business.calendar_connected ? 'success' : 'default'}
                             />
+                          </TableCell>
+                          <TableCell>
+                            {(() => {
+                              const acct = accountingConnections[business.id];
+                              const label = acct?.is_active
+                                ? acct.provider === 'freeagent'
+                                  ? 'FreeAgent'
+                                  : acct.provider === 'quickbooks'
+                                    ? 'QuickBooks'
+                                    : acct.provider === 'xero'
+                                      ? 'Xero'
+                                      : 'Connected'
+                                : 'Not connected';
+                              return (
+                                <Chip
+                                  label={label}
+                                  size="small"
+                                  color={acct?.is_active ? 'success' : 'default'}
+                                />
+                              );
+                            })()}
                           </TableCell>
                           <TableCell>
                             <ReceptionistStatusChip overview={receptionistOverview[business.id]} />

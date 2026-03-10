@@ -129,6 +129,13 @@ export default function AdminBusinessDetail() {
   const [health, setHealth] = useState<BusinessHealth | null>(null);
   const [healthLoading, setHealthLoading] = useState(false);
 
+  const [accountingConnection, setAccountingConnection] = useState<{
+    connected: boolean;
+    provider?: string;
+    tenant_name?: string;
+    last_sync_at?: string | null;
+  } | null>(null);
+
   useEffect(() => {
     if (id) {
       loadBusiness();
@@ -164,6 +171,7 @@ export default function AdminBusinessDetail() {
         loadEmailAccounts(),
         loadActivity(),
         loadHealth(),
+        loadAccountingConnection(),
       ]);
     } catch (err: any) {
       setError(err.message || 'Failed to load business');
@@ -190,6 +198,41 @@ export default function AdminBusinessDetail() {
     }
     const data: AwazIntegration = await response.json();
     setAwaz(data);
+  };
+
+  const loadAccountingConnection = async () => {
+    try {
+      const response = await apiRequest('GET', `/v1/accounting/connection/status?business_id=${id}`);
+      if (response.ok) {
+        const data = await response.json();
+        setAccountingConnection({
+          connected: !!data.connected,
+          provider: data.provider,
+          tenant_name: data.tenant_name,
+          last_sync_at: data.last_sync_at,
+        });
+      } else {
+        setAccountingConnection({ connected: false });
+      }
+    } catch {
+      setAccountingConnection({ connected: false });
+    }
+  };
+
+  const handleAccountingDisconnect = async () => {
+    if (!confirm("Disconnect this business's accounting software? Synced data will be preserved.")) return;
+    try {
+      const resp = await apiRequest('POST', `/v1/accounting/disconnect?business_id=${id}`);
+      if (resp.ok) {
+        setAccountingConnection({ connected: false });
+      }
+    } catch {
+      try {
+        await apiRequest('POST', `/v1/accounting/xero/disconnect?business_id=${id}`);
+        setAccountingConnection({ connected: false });
+      } catch { /* ignore */ }
+    }
+    loadAccountingConnection();
   };
 
   const loadEmailAccounts = async () => {
@@ -851,6 +894,42 @@ export default function AdminBusinessDetail() {
                 <Typography variant="body2" color="error">
                   Error: {calendarSyncState.last_error}
                 </Typography>
+              )}
+            </Paper>
+
+            <Paper sx={{ p: 3 }}>
+              <Typography variant="h6" gutterBottom>Accounting</Typography>
+              {accountingConnection?.connected ? (
+                <>
+                  <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 2 }}>
+                    <Chip
+                      label={accountingConnection.provider === 'freeagent' ? 'FreeAgent' : accountingConnection.provider === 'quickbooks' ? 'QuickBooks' : 'Xero'}
+                      color="success"
+                      size="small"
+                    />
+                  </Box>
+                  <Typography variant="body2" color="text.secondary">
+                    Organisation: {accountingConnection.tenant_name || 'Unknown'}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                    Last synced: {accountingConnection.last_sync_at ? new Date(accountingConnection.last_sync_at).toLocaleString() : 'Never'}
+                  </Typography>
+                  <Button variant="outlined" color="warning" size="small" sx={{ mt: 2 }} onClick={handleAccountingDisconnect}>
+                    Disconnect
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                    The business owner needs to connect their accounting software from their dashboard. Available providers:
+                  </Typography>
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, mb: 2 }}>
+                    <Typography variant="body2">Xero — configured and ready</Typography>
+                    <Typography variant="body2">FreeAgent — configured and ready</Typography>
+                    <Typography variant="body2">QuickBooks — configured and ready</Typography>
+                  </Box>
+                  <Chip label="Pending owner action" size="small" color="warning" />
+                </>
               )}
             </Paper>
           </Box>

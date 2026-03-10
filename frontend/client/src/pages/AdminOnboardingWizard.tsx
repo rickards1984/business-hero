@@ -53,7 +53,7 @@ const ALL_FEATURE_KEYS = [
   { key: 'aria_chat', label: 'AI Assistant (Chat)' },
   { key: 'aria_voice', label: 'AI Assistant (Voice)' },
   { key: 'receptionist', label: 'AI Receptionist' },
-  { key: 'accounting', label: 'Accounting (Xero)' },
+  { key: 'accounting', label: 'Accounting' },
 ];
 
 interface PlanDef {
@@ -173,6 +173,7 @@ export default function AdminOnboardingWizard() {
 
   // Step 7
   const [accNotes, setAccNotes] = useState('');
+  const [accProvider, setAccProvider] = useState<string>('other');
 
   // Step 8
   const [activateNow, setActivateNow] = useState(true);
@@ -299,6 +300,7 @@ export default function AdminOnboardingWizard() {
       }
       if (wd.accounting_setup) {
         setAccNotes(wd.accounting_setup.notes || '');
+        setAccProvider(wd.accounting_setup.preferred_provider || 'other');
       }
       if (wd.review_activate) {
         setActivateNow(wd.review_activate.activate_now ?? true);
@@ -389,7 +391,7 @@ export default function AdminOnboardingWizard() {
           stepData = { status: 'pending', notes: calNotes || null };
           break;
         case 'accounting_setup':
-          stepData = { status: 'pending', notes: accNotes || null };
+          stepData = { status: 'pending', preferred_provider: accProvider, notes: accNotes || null };
           break;
         case 'review_activate':
           stepData = { activate_now: activateNow, send_welcome_email: sendWelcome, admin_notes: adminNotes || null };
@@ -441,7 +443,10 @@ export default function AdminOnboardingWizard() {
       }
       if (stepName === 'email_setup') stepData.notes = emailNotes || null;
       if (stepName === 'calendar_setup') stepData.notes = calNotes || null;
-      if (stepName === 'accounting_setup') stepData.notes = accNotes || null;
+      if (stepName === 'accounting_setup') {
+        stepData.notes = accNotes || null;
+        stepData.preferred_provider = accProvider;
+      }
 
       const res = await apiRequest(
         'PUT',
@@ -855,22 +860,38 @@ export default function AdminOnboardingWizard() {
           {/* STEP 7: Accounting */}
           {stepName === 'accounting_setup' && (
             <Box>
-              <Typography variant="h6" gutterBottom>Accounting (Xero) Integration</Typography>
+              <Typography variant="h6" gutterBottom>Accounting Integration</Typography>
               <Alert severity="info" sx={{ mb: 3 }}>
-                Xero requires the business owner to connect via OAuth.
+                The business owner will connect their accounting software from their dashboard after logging in.
               </Alert>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 3 }}>
-                <Typography variant="body2">Status:</Typography>
-                <Chip label="Pending owner action" size="small" color="warning" />
-              </Box>
+              <Typography variant="body2" gutterBottom sx={{ fontWeight: 500 }}>
+                Which accounting software does this business use?
+              </Typography>
+              <FormControl component="fieldset" sx={{ mb: 2, display: 'block' }}>
+                <RadioGroup value={accProvider} onChange={(e) => setAccProvider(e.target.value)}>
+                  <FormControlLabel value="xero" control={<Radio />} label="Xero" />
+                  <FormControlLabel value="freeagent" control={<Radio />} label="FreeAgent" />
+                  <FormControlLabel value="quickbooks" control={<Radio />} label="QuickBooks Online" />
+                  <FormControlLabel value="other" control={<Radio />} label="Other / Don't know yet" />
+                </RadioGroup>
+              </FormControl>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                This helps us prepare the right setup for them.
+              </Typography>
               <TextField
                 label="Admin notes (optional)"
                 fullWidth
                 multiline
                 rows={2}
+                placeholder="e.g., Uses FreeAgent, accountant is Smith & Co"
                 value={accNotes}
                 onChange={(e) => setAccNotes(e.target.value)}
+                sx={{ mb: 2 }}
               />
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Typography variant="body2">Status:</Typography>
+                <Chip label="Pending owner action" size="small" color="warning" />
+              </Box>
             </Box>
           )}
 
@@ -906,6 +927,9 @@ export default function AdminOnboardingWizard() {
                   if (f.key === 'receptionist' && enabled) {
                     statusLabel = recPhone ? `Configured (${recVoice}, ${recPhone})` : 'Configured (no phone yet)';
                   }
+                  const displayLabel = f.key === 'accounting' && accProvider && accProvider !== 'other'
+                    ? `Accounting (${accProvider === 'freeagent' ? 'FreeAgent' : accProvider === 'quickbooks' ? 'QuickBooks' : 'Xero'})`
+                    : f.label;
                   return (
                     <Box key={f.key} sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 0.5 }}>
                       {enabled ? (
@@ -914,7 +938,7 @@ export default function AdminOnboardingWizard() {
                         <Typography color="text.disabled" sx={{ width: 20, textAlign: 'center' }}>—</Typography>
                       )}
                       <Typography variant="body2" sx={!enabled ? { color: 'text.disabled', textDecoration: 'line-through' } : undefined}>
-                        {f.label}
+                        {displayLabel}
                       </Typography>
                       {enabled && <Chip label={statusLabel} size="small" color={statusColor} variant="outlined" />}
                     </Box>

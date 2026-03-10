@@ -45,6 +45,7 @@ export default function AdminOnboarding() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statuses, setStatuses] = useState<OnboardingStatus[]>([]);
+  const [sessionDetails, setSessionDetails] = useState<Record<string, { preferred_provider?: string }>>({});
   const [abandonDialogOpen, setAbandonDialogOpen] = useState(false);
   const [abandonTarget, setAbandonTarget] = useState<OnboardingStatus | null>(null);
 
@@ -73,6 +74,33 @@ export default function AdminOnboarding() {
     () => statuses.filter((s) => !s.onboarding_completed && s.checklist_total > 0 && s.checklist_progress < 100),
     [statuses],
   );
+
+  const inProgressIds = useMemo(() => inProgress.map((s) => s.business_id).sort().join(','), [inProgress]);
+
+  useEffect(() => {
+    if (inProgress.length === 0) {
+      setSessionDetails({});
+      return;
+    }
+    const loadSessions = async () => {
+      const map: Record<string, { preferred_provider?: string }> = {};
+      await Promise.all(
+        inProgress.map(async (s) => {
+          try {
+            const res = await apiRequest('GET', `/v1/admin/onboarding/session/${s.business_id}`);
+            if (res.ok) {
+              const data = await res.json();
+              const wd = data.wizard_data || {};
+              const acc = typeof wd === 'string' ? {} : (wd.accounting_setup || {});
+              map[s.business_id] = { preferred_provider: acc.preferred_provider };
+            }
+          } catch { /* session may not exist */ }
+        }),
+      );
+      setSessionDetails(map);
+    };
+    loadSessions();
+  }, [inProgressIds, inProgress]);
 
   const completed = useMemo(
     () => statuses.filter((s) => s.onboarding_completed),
@@ -188,8 +216,13 @@ export default function AdminOnboarding() {
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1 }}>
                     <Box>
                       <Typography variant="subtitle1" fontWeight="bold">{s.business_name}</Typography>
-                      <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', mt: 0.5 }}>
+                      <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', mt: 0.5, flexWrap: 'wrap' }}>
                         <Chip label={s.plan_tier} size="small" variant="outlined" />
+                        {sessionDetails[s.business_id]?.preferred_provider && sessionDetails[s.business_id].preferred_provider !== 'other' && (
+                          <Typography variant="caption" color="text.secondary">
+                            Accounting: {sessionDetails[s.business_id].preferred_provider === 'freeagent' ? 'FreeAgent' : sessionDetails[s.business_id].preferred_provider === 'quickbooks' ? 'QuickBooks' : 'Xero'} (pending)
+                          </Typography>
+                        )}
                         <Typography variant="caption" color="text.secondary">
                           {s.checklist_completed}/{s.checklist_total} checklist items
                         </Typography>
