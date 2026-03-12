@@ -268,6 +268,11 @@ def get_email_account_for_sending(session: Session, business_id: str):
 async def lifespan(app: FastAPI):
     """Application lifespan - initialize database on startup."""
     init_db()
+    try:
+        from services.briefing_scheduler import start_briefing_scheduler
+        await start_briefing_scheduler()
+    except Exception as e:
+        logging.getLogger("app").warning(f"Briefing scheduler failed to start: {e}")
     yield
 
 
@@ -335,6 +340,13 @@ app.include_router(onboarding_router)
 from support_api import router as support_router, admin_router as support_admin_router
 app.include_router(support_router)
 app.include_router(support_admin_router)
+
+from whatsapp_briefing_api import router as whatsapp_router, admin_router as whatsapp_admin_router
+app.include_router(whatsapp_router)
+app.include_router(whatsapp_admin_router)
+
+from automation_api import router as automation_router
+app.include_router(automation_router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])

@@ -32,6 +32,8 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CelebrationIcon from '@mui/icons-material/Celebration';
 import { useAuth } from '@/contexts/AuthContext';
 import { apiRequest } from '@/lib/queryClient';
+import { updateAdminWhatsAppConfig } from '@/lib/whatsappApi';
+import PhoneInput from '@/components/PhoneInput';
 
 const TIMEZONES = [
   'Europe/London',
@@ -153,6 +155,11 @@ export default function AdminOnboardingWizard() {
   // Step 3
   const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
   const [planFeatureDefaults, setPlanFeatureDefaults] = useState<Record<string, boolean>>({});
+  const [whatsappNumber, setWhatsappNumber] = useState('');
+  const [whatsappOwnerName, setWhatsappOwnerName] = useState('');
+  const [whatsappWeeklyEnabled, setWhatsappWeeklyEnabled] = useState(true);
+  const [whatsappDailyEnabled, setWhatsappDailyEnabled] = useState(true);
+  const [whatsappAlertsEnabled, setWhatsappAlertsEnabled] = useState(true);
 
   // Step 4
   const [emailNotes, setEmailNotes] = useState('');
@@ -174,6 +181,13 @@ export default function AdminOnboardingWizard() {
   // Step 7
   const [accNotes, setAccNotes] = useState('');
   const [accProvider, setAccProvider] = useState<string>('other');
+
+  // CEO Briefing (optional, collected in plan_features)
+  const [whatsappNumber, setWhatsappNumber] = useState('');
+  const [whatsappOwnerName, setWhatsappOwnerName] = useState('');
+  const [whatsappWeeklyEnabled, setWhatsappWeeklyEnabled] = useState(true);
+  const [whatsappDailyEnabled, setWhatsappDailyEnabled] = useState(true);
+  const [whatsappAlertsEnabled, setWhatsappAlertsEnabled] = useState(true);
 
   // Step 8
   const [activateNow, setActivateNow] = useState(true);
@@ -274,6 +288,14 @@ export default function AdminOnboardingWizard() {
       }
       if (wd.plan_features) {
         setFeatureFlags(wd.plan_features.feature_flags || {});
+        const cb = wd.plan_features.ceo_briefing;
+        if (cb) {
+          setWhatsappNumber(cb.phone_number || '');
+          setWhatsappOwnerName(cb.owner_name || '');
+          setWhatsappWeeklyEnabled(cb.weekly_enabled ?? true);
+          setWhatsappDailyEnabled(cb.daily_enabled ?? true);
+          setWhatsappAlertsEnabled(cb.alerts_enabled ?? true);
+        }
       }
 
       const planId = wd.business_details?.plan_tier || 'starter';
@@ -366,7 +388,16 @@ export default function AdminOnboardingWizard() {
           stepData = { owner_email: ownerEmail, owner_name: ownerName, send_invite: sendInvite };
           break;
         case 'plan_features':
-          stepData = { feature_flags: featureFlags };
+          stepData = {
+            feature_flags: featureFlags,
+            ceo_briefing: {
+              phone_number: whatsappNumber,
+              owner_name: whatsappOwnerName,
+              weekly_enabled: whatsappWeeklyEnabled,
+              daily_enabled: whatsappDailyEnabled,
+              alerts_enabled: whatsappAlertsEnabled,
+            },
+          };
           break;
         case 'email_setup':
           stepData = { status: 'pending', notes: emailNotes || null };
@@ -406,6 +437,21 @@ export default function AdminOnboardingWizard() {
       const result = await res.json();
 
       if (result.status === 'completed') {
+        if (businessId && whatsappNumber.trim()) {
+          try {
+            await updateAdminWhatsAppConfig(businessId, {
+              phone_number: whatsappNumber.replace(/\s/g, ''),
+              owner_name: whatsappOwnerName.trim() || undefined,
+              enabled: true,
+              daily_pulse_enabled: whatsappDailyEnabled,
+              weekly_briefing_enabled: whatsappWeeklyEnabled,
+              real_time_alerts_enabled: whatsappAlertsEnabled,
+              timezone: bizTimezone || 'Europe/London',
+            });
+          } catch (e) {
+            console.warn('Failed to save WhatsApp config during onboarding', e);
+          }
+        }
         setCompleted(true);
         return;
       }
@@ -730,6 +776,30 @@ export default function AdminOnboardingWizard() {
                   You've enabled features not included in the {selectedPlan?.name} plan. These are custom overrides.
                 </Alert>
               )}
+
+              <Divider sx={{ my: 3 }} />
+              <Typography variant="subtitle1" gutterBottom>CEO Briefing Setup (optional)</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Owner's WhatsApp number for CEO briefings and alerts. They can change this later.
+              </Typography>
+              <Box sx={{ mb: 2 }}>
+                <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>Owner&apos;s WhatsApp Number</Typography>
+                <PhoneInput value={whatsappNumber} onChange={setWhatsappNumber} />
+              </Box>
+              <TextField
+                label="Owner's first name (for personalised greetings)"
+                fullWidth
+                size="small"
+                value={whatsappOwnerName}
+                onChange={(e) => setWhatsappOwnerName(e.target.value)}
+                placeholder="Michael"
+                sx={{ mb: 2 }}
+              />
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                <FormControlLabel control={<Checkbox checked={whatsappWeeklyEnabled} onChange={(e) => setWhatsappWeeklyEnabled(e.target.checked)} />} label="Enable Weekly CEO Briefing (Monday 8am)" />
+                <FormControlLabel control={<Checkbox checked={whatsappDailyEnabled} onChange={(e) => setWhatsappDailyEnabled(e.target.checked)} />} label="Enable Daily Morning Pulse (7:30am)" />
+                <FormControlLabel control={<Checkbox checked={whatsappAlertsEnabled} onChange={(e) => setWhatsappAlertsEnabled(e.target.checked)} />} label="Enable Real-Time Alerts" />
+              </Box>
             </Box>
           )}
 

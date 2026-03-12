@@ -86,6 +86,7 @@ import {
   ChevronRight as ChevronRightIcon,
   AccountBalance as AccountBalanceIcon,
   MailOutline as MailOutlineIcon,
+  Sms as SmsIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type Business, type Task, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
@@ -95,6 +96,7 @@ import { config } from '@/config/env';
 import DebugPanel from '@/components/DebugPanel';
 import EmailsTab from '@/components/EmailsTab';
 import ReceptionistTab from '@/components/ReceptionistTab';
+import CeoBriefingTab from '@/components/CeoBriefingTab';
 import BottomNav from '@/components/BottomNav';
 import { fetchEmailMessages } from '@/lib/emailApi';
 import { applyBrandColor } from '@/pages/BrandingSettings';
@@ -188,6 +190,7 @@ export default function BusinessDashboard() {
   
   const [tabValue, setTabValue] = useState(() => {
     const tab = searchParams.get('tab');
+    if (tab === 'ceo-briefing') return 5;
     if (tab === 'receptionist') return 4;
     if (tab === 'emails') return 3;
     if (tab === 'invoices') return 2;
@@ -1416,6 +1419,12 @@ export default function BusinessDashboard() {
                     }
                     data-testid="tab-receptionist"
                   />
+                  <Tab
+                    icon={<SmsIcon />}
+                    iconPosition="start"
+                    label="CEO Briefing"
+                    data-testid="tab-ceo-briefing"
+                  />
                 </Tabs>
               </Box>
 
@@ -2373,6 +2382,9 @@ export default function BusinessDashboard() {
 
               <TabPanel value={tabValue} index={4}>
                 {mountedTabs.has(4) && business && <ReceptionistTab businessId={business.id} onViewCalls={() => { setCallSourceFilter('receptionist'); setTabValue(1); }} />}
+              </TabPanel>
+              <TabPanel value={tabValue} index={5}>
+                {mountedTabs.has(5) && business && <CeoBriefingTab />}
               </TabPanel>
             </Paper>
           </>

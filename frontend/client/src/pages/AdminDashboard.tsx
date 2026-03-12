@@ -51,6 +51,7 @@ import { supabase, type BusinessMember } from '@/lib/supabase';
 import { apiRequest } from '@/lib/queryClient';
 import DebugPanel from '@/components/DebugPanel';
 import { ReceptionistStatusChip } from '@/components/AdminReceptionistSection';
+import { fetchAdminWhatsAppOverview } from '@/lib/whatsappApi';
 
 const TIMEZONES = [
   'America/New_York',
@@ -131,6 +132,7 @@ export default function AdminDashboard() {
   const [filterCalendar, setFilterCalendar] = useState('all');
   const [filterReceptionist, setFilterReceptionist] = useState('all');
   const [receptionistOverview, setReceptionistOverview] = useState<Record<string, { enabled: boolean; config_exists: boolean }>>({});
+  const [whatsappOverview, setWhatsappOverview] = useState<Record<string, { configured: boolean; enabled: boolean }>>({});
   const [onboardingStatus, setOnboardingStatus] = useState<Record<string, { onboarding_completed: boolean; checklist_progress: number; checklist_total: number }>>({});
   const [accountingConnections, setAccountingConnections] = useState<Record<string, { provider: string; tenant_name?: string; is_active: boolean; last_sync_at?: string | null }>>({});
   const [toggleDialogOpen, setToggleDialogOpen] = useState(false);
@@ -206,6 +208,15 @@ export default function AdminDashboard() {
         }
         setAccountingConnections(acctMap);
       } catch { /* accounting overview is optional */ }
+
+      try {
+        const waRes = await fetchAdminWhatsAppOverview();
+        const waMap: Record<string, { configured: boolean; enabled: boolean }> = {};
+        for (const item of waRes) {
+          waMap[item.business_id] = { configured: true, enabled: !!item.enabled };
+        }
+        setWhatsappOverview(waMap);
+      } catch { /* WhatsApp overview is optional */ }
     } catch (err: any) {
       setError(err.message || 'Failed to fetch data');
     } finally {
@@ -669,6 +680,7 @@ export default function AdminDashboard() {
                       <TableCell>Calendar</TableCell>
                       <TableCell>Accounting</TableCell>
                       <TableCell>Recept.</TableCell>
+                      <TableCell>Briefing</TableCell>
                       <TableCell>Onboard.</TableCell>
                       <TableCell>Tickets</TableCell>
                       <TableCell>Last activity</TableCell>
@@ -678,7 +690,7 @@ export default function AdminDashboard() {
                   <TableBody>
                     {filteredBusinesses.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={12} align="center" sx={{ py: 4 }}>
+                        <TableCell colSpan={13} align="center" sx={{ py: 4 }}>
                           <Typography color="text.secondary">No businesses found</Typography>
                         </TableCell>
                       </TableRow>
@@ -745,6 +757,15 @@ export default function AdminDashboard() {
                           </TableCell>
                           <TableCell>
                             <ReceptionistStatusChip overview={receptionistOverview[business.id]} />
+                          </TableCell>
+                          <TableCell>
+                            {(() => {
+                              const wa = whatsappOverview[business.id];
+                              if (wa?.configured) {
+                                return <Chip label={wa.enabled ? '📱 Active' : '📱 Disabled'} size="small" color={wa.enabled ? 'success' : 'default'} />;
+                              }
+                              return <Typography variant="body2" color="text.secondary">Not configured</Typography>;
+                            })()}
                           </TableCell>
                           <TableCell>
                             {(() => {

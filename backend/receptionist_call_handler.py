@@ -196,6 +196,23 @@ async def handle_receptionist_function_call(
                 priority="high",
                 category="Phone Call",
             )
+            try:
+                from services.alert_dispatcher import dispatch_alert
+                import asyncio
+                asyncio.create_task(dispatch_alert(
+                    business_id,
+                    "call_transferred",
+                    {
+                        "caller_name": caller_number,
+                        "caller_number": caller_number,
+                        "reason": arguments.get("reason", "Caller requested human support"),
+                        "time": datetime.utcnow().strftime("%H:%M"),
+                        "entity_type": "call",
+                        "action_option": {"label": "Call them back now", "type": "show_breakdown", "config": {}},
+                    },
+                ))
+            except Exception:
+                pass
             return {
                 "success": True,
                 "message": (
