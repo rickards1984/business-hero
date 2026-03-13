@@ -206,9 +206,10 @@ async def gather_business_data(
     try:
         invoices_rows = session.execute(
             text("""
-                SELECT id, status, total, amount_due, due_date, customer_name, chase_stage
+                SELECT id, status, amount, amount_due, due_date, customer_name, chase_stage
                 FROM invoices
                 WHERE business_id = :business_id
+                  AND (archived IS NULL OR archived = false)
             """),
             {"business_id": business_id},
         ).fetchall()
