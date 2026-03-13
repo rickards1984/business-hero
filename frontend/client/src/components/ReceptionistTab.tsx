@@ -175,6 +175,10 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
   const [previewVoiceId, setPreviewVoiceId] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  const showSnack = useCallback((message: string, severity: 'success' | 'error') => {
+    setSnackbar({ open: true, message, severity });
+  }, []);
+
   const playPreview = useCallback(async (voiceId: string) => {
     if (audioRef.current) {
       audioRef.current.pause();
@@ -208,10 +212,6 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
   }, []);
 
   // ---- Data fetching ----
-  const showSnack = useCallback((message: string, severity: 'success' | 'error') => {
-    setSnackbar({ open: true, message, severity });
-  }, []);
-
   const fetchConfig = useCallback(async () => {
     try {
       const res = await apiRequest('GET', '/v1/receptionist/config');
