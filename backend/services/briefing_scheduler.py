@@ -290,7 +290,7 @@ async def _send_daily_pulse(
                     "tasks_completed": tasks.get("completed_this_period", 0),
                     "invoices_overdue_count": invoices.get("overdue_count", 0),
                     "invoices_overdue_amount": invoices.get("overdue_total", 0),
-                    "full_data": json.loads(json.dumps(data, default=str)) if data else None,
+                    "full_data": json.dumps(data, default=str) if data else None,
                 },
             )
             session.commit()
@@ -352,7 +352,7 @@ async def _send_weekly_briefing(
                             "action_number": option.get("number", 0),
                             "action_label": option.get("label", ""),
                             "action_type": option.get("type", ""),
-                            "action_config": option.get("config") or {},
+                            "action_config": json.dumps(option.get("config") or {}),
                         },
                     )
                 session.commit()
@@ -402,9 +402,9 @@ async def _send_weekly_briefing(
                     "invoices_overdue_count": invoices.get("overdue_count", 0),
                     "invoices_overdue_amount": invoices.get("overdue_total", 0),
                     "ai_summary": briefing_text[:5000] if briefing_text else None,
-                    "ai_observations": ai_analysis.get("observations", []),
-                    "ai_suggestions": ai_analysis.get("suggestions", []),
-                    "full_data": json.loads(json.dumps(data, default=str)) if data else None,
+                    "ai_observations": json.dumps(ai_analysis.get("observations", []), default=str),
+                    "ai_suggestions": json.dumps(ai_analysis.get("suggestions", []), default=str),
+                    "full_data": json.dumps(data, default=str) if data else None,
                 },
             )
             session.commit()

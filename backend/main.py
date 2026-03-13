@@ -1039,13 +1039,15 @@ async def get_my_profile(
     
     # Include business profile fields for the frontend
     if business:
-        flags = business.feature_flags or {}
+        flags = getattr(business, "feature_flags", None) or {}
         response.update({
             "id": str(business.id),
             "name": business.name,
             "timezone": business.timezone,
-            "logo_url": business.logo_url,
+            "logo_url": getattr(business, "logo_url", None),
+            "plan_tier": getattr(business, "plan_tier", "starter"),
             "brand_color": flags.get("brand_color", None),
+            "feature_flags": flags,
         })
     
     return response

@@ -324,7 +324,8 @@ async def provision_default_rules(
                 (business_id, name, description, trigger_type, conditions,
                  action_type, action_config, requires_approval, is_active)
                 VALUES (:business_id, :name, :description, :trigger_type,
-                        CAST(:conditions AS jsonb), CAST(:action_config AS jsonb),
+                        CAST(:conditions AS jsonb), :action_type,
+                        CAST(:action_config AS jsonb),
                         :requires_approval, false)
             """),
             {
@@ -333,6 +334,7 @@ async def provision_default_rules(
                 "description": t[1] or "",
                 "trigger_type": t[2],
                 "conditions": conditions_json,
+                "action_type": t[4],
                 "action_config": action_config_json,
                 "requires_approval": t[6] if t[6] is not None else True,
             },
