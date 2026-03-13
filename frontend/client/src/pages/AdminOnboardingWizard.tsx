@@ -155,11 +155,6 @@ export default function AdminOnboardingWizard() {
   // Step 3
   const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
   const [planFeatureDefaults, setPlanFeatureDefaults] = useState<Record<string, boolean>>({});
-  const [whatsappNumber, setWhatsappNumber] = useState('');
-  const [whatsappOwnerName, setWhatsappOwnerName] = useState('');
-  const [whatsappWeeklyEnabled, setWhatsappWeeklyEnabled] = useState(true);
-  const [whatsappDailyEnabled, setWhatsappDailyEnabled] = useState(true);
-  const [whatsappAlertsEnabled, setWhatsappAlertsEnabled] = useState(true);
 
   // Step 4
   const [emailNotes, setEmailNotes] = useState('');
