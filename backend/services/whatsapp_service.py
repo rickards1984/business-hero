@@ -18,22 +18,26 @@ TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886"
 # Content Template SIDs for scheduled messages (bypass 24hr window)
 TWILIO_DAILY_PULSE_CONTENT_SID = os.getenv("TWILIO_DAILY_PULSE_CONTENT_SID", "")
 TWILIO_WEEKLY_BRIEFING_CONTENT_SID = os.getenv("TWILIO_WEEKLY_BRIEFING_CONTENT_SID", "")
+TWILIO_ALERT_CONTENT_SID = os.getenv("TWILIO_ALERT_CONTENT_SID", "")
+TWILIO_ACTION_CONFIRMATION_CONTENT_SID = os.getenv("TWILIO_ACTION_CONFIRMATION_CONTENT_SID", "")
+TWILIO_AUTOMATION_REPORT_CONTENT_SID = os.getenv("TWILIO_AUTOMATION_REPORT_CONTENT_SID", "")
 
 TEMPLATE_SID_MAP = {
     "daily_pulse": TWILIO_DAILY_PULSE_CONTENT_SID,
     "weekly_briefing": TWILIO_WEEKLY_BRIEFING_CONTENT_SID,
+    "alert": TWILIO_ALERT_CONTENT_SID,
+    "action_confirmation": TWILIO_ACTION_CONFIRMATION_CONTENT_SID,
+    "automation_report": TWILIO_AUTOMATION_REPORT_CONTENT_SID,
 }
 
 # Initialize Twilio client
 _twilio_client = None
-
 
 def get_twilio_client():
     global _twilio_client
     if _twilio_client is None and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
         _twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     return _twilio_client
-
 
 def split_message(text: str, max_length: int = 4000) -> List[str]:
     """Split a long message into chunks, breaking at newlines where possible"""
@@ -58,7 +62,6 @@ def split_message(text: str, max_length: int = 4000) -> List[str]:
 
     return chunks
 
-
 def log_whatsapp_message(
     business_id: str,
     direction: str,
@@ -76,7 +79,6 @@ def log_whatsapp_message(
         business_id, direction, message_type, phone_number, content,
         twilio_message_sid, twilio_status, related_entity_type, related_entity_id,
     )
-
 
 def _log_whatsapp_message(
     business_id: str,
@@ -158,12 +160,17 @@ async def send_whatsapp_message(
         content_sid = TEMPLATE_SID_MAP.get(message_type, "")
 
         if content_sid:
-            # Template-based send — single message with variable substitution
+            # Template-based send — parse variables from body
+            try:
+                variables = json.loads(body) if body.startswith("{") else {"1": body[:4000]}
+            except (json.JSONDecodeError, AttributeError):
+                variables = {"1": (body or "")[:4000]}
+
             message = client.messages.create(
                 from_=TWILIO_WHATSAPP_FROM,
                 to=to_number,
                 content_sid=content_sid,
-                content_variables=json.dumps({"1": body[:4000]}),  # "1" is the first template variable slot
+                content_variables=json.dumps(variables),
             )
             message_sid = message.sid
             logger.info(
@@ -182,7 +189,8 @@ async def send_whatsapp_message(
                 )
                 message_sid = message.sid
                 logger.info(
-                    f"[WhatsApp] Sent message {message.sid} to {to_number} (chunk {i+1}/{len(chunks)})"
+                    f"[WhatsApp] Sent message {message.sid} to {to_number} "
+                    f"(chunk {i+1}/{len(chunks)})"
                 )
 
         _log_whatsapp_message(
