@@ -16,6 +16,7 @@ from db import get_session_context
 logger = logging.getLogger(__name__)
 
 _scheduler_running = False
+MAX_TEMPLATE_VAR_LENGTH = 500
 
 
 async def start_briefing_scheduler():
@@ -247,9 +248,48 @@ async def _send_daily_pulse(
         data = await gather_business_data(session, business_id, period="day")
     pulse_text = await generate_daily_pulse(business_name, owner_name, data)
 
+    # Build structured variables for WhatsApp template
+    calls = data.get("calls", {})
+    emails = data.get("emails", {})
+    tasks = data.get("tasks", {})
+    financial = data.get("financial", {})
+    invoices_data = data.get("invoices", {})
+
+    calls_summary = (
+        f"{calls.get('total', 0)} calls yesterday. "
+        f"{calls.get('handled_by_ai', 0)} handled by AI receptionist, "
+        f"{calls.get('transferred', 0)} transferred."
+    )
+
+    emails_summary = (
+        f"{emails.get('total_received', 0)} new emails. "
+        f"{emails.get('action_required', 0)} action required, "
+        f"{emails.get('awaiting_reply', 0)} awaiting reply."
+    )
+
+    tasks_summary = (
+        f"{tasks.get('open_total', 0)} open tasks. "
+        f"{tasks.get('open_high_priority', 0)} high priority, "
+        f"{tasks.get('pending', 0)} pending."
+    )
+
+    snapshot = (
+        f"Revenue: £{financial.get('revenue', 0):,.2f}. "
+        f"Expenses: £{financial.get('expenses', 0):,.2f}. "
+        f"Net: £{financial.get('net_profit', 0):,.2f}. "
+        f"{invoices_data.get('overdue_count', 0)} overdue invoices "
+        f"(£{invoices_data.get('overdue_total', 0):,.2f})."
+    )
+
     await send_whatsapp_message(
         to_number=phone,
-        body=pulse_text,
+        body=json.dumps({
+            "1": business_name,
+            "2": calls_summary[:MAX_TEMPLATE_VAR_LENGTH],
+            "3": emails_summary[:MAX_TEMPLATE_VAR_LENGTH],
+            "4": tasks_summary[:MAX_TEMPLATE_VAR_LENGTH],
+            "5": snapshot[:MAX_TEMPLATE_VAR_LENGTH],
+        }),
         business_id=business_id,
         message_type="daily_pulse",
     )
@@ -318,9 +358,60 @@ async def _send_weekly_briefing(
         business_name, owner_name, data, detail_level
     )
 
+    # Build structured variables for WhatsApp template
+    week_ending = date.today().strftime("%-d %B %Y")
+
+    calls = data.get("calls", {})
+    emails = data.get("emails", {})
+    tasks = data.get("tasks", {})
+    financial = data.get("financial", {})
+    invoices_data = data.get("invoices", {})
+
+    calls_summary = (
+        f"{calls.get('total', 0)} calls this week. "
+        f"{calls.get('handled_by_ai', 0)} handled by AI receptionist"
+        f" ({calls.get('ai_resolution_rate', 0)}% resolution rate), "
+        f"{calls.get('transferred', 0)} transferred, "
+        f"{calls.get('voicemail', 0)} voicemail."
+    )
+
+    emails_summary = (
+        f"{emails.get('total_received', 0)} received. "
+        f"{emails.get('action_required', 0)} action required, "
+        f"{emails.get('awaiting_reply', 0)} awaiting reply, "
+        f"{emails.get('newsletters', 0)} newsletters filtered."
+    )
+
+    tasks_summary = (
+        f"{tasks.get('created_this_period', 0)} created, "
+        f"{tasks.get('completed_this_period', 0)} completed, "
+        f"{tasks.get('open_high_priority', 0)} high priority open."
+    )
+
+    financial_summary = (
+        f"Revenue: £{financial.get('revenue', 0):,.2f}. "
+        f"Expenses: £{financial.get('expenses', 0):,.2f}. "
+        f"Net profit: £{financial.get('net_profit', 0):,.2f}."
+    )
+
+    invoices_summary = (
+        f"{invoices_data.get('unpaid_count', 0)} unpaid "
+        f"(£{invoices_data.get('unpaid_total', 0):,.2f}). "
+        f"{invoices_data.get('overdue_count', 0)} overdue "
+        f"(£{invoices_data.get('overdue_total', 0):,.2f})."
+    )
+
     msg_sid = await send_whatsapp_message(
         to_number=phone,
-        body=briefing_text,
+        body=json.dumps({
+            "1": business_name,
+            "2": week_ending,
+            "3": calls_summary[:MAX_TEMPLATE_VAR_LENGTH],
+            "4": emails_summary[:MAX_TEMPLATE_VAR_LENGTH],
+            "5": tasks_summary[:MAX_TEMPLATE_VAR_LENGTH],
+            "6": financial_summary[:MAX_TEMPLATE_VAR_LENGTH],
+            "7": invoices_summary[:MAX_TEMPLATE_VAR_LENGTH],
+        }),
         business_id=business_id,
         message_type="weekly_briefing",
     )
