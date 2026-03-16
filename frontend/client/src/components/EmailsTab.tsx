@@ -134,6 +134,8 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' | 'info' }>({ open: false, message: '', severity: 'info' });
   const [hasEmailAccount, setHasEmailAccount] = useState(true);
+  const [autoSyncing, setAutoSyncing] = useState(false);
+  const [hasAutoSynced, setHasAutoSynced] = useState(false);
 
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [taskSaving, setTaskSaving] = useState(false);
@@ -174,6 +176,24 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
   useEffect(() => {
     loadEmails();
   }, [loadEmails]);
+
+  useEffect(() => {
+    if (!hasAutoSynced && businessId && hasEmailAccount) {
+      const doAutoSync = async () => {
+        setAutoSyncing(true);
+        try {
+          await runEmailSync();
+          await loadEmails();
+          setHasAutoSynced(true);
+        } catch {
+          setHasAutoSynced(true);
+        } finally {
+          setAutoSyncing(false);
+        }
+      };
+      doAutoSync();
+    }
+  }, [businessId, hasAutoSynced, hasEmailAccount, loadEmails]);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -399,6 +419,25 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
           />
         ))}
       </Box>
+
+      {/* Auto-sync indicator */}
+      {autoSyncing && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '12px 16px',
+          marginBottom: 12,
+          borderRadius: 8,
+          background: 'rgba(124, 92, 252, 0.08)',
+          border: '0.5px solid rgba(124, 92, 252, 0.15)',
+          fontSize: 13,
+          color: '#a78bfa',
+        }}>
+          <CircularProgress size={16} sx={{ color: '#a78bfa' }} />
+          Fetching your latest emails — this may take a moment...
+        </div>
+      )}
 
       {/* Email list */}
       {loading ? (

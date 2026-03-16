@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import AssistantChat from '@/pages/AssistantChat';
 import ReceptionistTab from '@/components/ReceptionistTab';
 import CeoBriefingTab from '@/components/CeoBriefingTab';
@@ -8,7 +8,16 @@ import { useMe } from '@/hooks/useMe';
 export default function AIHubPage() {
   const { data: me } = useMe();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [subTab, setSubTab] = useState<'aria' | 'receptionist' | 'briefing'>('aria');
+
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    if (tab === 'aria') setSubTab('aria');
+    if (tab === 'receptionist') setSubTab('receptionist');
+    if (tab === 'briefing') setSubTab('briefing');
+  }, [searchParams]);
+
   if (!me?.id) return null;
 
   return (
@@ -38,7 +47,7 @@ export default function AIHubPage() {
       {subTab === 'receptionist' && (
         <ReceptionistTab
           businessId={me.id}
-          onViewCalls={() => navigate('/app/comms')}
+          onViewCalls={() => navigate('/app/comms?tab=calls')}
         />
       )}
       {subTab === 'briefing' && <CeoBriefingTab />}

@@ -4,6 +4,7 @@ import { useMe } from '@/hooks/useMe';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
+import { runEmailSync } from '@/lib/emailApi';
 import TasksPanel from '@/components/TasksPanel';
 
 function getGreeting(): string {
@@ -137,6 +138,16 @@ export default function DashboardPage() {
       } finally {
         setLoading(false);
       }
+
+      // Background email sync — refresh count after sync completes
+      try {
+        await runEmailSync();
+        const freshRes = await apiRequest('GET', '/v1/email/messages?limit=100');
+        const freshData = await freshRes.json();
+        const fresh = Array.isArray(freshData) ? freshData : (freshData.messages || []);
+        const freshAction = fresh.filter((e: any) => e.ai_category === 'Action Required').length;
+        setStats(prev => prev ? { ...prev, emailsActionRequired: freshAction, emailsTotal: fresh.length } : prev);
+      } catch {}
     };
 
     fetchStats();
@@ -178,7 +189,7 @@ export default function DashboardPage() {
         <div
           className="kpi-card"
           style={{ cursor: 'pointer' }}
-          onClick={() => navigate('/app/comms')}
+          onClick={() => navigate('/app/comms?tab=calls')}
         >
           <div className="kpi-label">Calls today</div>
           <div className="kpi-value">{loading ? '—' : stats?.callsToday ?? 0}</div>
@@ -190,7 +201,7 @@ export default function DashboardPage() {
         <div
           className="kpi-card"
           style={{ cursor: 'pointer' }}
-          onClick={() => navigate('/app/comms')}
+          onClick={() => navigate('/app/comms?tab=emails')}
         >
           <div className="kpi-label">Emails</div>
           <div className="kpi-value">{loading ? '—' : stats?.emailsActionRequired ?? 0}</div>
@@ -202,7 +213,7 @@ export default function DashboardPage() {
         <div
           className="kpi-card"
           style={{ cursor: 'pointer' }}
-          onClick={() => navigate('/app/finance')}
+          onClick={() => navigate('/app/finance?tab=invoices')}
         >
           <div className="kpi-label">Invoices</div>
           <div className="kpi-value">
@@ -216,7 +227,7 @@ export default function DashboardPage() {
         <div
           className="kpi-card"
           style={{ cursor: 'pointer' }}
-          onClick={() => navigate('/app/ai')}
+          onClick={() => navigate('/app/ai?tab=aria')}
         >
           <div className="kpi-label">AI receptionist</div>
           <div className="kpi-value">{loading ? '—' : `${stats?.aiResolutionRate ?? 0}%`}</div>
@@ -238,10 +249,10 @@ export default function DashboardPage() {
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             {[
-              { label: 'Check emails', icon: '📧', path: '/app/comms' },
-              { label: 'Review invoices', icon: '📄', path: '/app/finance' },
-              { label: 'Talk to Aria', icon: '🤖', path: '/app/ai' },
-              { label: 'View calls', icon: '📞', path: '/app/comms' },
+              { label: 'Check emails', icon: '📧', path: '/app/comms?tab=emails' },
+              { label: 'Review invoices', icon: '📄', path: '/app/finance?tab=invoices' },
+              { label: 'Talk to Aria', icon: '🤖', path: '/app/ai?tab=aria' },
+              { label: 'View calls', icon: '📞', path: '/app/comms?tab=calls' },
             ].map((item) => (
               <div
                 key={item.label}

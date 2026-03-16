@@ -10,6 +10,7 @@ import Sidebar from './Sidebar';
 import MobileBottomNav from './MobileBottomNav';
 import SupportHelpButton from './SupportHelpButton';
 import SupportPanel from './SupportPanel';
+import ThemeToggle from '@/components/ThemeToggle';
 
 type Section = 'dashboard' | 'comms' | 'finance' | 'ai';
 
@@ -64,13 +65,16 @@ export default function AppShell() {
               )}
               <span>{me?.name || 'Business Hero'}</span>
             </div>
-            <IconButton
-              onClick={() => navigate('/app/settings/branding')}
-              size="small"
-              sx={{ color: 'text.secondary' }}
-            >
-              <SettingsIcon fontSize="small" />
-            </IconButton>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <ThemeToggle />
+              <IconButton
+                onClick={() => navigate('/app/settings/branding')}
+                size="small"
+                sx={{ color: 'text.secondary' }}
+              >
+                <SettingsIcon fontSize="small" />
+              </IconButton>
+            </div>
           </div>
         )}
         <Outlet />

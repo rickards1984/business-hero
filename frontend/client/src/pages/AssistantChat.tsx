@@ -132,7 +132,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
         minHeight: embedded ? 'auto' : '100vh',
         display: 'flex',
         flexDirection: 'column',
-        background: embedded ? 'transparent' : 'linear-gradient(180deg, var(--color-neutral-25) 0%, var(--color-aria-50) 30%, var(--color-neutral-25) 100%)',
+        background: embedded ? 'transparent' : 'linear-gradient(180deg, hsl(var(--background)) 0%, rgba(139,92,246,0.04) 30%, hsl(var(--background)) 100%)',
       }}
     >
       <Container maxWidth="md" sx={{ py: embedded ? 0 : 3, flex: 1, display: 'flex', flexDirection: 'column' }}>
@@ -143,7 +143,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
               variant="text"
               startIcon={<ArrowBackIcon />}
               onClick={() => navigate('/app')}
-              sx={{ color: 'var(--color-neutral-500)', fontWeight: 500, fontSize: '0.8125rem' }}
+              sx={{ color: 'hsl(var(--muted-foreground))', fontWeight: 500, fontSize: '0.8125rem' }}
             >
               Back
             </Button>
@@ -156,7 +156,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                 setConversationId(null);
                 setRealtimeMode(false);
               }}
-              sx={{ color: 'var(--color-neutral-500)', fontWeight: 500, fontSize: '0.8125rem' }}
+              sx={{ color: 'hsl(var(--muted-foreground))', fontWeight: 500, fontSize: '0.8125rem' }}
             >
               New conversation
             </Button>
@@ -173,10 +173,10 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
               onClose={() => setRealtimeMode(false)}
             />
             {messages.length > 0 && (
-              <Paper sx={{ mt: 4, p: 2, maxHeight: 200, overflow: 'auto', width: '100%', maxWidth: 500, bgcolor: 'var(--color-neutral-50)', border: '1px solid var(--color-neutral-100)' }}>
-                <Typography variant="caption" sx={{ mb: 1, display: 'block', color: 'var(--color-neutral-500)' }}>Transcript</Typography>
+              <Paper sx={{ mt: 4, p: 2, maxHeight: 200, overflow: 'auto', width: '100%', maxWidth: 500, bgcolor: 'var(--glass-bg)', border: '1px solid var(--glass-border)' }}>
+                <Typography variant="caption" sx={{ mb: 1, display: 'block', color: 'hsl(var(--muted-foreground))' }}>Transcript</Typography>
                 {messages.slice(-6).map((msg, i) => (
-                  <Typography key={i} variant="body2" sx={{ mb: 0.5, color: msg.role === 'user' ? 'var(--color-primary-600)' : 'var(--color-neutral-700)', fontStyle: msg.role === 'user' ? 'italic' : 'normal' }}>
+                  <Typography key={i} variant="body2" sx={{ mb: 0.5, color: msg.role === 'user' ? '#a78bfa' : 'hsl(var(--foreground))', fontStyle: msg.role === 'user' ? 'italic' : 'normal' }}>
                     {msg.role === 'user' ? 'You: ' : 'Aria: '}{msg.content.slice(0, 100)}{msg.content.length > 100 ? '...' : ''}
                   </Typography>
                 ))}
@@ -221,7 +221,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
               Meet Aria
             </Typography>
 
-            <Typography sx={{ fontSize: '0.875rem', color: 'var(--color-neutral-500)', mb: 5, maxWidth: 360 }}>
+            <Typography sx={{ fontSize: '0.875rem', color: 'hsl(var(--muted-foreground))', mb: 5, maxWidth: 360 }}>
               Your AI business assistant. I can help with emails, tasks, calls, invoices, and finances.
             </Typography>
 
@@ -252,7 +252,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
               Talk to Aria
             </Button>
 
-            <Typography sx={{ fontSize: '0.8125rem', color: 'var(--color-neutral-400)', mb: 4 }}>
+            <Typography sx={{ fontSize: '0.8125rem', color: 'rgba(232, 230, 225, 0.4)', mb: 4 }}>
               or type a message below
             </Typography>
 
@@ -292,7 +292,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
         ) : (
           /* Chat Messages View */
           <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, pb: 2, mb: 2, borderBottom: '1px solid var(--color-neutral-100)' }}>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, pb: 2, mb: 2, borderBottom: '1px solid var(--glass-border)' }}>
               {QUICK_ACTIONS.map((action) => (
                 <Chip
                   key={action.label}
@@ -303,8 +303,10 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                   size="small"
                   sx={{
                     cursor: 'pointer',
-                    borderColor: 'var(--color-neutral-200)',
-                    '&:hover': { borderColor: 'var(--color-aria-300)', bgcolor: 'var(--color-aria-50)' },
+                    borderColor: 'var(--glass-border)',
+                    color: 'hsl(var(--foreground))',
+                    '& .MuiChip-icon': { color: 'inherit' },
+                    '&:hover': { borderColor: 'rgba(124,92,252,0.4)', bgcolor: 'rgba(124,92,252,0.08)' },
                   }}
                 />
               ))}
@@ -316,9 +318,9 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                 onClick={() => setRealtimeMode(true)}
                 sx={{
                   borderRadius: '9999px',
-                  borderColor: 'var(--color-aria-200)',
-                  color: 'var(--color-aria-600)',
-                  '&:hover': { borderColor: 'var(--color-aria-400)', bgcolor: 'var(--color-aria-50)' },
+                  borderColor: 'rgba(124,92,252,0.25)',
+                  color: '#a78bfa',
+                  '&:hover': { borderColor: 'rgba(124,92,252,0.5)', bgcolor: 'rgba(124,92,252,0.08)' },
                 }}
               >
                 Voice
@@ -332,7 +334,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                   key={`${message.role}-${idx}`}
                   sx={{
                     alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start',
-                    bgcolor: message.role === 'user' ? 'var(--color-primary-600)' : 'var(--glass-bg)',
+                    bgcolor: message.role === 'user' ? '#7C3AED' : 'var(--glass-bg)',
                     color: message.role === 'user' ? 'white' : 'hsl(var(--foreground))',
                     px: 2.5,
                     py: 1.5,
@@ -382,7 +384,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
               pt: 2,
               pb: 2,
               mt: 'auto',
-              background: 'linear-gradient(180deg, transparent 0%, var(--color-neutral-25) 30%)',
+              background: 'linear-gradient(180deg, transparent 0%, hsl(var(--background)) 30%)',
             }}
           >
             <Box
@@ -440,7 +442,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                   background: 'var(--color-aria-500)',
                   boxShadow: 'none',
                   '&:hover': { background: 'var(--color-aria-600)', transform: 'scale(1.05)' },
-                  '&.Mui-disabled': { background: 'var(--color-neutral-200)' },
+                  '&.Mui-disabled': { background: 'rgba(255,255,255,0.08)' },
                   transition: 'all 150ms cubic-bezier(0.4,0,0.2,1)',
                 }}
               >

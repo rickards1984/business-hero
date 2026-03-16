@@ -1,11 +1,20 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import CallsPanel from '@/components/CallsPanel';
 import EmailsTab from '@/components/EmailsTab';
 import { useMe } from '@/hooks/useMe';
 
 export default function CommsPage() {
   const { data: me } = useMe();
+  const [searchParams] = useSearchParams();
   const [subTab, setSubTab] = useState<'calls' | 'emails'>('calls');
+
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    if (tab === 'emails') setSubTab('emails');
+    if (tab === 'calls') setSubTab('calls');
+  }, [searchParams]);
+
   if (!me?.id) return null;
 
   return (
