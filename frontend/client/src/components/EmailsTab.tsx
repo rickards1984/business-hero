@@ -24,7 +24,6 @@ import {
 } from '@mui/material';
 import {
   Search as SearchIcon,
-  Sync as SyncIcon,
   AutoAwesome as AutoAwesomeIcon,
   ChatBubbleOutline as ChatBubbleOutlineIcon,
   AttachFile as AttachFileIcon,
@@ -127,14 +126,14 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
   const navigate = useNavigate();
   const [emails, setEmails] = useState<EmailMessageItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [syncing, setSyncing] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState('all');
-  const [timeRange, setTimeRange] = useState('week');
+  const [timeRange, setTimeRange] = useState('today');
   const [searchQuery, setSearchQuery] = useState('');
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' | 'info' }>({ open: false, message: '', severity: 'info' });
   const [hasEmailAccount, setHasEmailAccount] = useState(true);
-  const [autoSyncing, setAutoSyncing] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncPeriod, setSyncPeriod] = useState<'today' | 'week' | 'month' | 'all'>('today');
   const [hasAutoSynced, setHasAutoSynced] = useState(false);
 
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
@@ -177,36 +176,32 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
     loadEmails();
   }, [loadEmails]);
 
-  useEffect(() => {
-    if (!hasAutoSynced && businessId && hasEmailAccount) {
-      const doAutoSync = async () => {
-        setAutoSyncing(true);
-        try {
-          await runEmailSync();
-          await loadEmails();
-          setHasAutoSynced(true);
-        } catch {
-          setHasAutoSynced(true);
-        } finally {
-          setAutoSyncing(false);
-        }
-      };
-      doAutoSync();
-    }
-  }, [businessId, hasAutoSynced, hasEmailAccount, loadEmails]);
-
-  const handleSync = async () => {
-    setSyncing(true);
+  const handleSyncWithPeriod = useCallback(async (period: 'today' | 'week' | 'month' | 'all' = 'today', isAuto = false) => {
+    setIsSyncing(true);
+    setSyncPeriod(period);
+    setTimeRange(period);
     try {
       const result = await runEmailSync();
-      setSnackbar({ open: true, message: `Synced ${result.message_count} emails`, severity: 'success' });
       await loadEmails();
+      if (!isAuto) {
+        setSnackbar({ open: true, message: `Synced ${result.message_count} emails`, severity: 'success' });
+      }
+      setHasAutoSynced(true);
     } catch {
-      setSnackbar({ open: true, message: 'Sync failed — check email connection', severity: 'error' });
+      if (!isAuto) {
+        setSnackbar({ open: true, message: 'Sync failed — check email connection', severity: 'error' });
+      }
+      setHasAutoSynced(true);
     } finally {
-      setSyncing(false);
+      setIsSyncing(false);
     }
-  };
+  }, [loadEmails]);
+
+  useEffect(() => {
+    if (!hasAutoSynced && businessId && hasEmailAccount) {
+      handleSyncWithPeriod('today', true);
+    }
+  }, [businessId, hasAutoSynced, hasEmailAccount, handleSyncWithPeriod]);
 
   const handleAnalyze = async () => {
     setAnalyzing(true);
@@ -322,20 +317,11 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
   return (
     <Box>
       {/* Header row: Sync + Analyze */}
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 2 }}>
         <Typography variant="h6" fontWeight={600}>
           Inbox
         </Typography>
         <Box sx={{ display: 'flex', gap: 1 }}>
-          <Button
-            size="small"
-            variant="outlined"
-            startIcon={syncing ? <CircularProgress size={16} /> : <SyncIcon />}
-            onClick={handleSync}
-            disabled={syncing}
-          >
-            {syncing ? 'Syncing...' : 'Sync'}
-          </Button>
           <Button
             size="small"
             variant="outlined"
@@ -347,6 +333,56 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
           </Button>
         </Box>
       </Box>
+
+      {/* Sync period selector */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        marginBottom: 12,
+        flexWrap: 'wrap',
+      }}>
+        <span style={{
+          fontSize: 12,
+          color: 'hsl(var(--muted-foreground))',
+          marginRight: 4,
+        }}>
+          Sync period:
+        </span>
+        {([
+          { key: 'today', label: 'Today', description: null },
+          { key: 'week', label: 'Past week', description: 'May take a moment' },
+          { key: 'month', label: 'Past month', description: 'Takes longer' },
+          { key: 'all', label: 'All time', description: 'May take several minutes' },
+        ] as const).map((option) => (
+          <button
+            key={option.key}
+            onClick={() => handleSyncWithPeriod(option.key)}
+            disabled={isSyncing}
+            title={option.description || undefined}
+            style={{
+              padding: '4px 12px',
+              cursor: isSyncing ? 'not-allowed' : 'pointer',
+              fontSize: 12,
+              fontWeight: 500,
+              background: syncPeriod === option.key
+                ? 'rgba(124, 92, 252, 0.12)'
+                : 'var(--glass-bg)',
+              border: syncPeriod === option.key
+                ? '0.5px solid rgba(124, 92, 252, 0.2)'
+                : '0.5px solid var(--glass-border)',
+              borderRadius: 6,
+              color: syncPeriod === option.key
+                ? '#a78bfa'
+                : 'hsl(var(--foreground))',
+              opacity: isSyncing ? 0.5 : 1,
+              transition: 'all 200ms',
+            }}
+          >
+            {option.key === syncPeriod && isSyncing ? 'Syncing...' : option.label}
+          </button>
+        ))}
+      </div>
 
       {/* Summary stat cards */}
       <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap' }}>
@@ -413,15 +449,15 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
             key={tr.key}
             label={tr.label}
             size="small"
-            onClick={() => setTimeRange(tr.key)}
+            onClick={() => setTimeRange(tr.key as typeof timeRange)}
             color={timeRange === tr.key ? 'primary' : 'default'}
             variant={timeRange === tr.key ? 'filled' : 'outlined'}
           />
         ))}
       </Box>
 
-      {/* Auto-sync indicator */}
-      {autoSyncing && (
+      {/* Syncing indicator */}
+      {isSyncing && (
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -435,7 +471,14 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
           color: '#a78bfa',
         }}>
           <CircularProgress size={16} sx={{ color: '#a78bfa' }} />
-          Fetching your latest emails — this may take a moment...
+          {syncPeriod === 'today'
+            ? "Fetching today's emails..."
+            : syncPeriod === 'week'
+            ? "Fetching this week's emails \u2014 this may take a moment..."
+            : syncPeriod === 'month'
+            ? "Fetching the past month's emails \u2014 this will take a little while..."
+            : "Fetching all emails \u2014 this may take several minutes..."
+          }
         </div>
       )}
 

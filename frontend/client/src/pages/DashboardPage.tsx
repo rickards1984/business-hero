@@ -79,11 +79,13 @@ export default function DashboardPage() {
         let emailsAction = 0;
         let emailsTotal = 0;
         try {
-          const emailsRes = await apiRequest('GET', '/v1/email/messages?limit=100');
+          const emailsRes = await apiRequest('GET', '/v1/email/messages?limit=200');
           const emailsData = await emailsRes.json();
-          const emails = Array.isArray(emailsData) ? emailsData : (emailsData.messages || []);
-          emailsTotal = emails.length;
-          emailsAction = emails.filter((e: any) => e.ai_category === 'Action Required').length;
+          const allEmails = Array.isArray(emailsData) ? emailsData : (emailsData.messages || []);
+          const todayDate = new Date().toDateString();
+          const todayOnly = allEmails.filter((e: any) => e.received_at && new Date(e.received_at).toDateString() === todayDate);
+          emailsTotal = todayOnly.length;
+          emailsAction = todayOnly.filter((e: any) => e.ai_category === 'Action Required').length;
         } catch {}
 
         let unpaidCount = 0;
@@ -139,14 +141,16 @@ export default function DashboardPage() {
         setLoading(false);
       }
 
-      // Background email sync — refresh count after sync completes
+      // Background email sync — refresh today's count after sync
       try {
         await runEmailSync();
-        const freshRes = await apiRequest('GET', '/v1/email/messages?limit=100');
+        const freshRes = await apiRequest('GET', '/v1/email/messages?limit=200');
         const freshData = await freshRes.json();
         const fresh = Array.isArray(freshData) ? freshData : (freshData.messages || []);
-        const freshAction = fresh.filter((e: any) => e.ai_category === 'Action Required').length;
-        setStats(prev => prev ? { ...prev, emailsActionRequired: freshAction, emailsTotal: fresh.length } : prev);
+        const todayStr = new Date().toDateString();
+        const todayEmails = fresh.filter((e: any) => e.received_at && new Date(e.received_at).toDateString() === todayStr);
+        const freshAction = todayEmails.filter((e: any) => e.ai_category === 'Action Required').length;
+        setStats(prev => prev ? { ...prev, emailsActionRequired: freshAction, emailsTotal: todayEmails.length } : prev);
       } catch {}
     };
 
@@ -203,10 +207,10 @@ export default function DashboardPage() {
           style={{ cursor: 'pointer' }}
           onClick={() => navigate('/app/comms?tab=emails')}
         >
-          <div className="kpi-label">Emails</div>
+          <div className="kpi-label">Emails today</div>
           <div className="kpi-value">{loading ? '—' : stats?.emailsActionRequired ?? 0}</div>
           <div className="kpi-sub warning">
-            {loading ? '' : 'action required'}
+            {loading ? '' : `action required · ${stats?.emailsTotal ?? 0} total`}
           </div>
         </div>
 
