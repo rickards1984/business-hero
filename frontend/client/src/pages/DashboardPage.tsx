@@ -26,8 +26,8 @@ function formatDate(): string {
 interface DashboardStats {
   callsToday: number;
   callsThisWeek: number;
+  emailsToday: number;
   emailsActionRequired: number;
-  emailsTotal: number;
   unpaidInvoices: number;
   unpaidAmount: number;
   overdueInvoices: number;
@@ -43,6 +43,18 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [showTasks, setShowTasks] = useState(false);
+  const [ownerName, setOwnerName] = useState<string>('');
+
+  useEffect(() => {
+    const fetchOwnerName = async () => {
+      try {
+        const res = await apiRequest('GET', '/v1/whatsapp/config');
+        const config = await res.json();
+        if (config?.owner_name) setOwnerName(config.owner_name);
+      } catch {}
+    };
+    fetchOwnerName();
+  }, []);
 
   useEffect(() => {
     if (!me?.id) return;
@@ -76,16 +88,15 @@ export default function DashboardPage() {
           }
         } catch {}
 
+        let emailsToday = 0;
         let emailsAction = 0;
-        let emailsTotal = 0;
         try {
           const emailsRes = await apiRequest('GET', '/v1/email/messages?limit=200');
           const emailsData = await emailsRes.json();
           const allEmails = Array.isArray(emailsData) ? emailsData : (emailsData.messages || []);
           const todayDate = new Date().toDateString();
-          const todayOnly = allEmails.filter((e: any) => e.received_at && new Date(e.received_at).toDateString() === todayDate);
-          emailsTotal = todayOnly.length;
-          emailsAction = todayOnly.filter((e: any) => e.ai_category === 'Action Required').length;
+          emailsToday = allEmails.filter((e: any) => e.received_at && new Date(e.received_at).toDateString() === todayDate).length;
+          emailsAction = allEmails.filter((e: any) => e.ai_category === 'Action Required').length;
         } catch {}
 
         let unpaidCount = 0;
@@ -124,8 +135,8 @@ export default function DashboardPage() {
         setStats({
           callsToday,
           callsThisWeek,
+          emailsToday,
           emailsActionRequired: emailsAction,
-          emailsTotal,
           unpaidInvoices: unpaidCount,
           unpaidAmount,
           overdueInvoices: overdueCount,
@@ -141,16 +152,16 @@ export default function DashboardPage() {
         setLoading(false);
       }
 
-      // Background email sync — refresh today's count after sync
+      // Background email sync — refresh counts after sync
       try {
         await runEmailSync();
         const freshRes = await apiRequest('GET', '/v1/email/messages?limit=200');
         const freshData = await freshRes.json();
         const fresh = Array.isArray(freshData) ? freshData : (freshData.messages || []);
         const todayStr = new Date().toDateString();
-        const todayEmails = fresh.filter((e: any) => e.received_at && new Date(e.received_at).toDateString() === todayStr);
-        const freshAction = todayEmails.filter((e: any) => e.ai_category === 'Action Required').length;
-        setStats(prev => prev ? { ...prev, emailsActionRequired: freshAction, emailsTotal: todayEmails.length } : prev);
+        const freshToday = fresh.filter((e: any) => e.received_at && new Date(e.received_at).toDateString() === todayStr).length;
+        const freshAction = fresh.filter((e: any) => e.ai_category === 'Action Required').length;
+        setStats(prev => prev ? { ...prev, emailsToday: freshToday, emailsActionRequired: freshAction } : prev);
       } catch {}
     };
 
@@ -159,7 +170,7 @@ export default function DashboardPage() {
 
   if (!me?.id) return null;
 
-  const displayName = me.name?.split(' ')[0] || 'there';
+  const displayName = ownerName || me.name?.split(' ')[0] || 'there';
 
   return (
     <div>
@@ -208,9 +219,9 @@ export default function DashboardPage() {
           onClick={() => navigate('/app/comms?tab=emails')}
         >
           <div className="kpi-label">Emails today</div>
-          <div className="kpi-value">{loading ? '—' : stats?.emailsActionRequired ?? 0}</div>
-          <div className="kpi-sub warning">
-            {loading ? '' : `action required · ${stats?.emailsTotal ?? 0} total`}
+          <div className="kpi-value">{loading ? '—' : stats?.emailsToday ?? 0}</div>
+          <div className={`kpi-sub ${(stats?.emailsActionRequired ?? 0) > 0 ? 'warning' : 'neutral'}`}>
+            {loading ? '' : `${stats?.emailsActionRequired ?? 0} action required`}
           </div>
         </div>
 
