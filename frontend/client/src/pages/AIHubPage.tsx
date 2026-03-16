@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import AssistantChat from '@/pages/AssistantChat';
 import ReceptionistTab from '@/components/ReceptionistTab';
 import CeoBriefingTab from '@/components/CeoBriefingTab';
 import { useMe } from '@/hooks/useMe';
@@ -7,12 +8,18 @@ import { useMe } from '@/hooks/useMe';
 export default function AIHubPage() {
   const { data: me } = useMe();
   const navigate = useNavigate();
-  const [subTab, setSubTab] = useState<'receptionist' | 'briefing'>('receptionist');
+  const [subTab, setSubTab] = useState<'aria' | 'receptionist' | 'briefing'>('aria');
   if (!me?.id) return null;
 
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+        <button
+          onClick={() => setSubTab('aria')}
+          className={`glass-panel sub-tab-btn ${subTab === 'aria' ? 'active-sub-tab' : ''}`}
+        >
+          Aria
+        </button>
         <button
           onClick={() => setSubTab('receptionist')}
           className={`glass-panel sub-tab-btn ${subTab === 'receptionist' ? 'active-sub-tab' : ''}`}
@@ -27,6 +34,7 @@ export default function AIHubPage() {
         </button>
       </div>
 
+      {subTab === 'aria' && <AssistantChat embedded />}
       {subTab === 'receptionist' && (
         <ReceptionistTab
           businessId={me.id}

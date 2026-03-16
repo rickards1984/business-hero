@@ -41,7 +41,11 @@ const QUICK_ACTIONS = [
   { icon: <AccountBalanceIcon fontSize="small" />, label: "Financials", action: "Please provide a detailed summary of my business financials including income, expenses, profit/loss, and spending breakdown by category." },
 ];
 
-export default function AssistantChat() {
+interface AssistantChatProps {
+  embedded?: boolean;
+}
+
+export default function AssistantChat({ embedded = false }: AssistantChatProps) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user, loading: authLoading } = useAuth();
@@ -125,23 +129,25 @@ export default function AssistantChat() {
   return (
     <Box
       sx={{
-        minHeight: '100vh',
+        minHeight: embedded ? 'auto' : '100vh',
         display: 'flex',
         flexDirection: 'column',
-        background: 'linear-gradient(180deg, var(--color-neutral-25) 0%, var(--color-aria-50) 30%, var(--color-neutral-25) 100%)',
+        background: embedded ? 'transparent' : 'linear-gradient(180deg, var(--color-neutral-25) 0%, var(--color-aria-50) 30%, var(--color-neutral-25) 100%)',
       }}
     >
-      <Container maxWidth="md" sx={{ py: 3, flex: 1, display: 'flex', flexDirection: 'column' }}>
+      <Container maxWidth="md" sx={{ py: embedded ? 0 : 3, flex: 1, display: 'flex', flexDirection: 'column' }}>
         {/* Header */}
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-          <Button
-            variant="text"
-            startIcon={<ArrowBackIcon />}
-            onClick={() => navigate('/app')}
-            sx={{ color: 'var(--color-neutral-500)', fontWeight: 500, fontSize: '0.8125rem' }}
-          >
-            Back
-          </Button>
+          {!embedded && (
+            <Button
+              variant="text"
+              startIcon={<ArrowBackIcon />}
+              onClick={() => navigate('/app')}
+              sx={{ color: 'var(--color-neutral-500)', fontWeight: 500, fontSize: '0.8125rem' }}
+            >
+              Back
+            </Button>
+          )}
           {(messages.length > 0 || realtimeMode) && (
             <Button
               variant="text"
