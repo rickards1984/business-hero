@@ -602,15 +602,17 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .transcript-bubble--receptionist {
-  background: var(--color-primary-50);
-  color: var(--color-primary-900);
+  background: rgba(124, 92, 252, 0.12);
+  border: 0.5px solid rgba(124, 92, 252, 0.2);
+  color: #e8e6e1;
   margin-right: auto;
   border-bottom-left-radius: 4px;
 }
 
 .transcript-bubble--caller {
-  background: var(--color-neutral-100);
-  color: var(--color-neutral-800);
+  background: rgba(255, 255, 255, 0.06);
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  color: #e8e6e1;
   margin-left: auto;
   border-bottom-right-radius: 4px;
 }

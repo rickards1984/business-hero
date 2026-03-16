@@ -439,7 +439,9 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
       )}
 
       {/* Call Detail Panel */}
-      <Drawer anchor="right" open={callPanelOpen} onClose={() => { setCallPanelOpen(false); setSelectedCall(null); }}>
+      <Drawer anchor="right" open={callPanelOpen} onClose={() => { setCallPanelOpen(false); setSelectedCall(null); }}
+        PaperProps={{ sx: { bgcolor: 'var(--surface-primary, #0d0f13)', backgroundImage: 'none' } }}
+      >
         <Box sx={{ width: 450, p: 3 }}>
           {selectedCall && (
             <>
@@ -462,7 +464,7 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
               </Box>
 
               {/* Caller Info */}
-              <Card sx={{ p: 2, mb: 3, bgcolor: 'primary.light' }}>
+              <Card sx={{ p: 2, mb: 3, bgcolor: 'rgba(255, 255, 255, 0.04)', border: '0.5px solid rgba(255, 255, 255, 0.08)' }}>
                 <Typography variant="subtitle2" color="text.secondary" gutterBottom>
                   Caller
                 </Typography>
@@ -527,11 +529,11 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
               {/* Summary */}
               {(selectedCall.summary || selectedCall.notes) && (
                 <Box sx={{ mb: 3 }}>
-                  <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                  <Typography sx={{ fontSize: '0.75rem', fontWeight: 600, color: 'rgba(232, 230, 225, 0.6)', textTransform: 'uppercase', letterSpacing: '0.05em', mb: 1 }}>
                     Summary
                   </Typography>
-                  <Card sx={{ p: 2, bgcolor: 'grey.50' }}>
-                    <Typography variant="body2">
+                  <Card sx={{ p: 2, bgcolor: 'rgba(255, 255, 255, 0.04)', border: '0.5px solid rgba(255, 255, 255, 0.08)' }}>
+                    <Typography variant="body2" sx={{ color: '#e8e6e1' }}>
                       {selectedCall.summary || selectedCall.notes}
                     </Typography>
                   </Card>
@@ -541,7 +543,7 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
               {/* Transcript */}
               {selectedCall.transcript && (
                 <Box sx={{ mb: 3 }}>
-                  <Typography sx={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-neutral-500)', textTransform: 'uppercase', letterSpacing: '0.05em', mb: 1.5 }}>
+                  <Typography sx={{ fontSize: '0.75rem', fontWeight: 600, color: 'rgba(232, 230, 225, 0.6)', textTransform: 'uppercase', letterSpacing: '0.05em', mb: 1.5 }}>
                     Transcript
                   </Typography>
                   <Box sx={{ maxHeight: 400, overflow: 'auto', px: 0.5 }}>
@@ -556,17 +558,17 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
                                 className={`transcript-bubble ${isCaller ? 'transcript-bubble--caller' : 'transcript-bubble--receptionist'}`}
                                 sx={{ maxWidth: '85%', px: 2, py: 1 }}
                               >
-                                <Typography sx={{ fontSize: '0.625rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', mb: '2px', color: isCaller ? 'var(--color-neutral-500)' : 'var(--color-primary-600)' }}>
+                                <Typography sx={{ fontSize: '0.625rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', mb: '2px', color: isCaller ? 'rgba(232, 230, 225, 0.5)' : '#a78bfa' }}>
                                   {isCaller ? 'Caller' : 'Receptionist'}
                                 </Typography>
-                                <Typography sx={{ fontSize: '0.8125rem', lineHeight: 1.625 }}>{text}</Typography>
+                                <Typography sx={{ fontSize: '0.8125rem', lineHeight: 1.625, color: '#e8e6e1' }}>{text}</Typography>
                               </Box>
                             </Box>
                           );
                         })}
                       </Box>
                     ) : (
-                      <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: 'var(--color-neutral-700)' }}>
+                      <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: '#e8e6e1' }}>
                         {selectedCall.transcript}
                       </Typography>
                     )}
@@ -576,7 +578,7 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
 
               {/* No details message */}
               {!selectedCall.summary && !selectedCall.notes && !selectedCall.transcript && !selectedCall.intent && (
-                <Card sx={{ p: 3, textAlign: 'center', bgcolor: 'grey.50', mb: 3 }}>
+                <Card sx={{ p: 3, textAlign: 'center', bgcolor: 'rgba(255, 255, 255, 0.04)', border: '0.5px solid rgba(255, 255, 255, 0.08)', mb: 3 }}>
                   <Typography color="text.secondary">
                     No additional details available for this call.
                   </Typography>
@@ -608,7 +610,6 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
                 {/* Archive */}
                 <Button
                   variant="outlined"
-                  color={selectedCall.archived ? 'primary' : 'inherit'}
                   startIcon={<ArchiveIcon />}
                   onClick={() => {
                     handleArchiveCall(selectedCall.id);
@@ -616,6 +617,12 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
                     setSelectedCall(null);
                   }}
                   fullWidth
+                  sx={{
+                    bgcolor: 'var(--glass-bg)',
+                    border: '0.5px solid var(--glass-border)',
+                    color: 'hsl(var(--foreground))',
+                    '&:hover': { bgcolor: 'rgba(255,255,255,0.08)' },
+                  }}
                 >
                   {selectedCall.archived ? 'Unarchive' : 'Archive Call'}
                 </Button>
