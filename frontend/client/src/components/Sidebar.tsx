@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Typography, IconButton, Tooltip } from '@mui/material';
 import {
   GridViewOutlined,
@@ -6,8 +7,9 @@ import {
   AutoAwesomeOutlined,
   Logout as LogoutIcon,
   Settings as SettingsIcon,
+  HelpOutline as HelpOutlineIcon,
 } from '@mui/icons-material';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import ThemeToggle from '@/components/ThemeToggle';
 import { resolveLogoSrc } from '@/lib/supabase';
 
@@ -18,6 +20,7 @@ interface SidebarProps {
   businessLogo?: string | null;
   userEmail: string;
   onSignOut: () => void;
+  onHelpClick?: () => void;
 }
 
 const NAV_ITEMS = [
@@ -25,6 +28,13 @@ const NAV_ITEMS = [
   { key: 'comms',     label: 'Comms',     Icon: ChatOutlined },
   { key: 'finance',   label: 'Finance',   Icon: AccountBalanceWalletOutlined },
   { key: 'ai',        label: 'AI Hub',    Icon: AutoAwesomeOutlined },
+];
+
+const SETTINGS_ITEMS = [
+  { label: 'Branding',      path: '/app/settings/branding' },
+  { label: 'Billing',       path: '/app/settings/billing' },
+  { label: 'Email',         path: '/app/settings/email' },
+  { label: 'Voice (Awaz)',  path: '/app/settings/awaz' },
 ];
 
 function getInitials(name: string): string {
@@ -38,9 +48,14 @@ export default function Sidebar({
   businessLogo,
   userEmail,
   onSignOut,
+  onHelpClick,
 }: SidebarProps) {
   const navigate = useNavigate();
+  const location = useLocation();
   const logoUrl = resolveLogoSrc(businessLogo);
+  const [settingsOpen, setSettingsOpen] = useState(
+    location.pathname.startsWith('/app/settings')
+  );
 
   return (
     <aside className="sidebar">
@@ -75,15 +90,54 @@ export default function Sidebar({
 
       <div className="sidebar-spacer" />
 
-      {/* Settings link */}
       <div className="sidebar-settings-divider" />
+
+      {/* Help & Support */}
       <button
         className="sidebar-nav-item"
-        onClick={() => navigate('/app/settings/branding')}
+        onClick={onHelpClick}
       >
-        <SettingsIcon sx={{ fontSize: 20 }} />
-        <span>Settings</span>
+        <HelpOutlineIcon sx={{ fontSize: 20 }} />
+        <span>Help & Support</span>
       </button>
+
+      {/* Settings accordion */}
+      <div>
+        <button
+          className={`sidebar-nav-item ${settingsOpen ? 'active' : ''}`}
+          onClick={() => setSettingsOpen(!settingsOpen)}
+        >
+          <SettingsIcon sx={{ fontSize: 20 }} />
+          <span style={{ flex: 1 }}>Settings</span>
+          <span style={{
+            fontSize: 10,
+            transition: 'transform 200ms',
+            transform: settingsOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+            opacity: 0.5,
+          }}>
+            ▸
+          </span>
+        </button>
+
+        {settingsOpen && (
+          <div className="sidebar-settings-submenu">
+            {SETTINGS_ITEMS.map((item) => {
+              const isActive = location.pathname === item.path;
+              return (
+                <button
+                  key={item.path}
+                  className={`sidebar-settings-item ${isActive ? 'active' : ''}`}
+                  onClick={() => navigate(item.path)}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="sidebar-settings-divider" />
 
       {/* Bottom section */}
       <div className="sidebar-footer">

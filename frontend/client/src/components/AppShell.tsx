@@ -47,6 +47,7 @@ export default function AppShell() {
           businessLogo={me?.logo_url}
           userEmail={user.email || ''}
           onSignOut={signOut}
+          onHelpClick={() => setSupportPanelOpen(true)}
         />
       )}
 
@@ -82,7 +83,7 @@ export default function AppShell() {
         />
       )}
 
-      <SupportHelpButton onClick={() => setSupportPanelOpen(true)} />
+      {isMobile && <SupportHelpButton onClick={() => setSupportPanelOpen(true)} />}
       <SupportPanel open={supportPanelOpen} onClose={() => setSupportPanelOpen(false)} />
     </div>
   );

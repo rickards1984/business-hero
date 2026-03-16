@@ -2029,6 +2029,51 @@ input, textarea, select, button, a, svg, canvas, video, img {
   margin: 8px 16px;
 }
 
+.sidebar-settings-submenu {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 0;
+}
+
+.sidebar-settings-item {
+  display: block;
+  width: 100%;
+  padding: 6px 16px 6px 46px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 400;
+  color: rgba(232, 230, 225, 0.45);
+  text-align: left;
+  transition: background 150ms, color 150ms;
+}
+
+.sidebar-settings-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: #e8e6e1;
+}
+
+.sidebar-settings-item.active {
+  background: rgba(124, 92, 252, 0.08);
+  color: #a78bfa;
+}
+
+/* Light mode overrides for settings submenu */
+:root .sidebar-settings-item {
+  color: #9CA3AF;
+}
+:root .sidebar-settings-item:hover {
+  color: #111827;
+  background: rgba(0, 0, 0, 0.03);
+}
+:root .sidebar-settings-item.active {
+  color: #7c5cfc;
+  background: rgba(124, 92, 252, 0.08);
+}
+
 /* ========== MOBILE HEADER ========== */
 
 .mobile-header {
