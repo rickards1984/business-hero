@@ -1927,3 +1927,97 @@ body {
 input, textarea, select, button, a, svg, canvas, video, img {
   transition: none;
 }
+
+/* ========== DARK MODE GLOBAL FIXES ========== */
+
+.dark .MuiCardContent-root,
+.dark .MuiCardActions-root,
+.dark .MuiDialogTitle-root,
+.dark .MuiDialogContent-root {
+  color: #e8e6e1;
+}
+
+.dark .MuiCard-root .MuiTypography-root,
+.dark .MuiPaper-root .MuiTypography-root {
+  color: inherit;
+}
+
+.dark .MuiInputBase-input {
+  color: #e8e6e1 !important;
+}
+
+.dark .MuiInputBase-input::placeholder {
+  color: rgba(232, 230, 225, 0.35) !important;
+  opacity: 1 !important;
+}
+
+.dark .MuiInputAdornment-root .MuiSvgIcon-root {
+  color: rgba(232, 230, 225, 0.4);
+}
+
+.dark .MuiContainer-root {
+  background: transparent;
+}
+
+.dark .MuiGrid-item .MuiPaper-root {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.dark .MuiListItem-root {
+  color: #e8e6e1;
+}
+
+.dark .MuiListItemText-primary {
+  color: #e8e6e1;
+}
+
+.dark .MuiListItemText-secondary {
+  color: rgba(232, 230, 225, 0.5);
+}
+
+.dark .MuiListItemIcon-root {
+  color: rgba(232, 230, 225, 0.5);
+}
+
+.dark .MuiDrawer-paper {
+  background-color: #0d0f13 !important;
+  color: #e8e6e1;
+}
+
+.dark .MuiFormControlLabel-label {
+  color: #e8e6e1;
+}
+
+.dark [style*="background-color: rgb(255, 255, 255)"],
+.dark [style*="background-color: #fff"],
+.dark [style*="background-color: #FFFFFF"],
+.dark [style*="backgroundColor: rgb(255, 255, 255)"] {
+  background-color: rgba(255, 255, 255, 0.04) !important;
+  color: #e8e6e1 !important;
+}
+
+.dark .MuiAppBar-root {
+  background-color: rgba(13, 15, 19, 0.85) !important;
+  color: #e8e6e1;
+}
+
+.dark .MuiCard-root:hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.dark .MuiCard-root:hover * {
+  color: inherit;
+}
+
+.dark .MuiChip-label {
+  color: inherit;
+}
+
+.dark .MuiChip-sizeSmall {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.dark .MuiChip-colorPrimary {
+  background-color: rgba(124, 92, 252, 0.15);
+  color: #a78bfa;
+}
