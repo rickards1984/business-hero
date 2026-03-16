@@ -2146,3 +2146,39 @@ input, textarea, select, button, a, svg, canvas, video, img {
 .dark .MuiCircularProgress-root {
   color: #7c5cfc;
 }
+
+/* ========== QUICK ACTION ROWS ========== */
+
+.quick-action-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: hsl(var(--foreground));
+  transition: background 150ms;
+  background: transparent;
+}
+
+.quick-action-row:hover {
+  background: var(--glass-hover);
+}
+
+/* ========== INPUT DARK MODE SAFETY NET ========== */
+
+.dark input[type="text"],
+.dark input[type="search"],
+.dark input[type="email"],
+.dark input[type="password"],
+.dark textarea {
+  background-color: rgba(255, 255, 255, 0.06) !important;
+  color: #e8e6e1 !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: rgba(232, 230, 225, 0.35) !important;
+}
