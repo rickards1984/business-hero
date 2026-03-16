@@ -1,8 +1,11 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
+import { IconButton } from '@mui/material';
+import { Settings as SettingsIcon } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { useMe } from '@/hooks/useMe';
 import { useIsMobile } from '@/hooks/use-mobile';
+import { resolveLogoSrc } from '@/lib/supabase';
 import Sidebar from './Sidebar';
 import MobileBottomNav from './MobileBottomNav';
 import SupportHelpButton from './SupportHelpButton';
@@ -48,6 +51,27 @@ export default function AppShell() {
       )}
 
       <main className="app-content">
+        {isMobile && (
+          <div className="mobile-header">
+            <div className="mobile-header-brand">
+              {me?.logo_url && (
+                <img
+                  src={resolveLogoSrc(me.logo_url) || ''}
+                  alt=""
+                  style={{ width: 28, height: 28, borderRadius: 6, objectFit: 'cover' }}
+                />
+              )}
+              <span>{me?.name || 'Business Hero'}</span>
+            </div>
+            <IconButton
+              onClick={() => navigate('/app/settings/branding')}
+              size="small"
+              sx={{ color: 'text.secondary' }}
+            >
+              <SettingsIcon fontSize="small" />
+            </IconButton>
+          </div>
+        )}
         <Outlet />
       </main>
 

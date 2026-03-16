@@ -75,17 +75,18 @@ export default function Sidebar({
 
       <div className="sidebar-spacer" />
 
+      {/* Settings link */}
+      <div className="sidebar-settings-divider" />
+      <button
+        className="sidebar-nav-item"
+        onClick={() => navigate('/app/settings/branding')}
+      >
+        <SettingsIcon sx={{ fontSize: 20 }} />
+        <span>Settings</span>
+      </button>
+
       {/* Bottom section */}
       <div className="sidebar-footer">
-        <Tooltip title="Settings" placement="right">
-          <IconButton
-            size="small"
-            onClick={() => navigate('/app/settings/branding')}
-            sx={{ color: 'rgba(232,230,225,0.5)', '&:hover': { color: '#e8e6e1' } }}
-          >
-            <SettingsIcon sx={{ fontSize: 18 }} />
-          </IconButton>
-        </Tooltip>
         <ThemeToggle />
         <div className="sidebar-user">
           <Typography

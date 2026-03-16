@@ -269,16 +269,18 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                     px: 1.5,
                     py: 2.5,
                     borderRadius: '9999px',
-                    border: '1px solid var(--color-neutral-200)',
-                    bgcolor: 'white',
+                    border: '1px solid var(--glass-border)',
+                    bgcolor: 'var(--glass-bg)',
+                    color: 'hsl(var(--foreground))',
                     fontSize: '0.8125rem',
                     fontWeight: 500,
                     boxShadow: 'var(--shadow-xs)',
                     transition: 'all 150ms cubic-bezier(0.4,0,0.2,1)',
+                    '& .MuiChip-icon': { color: 'inherit' },
                     '&:hover': {
                       borderColor: 'var(--color-aria-300)',
-                      bgcolor: 'var(--color-aria-50)',
-                      color: 'var(--color-aria-700)',
+                      bgcolor: 'rgba(255,255,255,0.1)',
+                      color: '#a78bfa',
                       boxShadow: 'var(--shadow-sm)',
                       transform: 'translateY(-1px)',
                     },
@@ -330,14 +332,14 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                   key={`${message.role}-${idx}`}
                   sx={{
                     alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start',
-                    bgcolor: message.role === 'user' ? 'var(--color-primary-600)' : 'white',
-                    color: message.role === 'user' ? 'white' : 'var(--color-neutral-700)',
+                    bgcolor: message.role === 'user' ? 'var(--color-primary-600)' : 'var(--glass-bg)',
+                    color: message.role === 'user' ? 'white' : 'hsl(var(--foreground))',
                     px: 2.5,
                     py: 1.5,
                     borderRadius: message.role === 'user' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
                     maxWidth: '80%',
                     boxShadow: message.role === 'user' ? 'var(--shadow-md)' : 'var(--shadow-xs)',
-                    border: message.role === 'assistant' ? '1px solid var(--color-neutral-100)' : 'none',
+                    border: message.role === 'assistant' ? '1px solid var(--glass-border)' : 'none',
                     fontSize: '0.875rem',
                     lineHeight: 1.625,
                     animation: 'messageAppear 200ms ease-out',
@@ -391,8 +393,8 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                 maxWidth: 700,
                 mx: 'auto',
                 p: '8px 8px 8px 20px',
-                bgcolor: 'white',
-                border: '1px solid var(--color-neutral-200)',
+                bgcolor: 'var(--glass-bg)',
+                border: '1px solid var(--glass-border)',
                 borderRadius: '9999px',
                 boxShadow: 'var(--shadow-md)',
                 transition: 'all 150ms cubic-bezier(0.4,0,0.2,1)',
@@ -421,8 +423,8 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                 variant="standard"
                 InputProps={{ disableUnderline: true }}
                 sx={{
-                  '& .MuiInputBase-root': { fontSize: '0.875rem', color: 'var(--color-neutral-700)' },
-                  '& .MuiInputBase-input::placeholder': { color: 'var(--color-neutral-400)', opacity: 1 },
+                  '& .MuiInputBase-root': { fontSize: '0.875rem', color: 'hsl(var(--foreground))' },
+                  '& .MuiInputBase-input::placeholder': { color: 'rgba(232,230,225,0.4)', opacity: 1 },
                 }}
               />
               <Button

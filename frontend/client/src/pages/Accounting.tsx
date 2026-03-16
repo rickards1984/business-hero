@@ -148,7 +148,11 @@ interface ColumnMapping {
 
 // ============== Main Component ==============
 
-const Accounting: React.FC = () => {
+interface AccountingProps {
+  embedded?: boolean;
+}
+
+const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -714,57 +718,88 @@ const Accounting: React.FC = () => {
 
   if (loading) {
     return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: embedded ? '40vh' : '100vh' }}>
         <CircularProgress />
       </Box>
     );
   }
 
   return (
-    <Box sx={{ bgcolor: 'grey.50', minHeight: '100vh' }}>
+    <Box sx={{ bgcolor: embedded ? 'transparent' : 'grey.50', minHeight: embedded ? 'auto' : '100vh' }}>
       {/* Header */}
-      <Box sx={{ bgcolor: 'white', borderBottom: 1, borderColor: 'divider', py: 2, px: 3 }}>
-        <Container maxWidth="xl">
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <IconButton onClick={() => navigate('/dashboard')}>
-              <ArrowBackIcon />
-            </IconButton>
-            <Box sx={{ flex: 1 }}>
-              <Typography variant="h5" fontWeight={600}>
-                Accounting
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Track income, expenses, and financial insights
-              </Typography>
+      {!embedded && (
+        <Box sx={{ bgcolor: 'white', borderBottom: 1, borderColor: 'divider', py: 2, px: 3 }}>
+          <Container maxWidth="xl">
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              <IconButton onClick={() => navigate('/dashboard')}>
+                <ArrowBackIcon />
+              </IconButton>
+              <Box sx={{ flex: 1 }}>
+                <Typography variant="h5" fontWeight={600}>
+                  Accounting
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Track income, expenses, and financial insights
+                </Typography>
+              </Box>
+              <Button
+                variant="outlined"
+                startIcon={<FileDownloadIcon />}
+                onClick={() => setShowExportModal(true)}
+                sx={{ mr: 1 }}
+              >
+                Export Accountant Pack
+              </Button>
+              <Button
+                variant="outlined"
+                startIcon={<UploadIcon />}
+                onClick={() => setUploadDialogOpen(true)}
+                sx={{ mr: 1 }}
+              >
+                Import Spreadsheet
+              </Button>
+              <Button
+                variant="contained"
+                startIcon={<AddIcon />}
+                onClick={() => setAddTransactionOpen(true)}
+              >
+                Add Transaction
+              </Button>
             </Box>
-            <Button
-              variant="outlined"
-              startIcon={<FileDownloadIcon />}
-              onClick={() => setShowExportModal(true)}
-              sx={{ mr: 1 }}
-            >
-              Export Accountant Pack
-            </Button>
-            <Button
-              variant="outlined"
-              startIcon={<UploadIcon />}
-              onClick={() => setUploadDialogOpen(true)}
-              sx={{ mr: 1 }}
-            >
-              Import Spreadsheet
-            </Button>
-            <Button
-              variant="contained"
-              startIcon={<AddIcon />}
-              onClick={() => setAddTransactionOpen(true)}
-            >
-              Add Transaction
-            </Button>
-          </Box>
-        </Container>
-      </Box>
+          </Container>
+        </Box>
+      )}
 
-      <Container maxWidth="xl" sx={{ py: 3 }}>
+      {embedded && (
+        <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<FileDownloadIcon />}
+            onClick={() => setShowExportModal(true)}
+          >
+            Export
+          </Button>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<UploadIcon />}
+            onClick={() => setUploadDialogOpen(true)}
+          >
+            Import
+          </Button>
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={<AddIcon />}
+            onClick={() => setAddTransactionOpen(true)}
+          >
+            Add Transaction
+          </Button>
+        </Box>
+      )}
+
+      <Container maxWidth="xl" sx={{ py: embedded ? 0 : 3, px: embedded ? '0 !important' : undefined }}>
         {/* Period Filter */}
         <Box sx={{ mb: 3, display: 'flex', gap: 1 }}>
           {(['month', 'quarter', 'year', 'all'] as const).map((p) => (

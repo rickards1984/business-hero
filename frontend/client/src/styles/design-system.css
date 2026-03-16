@@ -2021,3 +2021,83 @@ input, textarea, select, button, a, svg, canvas, video, img {
   background-color: rgba(124, 92, 252, 0.15);
   color: #a78bfa;
 }
+
+/* ========== SIDEBAR SETTINGS DIVIDER ========== */
+
+.sidebar-settings-divider {
+  border-top: 0.5px solid var(--glass-border);
+  margin: 8px 16px;
+}
+
+/* ========== MOBILE HEADER ========== */
+
+.mobile-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 0 4px;
+}
+
+.mobile-header-brand {
+  font-size: 15px;
+  font-weight: 600;
+  color: hsl(var(--foreground));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ========== FINAL DARK MODE CATCH-ALL ========== */
+
+.dark .MuiButton-root.MuiButton-outlined {
+  color: #e8e6e1;
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.dark .MuiTypography-colorTextSecondary {
+  color: rgba(232, 230, 225, 0.5) !important;
+}
+
+.dark .MuiBreadcrumbs-li {
+  color: rgba(232, 230, 225, 0.5);
+}
+
+.dark .MuiBreadcrumbs-separator {
+  color: rgba(232, 230, 225, 0.3);
+}
+
+.dark .MuiPopover-paper,
+.dark .MuiMenu-paper {
+  background-color: #1a1c22 !important;
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+}
+
+.dark .MuiAutocomplete-paper {
+  background-color: #1a1c22 !important;
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+}
+
+.dark .MuiAutocomplete-option {
+  color: #e8e6e1;
+}
+
+.dark .MuiAutocomplete-option:hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.dark .MuiBox-root {
+  color: inherit;
+}
+
+.dark .MuiSvgIcon-root {
+  color: inherit;
+}
+
+.dark .MuiSkeleton-root {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.dark .MuiCircularProgress-root {
+  color: #7c5cfc;
+}
