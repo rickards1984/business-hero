@@ -8,16 +8,8 @@ import {
   Button,
   Container,
   Paper,
-  Grid,
   Card,
-  CardContent,
-  CardActions,
   Chip,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogContentText,
-  DialogActions,
   TextField,
   CircularProgress,
   Alert,
@@ -26,26 +18,14 @@ import {
   Tab,
   Divider,
   Avatar,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
   Drawer,
-  List,
-  ListItem,
-  ListItemText,
   ListItemIcon,
+  ListItemText,
   Snackbar,
-  Checkbox,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
   FormControlLabel,
   Switch,
   Menu,
+  MenuItem,
   Tooltip,
   InputAdornment,
   Fab,
@@ -54,59 +34,40 @@ import {
 import {
   Task as TaskIcon,
   Phone as PhoneIcon,
-  Add as AddIcon,
-  CheckCircle as CheckCircleIcon,
   Logout as LogoutIcon,
   AccessTime as AccessTimeIcon,
   Receipt as ReceiptIcon,
   Archive as ArchiveIcon,
-  Warning as WarningIcon,
-  Gavel as GavelIcon,
-  CloudUpload as CloudUploadIcon,
   Email as EmailIcon,
-  CheckCircleOutline as CheckCircleOutlineIcon,
   Close as CloseIcon,
   Settings as SettingsIcon,
   Outbox as OutboxIcon,
-  Send as SendIcon,
-  Preview as PreviewIcon,
-  Link as LinkIcon,
   SmartToy as SmartToyIcon,
   Payment as PaymentIcon,
   Palette as PaletteIcon,
   Help as HelpIcon,
-  Edit as EditIcon,
-  Undo as UndoIcon,
-  Cancel as CancelIcon,
-  Delete as DeleteIcon,
   Search as SearchIcon,
   Clear as ClearIcon,
-  ArrowUpward as ArrowUpwardIcon,
-  ArrowDownward as ArrowDownwardIcon,
   ChevronRight as ChevronRightIcon,
   AccountBalance as AccountBalanceIcon,
   MailOutline as MailOutlineIcon,
   Sms as SmsIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase, type Business, type Task, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
+import { supabase, type Business, type Call, type BusinessMember, resolveLogoSrc } from '@/lib/supabase';
 import { useMe } from '@/hooks/useMe';
 import { apiRequest } from '@/lib/queryClient';
-import { config } from '@/config/env';
 import DebugPanel from '@/components/DebugPanel';
 import EmailsTab from '@/components/EmailsTab';
 import ReceptionistTab from '@/components/ReceptionistTab';
 import CeoBriefingTab from '@/components/CeoBriefingTab';
+import TasksPanel, { type TasksPanelHandle } from '@/components/TasksPanel';
+import InvoicesPanel from '@/components/InvoicesPanel';
 import BottomNav from '@/components/BottomNav';
 import { fetchEmailMessages } from '@/lib/emailApi';
 import { applyBrandColor } from '@/pages/BrandingSettings';
 import SupportPanel from '@/components/SupportPanel';
 import SupportHelpButton from '@/components/SupportHelpButton';
-import {
-  TASK_CATEGORIES, TASK_PRIORITIES,
-  getCategoryColor, getCategoryLabel,
-  isOverdue as isTaskOverdue, isToday as isDateToday, formatDueDate,
-} from '@/lib/taskConstants';
 
 /**
  * Get business initials from name
@@ -140,42 +101,6 @@ function TabPanel(props: TabPanelProps) {
   );
 }
 
-// Chase stage definitions
-interface ChaseStage {
-  stage: number;
-  label: string;
-  description: string;
-  color: 'default' | 'primary' | 'warning' | 'error';
-}
-
-const CHASE_STAGES: ChaseStage[] = [
-  { stage: 1, label: 'Stage 1', description: 'Friendly Reminder', color: 'primary' },
-  { stage: 2, label: 'Stage 2', description: 'Second Notice', color: 'primary' },
-  { stage: 3, label: 'Stage 3', description: 'Final Warning', color: 'warning' },
-  { stage: 4, label: 'Stage 4', description: 'Legal Action Notice', color: 'error' },
-];
-
-// Helper component to display chase stage as a chip
-const ChaseStageChip: React.FC<{ stage: number }> = ({ stage }) => {
-  if (!stage || stage === 0) {
-    return <Chip label="Not chased" size="small" variant="outlined" />;
-  }
-  
-  const stageInfo = CHASE_STAGES.find(s => s.stage === stage);
-  if (!stageInfo) {
-    return <Chip label={`Stage ${stage}`} size="small" />;
-  }
-  
-  return (
-    <Chip 
-      label={`${stageInfo.label}: ${stageInfo.description}`}
-      size="small"
-      color={stageInfo.color}
-      icon={stage >= 4 ? <GavelIcon /> : stage >= 3 ? <WarningIcon /> : undefined}
-    />
-  );
-};
-
 export default function BusinessDashboard() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -199,7 +124,6 @@ export default function BusinessDashboard() {
   });
   const [membership, setMembership] = useState<BusinessMember | null>(null);
   const [business, setBusiness] = useState<Business | null>(null);
-  const [tasks, setTasks] = useState<Task[]>([]);
   const [calls, setCalls] = useState<Call[]>([]);
   const [callSearch, setCallSearch] = useState('');
   const [callDateFilter, setCallDateFilter] = useState<'all' | 'today' | 'week' | 'month'>('all');
@@ -207,74 +131,18 @@ export default function BusinessDashboard() {
   const [showArchivedCalls, setShowArchivedCalls] = useState(false);
   const [selectedCall, setSelectedCall] = useState<Call | null>(null);
   const [callPanelOpen, setCallPanelOpen] = useState(false);
-  const [taskFilter, setTaskFilter] = useState<'open' | 'completed' | 'all'>('open');
+  const [openTaskCount, setOpenTaskCount] = useState(0);
   const [settingsAnchor, setSettingsAnchor] = useState<null | HTMLElement>(null);
   const [supportPanelOpen, setSupportPanelOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const initialLoadDone = useRef(false);
+  const tasksPanelRef = useRef<TasksPanelHandle>(null);
   const [mountedTabs, setMountedTabs] = useState<Set<number>>(() => new Set([tabValue]));
   
   const logoUrl = resolveLogoSrc(businessProfile?.logo_url ?? business?.logo_url);
 
-  const [taskDialogOpen, setTaskDialogOpen] = useState(false);
-  const [taskTitle, setTaskTitle] = useState('');
-  const [taskDescription, setTaskDescription] = useState('');
-  const [taskDueAt, setTaskDueAt] = useState('');
-  const [taskCategory, setTaskCategory] = useState('general');
-  const [taskPriority, setTaskPriority] = useState('medium');
-  const [savingTask, setSavingTask] = useState(false);
-  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
-  const [priorityFilter, setPriorityFilter] = useState<string | null>(null);
-  const [sortBy, setSortBy] = useState('created_at');
-
-  // Invoice state
-  interface Invoice {
-    id: string;
-    invoice_number: string;
-    customer_name: string;
-    customer_email: string | null;
-    issue_date: string | null;
-    due_date: string;
-    amount: number;
-    currency: string;
-    status: string;
-    paid_date: string | null;
-    paid_amount: number | null;
-    paid_at: string | null;
-    archived: boolean;
-    last_chased_at: string | null;
-    chase_stage: number;
-    source: string;
-    source_ref: string | null;
-    external_source: string | null;
-  }
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [invoicesLoading, setInvoicesLoading] = useState(false);
-  const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
-  const [invoiceDrawerOpen, setInvoiceDrawerOpen] = useState(false);
-  const [chaseDraft, setChaseDraft] = useState<{ subject: string; body: string; chase_stage: number } | null>(null);
-  const [csvUploading, setCsvUploading] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
-  const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<string[]>([]);
-  const [invoiceStage, setInvoiceStage] = useState(1);
-  const [dryRunSend, setDryRunSend] = useState(false);
-  const [bulkChaseStage, setBulkChaseStage] = useState(1);
-  const [bulkPreviewOpen, setBulkPreviewOpen] = useState(false);
-  const [bulkPreview, setBulkPreview] = useState<{ invoice_id: string; subject: string; body: string; status: string; stage_description?: string; error_message?: string }[]>([]);
-  
-  // Xero invoice sync state
-  const [xeroInvoiceSyncing, setXeroInvoiceSyncing] = useState(false);
-  const [xeroConnected, setXeroConnected] = useState(false);
-
-  // Invoice filtering state
-  const [invoiceSearch, setInvoiceSearch] = useState('');
-  const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('');
-  const [showArchivedInvoices, setShowArchivedInvoices] = useState(false);
-  const [invoiceSortBy, setInvoiceSortBy] = useState('due_date');
-  const [invoiceSortOrder, setInvoiceSortOrder] = useState<'asc' | 'desc'>('asc');
-  const [invoiceActionLoading, setInvoiceActionLoading] = useState<string | null>(null);
-  const [confirmDialog, setConfirmDialog] = useState<{ open: boolean; action: 'delete' | 'cancel' | null; invoiceId: string | null }>({ open: false, action: null, invoiceId: null });
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -341,28 +209,13 @@ export default function BusinessDashboard() {
       if (businessError) throw businessError;
       setBusiness(businessData);
 
-      await Promise.all([
-        fetchTasks(memberData.business_id),
-        fetchCalls(memberData.business_id),
-      ]);
+      await fetchCalls(memberData.business_id);
     } catch (err: any) {
       setError(err.message || 'Failed to fetch business data');
     } finally {
       setLoading(false);
       initialLoadDone.current = true;
     }
-  };
-
-  const fetchTasks = async (businessId: string) => {
-    const { data, error } = await supabase
-      .from('tasks')
-      .select('*')
-      .eq('business_id', businessId)
-      .is('deleted_at', null)
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-    setTasks(data || []);
   };
 
   const fetchCalls = async (businessId: string) => {
@@ -374,76 +227,6 @@ export default function BusinessDashboard() {
 
     if (error) throw error;
     setCalls(data || []);
-  };
-
-  const handleCreateTask = async () => {
-    if (!taskTitle.trim() || !business) return;
-
-    setSavingTask(true);
-    setError('');
-
-    try {
-      const { error: insertError } = await supabase
-        .from('tasks')
-        .insert({
-          business_id: business.id,
-          title: taskTitle.trim(),
-          description: taskDescription.trim() || null,
-          status: 'open',
-          due_at: taskDueAt ? new Date(taskDueAt).toISOString() : null,
-          category: taskCategory,
-          priority: taskPriority,
-        });
-
-      if (insertError) throw insertError;
-
-      setTaskDialogOpen(false);
-      setTaskTitle('');
-      setTaskDescription('');
-      setTaskDueAt('');
-      setTaskCategory('general');
-      setTaskPriority('medium');
-      setSuccessMessage('Task created');
-      await fetchTasks(business.id);
-    } catch (err: any) {
-      setError(err.message || 'Failed to create task');
-    } finally {
-      setSavingTask(false);
-    }
-  };
-
-  const handleCompleteTask = async (taskId: string) => {
-    if (!business) return;
-
-    try {
-      const { error: updateError } = await supabase
-        .from('tasks')
-        .update({ status: 'completed' })
-        .eq('id', taskId);
-
-      if (updateError) throw updateError;
-      await fetchTasks(business.id);
-    } catch (err: any) {
-      setError(err.message || 'Failed to complete task');
-    }
-  };
-
-  const cycleTaskStatus = async (taskId: string, currentStatus: string) => {
-    if (!business) return;
-    const nextStatus =
-      currentStatus === 'open' ? 'pending' :
-      currentStatus === 'pending' ? 'completed' :
-      'open';
-    try {
-      const { error: updateError } = await supabase
-        .from('tasks')
-        .update({ status: nextStatus, updated_at: new Date().toISOString() })
-        .eq('id', taskId);
-      if (updateError) throw updateError;
-      await fetchTasks(business.id);
-    } catch (err: any) {
-      setError(err.message || 'Failed to update task status');
-    }
   };
 
   // Helper function to format relative time
@@ -615,38 +398,6 @@ export default function BusinessDashboard() {
     setCallPanelOpen(true);
   };
 
-  // Filter & sort tasks
-  const filteredTasks = useMemo(() => {
-    let result = tasks.filter(t => !t.deleted_at);
-
-    if (taskFilter === 'open') result = result.filter(t => t.status !== 'completed');
-    else if (taskFilter === 'completed') result = result.filter(t => t.status === 'completed');
-
-    if (categoryFilter) result = result.filter(t => (t.category || 'general') === categoryFilter);
-    if (priorityFilter) result = result.filter(t => (t.priority || 'medium') === priorityFilter);
-
-    const priorityOrder: Record<string, number> = { high: 0, medium: 1, low: 2 };
-    result.sort((a, b) => {
-      if (sortBy === 'due_at') {
-        if (!a.due_at && !b.due_at) return 0;
-        if (!a.due_at) return 1;
-        if (!b.due_at) return -1;
-        return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
-      }
-      if (sortBy === 'priority') {
-        return (priorityOrder[a.priority] ?? 1) - (priorityOrder[b.priority] ?? 1);
-      }
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-    });
-
-    return result;
-  }, [tasks, taskFilter, categoryFilter, priorityFilter, sortBy]);
-
-  const overdueTasks = tasks.filter(t => t.due_at && new Date(t.due_at) < new Date() && t.status !== 'completed').length;
-  const dueTodayTasks = tasks.filter(t => t.due_at && isDateToday(new Date(t.due_at)) && t.status !== 'completed').length;
-  const pendingTasks = tasks.filter(t => t.status === 'pending').length;
-  const openTaskCount = tasks.filter(t => t.status !== 'completed').length;
-  const overdueInvoiceCount = invoices.filter(inv => new Date(inv.due_date) < new Date() && inv.status !== 'paid').length;
   const newCallCount = calls.filter(c => !c.archived).length;
   const [unreadEmailCount, setUnreadEmailCount] = useState(0);
 
@@ -654,297 +405,6 @@ export default function BusinessDashboard() {
     await signOut();
     navigate('/login');
   };
-
-  // Invoice functions
-  const fetchInvoices = async () => {
-    if (!business) return;
-    setInvoicesLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (invoiceSearch) params.append('search', invoiceSearch);
-      if (invoiceStatusFilter) params.append('status', invoiceStatusFilter);
-      params.append('archived', showArchivedInvoices.toString());
-      params.append('sort_by', invoiceSortBy);
-      params.append('sort_order', invoiceSortOrder);
-      
-      const response = await apiRequest('GET', `/v1/invoices?${params.toString()}`);
-      const data = await response.json();
-      setInvoices(data.invoices || []);
-    } catch (err: any) {
-      setError(err.message || 'Failed to fetch invoices');
-    } finally {
-      setInvoicesLoading(false);
-    }
-  };
-
-  const handleCsvUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !business) return;
-
-    setCsvUploading(true);
-    setError('');
-    setSuccessMessage('');
-
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-
-      const response = await fetch(`${config.apiBaseUrl}/v1/invoices/import/csv`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}`,
-        },
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || 'Failed to import CSV');
-      }
-
-      const result = await response.json();
-      setSuccessMessage(`Successfully imported ${result.imported} invoices, updated ${result.updated} invoices`);
-      
-      // Refetch invoices
-      await fetchInvoices();
-      
-      // Clear file input
-      e.target.value = '';
-    } catch (err: any) {
-      setError(err.message || 'Failed to upload CSV');
-    } finally {
-      setCsvUploading(false);
-    }
-  };
-
-  const handleInvoiceClick = (invoice: Invoice) => {
-    setSelectedInvoice(invoice);
-    setInvoiceDrawerOpen(true);
-    setChaseDraft(null);
-    setInvoiceStage(Math.min((invoice.chase_stage || 0) + 1, 4));
-  };
-
-  const handleGetChaseDraft = async () => {
-    if (!selectedInvoice) return;
-    try {
-      const response = await apiRequest('POST', `/v1/invoices/${selectedInvoice.id}/chase-draft?stage=${invoiceStage}`);
-      const data = await response.json();
-      setChaseDraft(data);
-    } catch (err: any) {
-      setError(err.message || 'Failed to get chase draft');
-    }
-  };
-
-  const handleSendChaseEmail = async () => {
-    if (!selectedInvoice) return;
-    try {
-      const response = await apiRequest('POST', `/v1/invoices/${selectedInvoice.id}/send-chase`, {
-        chase_stage: invoiceStage,  // Now uses 1-4 directly
-        dry_run: dryRunSend,
-      });
-      const data = await response.json();
-      if (dryRunSend) {
-        setChaseDraft({ subject: data.subject, body: data.body, chase_stage: data.chase_stage });
-        setSuccessMessage('Preview generated (dry run)');
-        return;
-      }
-      await fetchInvoices();
-      const stageInfo = CHASE_STAGES.find(s => s.stage === invoiceStage);
-      setSuccessMessage(`${stageInfo?.description || 'Chase email'} sent successfully`);
-    } catch (err: any) {
-      setError(err.message || 'Failed to send chase email');
-    }
-  };
-
-  const handleMarkChased = async () => {
-    if (!selectedInvoice) return;
-    try {
-      const response = await apiRequest('POST', `/v1/invoices/${selectedInvoice.id}/mark-chased`);
-      const data = await response.json();
-      setSelectedInvoice(data);
-      await fetchInvoices();
-      setSuccessMessage('Invoice marked as chased');
-    } catch (err: any) {
-      setError(err.message || 'Failed to mark invoice as chased');
-    }
-  };
-
-  const toggleInvoiceSelection = (invoiceId: string) => {
-    setSelectedInvoiceIds((prev) =>
-      prev.includes(invoiceId) ? prev.filter((id) => id !== invoiceId) : [...prev, invoiceId]
-    );
-  };
-
-  const toggleSelectAllInvoices = () => {
-    if (selectedInvoiceIds.length === invoices.length) {
-      setSelectedInvoiceIds([]);
-    } else {
-      setSelectedInvoiceIds(invoices.map((inv) => inv.id));
-    }
-  };
-
-  const handleBulkPreview = async () => {
-    if (selectedInvoiceIds.length === 0) {
-      setError('Select at least one invoice');
-      return;
-    }
-    try {
-      const response = await apiRequest('POST', `/v1/invoices/send-chase/bulk`, {
-        invoice_ids: selectedInvoiceIds,
-        chase_stage: bulkChaseStage,  // Use selected stage
-        dry_run: true,
-      });
-      const data = await response.json();
-      setBulkPreview(data.results || []);
-      setBulkPreviewOpen(true);
-    } catch (err: any) {
-      setError(err.message || 'Failed to preview bulk send');
-    }
-  };
-
-  const handleBulkSend = async () => {
-    if (selectedInvoiceIds.length === 0) return;
-    try {
-      const response = await apiRequest('POST', `/v1/invoices/send-chase/bulk`, {
-        invoice_ids: selectedInvoiceIds,
-        chase_stage: bulkChaseStage,  // Use selected stage
-        dry_run: false,
-      });
-      const data = await response.json();
-      setBulkPreview(data.results || []);
-      await fetchInvoices();
-      const stageInfo = CHASE_STAGES.find(s => s.stage === bulkChaseStage);
-      setSuccessMessage(`Bulk ${stageInfo?.description || 'chase'} complete: ${data.sent} sent, ${data.failed} failed`);
-      setSelectedInvoiceIds([]);
-      setBulkPreviewOpen(false);
-    } catch (err: any) {
-      setError(err.message || 'Failed to send bulk emails');
-    }
-  };
-
-  // Invoice action handlers
-  const handleMarkAsPaid = async (invoiceId: string) => {
-    setInvoiceActionLoading('paid');
-    try {
-      const response = await apiRequest('PATCH', `/v1/invoices/${invoiceId}/status?status=paid`);
-      if (response.ok) {
-        await fetchInvoices();
-        setSuccessMessage('Invoice marked as paid');
-        setInvoiceDrawerOpen(false);
-        setSelectedInvoice(null);
-      } else {
-        const data = await response.json();
-        setError(data.detail || 'Failed to mark as paid');
-      }
-    } catch (err: any) {
-      setError(err.message || 'Failed to mark as paid');
-    } finally {
-      setInvoiceActionLoading(null);
-    }
-  };
-
-  const handleMarkAsUnpaid = async (invoiceId: string) => {
-    setInvoiceActionLoading('unpaid');
-    try {
-      const response = await apiRequest('PATCH', `/v1/invoices/${invoiceId}/status?status=unpaid`);
-      if (response.ok) {
-        await fetchInvoices();
-        setSuccessMessage('Invoice marked as unpaid');
-        // Update selected invoice
-        const data = await response.json();
-        if (selectedInvoice && selectedInvoice.id === invoiceId) {
-          setSelectedInvoice({ ...selectedInvoice, status: 'unpaid', paid_amount: null, paid_at: null });
-        }
-      } else {
-        const data = await response.json();
-        setError(data.detail || 'Failed to mark as unpaid');
-      }
-    } catch (err: any) {
-      setError(err.message || 'Failed to mark as unpaid');
-    } finally {
-      setInvoiceActionLoading(null);
-    }
-  };
-
-  const handleCancelInvoice = async (invoiceId: string) => {
-    setInvoiceActionLoading('cancel');
-    try {
-      const response = await apiRequest('PATCH', `/v1/invoices/${invoiceId}/status?status=cancelled`);
-      if (response.ok) {
-        await fetchInvoices();
-        setSuccessMessage('Invoice cancelled');
-        setInvoiceDrawerOpen(false);
-        setSelectedInvoice(null);
-      } else {
-        const data = await response.json();
-        setError(data.detail || 'Failed to cancel invoice');
-      }
-    } catch (err: any) {
-      setError(err.message || 'Failed to cancel invoice');
-    } finally {
-      setInvoiceActionLoading(null);
-      setConfirmDialog({ open: false, action: null, invoiceId: null });
-    }
-  };
-
-  const handleArchiveInvoice = async (invoiceId: string) => {
-    setInvoiceActionLoading('archive');
-    try {
-      const response = await apiRequest('PATCH', `/v1/invoices/${invoiceId}/archive`);
-      if (response.ok) {
-        await fetchInvoices();
-        const data = await response.json();
-        setSuccessMessage(data.archived ? 'Invoice archived' : 'Invoice unarchived');
-        setInvoiceDrawerOpen(false);
-        setSelectedInvoice(null);
-      } else {
-        const data = await response.json();
-        setError(data.detail || 'Failed to archive invoice');
-      }
-    } catch (err: any) {
-      setError(err.message || 'Failed to archive invoice');
-    } finally {
-      setInvoiceActionLoading(null);
-    }
-  };
-
-  const handleDeleteInvoice = async (invoiceId: string) => {
-    setInvoiceActionLoading('delete');
-    try {
-      const response = await apiRequest('DELETE', `/v1/invoices/${invoiceId}`);
-      if (response.ok) {
-        await fetchInvoices();
-        setSuccessMessage('Invoice deleted');
-        setInvoiceDrawerOpen(false);
-        setSelectedInvoice(null);
-      } else {
-        const data = await response.json();
-        setError(data.detail || 'Failed to delete invoice');
-      }
-    } catch (err: any) {
-      setError(err.message || 'Failed to delete invoice');
-    } finally {
-      setInvoiceActionLoading(null);
-      setConfirmDialog({ open: false, action: null, invoiceId: null });
-    }
-  };
-
-  // Fetch invoices when invoices tab is selected or filters change
-  useEffect(() => {
-    if (tabValue === 2 && business) {
-      fetchInvoices();
-    }
-  }, [tabValue, business, invoiceStatusFilter, showArchivedInvoices, invoiceSortBy, invoiceSortOrder]);
-
-  // Debounced search for invoices
-  useEffect(() => {
-    if (tabValue === 2 && business) {
-      const timer = setTimeout(() => {
-        fetchInvoices();
-      }, 300);
-      return () => clearTimeout(timer);
-    }
-  }, [invoiceSearch]);
 
   // Fetch unread email count for tab badge
   useEffect(() => {
@@ -956,45 +416,6 @@ export default function BusinessDashboard() {
       })
       .catch(() => setUnreadEmailCount(0));
   }, [business]);
-
-  // Xero invoice sync
-  const syncXeroInvoices = async () => {
-    try {
-      setXeroInvoiceSyncing(true);
-      const resp = await apiRequest('POST', '/v1/invoices/xero/sync');
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.synced > 0) {
-          setSuccessMessage(`Synced ${data.synced} invoices from Xero`);
-        }
-        await fetchInvoices();
-      }
-    } catch (e) {
-      console.error('Invoice sync failed:', e);
-    } finally {
-      setXeroInvoiceSyncing(false);
-    }
-  };
-
-  // Check Xero status and auto-sync invoices when invoices tab is first opened
-  useEffect(() => {
-    if (tabValue !== 2 || !business) return;
-    const checkXero = async () => {
-      try {
-        const resp = await apiRequest('GET', '/v1/accounting/xero/status');
-        if (resp.ok) {
-          const data = await resp.json();
-          setXeroConnected(data.connected);
-          if (data.connected) {
-            syncXeroInvoices();
-          }
-        }
-      } catch (e) {
-        console.error('Xero status check failed:', e);
-      }
-    };
-    checkXero();
-  }, [tabValue, business]);
 
   if (authLoading || loading) {
     return (
@@ -1380,17 +801,7 @@ export default function BusinessDashboard() {
                   <Tab
                     icon={<ReceiptIcon />}
                     iconPosition="start"
-                    label={
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        Invoices
-                        <Chip 
-                          label={overdueInvoiceCount > 0 ? `${overdueInvoiceCount} overdue` : invoices.length} 
-                          size="small" 
-                          color={overdueInvoiceCount > 0 ? 'error' : 'default'}
-                          sx={{ minWidth: 24, height: 22 }}
-                        />
-                      </Box>
-                    }
+                    label="Invoices"
                     data-testid="tab-invoices"
                   />
                   <Tab
@@ -1429,253 +840,7 @@ export default function BusinessDashboard() {
               </Box>
 
               <TabPanel value={tabValue} index={0}>
-                {/* Summary cards */}
-                <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap' }}>
-                  <Card sx={{ flex: '1 1 140px', p: 2, textAlign: 'center' }}>
-                    <Typography variant="h5" fontWeight={700} color="error.main">{overdueTasks}</Typography>
-                    <Typography variant="caption" color="text.secondary">Overdue</Typography>
-                  </Card>
-                  <Card sx={{ flex: '1 1 140px', p: 2, textAlign: 'center' }}>
-                    <Typography variant="h5" fontWeight={700} color="warning.main">{dueTodayTasks}</Typography>
-                    <Typography variant="caption" color="text.secondary">Due Today</Typography>
-                  </Card>
-                  <Card sx={{ flex: '1 1 140px', p: 2, textAlign: 'center' }}>
-                    <Typography variant="h5" fontWeight={700} color="info.main">{pendingTasks}</Typography>
-                    <Typography variant="caption" color="text.secondary">Pending</Typography>
-                  </Card>
-                  <Card sx={{ flex: '1 1 140px', p: 2, textAlign: 'center' }}>
-                    <Typography variant="h5" fontWeight={700}>{openTaskCount}</Typography>
-                    <Typography variant="caption" color="text.secondary">Total Open</Typography>
-                  </Card>
-                </Box>
-
-                {/* Status filter + create button */}
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 2 }}>
-                  <Box sx={{ display: 'flex', gap: 1 }}>
-                    <Chip
-                      label={`Open (${tasks.filter(t => t.status !== 'completed').length})`}
-                      onClick={() => setTaskFilter('open')}
-                      color={taskFilter === 'open' ? 'primary' : 'default'}
-                      variant={taskFilter === 'open' ? 'filled' : 'outlined'}
-                    />
-                    <Chip
-                      label={`Completed (${tasks.filter(t => t.status === 'completed').length})`}
-                      onClick={() => setTaskFilter('completed')}
-                      color={taskFilter === 'completed' ? 'primary' : 'default'}
-                      variant={taskFilter === 'completed' ? 'filled' : 'outlined'}
-                    />
-                    <Chip
-                      label={`All (${tasks.length})`}
-                      onClick={() => setTaskFilter('all')}
-                      color={taskFilter === 'all' ? 'primary' : 'default'}
-                      variant={taskFilter === 'all' ? 'filled' : 'outlined'}
-                    />
-                  </Box>
-                  <Button
-                    variant="contained"
-                    startIcon={<AddIcon />}
-                    onClick={() => setTaskDialogOpen(true)}
-                    data-testid="button-create-task"
-                  >
-                    Create Task
-                  </Button>
-                </Box>
-
-                {/* Category filter chips */}
-                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2 }}>
-                  <Chip
-                    label="All Categories"
-                    size="small"
-                    onClick={() => setCategoryFilter(null)}
-                    color={!categoryFilter ? 'primary' : 'default'}
-                    variant={!categoryFilter ? 'filled' : 'outlined'}
-                  />
-                  {TASK_CATEGORIES.map(cat => (
-                    <Chip
-                      key={cat.id}
-                      label={cat.label}
-                      size="small"
-                      onClick={() => setCategoryFilter(cat.id)}
-                      sx={{
-                        bgcolor: categoryFilter === cat.id ? cat.color : undefined,
-                        color: categoryFilter === cat.id ? '#fff' : undefined,
-                        borderColor: categoryFilter === cat.id ? cat.color : undefined,
-                        '&:hover': { opacity: 0.85 },
-                      }}
-                      variant={categoryFilter === cat.id ? 'filled' : 'outlined'}
-                    />
-                  ))}
-                </Box>
-
-                {/* Priority filter + sort */}
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 1 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Typography variant="caption" color="text.secondary">Priority:</Typography>
-                    {[{ id: null, label: 'All' }, ...TASK_PRIORITIES].map(p => (
-                      <Chip
-                        key={p.id ?? 'all'}
-                        label={p.label}
-                        size="small"
-                        onClick={() => setPriorityFilter(p.id)}
-                        variant={(p.id === null && !priorityFilter) || priorityFilter === p.id ? 'filled' : 'outlined'}
-                        color={(p.id === null && !priorityFilter) || priorityFilter === p.id ? 'primary' : 'default'}
-                        sx={{ height: 24, fontSize: '0.7rem' }}
-                      />
-                    ))}
-                  </Box>
-                  <FormControl size="small" sx={{ minWidth: 140 }}>
-                    <InputLabel>Sort by</InputLabel>
-                    <Select value={sortBy} label="Sort by" onChange={e => setSortBy(e.target.value)}>
-                      <MenuItem value="created_at">Newest First</MenuItem>
-                      <MenuItem value="due_at">Due Date</MenuItem>
-                      <MenuItem value="priority">Priority</MenuItem>
-                    </Select>
-                  </FormControl>
-                </Box>
-
-                {filteredTasks.length === 0 ? (
-                  <Box sx={{ textAlign: 'center', py: 4 }}>
-                    <TaskIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
-                    <Typography color="text.secondary">
-                      {taskFilter === 'completed' ? 'No completed tasks' : taskFilter === 'open' ? 'No open tasks' : 'No tasks yet'}
-                    </Typography>
-                  </Box>
-                ) : (
-                  <Box>
-                    {filteredTasks.map((task) => {
-                      const overdue = task.due_at && isTaskOverdue(task.due_at, task.status);
-                      const dueToday = task.due_at && isDateToday(new Date(task.due_at)) && task.status !== 'completed';
-                      const catColor = getCategoryColor(task.category || 'general');
-                      return (
-                        <Card
-                          key={task.id}
-                          data-testid={`card-task-${task.id}`}
-                          sx={{
-                            p: 2,
-                            mb: 2,
-                            borderLeft: 4,
-                            borderLeftColor: catColor,
-                            opacity: task.status === 'completed' ? 0.7 : 1,
-                            '&:hover': { boxShadow: 2 },
-                            transition: 'box-shadow 0.2s',
-                          }}
-                        >
-                          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                            <Box sx={{ flex: 1 }}>
-                              {/* Title row */}
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5, flexWrap: 'wrap' }}>
-                                <Typography
-                                  variant="subtitle1"
-                                  fontWeight={600}
-                                  sx={{ textDecoration: task.status === 'completed' ? 'line-through' : 'none' }}
-                                >
-                                  {task.title}
-                                </Typography>
-                                <Chip
-                                  label={getCategoryLabel(task.category || 'general')}
-                                  size="small"
-                                  sx={{ bgcolor: catColor, color: '#fff', height: 20, fontSize: '0.65rem' }}
-                                />
-                                <Chip
-                                  label={`${(TASK_PRIORITIES.find(p => p.id === task.priority) || TASK_PRIORITIES[1]).icon} ${(task.priority || 'medium').charAt(0).toUpperCase() + (task.priority || 'medium').slice(1)}`}
-                                  size="small"
-                                  variant="outlined"
-                                  sx={{
-                                    height: 20,
-                                    fontSize: '0.65rem',
-                                    borderColor: task.priority === 'high' ? '#EF4444' : task.priority === 'low' ? '#10B981' : '#F59E0B',
-                                    color: task.priority === 'high' ? '#EF4444' : task.priority === 'low' ? '#10B981' : '#F59E0B',
-                                  }}
-                                />
-                              </Box>
-
-                              {/* Description preview */}
-                              {task.description && (
-                                <Typography
-                                  variant="body2"
-                                  color="text.secondary"
-                                  sx={{
-                                    mb: 1,
-                                    display: '-webkit-box',
-                                    WebkitLineClamp: 2,
-                                    WebkitBoxOrient: 'vertical',
-                                    overflow: 'hidden',
-                                  }}
-                                >
-                                  {task.description}
-                                </Typography>
-                              )}
-
-                              {/* Meta row */}
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-                                {task.due_at && (
-                                  <Typography
-                                    variant="caption"
-                                    fontWeight={overdue || dueToday ? 600 : 400}
-                                    color={overdue ? 'error.main' : dueToday ? 'warning.main' : 'text.secondary'}
-                                  >
-                                    {overdue ? `⚠️ Overdue: ${formatDueDate(task.due_at)}` : dueToday ? '📅 Due today' : formatDueDate(task.due_at)}
-                                  </Typography>
-                                )}
-                                {task.source === 'email' && (
-                                  <Chip label="From email" size="small" variant="outlined" color="info" sx={{ height: 20, fontSize: '0.65rem' }} />
-                                )}
-                                {task.source === 'call' && (
-                                  <Chip label="From call" size="small" variant="outlined" color="success" sx={{ height: 20, fontSize: '0.65rem' }} />
-                                )}
-                                {task.source === 'manual' && (
-                                  <Chip label="Manual" size="small" variant="outlined" sx={{ height: 20, fontSize: '0.65rem' }} />
-                                )}
-                                <Typography variant="caption" color="text.disabled">
-                                  {new Date(task.created_at).toLocaleDateString('en-GB')}
-                                </Typography>
-                              </Box>
-                            </Box>
-
-                            {/* Action buttons */}
-                            <Box sx={{ display: 'flex', gap: 0.5, ml: 1, alignItems: 'center' }}>
-                              <Tooltip title={`Status: ${task.status} — click to cycle`}>
-                                <Chip
-                                  label={
-                                    task.status === 'completed' ? '✅ Done' :
-                                    task.status === 'pending' ? '⏳ Pending' :
-                                    '⬜ Open'
-                                  }
-                                  size="small"
-                                  onClick={() => cycleTaskStatus(task.id, task.status)}
-                                  sx={{
-                                    cursor: 'pointer',
-                                    fontWeight: 500,
-                                    bgcolor:
-                                      task.status === 'completed' ? '#dcfce7' :
-                                      task.status === 'pending' ? '#fef3c7' :
-                                      '#f3f4f6',
-                                    color:
-                                      task.status === 'completed' ? '#15803d' :
-                                      task.status === 'pending' ? '#92400e' :
-                                      '#4b5563',
-                                  }}
-                                />
-                              </Tooltip>
-                              {task.status !== 'completed' && (
-                                <Tooltip title="Mark complete">
-                                  <IconButton
-                                    size="small"
-                                    onClick={() => handleCompleteTask(task.id)}
-                                    color="success"
-                                    data-testid={`button-complete-task-${task.id}`}
-                                  >
-                                    <CheckCircleIcon fontSize="small" />
-                                  </IconButton>
-                                </Tooltip>
-                              )}
-                            </Box>
-                          </Box>
-                        </Card>
-                      );
-                    })}
-                  </Box>
-                )}
+                <TasksPanel ref={tasksPanelRef} businessId={business.id} onTaskCountChange={setOpenTaskCount} />
               </TabPanel>
 
               <TabPanel value={tabValue} index={1}>
@@ -2051,7 +1216,7 @@ export default function BusinessDashboard() {
                             startIcon={<TaskIcon />}
                             fullWidth
                             onClick={() => {
-                              setTaskDialogOpen(true);
+                              tasksPanelRef.current?.openCreateDialog();
                               setCallPanelOpen(false);
                             }}
                           >
@@ -2080,300 +1245,7 @@ export default function BusinessDashboard() {
               </TabPanel>
 
               <TabPanel value={tabValue} index={2}>
-                {/* Xero sync indicator */}
-                {xeroConnected && (
-                  <Box
-                    sx={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      mb: 2,
-                      px: 2,
-                      py: 1,
-                      bgcolor: 'grey.50',
-                      borderRadius: 2,
-                    }}
-                  >
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                      <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'success.main' }} />
-                      <Typography variant="body2" color="text.secondary">
-                        Synced with Xero
-                      </Typography>
-                      {xeroInvoiceSyncing && <CircularProgress size={14} sx={{ ml: 0.5 }} />}
-                    </Box>
-                    <Button
-                      size="small"
-                      onClick={syncXeroInvoices}
-                      disabled={xeroInvoiceSyncing}
-                    >
-                      Sync now
-                    </Button>
-                  </Box>
-                )}
-
-                {/* Summary Cards */}
-                <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap' }}>
-                  <Card variant="outlined" sx={{ p: 2, minWidth: 130 }}>
-                    <Typography variant="caption" color="text.secondary">Overdue</Typography>
-                    <Typography variant="h5" color="error">
-                      {invoices.filter(inv => new Date(inv.due_date) < new Date() && inv.status !== 'paid' && !inv.archived).length}
-                    </Typography>
-                  </Card>
-                  <Card variant="outlined" sx={{ p: 2, minWidth: 130 }}>
-                    <Typography variant="caption" color="text.secondary">Due in 7 days</Typography>
-                    <Typography variant="h5" color="warning.main">
-                      {invoices.filter(inv => {
-                        if (inv.status === 'paid' || inv.archived) return false;
-                        const dueDate = new Date(inv.due_date);
-                        const today = new Date();
-                        const daysDiff = Math.ceil((dueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-                        return daysDiff >= 0 && daysDiff <= 7;
-                      }).length}
-                    </Typography>
-                  </Card>
-                  <Card variant="outlined" sx={{ p: 2, minWidth: 130 }}>
-                    <Typography variant="caption" color="text.secondary">Unpaid Total</Typography>
-                    <Typography variant="h5">
-                      {invoices
-                        .filter(inv => inv.status !== 'paid' && !inv.archived)
-                        .reduce((sum, inv) => sum + inv.amount, 0)
-                        .toLocaleString('en-GB', { style: 'currency', currency: 'GBP' })}
-                    </Typography>
-                  </Card>
-                </Box>
-
-                {/* Search and Filter Toolbar */}
-                <Box sx={{ mb: 3 }}>
-                  {/* Search Bar */}
-                  <TextField
-                    placeholder="Search by customer name, invoice number, or email..."
-                    value={invoiceSearch}
-                    onChange={(e) => setInvoiceSearch(e.target.value)}
-                    size="small"
-                    fullWidth
-                    sx={{ mb: 2 }}
-                    InputProps={{
-                      startAdornment: (
-                        <InputAdornment position="start">
-                          <SearchIcon color="action" />
-                        </InputAdornment>
-                      ),
-                      endAdornment: invoiceSearch && (
-                        <InputAdornment position="end">
-                          <IconButton size="small" onClick={() => setInvoiceSearch('')}>
-                            <ClearIcon fontSize="small" />
-                          </IconButton>
-                        </InputAdornment>
-                      ),
-                    }}
-                  />
-
-                  {/* Filters Row */}
-                  <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
-                    {/* Status Filter Chips */}
-                    <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                      {['all', 'unpaid', 'paid', 'partially_paid', 'cancelled'].map((status) => (
-                        <Chip
-                          key={status}
-                          label={status === 'all' ? 'All' : status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                          onClick={() => setInvoiceStatusFilter(status === 'all' ? '' : status)}
-                          color={invoiceStatusFilter === status || (status === 'all' && !invoiceStatusFilter) ? 'primary' : 'default'}
-                          variant={invoiceStatusFilter === status || (status === 'all' && !invoiceStatusFilter) ? 'filled' : 'outlined'}
-                          size="small"
-                        />
-                      ))}
-                    </Box>
-
-                    {/* Show Archived Toggle */}
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          size="small"
-                          checked={showArchivedInvoices}
-                          onChange={(e) => setShowArchivedInvoices(e.target.checked)}
-                        />
-                      }
-                      label="Show archived"
-                      sx={{ ml: 'auto' }}
-                    />
-
-                    {/* Sort Dropdown */}
-                    <FormControl size="small" sx={{ minWidth: 140 }}>
-                      <InputLabel>Sort by</InputLabel>
-                      <Select
-                        value={invoiceSortBy}
-                        label="Sort by"
-                        onChange={(e) => setInvoiceSortBy(e.target.value)}
-                      >
-                        <MenuItem value="due_date">Due Date</MenuItem>
-                        <MenuItem value="amount">Amount</MenuItem>
-                        <MenuItem value="customer_name">Customer Name</MenuItem>
-                        <MenuItem value="created_at">Date Created</MenuItem>
-                        <MenuItem value="status">Status</MenuItem>
-                      </Select>
-                    </FormControl>
-
-                    {/* Sort Order Toggle */}
-                    <IconButton
-                      onClick={() => setInvoiceSortOrder(invoiceSortOrder === 'asc' ? 'desc' : 'asc')}
-                      title={invoiceSortOrder === 'asc' ? 'Ascending' : 'Descending'}
-                      size="small"
-                    >
-                      {invoiceSortOrder === 'asc' ? <ArrowUpwardIcon /> : <ArrowDownwardIcon />}
-                    </IconButton>
-                  </Box>
-                </Box>
-
-                {/* Bulk Actions Bar */}
-                <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, alignItems: 'center', mb: 2 }}>
-                  <FormControl size="small" sx={{ minWidth: 180 }}>
-                    <InputLabel>Chase Stage</InputLabel>
-                    <Select
-                      value={bulkChaseStage}
-                      label="Chase Stage"
-                      onChange={(e) => setBulkChaseStage(Number(e.target.value))}
-                    >
-                      {CHASE_STAGES.map((stage) => (
-                        <MenuItem key={stage.stage} value={stage.stage}>
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            {stage.stage >= 4 && <GavelIcon fontSize="small" color="error" />}
-                            {stage.stage === 3 && <WarningIcon fontSize="small" color="warning" />}
-                            <span>{stage.label}: {stage.description}</span>
-                          </Box>
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                  <Button
-                    variant="outlined"
-                    startIcon={<SendIcon />}
-                    disabled={selectedInvoiceIds.length === 0}
-                    onClick={handleBulkPreview}
-                    color={bulkChaseStage >= 3 ? 'warning' : 'primary'}
-                  >
-                    Preview ({selectedInvoiceIds.length})
-                  </Button>
-                  <input
-                    accept=".csv"
-                    style={{ display: 'none' }}
-                    id="csv-upload-input"
-                    type="file"
-                    onChange={handleCsvUpload}
-                    disabled={csvUploading}
-                  />
-                  <label htmlFor="csv-upload-input">
-                    <Button
-                      variant="contained"
-                      component="span"
-                      startIcon={csvUploading ? <CircularProgress size={20} /> : <CloudUploadIcon />}
-                      disabled={csvUploading}
-                    >
-                      {csvUploading ? 'Uploading...' : 'Upload CSV'}
-                    </Button>
-                  </label>
-                </Box>
-
-                {invoicesLoading ? (
-                  <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
-                    <CircularProgress />
-                  </Box>
-                ) : invoices.length === 0 ? (
-                  <Box sx={{ textAlign: 'center', py: 4 }}>
-                    <ReceiptIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
-                    <Typography color="text.secondary">No invoices found</Typography>
-                    <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                      Upload a CSV file to import invoices
-                    </Typography>
-                  </Box>
-                ) : (
-                  <TableContainer>
-                    <Table>
-                      <TableHead>
-                        <TableRow>
-                          <TableCell padding="checkbox">
-                            <Checkbox
-                              indeterminate={selectedInvoiceIds.length > 0 && selectedInvoiceIds.length < invoices.length}
-                              checked={invoices.length > 0 && selectedInvoiceIds.length === invoices.length}
-                              onChange={toggleSelectAllInvoices}
-                            />
-                          </TableCell>
-                          <TableCell>Invoice #</TableCell>
-                          <TableCell>Customer</TableCell>
-                          <TableCell>Due Date</TableCell>
-                          <TableCell align="right">Amount</TableCell>
-                          <TableCell>Status</TableCell>
-                          <TableCell>Chase Stage</TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {invoices.map((invoice) => {
-                          const isOverdue = invoice.due_date && new Date(invoice.due_date) < new Date() && invoice.status === 'unpaid';
-                          return (
-                          <TableRow
-                            key={invoice.id}
-                            hover
-                            onClick={() => handleInvoiceClick(invoice)}
-                            sx={{ 
-                              cursor: 'pointer',
-                              opacity: invoice.archived ? 0.6 : 1,
-                              backgroundColor: invoice.status === 'paid' ? 'rgba(46, 125, 50, 0.04)' : 'inherit'
-                            }}
-                          >
-                            <TableCell padding="checkbox" onClick={(e) => e.stopPropagation()}>
-                              <Checkbox
-                                checked={selectedInvoiceIds.includes(invoice.id)}
-                                onChange={() => toggleInvoiceSelection(invoice.id)}
-                              />
-                            </TableCell>
-                            <TableCell>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                                <Typography fontWeight={500}>{invoice.invoice_number}</Typography>
-                                {invoice.external_source === 'xero' && (
-                                  <Chip label="Xero" size="small" sx={{ height: 18, fontSize: '0.65rem', bgcolor: 'rgba(25, 118, 210, 0.08)', color: 'primary.main' }} />
-                                )}
-                                {invoice.archived && (
-                                  <Chip label="Archived" size="small" sx={{ ml: 0.5 }} variant="outlined" />
-                                )}
-                              </Box>
-                            </TableCell>
-                            <TableCell>
-                              <Typography>{invoice.customer_name}</Typography>
-                              {invoice.customer_email && (
-                                <Typography variant="caption" color="text.secondary">
-                                  {invoice.customer_email}
-                                </Typography>
-                              )}
-                            </TableCell>
-                            <TableCell>
-                              <Typography color={isOverdue ? 'error.main' : 'text.primary'}>
-                                {new Date(invoice.due_date).toLocaleDateString('en-GB')}
-                              </Typography>
-                            </TableCell>
-                            <TableCell align="right">
-                              <Typography fontWeight={600}>
-                                {invoice.amount.toLocaleString('en-GB', { style: 'currency', currency: invoice.currency || 'GBP' })}
-                              </Typography>
-                            </TableCell>
-                            <TableCell>
-                              <Chip
-                                label={invoice.status || 'unpaid'}
-                                size="small"
-                                color={
-                                  invoice.status === 'paid' ? 'success' : 
-                                  invoice.status === 'cancelled' ? 'default' :
-                                  isOverdue ? 'error' : 'warning'
-                                }
-                              />
-                            </TableCell>
-                            <TableCell>
-                              <ChaseStageChip stage={invoice.chase_stage} />
-                            </TableCell>
-                          </TableRow>
-                        );})}
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
-                )}
+                {mountedTabs.has(2) && business && <InvoicesPanel businessId={business.id} />}
               </TabPanel>
 
               <TabPanel value={tabValue} index={3}>
@@ -2391,469 +1263,13 @@ export default function BusinessDashboard() {
         )}
       </Container>
 
-      {/* Invoice Detail Drawer */}
-      <Drawer
-        anchor="right"
-        open={invoiceDrawerOpen}
-        onClose={() => {
-          setInvoiceDrawerOpen(false);
-          setSelectedInvoice(null);
-          setChaseDraft(null);
-        }}
-        PaperProps={{ sx: { width: { xs: '100%', sm: 500 } } }}
-      >
-        {selectedInvoice && (() => {
-          const isOverdue = selectedInvoice.due_date && new Date(selectedInvoice.due_date) < new Date() && selectedInvoice.status === 'unpaid';
-          const isPaid = selectedInvoice.status === 'paid';
-          const isCancelled = selectedInvoice.status === 'cancelled';
-          
-          return (
-          <Box sx={{ p: 3 }}>
-            {/* Header */}
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-              <Typography variant="h6" fontWeight={600}>
-                Invoice {selectedInvoice.invoice_number}
-              </Typography>
-              <IconButton onClick={() => setInvoiceDrawerOpen(false)}>
-                <CloseIcon />
-              </IconButton>
-            </Box>
-
-            {/* Status Badge */}
-            <Box sx={{ mb: 3 }}>
-              <Chip
-                label={selectedInvoice.status?.toUpperCase() || 'UNPAID'}
-                color={
-                  isPaid ? 'success' :
-                  isCancelled ? 'default' :
-                  isOverdue ? 'error' : 'warning'
-                }
-                sx={{ fontWeight: 600 }}
-              />
-              {isOverdue && !isPaid && !isCancelled && (
-                <Typography variant="caption" color="error" sx={{ ml: 1 }}>
-                  Overdue
-                </Typography>
-              )}
-              {selectedInvoice.archived && (
-                <Chip label="Archived" size="small" sx={{ ml: 1 }} variant="outlined" />
-              )}
-            </Box>
-
-            {/* Customer Info */}
-            <Box sx={{ mb: 3 }}>
-              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                Customer
-              </Typography>
-              <Typography variant="body1" fontWeight={500}>
-                {selectedInvoice.customer_name}
-              </Typography>
-              {selectedInvoice.customer_email && (
-                <Typography variant="body2" color="text.secondary">
-                  {selectedInvoice.customer_email}
-                </Typography>
-              )}
-            </Box>
-
-            {/* Amount */}
-            <Box sx={{ mb: 3 }}>
-              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                Amount
-              </Typography>
-              <Typography variant="h4" fontWeight={600} color={isPaid ? 'success.main' : 'text.primary'}>
-                {selectedInvoice.amount.toLocaleString('en-GB', { style: 'currency', currency: selectedInvoice.currency || 'GBP' })}
-              </Typography>
-              {selectedInvoice.paid_amount && selectedInvoice.paid_amount < selectedInvoice.amount && (
-                <Typography variant="body2" color="success.main">
-                  {selectedInvoice.paid_amount.toLocaleString('en-GB', { style: 'currency', currency: selectedInvoice.currency || 'GBP' })} paid
-                </Typography>
-              )}
-            </Box>
-
-            {/* Due Date */}
-            <Box sx={{ mb: 3 }}>
-              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                Due Date
-              </Typography>
-              <Typography variant="body1" color={isOverdue ? 'error.main' : 'text.primary'}>
-                {new Date(selectedInvoice.due_date).toLocaleDateString('en-GB', {
-                  day: 'numeric',
-                  month: 'long',
-                  year: 'numeric'
-                })}
-              </Typography>
-            </Box>
-
-            {/* Paid Date (if paid) */}
-            {isPaid && selectedInvoice.paid_at && (
-              <Box sx={{ mb: 3 }}>
-                <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                  Paid On
-                </Typography>
-                <Typography variant="body1" color="success.main">
-                  {new Date(selectedInvoice.paid_at).toLocaleDateString('en-GB', {
-                    day: 'numeric',
-                    month: 'long',
-                    year: 'numeric'
-                  })}
-                </Typography>
-              </Box>
-            )}
-
-            {/* Chase Stage */}
-            {!isPaid && !isCancelled && selectedInvoice.chase_stage > 0 && (
-              <Box sx={{ mb: 3 }}>
-                <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                  Chase Status
-                </Typography>
-                <Chip
-                  label={`Stage ${selectedInvoice.chase_stage}`}
-                  size="small"
-                  color={selectedInvoice.chase_stage >= 3 ? 'warning' : 'primary'}
-                />
-                {selectedInvoice.last_chased_at && (
-                  <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-                    Last chased: {new Date(selectedInvoice.last_chased_at).toLocaleDateString('en-GB')}
-                  </Typography>
-                )}
-              </Box>
-            )}
-
-            <Divider sx={{ my: 3 }} />
-
-            {/* Primary Action: Mark as Paid / Mark as Unpaid */}
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              {!isPaid && !isCancelled && (
-                <Button
-                  variant="contained"
-                  color="success"
-                  size="large"
-                  fullWidth
-                  startIcon={invoiceActionLoading === 'paid' ? <CircularProgress size={20} color="inherit" /> : <CheckCircleIcon />}
-                  onClick={() => handleMarkAsPaid(selectedInvoice.id)}
-                  disabled={invoiceActionLoading !== null}
-                >
-                  Mark as Paid
-                </Button>
-              )}
-
-              {isPaid && (
-                <Button
-                  variant="outlined"
-                  color="warning"
-                  fullWidth
-                  startIcon={invoiceActionLoading === 'unpaid' ? <CircularProgress size={20} /> : <UndoIcon />}
-                  onClick={() => handleMarkAsUnpaid(selectedInvoice.id)}
-                  disabled={invoiceActionLoading !== null}
-                >
-                  Mark as Unpaid
-                </Button>
-              )}
-
-              {/* Chase Email Section (only for unpaid) */}
-              {!isPaid && !isCancelled && (
-                <>
-                  <Divider sx={{ my: 1 }} />
-                  <Typography variant="subtitle2" color="text.secondary">Send Chase Email</Typography>
-                  
-                  <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-                    <FormControl size="small" sx={{ flex: 1, minWidth: 180 }}>
-                      <InputLabel id="invoice-stage-label">Chase Stage</InputLabel>
-                      <Select
-                        labelId="invoice-stage-label"
-                        label="Chase Stage"
-                        value={invoiceStage}
-                        onChange={(e) => setInvoiceStage(Number(e.target.value))}
-                      >
-                        {CHASE_STAGES.map((stage) => (
-                          <MenuItem key={stage.stage} value={stage.stage}>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                              {stage.stage >= 4 && <GavelIcon fontSize="small" color="error" />}
-                              {stage.stage === 3 && <WarningIcon fontSize="small" color="warning" />}
-                              <span>{stage.label}: {stage.description}</span>
-                            </Box>
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={dryRunSend}
-                          onChange={(e) => setDryRunSend(e.target.checked)}
-                          size="small"
-                        />
-                      }
-                      label="Dry run"
-                    />
-                  </Box>
-                  
-                  {invoiceStage >= 3 && (
-                    <Alert severity={invoiceStage >= 4 ? 'error' : 'warning'} sx={{ py: 0.5 }}>
-                      {invoiceStage >= 4 
-                        ? 'This will send a formal legal action notice.'
-                        : 'This will send a final warning before potential legal action.'
-                      }
-                    </Alert>
-                  )}
-
-                  <Box sx={{ display: 'flex', gap: 1 }}>
-                    <Button
-                      variant="outlined"
-                      startIcon={<PreviewIcon />}
-                      onClick={handleGetChaseDraft}
-                      sx={{ flex: 1 }}
-                    >
-                      Preview
-                    </Button>
-                    <Button
-                      variant="contained"
-                      startIcon={<SendIcon />}
-                      onClick={handleSendChaseEmail}
-                      sx={{ flex: 1 }}
-                    >
-                      Send
-                    </Button>
-                  </Box>
-                </>
-              )}
-
-              {/* Secondary Actions */}
-              <Divider sx={{ my: 1 }} />
-              <Box sx={{ display: 'flex', gap: 1 }}>
-                <Button
-                  variant="outlined"
-                  color="inherit"
-                  fullWidth
-                  startIcon={invoiceActionLoading === 'archive' ? <CircularProgress size={20} /> : <ArchiveIcon />}
-                  onClick={() => handleArchiveInvoice(selectedInvoice.id)}
-                  disabled={invoiceActionLoading !== null}
-                >
-                  {selectedInvoice.archived ? 'Unarchive' : 'Archive'}
-                </Button>
-
-                {!isCancelled && !isPaid && (
-                  <Button
-                    variant="outlined"
-                    color="warning"
-                    fullWidth
-                    startIcon={<CancelIcon />}
-                    onClick={() => setConfirmDialog({ open: true, action: 'cancel', invoiceId: selectedInvoice.id })}
-                    disabled={invoiceActionLoading !== null}
-                  >
-                    Cancel
-                  </Button>
-                )}
-              </Box>
-
-              {/* Delete (danger zone) */}
-              <Button
-                variant="text"
-                color="error"
-                size="small"
-                startIcon={<DeleteIcon />}
-                onClick={() => setConfirmDialog({ open: true, action: 'delete', invoiceId: selectedInvoice.id })}
-                disabled={invoiceActionLoading !== null}
-                sx={{ mt: 2 }}
-              >
-                Delete Invoice
-              </Button>
-            </Box>
-
-            {chaseDraft && (
-              <Box sx={{ mt: 3, p: 2, bgcolor: 'grey.100', borderRadius: 1 }}>
-                <Typography variant="subtitle2" gutterBottom>Email Draft:</Typography>
-                <Typography variant="body2" fontWeight="bold" gutterBottom>{chaseDraft.subject}</Typography>
-                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{chaseDraft.body}</Typography>
-              </Box>
-            )}
-          </Box>
-        );})()}
-      </Drawer>
-
-      {/* Bulk Send Preview Dialog */}
-      <Dialog open={bulkPreviewOpen} onClose={() => setBulkPreviewOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle>
-          Review bulk send - {CHASE_STAGES.find(s => s.stage === bulkChaseStage)?.description || `Stage ${bulkChaseStage}`}
-          {bulkChaseStage >= 3 && (
-            <Chip 
-              label={bulkChaseStage >= 4 ? 'Legal Action' : 'Final Warning'} 
-              color={bulkChaseStage >= 4 ? 'error' : 'warning'} 
-              size="small" 
-              sx={{ ml: 1 }}
-            />
-          )}
-        </DialogTitle>
-        <DialogContent>
-          {bulkPreview.length === 0 ? (
-            <Typography color="text.secondary">No preview available.</Typography>
-          ) : (
-            <List>
-              {bulkPreview.map((preview) => (
-                <ListItem key={preview.invoice_id} alignItems="flex-start">
-                  <ListItemText
-                    primary={`Invoice ${preview.invoice_id}`}
-                    secondary={
-                      <>
-                        <Typography variant="body2" fontWeight="bold">{preview.subject}</Typography>
-                        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
-                          {preview.body}
-                        </Typography>
-                        {preview.error_message && (
-                          <Typography variant="caption" color="error">{preview.error_message}</Typography>
-                        )}
-                      </>
-                    }
-                  />
-                </ListItem>
-              ))}
-            </List>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setBulkPreviewOpen(false)}>Cancel</Button>
-          <Button
-            variant="contained"
-            startIcon={<SendIcon />}
-            onClick={handleBulkSend}
-            disabled={bulkPreview.length === 0}
-          >
-            Send now
-          </Button>
-        </DialogActions>
-      </Dialog>
-
       {/* Success Snackbar */}
       <Snackbar
         open={!!successMessage}
         autoHideDuration={6000}
-        onClose={() => setSuccessMessage('')}
+        onClose={() => setSuccessMessage("")}
         message={successMessage}
       />
-
-      <Dialog open={taskDialogOpen} onClose={() => setTaskDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Create Task</DialogTitle>
-        <DialogContent>
-          <TextField
-            autoFocus
-            margin="dense"
-            label="Task Title"
-            fullWidth
-            variant="outlined"
-            value={taskTitle}
-            onChange={(e) => setTaskTitle(e.target.value)}
-            sx={{ mb: 2, mt: 1 }}
-            data-testid="input-task-title"
-          />
-
-          <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: 'block' }}>
-            Category
-          </Typography>
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2 }}>
-            {TASK_CATEGORIES.map(cat => (
-              <Chip
-                key={cat.id}
-                label={cat.label}
-                size="small"
-                onClick={() => setTaskCategory(cat.id)}
-                sx={{
-                  bgcolor: taskCategory === cat.id ? cat.color : undefined,
-                  color: taskCategory === cat.id ? '#fff' : undefined,
-                  borderColor: taskCategory === cat.id ? cat.color : undefined,
-                  '&:hover': { opacity: 0.85 },
-                }}
-                variant={taskCategory === cat.id ? 'filled' : 'outlined'}
-              />
-            ))}
-          </Box>
-
-          <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
-            <FormControl size="small" sx={{ flex: 1 }}>
-              <InputLabel>Priority</InputLabel>
-              <Select
-                value={taskPriority}
-                label="Priority"
-                onChange={(e) => setTaskPriority(e.target.value)}
-              >
-                {TASK_PRIORITIES.map(p => (
-                  <MenuItem key={p.id} value={p.id}>{p.icon} {p.label}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            <TextField
-              label="Due Date (optional)"
-              type="datetime-local"
-              size="small"
-              sx={{ flex: 1 }}
-              value={taskDueAt}
-              onChange={(e) => setTaskDueAt(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-              data-testid="input-task-due-date"
-            />
-          </Box>
-
-          <TextField
-            margin="dense"
-            label="Description (optional)"
-            fullWidth
-            multiline
-            rows={3}
-            variant="outlined"
-            value={taskDescription}
-            onChange={(e) => setTaskDescription(e.target.value)}
-            data-testid="input-task-description"
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setTaskDialogOpen(false)}>Cancel</Button>
-          <Button
-            onClick={handleCreateTask}
-            variant="contained"
-            disabled={savingTask || !taskTitle.trim()}
-            data-testid="button-save-task"
-          >
-            {savingTask ? <CircularProgress size={20} /> : 'Create'}
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Invoice Delete/Cancel Confirmation Dialog */}
-      <Dialog
-        open={confirmDialog.open}
-        onClose={() => setConfirmDialog({ open: false, action: null, invoiceId: null })}
-      >
-        <DialogTitle>
-          {confirmDialog.action === 'delete' ? 'Delete Invoice?' : 'Cancel Invoice?'}
-        </DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            {confirmDialog.action === 'delete'
-              ? 'This will permanently delete this invoice. This action cannot be undone.'
-              : 'This will mark the invoice as cancelled. You can still view it in the cancelled filter.'}
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setConfirmDialog({ open: false, action: null, invoiceId: null })}>
-            Go Back
-          </Button>
-          <Button
-            onClick={() => {
-              if (confirmDialog.invoiceId) {
-                if (confirmDialog.action === 'delete') {
-                  handleDeleteInvoice(confirmDialog.invoiceId);
-                } else if (confirmDialog.action === 'cancel') {
-                  handleCancelInvoice(confirmDialog.invoiceId);
-                }
-              }
-            }}
-            color="error"
-            variant="contained"
-            disabled={invoiceActionLoading !== null}
-          >
-            {invoiceActionLoading ? <CircularProgress size={20} /> : confirmDialog.action === 'delete' ? 'Delete' : 'Cancel Invoice'}
-          </Button>
-        </DialogActions>
-      </Dialog>
 
       {import.meta.env.DEV && <DebugPanel />}
 

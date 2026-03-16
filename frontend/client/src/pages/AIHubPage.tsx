@@ -1,0 +1,39 @@
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import ReceptionistTab from '@/components/ReceptionistTab';
+import CeoBriefingTab from '@/components/CeoBriefingTab';
+import { useMe } from '@/hooks/useMe';
+
+export default function AIHubPage() {
+  const { data: me } = useMe();
+  const navigate = useNavigate();
+  const [subTab, setSubTab] = useState<'receptionist' | 'briefing'>('receptionist');
+  if (!me?.id) return null;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+        <button
+          onClick={() => setSubTab('receptionist')}
+          className={`glass-panel sub-tab-btn ${subTab === 'receptionist' ? 'active-sub-tab' : ''}`}
+        >
+          Receptionist
+        </button>
+        <button
+          onClick={() => setSubTab('briefing')}
+          className={`glass-panel sub-tab-btn ${subTab === 'briefing' ? 'active-sub-tab' : ''}`}
+        >
+          CEO Briefing
+        </button>
+      </div>
+
+      {subTab === 'receptionist' && (
+        <ReceptionistTab
+          businessId={me.id}
+          onViewCalls={() => navigate('/app/comms')}
+        />
+      )}
+      {subTab === 'briefing' && <CeoBriefingTab />}
+    </div>
+  );
+}

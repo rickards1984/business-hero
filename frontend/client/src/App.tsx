@@ -8,7 +8,6 @@ import { AuthProvider } from '@/contexts/AuthContext';
 import Login from '@/pages/Login';
 import AdminDashboard from '@/pages/AdminDashboard';
 import AdminBusinessDetail from '@/pages/AdminBusinessDetail';
-import BusinessDashboard from '@/pages/BusinessDashboard';
 import ConfirmEmail from '@/pages/ConfirmEmail';
 import BrandingSettings from '@/pages/BrandingSettings';
 import EmailSettings from '@/pages/EmailSettings';
@@ -24,6 +23,11 @@ import AdminOnboarding from '@/pages/AdminOnboarding';
 import AdminOnboardingWizard from '@/pages/AdminOnboardingWizard';
 import BillingSettings from '@/pages/BillingSettings';
 import Accounting from '@/pages/Accounting';
+import AppShell from '@/components/AppShell';
+import DashboardPage from '@/pages/DashboardPage';
+import CommsPage from '@/pages/CommsPage';
+import FinancePage from '@/pages/FinancePage';
+import AIHubPage from '@/pages/AIHubPage';
 
 const SHARED_TYPOGRAPHY = {
   fontFamily: "'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
@@ -299,18 +303,24 @@ function App() {
                 <Route path="/admin/onboarding" element={<AdminOnboarding />} />
                 <Route path="/admin/onboarding/new" element={<AdminOnboardingWizard />} />
                 <Route path="/admin/onboarding/:businessId" element={<AdminOnboardingWizard />} />
-                <Route path="/app" element={<BusinessDashboard />} />
-                <Route path="/app/settings/branding" element={<BrandingSettings />} />
-                <Route path="/app/settings/billing" element={<BillingSettings />} />
-                <Route path="/app/settings/email" element={<EmailSettings />} />
-                <Route path="/app/settings/awaz" element={<AwazSettings />} />
-                <Route path="/app/assistant/chat" element={<AssistantChat />} />
-                <Route path="/app/help" element={<HelpSupport />} />
-                <Route path="/app/inbox" element={<Inbox />} />
-                <Route path="/app/briefings" element={<Briefings />} />
-                <Route path="/app/email/outbox" element={<EmailOutbox />} />
-                <Route path="/app/accounting" element={<Accounting />} />
-                <Route path="/dashboard" element={<Navigate to="/app" replace />} />
+                <Route path="/app" element={<AppShell />}>
+                  <Route index element={<Navigate to="/app/dashboard" replace />} />
+                  <Route path="dashboard" element={<DashboardPage />} />
+                  <Route path="comms" element={<CommsPage />} />
+                  <Route path="finance" element={<FinancePage />} />
+                  <Route path="ai" element={<AIHubPage />} />
+                  <Route path="settings/branding" element={<BrandingSettings />} />
+                  <Route path="settings/billing" element={<BillingSettings />} />
+                  <Route path="settings/email" element={<EmailSettings />} />
+                  <Route path="settings/awaz" element={<AwazSettings />} />
+                  <Route path="assistant/chat" element={<AssistantChat />} />
+                  <Route path="help" element={<HelpSupport />} />
+                  <Route path="inbox" element={<Inbox />} />
+                  <Route path="briefings" element={<Briefings />} />
+                  <Route path="email/outbox" element={<EmailOutbox />} />
+                  <Route path="accounting" element={<Accounting />} />
+                </Route>
+                <Route path="/dashboard" element={<Navigate to="/app/dashboard" replace />} />
                 <Route path="/settings/email" element={<Navigate to="/app/settings/email" replace />} />
                 <Route path="/inbox" element={<Navigate to="/app/inbox" replace />} />
                 <Route path="/briefings" element={<Navigate to="/app/briefings" replace />} />
