@@ -2,8 +2,9 @@
 WhatsApp CEO Briefing API — config, manual triggers, message history.
 """
 
+import json
 import logging
-from datetime import datetime
+from datetime import date as date_cls, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -214,13 +215,45 @@ async def trigger_daily_pulse(
     business_name = biz_row[0] if biz_row else "Your Business"
 
     data = await gather_business_data(session, business_id, period="day")
-    pulse = await generate_daily_pulse(
-        business_name, config_row[1] or "", data
+
+    calls = data.get("calls", {})
+    emails = data.get("emails", {})
+    tasks = data.get("tasks", {})
+    financial = data.get("financial", {})
+    invoices_data = data.get("invoices", {})
+
+    calls_summary = (
+        f"{calls.get('total', 0)} calls yesterday. "
+        f"{calls.get('handled_by_ai', 0)} handled by AI receptionist, "
+        f"{calls.get('transferred', 0)} transferred."
+    )
+    emails_summary = (
+        f"{emails.get('total_received', 0)} new emails. "
+        f"{emails.get('action_required', 0)} action required, "
+        f"{emails.get('awaiting_reply', 0)} awaiting reply."
+    )
+    tasks_summary = (
+        f"{tasks.get('open_total', 0)} open tasks. "
+        f"{tasks.get('open_high_priority', 0)} high priority, "
+        f"{tasks.get('pending', 0)} pending."
+    )
+    snapshot = (
+        f"Revenue: £{financial.get('revenue', 0):,.2f}. "
+        f"Expenses: £{financial.get('expenses', 0):,.2f}. "
+        f"Net: £{financial.get('net_profit', 0):,.2f}. "
+        f"{invoices_data.get('overdue_count', 0)} overdue invoices "
+        f"(£{invoices_data.get('overdue_total', 0):,.2f})."
     )
 
     sid = await send_whatsapp_message(
         to_number=config_row[0],
-        body=pulse,
+        body=json.dumps({
+            "1": business_name,
+            "2": calls_summary[:500],
+            "3": emails_summary[:500],
+            "4": tasks_summary[:500],
+            "5": snapshot[:500],
+        }),
         business_id=business_id,
         message_type="daily_pulse",
     )
@@ -257,16 +290,56 @@ async def trigger_weekly_briefing(
     data = await gather_business_data(
         session, business_id, period="week", include_previous=True
     )
-    briefing, actions, analysis = await generate_weekly_briefing(
-        business_name,
-        config_row[1] or "",
-        data,
-        config_row[2] or "standard",
+
+    week_ending = date_cls.today().strftime("%-d %B %Y")
+
+    calls = data.get("calls", {})
+    emails = data.get("emails", {})
+    tasks = data.get("tasks", {})
+    financial = data.get("financial", {})
+    invoices_data = data.get("invoices", {})
+
+    calls_summary = (
+        f"{calls.get('total', 0)} calls this week. "
+        f"{calls.get('handled_by_ai', 0)} handled by AI receptionist"
+        f" ({calls.get('ai_resolution_rate', 0)}% resolution rate), "
+        f"{calls.get('transferred', 0)} transferred, "
+        f"{calls.get('voicemail', 0)} voicemail."
+    )
+    emails_summary = (
+        f"{emails.get('total_received', 0)} received. "
+        f"{emails.get('action_required', 0)} action required, "
+        f"{emails.get('awaiting_reply', 0)} awaiting reply, "
+        f"{emails.get('newsletters', 0)} newsletters filtered."
+    )
+    tasks_summary = (
+        f"{tasks.get('created_this_period', 0)} created, "
+        f"{tasks.get('completed_this_period', 0)} completed, "
+        f"{tasks.get('open_high_priority', 0)} high priority open."
+    )
+    financial_summary = (
+        f"Revenue: £{financial.get('revenue', 0):,.2f}. "
+        f"Expenses: £{financial.get('expenses', 0):,.2f}. "
+        f"Net profit: £{financial.get('net_profit', 0):,.2f}."
+    )
+    invoices_summary = (
+        f"{invoices_data.get('unpaid_count', 0)} unpaid "
+        f"(£{invoices_data.get('unpaid_total', 0):,.2f}). "
+        f"{invoices_data.get('overdue_count', 0)} overdue "
+        f"(£{invoices_data.get('overdue_total', 0):,.2f})."
     )
 
     sid = await send_whatsapp_message(
         to_number=config_row[0],
-        body=briefing,
+        body=json.dumps({
+            "1": business_name,
+            "2": week_ending,
+            "3": calls_summary[:500],
+            "4": emails_summary[:500],
+            "5": tasks_summary[:500],
+            "6": financial_summary[:500],
+            "7": invoices_summary[:500],
+        }),
         business_id=business_id,
         message_type="weekly_briefing",
     )
@@ -274,7 +347,6 @@ async def trigger_weekly_briefing(
     return {
         "sent": bool(sid),
         "message_sid": sid,
-        "briefing_preview": briefing[:500] if briefing else "",
     }
 
 
