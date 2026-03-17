@@ -279,10 +279,89 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
     }
   }, []);
 
+  const buildProviderInsights = useCallback(() => {
+    const pnl = financialSummary?.profit_and_loss;
+    const income = pnl?.income ?? 0;
+    const expenses = pnl?.expenses ?? 0;
+    const net = pnl?.net_profit ?? (income - expenses);
+
+    const providerLabel = accountingProvider === 'freeagent' ? 'FreeAgent'
+      : accountingProvider === 'quickbooks' ? 'QuickBooks' : 'Xero';
+
+    const fmt = (v: number) => `£${Math.abs(v).toLocaleString('en-GB', { minimumFractionDigits: 2 })}`;
+    const profitEmoji = net > 0 ? '\u{1F4C8}' : net < 0 ? '\u{1F4C9}' : '\u27A1\uFE0F';
+
+    let summaryText: string;
+    if (net > 0) {
+      summaryText = `Good news! You're in the green this ${period}. ${profitEmoji} With ${fmt(income)} coming in and ${fmt(expenses)} going out, you're looking at a net profit of ${fmt(net)}. `;
+    } else if (net < 0) {
+      summaryText = `Let's have a look at the numbers. ${profitEmoji} You've brought in ${fmt(income)} this ${period}, but expenses of ${fmt(expenses)} mean you're running at a loss of ${fmt(Math.abs(net))}. `;
+    } else {
+      summaryText = `You're breaking even this ${period}. ${profitEmoji} Income of ${fmt(income)} matches your expenses exactly. `;
+    }
+    summaryText += `These figures are synced live from ${providerLabel}.`;
+
+    const overview = [
+      `Total Income: ${fmt(income)}`,
+      `Total Expenses: ${fmt(expenses)}`,
+      `Net ${net >= 0 ? 'Profit' : 'Loss'}: ${fmt(Math.abs(net))}`,
+    ];
+
+    if (financialSummary?.total_bank_balance != null) {
+      overview.push(`Bank Balance: ${fmt(financialSummary.total_bank_balance)}`);
+    }
+
+    const invoiceInfo = financialSummary?.invoices;
+    const spending: string[] = [];
+    if (invoiceInfo && invoiceInfo.overdue_count > 0) {
+      spending.push(`${invoiceInfo.overdue_count} overdue invoice${invoiceInfo.overdue_count > 1 ? 's' : ''} totalling ${fmt(invoiceInfo.overdue_amount)}`);
+    }
+    if (invoiceInfo && invoiceInfo.due_count > 0) {
+      spending.push(`${invoiceInfo.due_count} invoice${invoiceInfo.due_count > 1 ? 's' : ''} due, worth ${fmt(invoiceInfo.due_amount)}`);
+    }
+    if (invoiceInfo && invoiceInfo.total_outstanding > 0) {
+      spending.push(`Total outstanding: ${fmt(invoiceInfo.total_outstanding)}`);
+    }
+    if (spending.length === 0) {
+      spending.push('No outstanding invoices — all paid up!');
+    }
+
+    const suggestions: string[] = [];
+    if (net < 0) {
+      suggestions.push('Consider reviewing recurring expenses for potential savings');
+      suggestions.push('Look for opportunities to increase income streams');
+    }
+    if (net > 0) {
+      suggestions.push('You\'re profitable — consider setting aside some surplus for tax or reinvestment');
+    }
+    if (invoiceInfo && invoiceInfo.overdue_count > 0) {
+      suggestions.push(`Chase up ${invoiceInfo.overdue_count} overdue invoice${invoiceInfo.overdue_count > 1 ? 's' : ''} to improve cash flow`);
+    }
+    if (suggestions.length === 0) {
+      suggestions.push('Keep doing what you\'re doing — your finances look healthy!');
+    }
+
+    const dataQuality = [
+      `Data source: ${providerLabel} (live sync)`,
+      `Covers ${period} period`,
+    ];
+    if (xeroStatus?.last_sync_at) {
+      dataQuality.push(`Last synced: ${new Date(xeroStatus.last_sync_at).toLocaleString('en-GB')}`);
+    }
+
+    return { summary: summaryText, overview, spending, suggestions, dataQuality, period, dataSource: providerLabel };
+  }, [financialSummary, accountingProvider, period, xeroStatus?.last_sync_at]);
+
   const fetchAiInsights = async () => {
     setAiInsights({ loading: true, data: null, error: null });
     setShowInsights(true);
-    
+
+    if (xeroStatus?.connected && financialSummary) {
+      const data = buildProviderInsights();
+      setAiInsights({ loading: false, data, error: null });
+      return;
+    }
+
     try {
       const session = await supabase.auth.getSession();
       const response = await fetch(
@@ -296,6 +375,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
       
       if (response.ok) {
         const data = await response.json();
+        data.dataSource = 'manual_upload';
         setAiInsights({ loading: false, data, error: null });
       } else {
         setAiInsights({ loading: false, data: null, error: 'Failed to generate insights' });
@@ -1158,6 +1238,29 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
           })()}
         </Grid>
 
+        {/* Data source indicator */}
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 2, mt: -1 }}>
+          <span style={{
+            fontSize: 11,
+            color: 'hsl(var(--muted-foreground))',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+          }}>
+            {xeroStatus?.connected ? (
+              <>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#2dd48c', flexShrink: 0 }} />
+                Synced with {accountingProvider === 'freeagent' ? 'FreeAgent' : accountingProvider === 'quickbooks' ? 'QuickBooks' : 'Xero'}
+              </>
+            ) : (
+              <>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#fbbf24', flexShrink: 0 }} />
+                Based on uploaded data
+              </>
+            )}
+          </span>
+        </Box>
+
         {/* Tabs */}
         <Tabs value={activeTab} onChange={(_, v) => setActiveTab(v)} sx={{ mb: 3 }}>
           <Tab label="Overview" />
@@ -1246,6 +1349,28 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                         <Typography variant="body2" color="text.secondary">
                           Analysis for {summary?.period?.label || period}
                         </Typography>
+                        {aiInsights.data?.dataSource && (
+                          <span style={{
+                            fontSize: 11,
+                            color: 'hsl(var(--muted-foreground))',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 6,
+                            marginTop: 4,
+                          }}>
+                            {aiInsights.data.dataSource !== 'manual_upload' ? (
+                              <>
+                                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#2dd48c', flexShrink: 0 }} />
+                                Synced with {aiInsights.data.dataSource}
+                              </>
+                            ) : (
+                              <>
+                                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#fbbf24', flexShrink: 0 }} />
+                                Based on uploaded data
+                              </>
+                            )}
+                          </span>
+                        )}
                       </Box>
                       <IconButton 
                         onClick={() => setShowInsights(false)} 
