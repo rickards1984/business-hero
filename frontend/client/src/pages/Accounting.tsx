@@ -356,7 +356,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
     setAiInsights({ loading: true, data: null, error: null });
     setShowInsights(true);
 
-    if (xeroStatus?.connected && financialSummary) {
+    if ((xeroStatus?.connected || !!accountingProvider) && financialSummary) {
       const data = buildProviderInsights();
       setAiInsights({ loading: false, data, error: null });
       return;
@@ -1247,7 +1247,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
             alignItems: 'center',
             gap: 6,
           }}>
-            {xeroStatus?.connected ? (
+            {(xeroStatus?.connected || !!accountingProvider) ? (
               <>
                 <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#2dd48c', flexShrink: 0 }} />
                 Synced with {accountingProvider === 'freeagent' ? 'FreeAgent' : accountingProvider === 'quickbooks' ? 'QuickBooks' : 'Xero'}
