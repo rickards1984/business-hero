@@ -439,9 +439,14 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
     }
   }, []);
 
-  // ─── Auto-sync when connected ──────────────────────────────
+  // ─── Auto-sync when connected (once daily) ──────────────────
   useEffect(() => {
     if (!xeroStatus?.connected || xeroSyncing || xeroLoading) return;
+
+    const SYNC_KEY = 'bh_xero_accounting_last_sync';
+    const lastSync = localStorage.getItem(SYNC_KEY);
+    const today = new Date().toISOString().slice(0, 10);
+    if (lastSync && lastSync.slice(0, 10) === today) return;
 
     const autoSync = async () => {
       const providerLabel = accountingProvider === 'freeagent' ? 'FreeAgent'
@@ -460,6 +465,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
         if (response.ok) {
           const result = await response.json();
           setXeroSyncResult(result);
+          localStorage.setItem(SYNC_KEY, new Date().toISOString());
 
           setXeroStatus(prev => prev ? { ...prev, last_sync_at: result.synced_at } : prev);
           fetchFinancialSummary();
@@ -1088,58 +1094,68 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
           </Grid>
         )}
 
-        {/* Summary Cards */}
+        {/* Summary Cards — use Xero financial summary when available, fall back to local */}
         <Grid container spacing={3} sx={{ mb: 3 }}>
-          <Grid item xs={12} md={4}>
-            <Card sx={{ height: '100%' }}>
-              <CardContent>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                  <TrendingUpIcon color="success" />
-                  <Typography variant="subtitle2" color="text.secondary">
-                    Total Income
-                  </Typography>
-                </Box>
-                <Typography variant="h4" color="success.main" fontWeight={600}>
-                  £{summary?.totals.income.toLocaleString('en-GB', { minimumFractionDigits: 2 }) || '0.00'}
-                </Typography>
-              </CardContent>
-            </Card>
-          </Grid>
-          <Grid item xs={12} md={4}>
-            <Card sx={{ height: '100%' }}>
-              <CardContent>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                  <TrendingDownIcon color="error" />
-                  <Typography variant="subtitle2" color="text.secondary">
-                    Total Expenses
-                  </Typography>
-                </Box>
-                <Typography variant="h4" color="error.main" fontWeight={600}>
-                  £{summary?.totals.expense.toLocaleString('en-GB', { minimumFractionDigits: 2 }) || '0.00'}
-                </Typography>
-              </CardContent>
-            </Card>
-          </Grid>
-          <Grid item xs={12} md={4}>
-            <Card sx={{ height: '100%' }}>
-              <CardContent>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                  <AccountBalanceIcon color="primary" />
-                  <Typography variant="subtitle2" color="text.secondary">
-                    Net Profit/Loss
-                  </Typography>
-                </Box>
-                <Typography 
-                  variant="h4" 
-                  fontWeight={600}
-                  color={(summary?.totals.net || 0) >= 0 ? 'success.main' : 'error.main'}
-                >
-                  {(summary?.totals.net || 0) >= 0 ? '+' : ''}
-                  £{summary?.totals.net?.toLocaleString('en-GB', { minimumFractionDigits: 2 }) || '0.00'}
-                </Typography>
-              </CardContent>
-            </Card>
-          </Grid>
+          {(() => {
+            const pnl = financialSummary?.profit_and_loss;
+            const income = pnl?.income ?? summary?.totals.income ?? 0;
+            const expenses = pnl?.expenses ?? summary?.totals.expense ?? 0;
+            const net = pnl?.net_profit ?? summary?.totals.net ?? (income - expenses);
+            return (
+              <>
+                <Grid item xs={12} md={4}>
+                  <Card sx={{ height: '100%' }}>
+                    <CardContent>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                        <TrendingUpIcon color="success" />
+                        <Typography variant="subtitle2" color="text.secondary">
+                          Total Income
+                        </Typography>
+                      </Box>
+                      <Typography variant="h4" color="success.main" fontWeight={600}>
+                        £{income.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} md={4}>
+                  <Card sx={{ height: '100%' }}>
+                    <CardContent>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                        <TrendingDownIcon color="error" />
+                        <Typography variant="subtitle2" color="text.secondary">
+                          Total Expenses
+                        </Typography>
+                      </Box>
+                      <Typography variant="h4" color="error.main" fontWeight={600}>
+                        £{expenses.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} md={4}>
+                  <Card sx={{ height: '100%' }}>
+                    <CardContent>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                        <AccountBalanceIcon color="primary" />
+                        <Typography variant="subtitle2" color="text.secondary">
+                          Net Profit/Loss
+                        </Typography>
+                      </Box>
+                      <Typography
+                        variant="h4"
+                        fontWeight={600}
+                        color={net >= 0 ? 'success.main' : 'error.main'}
+                      >
+                        {net >= 0 ? '+' : ''}
+                        £{net.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              </>
+            );
+          })()}
         </Grid>
 
         {/* Tabs */}

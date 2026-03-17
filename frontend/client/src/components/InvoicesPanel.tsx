@@ -448,16 +448,24 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
     return () => clearTimeout(timer);
   }, [invoiceSearch]);
 
-  // Check Xero status and auto-sync invoices on mount
+  // Check Xero status and auto-sync invoices once daily
   useEffect(() => {
+    const SYNC_KEY = 'bh_xero_invoice_last_sync';
+    const shouldAutoSync = (): boolean => {
+      const lastSync = localStorage.getItem(SYNC_KEY);
+      if (!lastSync) return true;
+      return lastSync.slice(0, 10) !== new Date().toISOString().slice(0, 10);
+    };
+
     const checkXero = async () => {
       try {
         const resp = await apiRequest('GET', '/v1/accounting/xero/status');
         if (resp.ok) {
           const data = await resp.json();
           setXeroConnected(data.connected);
-          if (data.connected) {
-            syncXeroInvoices();
+          if (data.connected && shouldAutoSync()) {
+            await syncXeroInvoices();
+            localStorage.setItem(SYNC_KEY, new Date().toISOString());
           }
         }
       } catch (e) {
@@ -495,6 +503,16 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
               Synced with Xero
             </Typography>
             {xeroInvoiceSyncing && <CircularProgress size={14} sx={{ ml: 0.5 }} />}
+            {!xeroInvoiceSyncing && (
+              <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                {(() => {
+                  const ls = localStorage.getItem('bh_xero_invoice_last_sync');
+                  return ls
+                    ? `Last: ${new Date(ls).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`
+                    : 'Not synced today';
+                })()}
+              </Typography>
+            )}
           </Box>
           <Button
             size="small"
