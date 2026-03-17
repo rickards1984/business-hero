@@ -91,7 +91,7 @@ export default function DashboardPage() {
         let emailsToday = 0;
         let emailsAction = 0;
         try {
-          const emailsRes = await apiRequest('GET', '/v1/email/messages?limit=500');
+          const emailsRes = await apiRequest('GET', '/v1/email/messages?limit=200');
           const emailsData = await emailsRes.json();
           const allEmails = Array.isArray(emailsData) ? emailsData : (emailsData.messages || []);
           const todayDate = new Date().toDateString();
@@ -155,7 +155,7 @@ export default function DashboardPage() {
       // Background email sync — refresh counts after sync
       try {
         await runEmailSync();
-        const freshRes = await apiRequest('GET', '/v1/email/messages?limit=500');
+        const freshRes = await apiRequest('GET', '/v1/email/messages?limit=200');
         const freshData = await freshRes.json();
         const fresh = Array.isArray(freshData) ? freshData : (freshData.messages || []);
         const todayStr = new Date().toDateString();
