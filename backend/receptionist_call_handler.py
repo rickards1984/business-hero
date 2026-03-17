@@ -306,6 +306,7 @@ async def handle_receptionist_function_call(
 
             start_hour = int(day_config["start"].split(":")[0])
             end_hour = int(day_config["end"].split(":")[0])
+            calendar_id = getattr(settings_row, "calendar_id", None) or "primary"
 
             result = await check_calendar_availability(
                 business_id=business_id,
@@ -313,6 +314,7 @@ async def handle_receptionist_function_call(
                 duration_minutes=duration,
                 start_hour=start_hour,
                 end_hour=end_hour,
+                calendar_id=calendar_id,
             )
 
             if result.get("error"):
@@ -386,6 +388,8 @@ async def handle_receptionist_function_call(
             if notes:
                 desc_parts.append(f"Notes: {notes}")
 
+            calendar_id = getattr(settings_row, "calendar_id", None) or "primary"
+
             result = await create_calendar_event(
                 business_id=business_id,
                 title=f"{appointment_type} - {caller_name}",
@@ -394,6 +398,7 @@ async def handle_receptionist_function_call(
                 description="\n".join(desc_parts),
                 attendee_email=caller_email,
                 attendee_name=caller_name,
+                calendar_id=calendar_id,
             )
 
             if result.get("success"):

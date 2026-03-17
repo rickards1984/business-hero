@@ -1725,6 +1725,7 @@ async def check_calendar_availability(
     duration_minutes: int = 60,
     start_hour: int = 9,
     end_hour: int = 17,
+    calendar_id: str = "primary",
 ) -> dict:
     """Check available time slots on a given date using Google Calendar FreeBusy API."""
     from datetime import datetime as _dt, timedelta as _td
@@ -1744,7 +1745,7 @@ async def check_calendar_availability(
             return await client.post(
                 "https://www.googleapis.com/calendar/v3/freeBusy",
                 headers={"Authorization": f"Bearer {token}"},
-                json={"timeMin": time_min, "timeMax": time_max, "items": [{"id": "primary"}]},
+                json={"timeMin": time_min, "timeMax": time_max, "items": [{"id": calendar_id}]},
             )
 
     resp = await _freebusy(access_token)
@@ -1759,7 +1760,7 @@ async def check_calendar_availability(
     if resp.status_code != 200:
         return {"error": f"Calendar API error: {resp.status_code}", "slots": []}
 
-    busy_periods = resp.json().get("calendars", {}).get("primary", {}).get("busy", [])
+    busy_periods = resp.json().get("calendars", {}).get(calendar_id, {}).get("busy", [])
 
     available_slots = []
     current_time = date_obj.replace(hour=start_hour, minute=0, second=0)
@@ -1803,6 +1804,7 @@ async def create_calendar_event(
     attendee_name: str = None,
     location: str = None,
     timezone: str = "Europe/London",
+    calendar_id: str = "primary",
 ) -> dict:
     """Create a Google Calendar event (book an appointment)."""
     engine = _get_engine()
@@ -1840,7 +1842,7 @@ async def create_calendar_event(
     async def _create(token: str):
         async with httpx.AsyncClient(timeout=30) as client:
             return await client.post(
-                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events",
                 headers={"Authorization": f"Bearer {token}"},
                 json=event_body,
                 params={"sendUpdates": "all"},

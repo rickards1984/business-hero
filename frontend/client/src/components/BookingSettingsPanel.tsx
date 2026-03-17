@@ -19,8 +19,16 @@ interface AppointmentType {
   description: string;
 }
 
+interface CalendarInfo {
+  id: string;
+  name: string;
+  primary: boolean;
+  background_color?: string;
+}
+
 interface BookingSettings {
   enabled: boolean;
+  calendar_id?: string;
   business_hours: DayConfig[];
   appointment_types: AppointmentType[];
   buffer_minutes: number;
@@ -33,9 +41,30 @@ export default function BookingSettingsPanel() {
   const [settings, setSettings] = useState<BookingSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [calendars, setCalendars] = useState<CalendarInfo[]>([]);
+  const [loadingCalendars, setLoadingCalendars] = useState(false);
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
     open: false, message: '', severity: 'success'
   });
+
+  const fetchCalendars = async () => {
+    setLoadingCalendars(true);
+    try {
+      const res = await apiRequest('GET', '/v1/booking/calendars');
+      const data = await res.json();
+      setCalendars(data.calendars || []);
+    } catch {
+      console.error('Failed to fetch calendars');
+    } finally {
+      setLoadingCalendars(false);
+    }
+  };
+
+  useEffect(() => {
+    if (settings?.enabled) {
+      fetchCalendars();
+    }
+  }, [settings?.enabled]);
 
   useEffect(() => {
     const fetchSettings = async () => {
@@ -131,6 +160,83 @@ export default function BookingSettingsPanel() {
 
       {settings.enabled && (
         <>
+          {/* Calendar Selection */}
+          <div className="glass-card" style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: 'hsl(var(--foreground))', marginBottom: 4 }}>
+              Calendar
+            </div>
+            <div style={{ fontSize: 12, color: 'hsl(var(--muted-foreground))', marginBottom: 12 }}>
+              Choose which Google Calendar appointments are booked into
+            </div>
+            {loadingCalendars ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0' }}>
+                <CircularProgress size={16} sx={{ color: '#7c5cfc' }} />
+                <span style={{ fontSize: 13, color: 'hsl(var(--muted-foreground))' }}>Loading calendars...</span>
+              </div>
+            ) : calendars.length === 0 ? (
+              <div style={{
+                fontSize: 13,
+                color: 'hsl(var(--muted-foreground))',
+                padding: 12,
+                background: 'rgba(251, 191, 36, 0.08)',
+                border: '0.5px solid rgba(251, 191, 36, 0.15)',
+                borderRadius: 8,
+              }}>
+                No calendars found. Make sure Google Calendar is connected in Email settings.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {calendars.map((cal) => {
+                  const isSelected = settings.calendar_id === cal.id || (!settings.calendar_id && cal.primary);
+                  return (
+                    <div
+                      key={cal.id}
+                      onClick={() => setSettings({ ...settings, calendar_id: cal.id })}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        padding: '10px 12px',
+                        borderRadius: 8,
+                        cursor: 'pointer',
+                        border: isSelected
+                          ? '0.5px solid rgba(124, 92, 252, 0.3)'
+                          : '0.5px solid var(--glass-border)',
+                        background: isSelected
+                          ? 'rgba(124, 92, 252, 0.1)'
+                          : 'var(--glass-bg)',
+                        transition: 'all 200ms',
+                      }}
+                    >
+                      {cal.background_color && (
+                        <div style={{
+                          width: 12,
+                          height: 12,
+                          borderRadius: '50%',
+                          backgroundColor: cal.background_color,
+                          flexShrink: 0,
+                        }} />
+                      )}
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13, fontWeight: 500, color: 'hsl(var(--foreground))' }}>
+                          {cal.name}
+                        </div>
+                        {cal.primary && (
+                          <span style={{ fontSize: 11, color: 'hsl(var(--muted-foreground))' }}>
+                            Primary calendar
+                          </span>
+                        )}
+                      </div>
+                      {isSelected && (
+                        <span style={{ color: '#a78bfa', fontSize: 14 }}>✓</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           {/* Business Hours */}
           <div className="glass-card" style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 14, fontWeight: 600, color: 'hsl(var(--foreground))', marginBottom: 12 }}>

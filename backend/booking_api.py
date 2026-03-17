@@ -1,7 +1,7 @@
 """Booking settings API for AI receptionist calendar integration."""
 import json
 import logging
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlmodel import Session
 from db import get_session
@@ -26,6 +26,57 @@ DEFAULT_APPOINTMENT_TYPES = [
 ]
 
 
+@router.get("/calendars")
+async def list_google_calendars(
+    auth_ctx: dict = Depends(get_user_business_context),
+):
+    """List available Google Calendars for the authenticated user."""
+    import httpx
+    from assistant_tools import _get_google_calendar_token, _get_engine, _refresh_google_token
+
+    business_id = str(auth_ctx["business_id"])
+    engine = _get_engine()
+    access_token, account_id, refresh_ciphertext = _get_google_calendar_token(engine, business_id)
+
+    if not access_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Google Calendar not connected. Please connect Google in Email settings first.",
+        )
+
+    async def _fetch(token: str):
+        async with httpx.AsyncClient(timeout=30) as client:
+            return await client.get(
+                "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"minAccessRole": "writer"},
+            )
+
+    resp = await _fetch(access_token)
+
+    if resp.status_code == 401 and refresh_ciphertext:
+        try:
+            access_token = _refresh_google_token(engine, account_id, refresh_ciphertext)
+            resp = await _fetch(access_token)
+        except Exception:
+            raise HTTPException(status_code=401, detail="Calendar token expired — please reconnect Google")
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch calendars: {resp.status_code}")
+
+    calendars = []
+    for cal in resp.json().get("items", []):
+        calendars.append({
+            "id": cal.get("id"),
+            "name": cal.get("summary", "Unnamed Calendar"),
+            "description": cal.get("description", ""),
+            "primary": cal.get("primary", False),
+            "background_color": cal.get("backgroundColor"),
+        })
+
+    return {"calendars": calendars}
+
+
 @router.get("/settings")
 async def get_booking_settings(
     auth_ctx: dict = Depends(get_user_business_context),
@@ -40,6 +91,7 @@ async def get_booking_settings(
     if not row:
         return {
             "enabled": False,
+            "calendar_id": "primary",
             "business_hours": DEFAULT_BUSINESS_HOURS,
             "appointment_types": DEFAULT_APPOINTMENT_TYPES,
             "buffer_minutes": 15,
@@ -50,6 +102,7 @@ async def get_booking_settings(
 
     return {
         "enabled": row.enabled,
+        "calendar_id": getattr(row, "calendar_id", "primary") or "primary",
         "business_hours": row.business_hours if isinstance(row.business_hours, list) else json.loads(row.business_hours or "[]"),
         "appointment_types": row.appointment_types if isinstance(row.appointment_types, list) else json.loads(row.appointment_types or "[]"),
         "buffer_minutes": row.buffer_minutes,
@@ -78,6 +131,7 @@ async def update_booking_settings(
     params = {
         "bid": business_id,
         "enabled": settings.get("enabled", False),
+        "calendar_id": settings.get("calendar_id", "primary"),
         "business_hours": business_hours,
         "appointment_types": appointment_types,
         "buffer_minutes": settings.get("buffer_minutes", 15),
@@ -91,6 +145,7 @@ async def update_booking_settings(
             text("""
                 UPDATE booking_settings SET
                     enabled = :enabled,
+                    calendar_id = :calendar_id,
                     business_hours = CAST(:business_hours AS jsonb),
                     appointment_types = CAST(:appointment_types AS jsonb),
                     buffer_minutes = :buffer_minutes,
@@ -106,9 +161,9 @@ async def update_booking_settings(
         session.execute(
             text("""
                 INSERT INTO booking_settings
-                (business_id, enabled, business_hours, appointment_types,
+                (business_id, enabled, calendar_id, business_hours, appointment_types,
                  buffer_minutes, max_advance_days, min_notice_hours, confirmation_message)
-                VALUES (:bid, :enabled, CAST(:business_hours AS jsonb), CAST(:appointment_types AS jsonb),
+                VALUES (:bid, :enabled, :calendar_id, CAST(:business_hours AS jsonb), CAST(:appointment_types AS jsonb),
                         :buffer_minutes, :max_advance_days, :min_notice_hours, :confirmation_message)
             """),
             params,
