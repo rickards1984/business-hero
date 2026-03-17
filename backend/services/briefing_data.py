@@ -27,7 +27,12 @@ async def gather_business_data(
     today = now.date()
 
     # Define period boundaries
-    if period == "day":
+    if period == "yesterday":
+        period_start = today - timedelta(days=1)
+        period_end = today - timedelta(days=1)
+        prev_start = today - timedelta(days=2)
+        prev_end = today - timedelta(days=2)
+    elif period == "day":
         period_start = today
         period_end = today
         prev_start = today - timedelta(days=1)

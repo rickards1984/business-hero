@@ -214,7 +214,7 @@ async def trigger_daily_pulse(
     ).fetchone()
     business_name = biz_row[0] if biz_row else "Your Business"
 
-    data = await gather_business_data(session, business_id, period="day")
+    data = await gather_business_data(session, business_id, period="yesterday")
 
     calls = data.get("calls", {})
     emails = data.get("emails", {})

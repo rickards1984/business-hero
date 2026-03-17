@@ -91,7 +91,7 @@ export default function DashboardPage() {
         let emailsToday = 0;
         let emailsAction = 0;
         try {
-          const emailsRes = await apiRequest('GET', '/v1/email/messages?limit=200');
+          const emailsRes = await apiRequest('GET', '/v1/email/messages?limit=500');
           const emailsData = await emailsRes.json();
           const allEmails = Array.isArray(emailsData) ? emailsData : (emailsData.messages || []);
           const todayDate = new Date().toDateString();
@@ -155,7 +155,7 @@ export default function DashboardPage() {
       // Background email sync — refresh counts after sync
       try {
         await runEmailSync();
-        const freshRes = await apiRequest('GET', '/v1/email/messages?limit=200');
+        const freshRes = await apiRequest('GET', '/v1/email/messages?limit=500');
         const freshData = await freshRes.json();
         const fresh = Array.isArray(freshData) ? freshData : (freshData.messages || []);
         const todayStr = new Date().toDateString();
@@ -221,7 +221,10 @@ export default function DashboardPage() {
           <div className="kpi-label">Emails today</div>
           <div className="kpi-value">{loading ? '—' : stats?.emailsToday ?? 0}</div>
           <div className={`kpi-sub ${(stats?.emailsActionRequired ?? 0) > 0 ? 'warning' : 'neutral'}`}>
-            {loading ? '' : `${stats?.emailsActionRequired ?? 0} action required`}
+            {loading ? '' : (stats?.emailsActionRequired ?? 0) > 0
+              ? `${stats?.emailsActionRequired} need action`
+              : 'No action required'
+            }
           </div>
         </div>
 

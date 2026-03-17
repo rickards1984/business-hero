@@ -245,7 +245,7 @@ async def _send_daily_pulse(
     from services.whatsapp_service import send_whatsapp_message
 
     with get_session_context() as session:
-        data = await gather_business_data(session, business_id, period="day")
+        data = await gather_business_data(session, business_id, period="yesterday")
     pulse_text = await generate_daily_pulse(business_name, owner_name, data)
 
     # Build structured variables for WhatsApp template
