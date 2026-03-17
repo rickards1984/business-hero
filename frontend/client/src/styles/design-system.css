@@ -2184,3 +2184,14 @@ input, textarea, select, button, a, svg, canvas, video, img {
 .dark textarea::placeholder {
   color: rgba(232, 230, 225, 0.35) !important;
 }
+
+/* Fix time / number inputs in dark mode */
+.dark input[type="time"],
+.dark input[type="number"] {
+  color: #e8e6e1 !important;
+  color-scheme: dark;
+}
+
+.dark input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+}
