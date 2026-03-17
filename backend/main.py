@@ -348,6 +348,9 @@ app.include_router(whatsapp_admin_router)
 from automation_api import router as automation_router
 app.include_router(automation_router)
 
+from booking_api import router as booking_router
+app.include_router(booking_router)
+
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():

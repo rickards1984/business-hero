@@ -253,6 +253,173 @@ async def handle_receptionist_function_call(
         logger.info(f"[Receptionist Fn] Call ending — summary: {arguments.get('summary', 'No summary')}")
         return {"success": True, "message": "Say a warm goodbye and end the conversation naturally."}
 
+    elif function_name == "check_availability":
+        try:
+            from assistant_tools import check_calendar_availability
+            from db import get_session_context
+            import json as _json
+
+            date_str = arguments.get("date")
+            appointment_type = arguments.get("appointment_type", "Consultation")
+
+            with get_session_context() as session:
+                from sqlalchemy import text as sql_text
+                settings_row = session.execute(
+                    sql_text("SELECT * FROM booking_settings WHERE business_id = :bid AND enabled = true"),
+                    {"bid": business_id},
+                ).fetchone()
+
+            if not settings_row:
+                return {
+                    "success": False,
+                    "message": (
+                        "Appointment booking is not currently available. "
+                        "Please take the caller's details and someone will get back to them."
+                    ),
+                }
+
+            appointment_types = (
+                settings_row.appointment_types
+                if isinstance(settings_row.appointment_types, list)
+                else _json.loads(settings_row.appointment_types or "[]")
+            )
+            duration = 60
+            for apt in appointment_types:
+                if apt.get("name", "").lower() == appointment_type.lower():
+                    duration = apt.get("duration_minutes", 60)
+                    break
+
+            import datetime as _dt
+            day_name = _dt.datetime.fromisoformat(date_str).strftime("%A").lower()
+            business_hours = (
+                settings_row.business_hours
+                if isinstance(settings_row.business_hours, list)
+                else _json.loads(settings_row.business_hours or "[]")
+            )
+            day_config = next((d for d in business_hours if d.get("day") == day_name), None)
+
+            if not day_config or not day_config.get("enabled"):
+                return {
+                    "success": True,
+                    "message": f"Sorry, we're not available on {day_name.title()}s. Would you like to try another day?",
+                }
+
+            start_hour = int(day_config["start"].split(":")[0])
+            end_hour = int(day_config["end"].split(":")[0])
+
+            result = await check_calendar_availability(
+                business_id=business_id,
+                date=date_str,
+                duration_minutes=duration,
+                start_hour=start_hour,
+                end_hour=end_hour,
+            )
+
+            if result.get("error"):
+                return {
+                    "success": False,
+                    "message": (
+                        "I'm having trouble checking the calendar right now. "
+                        "Let me take your details and someone will call you back to arrange a time."
+                    ),
+                }
+            elif result.get("total_available", 0) == 0:
+                return {
+                    "success": True,
+                    "message": f"Unfortunately there are no available slots on {date_str}. Would you like to try another day?",
+                }
+            else:
+                slots = result["available_slots"][:6]
+                slot_text = ", ".join([s["start"] for s in slots])
+                return {
+                    "success": True,
+                    "message": f"Available times on {date_str}: {slot_text}. Which time works best for you?",
+                }
+        except Exception as e:
+            logger.error(f"[Receptionist Fn] check_availability failed: {e}")
+            return {
+                "success": False,
+                "message": "I couldn't check the calendar right now. Let me take your details instead.",
+            }
+
+    elif function_name == "book_appointment":
+        try:
+            from assistant_tools import create_calendar_event
+            from db import get_session_context
+            import json as _json
+            from datetime import datetime as _datetime, timedelta as _timedelta
+
+            date_str = arguments.get("date")
+            time_str = arguments.get("time")
+            caller_name = arguments.get("caller_name", "")
+            caller_email = arguments.get("caller_email")
+            appointment_type = arguments.get("appointment_type", "Appointment")
+            notes = arguments.get("notes", "")
+
+            with get_session_context() as session:
+                from sqlalchemy import text as sql_text
+                settings_row = session.execute(
+                    sql_text("SELECT * FROM booking_settings WHERE business_id = :bid AND enabled = true"),
+                    {"bid": business_id},
+                ).fetchone()
+
+            duration = 60
+            confirmation_msg = "Your appointment has been booked."
+            if settings_row:
+                appointment_types = (
+                    settings_row.appointment_types
+                    if isinstance(settings_row.appointment_types, list)
+                    else _json.loads(settings_row.appointment_types or "[]")
+                )
+                for apt in appointment_types:
+                    if apt.get("name", "").lower() == appointment_type.lower():
+                        duration = apt.get("duration_minutes", 60)
+                        break
+                confirmation_msg = settings_row.confirmation_message or confirmation_msg
+
+            start_dt = _datetime.fromisoformat(f"{date_str}T{time_str}:00")
+            end_dt = start_dt + _timedelta(minutes=duration)
+
+            desc_parts = [f"Booked by AI receptionist.", f"Caller: {caller_name}"]
+            if caller_email:
+                desc_parts.append(f"Email: {caller_email}")
+            if notes:
+                desc_parts.append(f"Notes: {notes}")
+
+            result = await create_calendar_event(
+                business_id=business_id,
+                title=f"{appointment_type} - {caller_name}",
+                start_time=start_dt.isoformat(),
+                end_time=end_dt.isoformat(),
+                description="\n".join(desc_parts),
+                attendee_email=caller_email,
+                attendee_name=caller_name,
+            )
+
+            if result.get("success"):
+                logger.info(f"[Receptionist Fn] Appointment booked: {caller_name} on {date_str} at {time_str}")
+                return {
+                    "success": True,
+                    "message": (
+                        f"I've booked a {appointment_type} for {caller_name} "
+                        f"on {date_str} at {time_str}. {confirmation_msg}"
+                    ),
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": (
+                        "I'm having trouble booking that appointment right now. "
+                        "Let me take your details and someone will confirm the booking shortly."
+                    ),
+                }
+        except Exception as e:
+            logger.error(f"[Receptionist Fn] book_appointment failed: {e}")
+            return {
+                "success": False,
+                "message": "I couldn't complete the booking. Let me take your details and someone will call you back.",
+            }
+
     else:
         logger.warning(f"[Receptionist Fn] Unknown function: {function_name}")
         return {"success": False, "message": f"Unknown function: {function_name}"}
@@ -526,6 +693,66 @@ async def receptionist_media_stream(ws: WebSocket):
                             "required": ["summary"],
                         },
                     },
+                    {
+                        "type": "function",
+                        "name": "check_availability",
+                        "description": (
+                            "Check available appointment slots on a specific date. Use this when "
+                            "a caller asks to book an appointment or wants to know when you're available."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "date": {
+                                    "type": "string",
+                                    "description": "The date to check availability for in YYYY-MM-DD format",
+                                },
+                                "appointment_type": {
+                                    "type": "string",
+                                    "description": "Type of appointment requested (e.g., Consultation, Quick Call)",
+                                },
+                            },
+                            "required": ["date"],
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "name": "book_appointment",
+                        "description": (
+                            "Book an appointment on the calendar. Only use after confirming "
+                            "the date, time, and caller's details."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "date": {
+                                    "type": "string",
+                                    "description": "Appointment date in YYYY-MM-DD format",
+                                },
+                                "time": {
+                                    "type": "string",
+                                    "description": "Appointment start time in HH:MM format (24h)",
+                                },
+                                "caller_name": {
+                                    "type": "string",
+                                    "description": "Name of the person booking",
+                                },
+                                "caller_email": {
+                                    "type": "string",
+                                    "description": "Email address for calendar invite (optional)",
+                                },
+                                "appointment_type": {
+                                    "type": "string",
+                                    "description": "Type of appointment",
+                                },
+                                "notes": {
+                                    "type": "string",
+                                    "description": "Any additional notes about the appointment",
+                                },
+                            },
+                            "required": ["date", "time", "caller_name"],
+                        },
+                    },
                 ],
             },
         }
@@ -647,6 +874,10 @@ async def receptionist_media_stream(ws: WebSocket):
                             call_outcome = "transferred"
                         elif fn_name == "create_task":
                             tasks_created.append(args)
+                        elif fn_name == "book_appointment":
+                            call_outcome = "appointment_booked"
+                            if args.get("caller_name"):
+                                caller_name = args["caller_name"]
 
                         fn_result_event = {
                             "type": "conversation.item.create",

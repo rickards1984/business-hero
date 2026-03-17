@@ -1688,6 +1688,188 @@ def _is_tomorrow(date_str: str, tz) -> bool:
         return False
 
 
+# =============================================================================
+# CALENDAR WRITE FUNCTIONS (booking)
+# =============================================================================
+
+def _get_google_calendar_token(engine, business_id: str):
+    """Return (access_token, account_id, refresh_token_ciphertext) or (None, …) if unavailable.
+
+    Uses the same lookup as _list_calendar_events: query the google row
+    from email_accounts, decrypt the token, and auto-refresh if expired.
+    """
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT id, token_ciphertext, refresh_token_ciphertext
+            FROM email_accounts
+            WHERE business_id = :business_id AND provider = 'google'
+            ORDER BY created_at DESC
+            LIMIT 1
+        """), {"business_id": business_id}).fetchone()
+
+    if not row or not row[1]:
+        return None, None, None
+
+    account_id, token_ciphertext, refresh_ciphertext = str(row[0]), row[1], row[2]
+    try:
+        access_token = _decrypt_token(token_ciphertext)
+    except Exception:
+        return None, account_id, refresh_ciphertext
+
+    return access_token, account_id, refresh_ciphertext
+
+
+async def check_calendar_availability(
+    business_id: str,
+    date: str,
+    duration_minutes: int = 60,
+    start_hour: int = 9,
+    end_hour: int = 17,
+) -> dict:
+    """Check available time slots on a given date using Google Calendar FreeBusy API."""
+    from datetime import datetime as _dt, timedelta as _td
+
+    engine = _get_engine()
+    access_token, account_id, refresh_ciphertext = _get_google_calendar_token(engine, business_id)
+
+    if not access_token:
+        return {"error": "Google Calendar not connected", "slots": []}
+
+    date_obj = _dt.fromisoformat(date)
+    time_min = date_obj.replace(hour=start_hour, minute=0, second=0).isoformat() + "Z"
+    time_max = date_obj.replace(hour=end_hour, minute=0, second=0).isoformat() + "Z"
+
+    async def _freebusy(token: str):
+        async with httpx.AsyncClient(timeout=30) as client:
+            return await client.post(
+                "https://www.googleapis.com/calendar/v3/freeBusy",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"timeMin": time_min, "timeMax": time_max, "items": [{"id": "primary"}]},
+            )
+
+    resp = await _freebusy(access_token)
+
+    if resp.status_code == 401 and refresh_ciphertext:
+        try:
+            access_token = _refresh_google_token(engine, account_id, refresh_ciphertext)
+            resp = await _freebusy(access_token)
+        except Exception:
+            return {"error": "Calendar token expired — please reconnect Google", "slots": []}
+
+    if resp.status_code != 200:
+        return {"error": f"Calendar API error: {resp.status_code}", "slots": []}
+
+    busy_periods = resp.json().get("calendars", {}).get("primary", {}).get("busy", [])
+
+    available_slots = []
+    current_time = date_obj.replace(hour=start_hour, minute=0, second=0)
+    end_time = date_obj.replace(hour=end_hour, minute=0, second=0)
+    slot_duration = _td(minutes=duration_minutes)
+
+    while current_time + slot_duration <= end_time:
+        slot_end = current_time + slot_duration
+        is_busy = False
+        for busy in busy_periods:
+            busy_start = _dt.fromisoformat(busy["start"].replace("Z", "+00:00")).replace(tzinfo=None)
+            busy_end = _dt.fromisoformat(busy["end"].replace("Z", "+00:00")).replace(tzinfo=None)
+            if current_time < busy_end and slot_end > busy_start:
+                is_busy = True
+                break
+        if not is_busy:
+            available_slots.append({
+                "start": current_time.strftime("%H:%M"),
+                "end": slot_end.strftime("%H:%M"),
+                "start_iso": current_time.isoformat(),
+                "end_iso": slot_end.isoformat(),
+            })
+        current_time += _td(minutes=30)
+
+    return {
+        "date": date,
+        "duration_minutes": duration_minutes,
+        "business_hours": f"{start_hour:02d}:00 - {end_hour:02d}:00",
+        "available_slots": available_slots,
+        "total_available": len(available_slots),
+    }
+
+
+async def create_calendar_event(
+    business_id: str,
+    title: str,
+    start_time: str,
+    end_time: str,
+    description: str = "",
+    attendee_email: str = None,
+    attendee_name: str = None,
+    location: str = None,
+    timezone: str = "Europe/London",
+) -> dict:
+    """Create a Google Calendar event (book an appointment)."""
+    engine = _get_engine()
+    access_token, account_id, refresh_ciphertext = _get_google_calendar_token(engine, business_id)
+
+    if not access_token:
+        return {"error": "Google Calendar not connected", "success": False}
+
+    event_body: dict = {
+        "summary": title,
+        "description": description,
+        "start": {
+            "dateTime": start_time if "T" in start_time else f"{start_time}T00:00:00",
+            "timeZone": timezone,
+        },
+        "end": {
+            "dateTime": end_time if "T" in end_time else f"{end_time}T01:00:00",
+            "timeZone": timezone,
+        },
+        "reminders": {
+            "useDefault": False,
+            "overrides": [{"method": "popup", "minutes": 30}],
+        },
+    }
+
+    if location:
+        event_body["location"] = location
+
+    if attendee_email:
+        attendee: dict = {"email": attendee_email}
+        if attendee_name:
+            attendee["displayName"] = attendee_name
+        event_body["attendees"] = [attendee]
+
+    async def _create(token: str):
+        async with httpx.AsyncClient(timeout=30) as client:
+            return await client.post(
+                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                headers={"Authorization": f"Bearer {token}"},
+                json=event_body,
+                params={"sendUpdates": "all"},
+            )
+
+    resp = await _create(access_token)
+
+    if resp.status_code == 401 and refresh_ciphertext:
+        try:
+            access_token = _refresh_google_token(engine, account_id, refresh_ciphertext)
+            resp = await _create(access_token)
+        except Exception:
+            return {"error": "Calendar token expired — please reconnect Google", "success": False}
+
+    if resp.status_code not in (200, 201):
+        return {"error": f"Failed to create event: {resp.status_code} {resp.text}", "success": False}
+
+    created = resp.json()
+    return {
+        "success": True,
+        "event_id": created.get("id"),
+        "title": created.get("summary"),
+        "start": created.get("start", {}).get("dateTime"),
+        "end": created.get("end", {}).get("dateTime"),
+        "link": created.get("htmlLink"),
+        "attendees": [a.get("email") for a in created.get("attendees", [])],
+    }
+
+
 # ============================================================================
 # ACCOUNTING TOOLS
 # ============================================================================
