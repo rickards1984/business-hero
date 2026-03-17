@@ -8,8 +8,8 @@ export const initMobileApp = async () => {
   if (!Capacitor.isNativePlatform()) return;
 
   try {
-    await StatusBar.setStyle({ style: Style.Light });
-    await StatusBar.setBackgroundColor({ color: '#2563EB' });
+    await StatusBar.setStyle({ style: Style.Dark });
+    await StatusBar.setBackgroundColor({ color: '#0d0f13' });
   } catch (_) {
     // StatusBar not available on this platform
   }
