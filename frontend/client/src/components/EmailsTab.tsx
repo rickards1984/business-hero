@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Box,
@@ -124,8 +124,16 @@ interface EmailsTabProps {
 
 export default function EmailsTab({ businessId }: EmailsTabProps) {
   const navigate = useNavigate();
-  const [emails, setEmails] = useState<EmailMessageItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [emails, setEmails] = useState<EmailMessageItem[]>(() => {
+    try {
+      const cached = sessionStorage.getItem(`bh_emails_${businessId}`);
+      return cached ? JSON.parse(cached) : [];
+    } catch { return []; }
+  });
+  const [loading, setLoading] = useState(() => {
+    try { return !sessionStorage.getItem(`bh_emails_${businessId}`); } catch { return true; }
+  });
+  const hasDataRef = useRef(emails.length > 0);
   const [analyzing, setAnalyzing] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [timeRange, setTimeRange] = useState('today');
@@ -150,7 +158,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
 
   const loadEmails = useCallback(async () => {
     try {
-      setLoading(true);
+      if (!hasDataRef.current) setLoading(true);
       const params: { limit?: number; category?: string; sortBy?: string } = {
         limit: 50,
         sortBy: 'date',
@@ -159,8 +167,11 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
         params.category = categoryFilter;
       }
       const data = await fetchEmailMessages(params);
-      setEmails(data.messages || []);
+      const result = data.messages || [];
+      setEmails(result);
+      hasDataRef.current = true;
       setHasEmailAccount(true);
+      try { sessionStorage.setItem(`bh_emails_${businessId}`, JSON.stringify(result)); } catch {}
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes('No email account') || message.includes('404') || message.includes('email feature')) {
@@ -170,7 +181,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
     } finally {
       setLoading(false);
     }
-  }, [categoryFilter]);
+  }, [categoryFilter, businessId]);
 
   useEffect(() => {
     loadEmails();
@@ -483,12 +494,11 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
       )}
 
       {/* Email list */}
-      {loading ? (
-        <Box sx={{ textAlign: 'center', py: 6 }}>
-          <CircularProgress />
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-            Loading emails...
-          </Typography>
+      {loading && emails.length === 0 ? (
+        <Box sx={{ py: 1 }}>
+          {[1, 2, 3, 4, 5].map(i => (
+            <div key={i} className="skeleton skeleton-card" style={{ height: 64, marginBottom: 8 }} />
+          ))}
         </Box>
       ) : filteredEmails.length === 0 ? (
         <Box sx={{ textAlign: 'center', py: 6 }}>

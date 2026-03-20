@@ -2195,3 +2195,37 @@ input, textarea, select, button, a, svg, canvas, video, img {
 .dark input[type="time"]::-webkit-calendar-picker-indicator {
   filter: invert(1);
 }
+
+/* ========== SKELETON LOADING ========== */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--glass-bg) 25%,
+    rgba(255, 255, 255, 0.08) 50%,
+    var(--glass-bg) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s ease-in-out infinite;
+  border-radius: 8px;
+}
+
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.skeleton-text {
+  height: 14px;
+  margin-bottom: 8px;
+}
+
+.skeleton-heading {
+  height: 24px;
+  width: 60%;
+  margin-bottom: 12px;
+}
+
+.skeleton-card {
+  height: 80px;
+  margin-bottom: 12px;
+}

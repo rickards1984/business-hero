@@ -33,7 +33,13 @@ interface CallsPanelProps {
 }
 
 export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPanelProps) {
-  const [calls, setCalls] = useState<Call[]>([]);
+  const [calls, setCalls] = useState<Call[]>(() => {
+    try {
+      const cached = sessionStorage.getItem(`bh_calls_${businessId}`);
+      return cached ? JSON.parse(cached) : [];
+    } catch { return []; }
+  });
+  const [callsLoading, setCallsLoading] = useState(false);
   const [callSearch, setCallSearch] = useState('');
   const [callDateFilter, setCallDateFilter] = useState<'all' | 'today' | 'week' | 'month'>('all');
   const [callSourceFilter, setCallSourceFilter] = useState<'all' | 'receptionist' | 'Awaz'>('all');
@@ -42,6 +48,7 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
   const [callPanelOpen, setCallPanelOpen] = useState(false);
 
   const fetchCalls = async (bizId: string) => {
+    setCallsLoading(calls.length === 0);
     const { data, error } = await supabase
       .from('calls')
       .select('*')
@@ -50,9 +57,12 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
 
     if (error) {
       console.error('Failed to fetch calls:', error);
+      setCallsLoading(false);
       return;
     }
     setCalls(data || []);
+    try { sessionStorage.setItem(`bh_calls_${bizId}`, JSON.stringify(data || [])); } catch {}
+    setCallsLoading(false);
   };
 
   useEffect(() => {
@@ -335,7 +345,13 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
       </Box>
 
       {/* Calls List */}
-      {filteredCalls.length === 0 ? (
+      {callsLoading && calls.length === 0 ? (
+        <Box>
+          {[1, 2, 3, 4].map(i => (
+            <div key={i} className="skeleton skeleton-card" style={{ height: 72, marginBottom: 8 }} />
+          ))}
+        </Box>
+      ) : filteredCalls.length === 0 ? (
         <Card sx={{ p: 4, textAlign: 'center' }}>
           <PhoneIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 2 }} />
           <Typography color="text.secondary">

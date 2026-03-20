@@ -118,7 +118,12 @@ interface InvoicesPanelProps {
 }
 
 export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [invoices, setInvoices] = useState<Invoice[]>(() => {
+    try {
+      const cached = sessionStorage.getItem(`bh_invoices_${businessId}`);
+      return cached ? JSON.parse(cached) : [];
+    } catch { return []; }
+  });
   const [invoicesLoading, setInvoicesLoading] = useState(false);
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
   const [invoiceDrawerOpen, setInvoiceDrawerOpen] = useState(false);
@@ -148,7 +153,7 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
 
   // Invoice functions
   const fetchInvoices = async () => {
-    setInvoicesLoading(true);
+    setInvoicesLoading(invoices.length === 0);
     try {
       const params = new URLSearchParams();
       if (invoiceSearch) params.append('search', invoiceSearch);
@@ -159,7 +164,9 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
       
       const response = await apiRequest('GET', `/v1/invoices?${params.toString()}`);
       const data = await response.json();
-      setInvoices(data.invoices || []);
+      const result = data.invoices || [];
+      setInvoices(result);
+      try { sessionStorage.setItem(`bh_invoices_${businessId}`, JSON.stringify(result)); } catch {}
     } catch (err: any) {
       setError(err.message || 'Failed to fetch invoices');
     } finally {
@@ -686,9 +693,11 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
         </label>
       </Box>
 
-      {invoicesLoading ? (
-        <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
-          <CircularProgress />
+      {invoicesLoading && invoices.length === 0 ? (
+        <Box sx={{ py: 1 }}>
+          {[1, 2, 3, 4].map(i => (
+            <div key={i} className="skeleton skeleton-card" style={{ height: 56, marginBottom: 8 }} />
+          ))}
         </Box>
       ) : invoices.length === 0 ? (
         <Box sx={{ textAlign: 'center', py: 4 }}>

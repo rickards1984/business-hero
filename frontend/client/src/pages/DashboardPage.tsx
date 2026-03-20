@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { useMe } from '@/hooks/useMe';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { apiRequest } from '@/lib/queryClient';
@@ -40,8 +41,6 @@ export default function DashboardPage() {
   const { data: me } = useMe();
   const isMobile = useIsMobile();
   const navigate = useNavigate();
-  const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [loading, setLoading] = useState(true);
   const [showTasks, setShowTasks] = useState(false);
   const [ownerName, setOwnerName] = useState<string>('');
 
@@ -56,116 +55,104 @@ export default function DashboardPage() {
     fetchOwnerName();
   }, []);
 
-  useEffect(() => {
-    if (!me?.id) return;
-
-    const fetchStats = async () => {
+  const { data: stats, isLoading: loading } = useQuery<DashboardStats>({
+    queryKey: ['dashboard-stats', me?.id],
+    queryFn: async () => {
+      let callsToday = 0;
+      let callsThisWeek = 0;
+      let aiHandled = 0;
+      let totalReceptionist = 0;
       try {
-        let callsToday = 0;
-        let callsThisWeek = 0;
-        let aiHandled = 0;
-        let totalReceptionist = 0;
-        try {
-          const { data: calls } = await supabase
-            .from('calls')
-            .select('started_at, created_at, source, outcome')
-            .eq('business_id', me.id)
-            .order('created_at', { ascending: false })
-            .limit(500);
-          if (calls) {
-            const now = new Date();
-            const todayStr = now.toISOString().slice(0, 10);
-            const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-            callsToday = calls.filter(c =>
-              (c.started_at || c.created_at)?.slice(0, 10) === todayStr
-            ).length;
-            callsThisWeek = calls.filter(c =>
-              new Date(c.started_at || c.created_at) >= weekAgo
-            ).length;
-            const receptionist = calls.filter(c => c.source === 'receptionist');
-            totalReceptionist = receptionist.length;
-            aiHandled = receptionist.filter(c => c.outcome === 'handled').length;
-          }
-        } catch {}
-
-        let emailsToday = 0;
-        let emailsAction = 0;
-        try {
-          const emailsRes = await apiRequest('GET', '/v1/email/messages?limit=200');
-          const emailsData = await emailsRes.json();
-          const allEmails = Array.isArray(emailsData) ? emailsData : (emailsData.messages || []);
-          const todayDate = new Date().toDateString();
-          emailsToday = allEmails.filter((e: any) => e.received_at && new Date(e.received_at).toDateString() === todayDate).length;
-          emailsAction = allEmails.filter((e: any) => e.ai_category === 'Action Required').length;
-        } catch {}
-
-        let unpaidCount = 0;
-        let unpaidAmount = 0;
-        let overdueCount = 0;
-        try {
-          const invRes = await apiRequest('GET', '/v1/invoices');
-          const invData = await invRes.json();
-          const invoices = Array.isArray(invData) ? invData : (invData.invoices || []);
-          const unpaid = invoices.filter((i: any) =>
-            ['unpaid', 'authorised', 'sent'].includes(i.status) && !i.archived
-          );
-          unpaidCount = unpaid.length;
-          unpaidAmount = unpaid.reduce((sum: number, i: any) =>
-            sum + (parseFloat(i.amount_due) || parseFloat(i.amount) || 0), 0
-          );
-          const today = new Date().toISOString().slice(0, 10);
-          overdueCount = unpaid.filter((i: any) => i.due_date && i.due_date < today).length;
-        } catch {}
-
-        let openTasks = 0;
-        let highPriority = 0;
-        try {
-          const { data: tasks } = await supabase
-            .from('tasks')
-            .select('status, priority')
-            .eq('business_id', me.id)
-            .is('deleted_at', null);
-          if (tasks) {
-            const open = tasks.filter(t => t.status !== 'completed');
-            openTasks = open.length;
-            highPriority = open.filter(t => t.priority === 'high').length;
-          }
-        } catch {}
-
-        setStats({
-          callsToday,
-          callsThisWeek,
-          emailsToday,
-          emailsActionRequired: emailsAction,
-          unpaidInvoices: unpaidCount,
-          unpaidAmount,
-          overdueInvoices: overdueCount,
-          aiResolutionRate: totalReceptionist > 0
-            ? Math.round((aiHandled / totalReceptionist) * 100)
-            : 0,
-          openTasks,
-          highPriorityTasks: highPriority,
-        });
-      } catch (err) {
-        console.error('Dashboard stats error:', err);
-      } finally {
-        setLoading(false);
-      }
-
-      // Background email sync — refresh counts after sync
-      try {
-        await runEmailSync();
-        const freshRes = await apiRequest('GET', '/v1/email/messages?limit=200');
-        const freshData = await freshRes.json();
-        const fresh = Array.isArray(freshData) ? freshData : (freshData.messages || []);
-        const todayStr = new Date().toDateString();
-        const freshToday = fresh.filter((e: any) => e.received_at && new Date(e.received_at).toDateString() === todayStr).length;
-        const freshAction = fresh.filter((e: any) => e.ai_category === 'Action Required').length;
-        setStats(prev => prev ? { ...prev, emailsToday: freshToday, emailsActionRequired: freshAction } : prev);
+        const { data: calls } = await supabase
+          .from('calls')
+          .select('started_at, created_at, source, outcome')
+          .eq('business_id', me!.id)
+          .order('created_at', { ascending: false })
+          .limit(500);
+        if (calls) {
+          const now = new Date();
+          const todayStr = now.toISOString().slice(0, 10);
+          const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+          callsToday = calls.filter(c =>
+            (c.started_at || c.created_at)?.slice(0, 10) === todayStr
+          ).length;
+          callsThisWeek = calls.filter(c =>
+            new Date(c.started_at || c.created_at) >= weekAgo
+          ).length;
+          const receptionist = calls.filter(c => c.source === 'receptionist');
+          totalReceptionist = receptionist.length;
+          aiHandled = receptionist.filter(c => c.outcome === 'handled').length;
+        }
       } catch {}
-    };
 
-    fetchStats();
+      let emailsToday = 0;
+      let emailsAction = 0;
+      try {
+        const emailsRes = await apiRequest('GET', '/v1/email/messages?limit=200');
+        const emailsData = await emailsRes.json();
+        const allEmails = Array.isArray(emailsData) ? emailsData : (emailsData.messages || []);
+        const todayDate = new Date().toDateString();
+        emailsToday = allEmails.filter((e: any) => e.received_at && new Date(e.received_at).toDateString() === todayDate).length;
+        emailsAction = allEmails.filter((e: any) => e.ai_category === 'Action Required').length;
+      } catch {}
+
+      let unpaidCount = 0;
+      let unpaidAmount = 0;
+      let overdueCount = 0;
+      try {
+        const invRes = await apiRequest('GET', '/v1/invoices');
+        const invData = await invRes.json();
+        const invoices = Array.isArray(invData) ? invData : (invData.invoices || []);
+        const unpaid = invoices.filter((i: any) =>
+          ['unpaid', 'authorised', 'sent'].includes(i.status) && !i.archived
+        );
+        unpaidCount = unpaid.length;
+        unpaidAmount = unpaid.reduce((sum: number, i: any) =>
+          sum + (parseFloat(i.amount_due) || parseFloat(i.amount) || 0), 0
+        );
+        const today = new Date().toISOString().slice(0, 10);
+        overdueCount = unpaid.filter((i: any) => i.due_date && i.due_date < today).length;
+      } catch {}
+
+      let openTasks = 0;
+      let highPriority = 0;
+      try {
+        const { data: tasks } = await supabase
+          .from('tasks')
+          .select('status, priority')
+          .eq('business_id', me!.id)
+          .is('deleted_at', null);
+        if (tasks) {
+          const open = tasks.filter(t => t.status !== 'completed');
+          openTasks = open.length;
+          highPriority = open.filter(t => t.priority === 'high').length;
+        }
+      } catch {}
+
+      return {
+        callsToday,
+        callsThisWeek,
+        emailsToday,
+        emailsActionRequired: emailsAction,
+        unpaidInvoices: unpaidCount,
+        unpaidAmount,
+        overdueInvoices: overdueCount,
+        aiResolutionRate: totalReceptionist > 0
+          ? Math.round((aiHandled / totalReceptionist) * 100)
+          : 0,
+        openTasks,
+        highPriorityTasks: highPriority,
+      };
+    },
+    enabled: !!me?.id,
+    staleTime: 3 * 60 * 1000,
+    refetchOnMount: true,
+  });
+
+  useEffect(() => {
+    if (me?.id) {
+      runEmailSync().catch(() => {});
+    }
   }, [me?.id]);
 
   if (!me?.id) return null;
@@ -207,10 +194,11 @@ export default function DashboardPage() {
           onClick={() => navigate('/app/comms?tab=calls')}
         >
           <div className="kpi-label">Calls today</div>
-          <div className="kpi-value">{loading ? '—' : stats?.callsToday ?? 0}</div>
-          <div className="kpi-sub neutral">
-            {loading ? '' : `${stats?.callsThisWeek ?? 0} this week`}
-          </div>
+          {loading && !stats ? (
+            <><div className="skeleton" style={{ height: 28, width: '50%', marginBottom: 6 }} /><div className="skeleton" style={{ height: 14, width: '70%' }} /></>
+          ) : (
+            <><div className="kpi-value">{stats?.callsToday ?? 0}</div><div className="kpi-sub neutral">{stats?.callsThisWeek ?? 0} this week</div></>
+          )}
         </div>
 
         <div
@@ -219,13 +207,11 @@ export default function DashboardPage() {
           onClick={() => navigate('/app/comms?tab=emails')}
         >
           <div className="kpi-label">Emails today</div>
-          <div className="kpi-value">{loading ? '—' : stats?.emailsToday ?? 0}</div>
-          <div className={`kpi-sub ${(stats?.emailsActionRequired ?? 0) > 0 ? 'warning' : 'neutral'}`}>
-            {loading ? '' : (stats?.emailsActionRequired ?? 0) > 0
-              ? `${stats?.emailsActionRequired} need action`
-              : 'No action required'
-            }
-          </div>
+          {loading && !stats ? (
+            <><div className="skeleton" style={{ height: 28, width: '50%', marginBottom: 6 }} /><div className="skeleton" style={{ height: 14, width: '70%' }} /></>
+          ) : (
+            <><div className="kpi-value">{stats?.emailsToday ?? 0}</div><div className={`kpi-sub ${(stats?.emailsActionRequired ?? 0) > 0 ? 'warning' : 'neutral'}`}>{(stats?.emailsActionRequired ?? 0) > 0 ? `${stats?.emailsActionRequired} need action` : 'No action required'}</div></>
+          )}
         </div>
 
         <div
@@ -234,12 +220,11 @@ export default function DashboardPage() {
           onClick={() => navigate('/app/finance?tab=invoices')}
         >
           <div className="kpi-label">Invoices</div>
-          <div className="kpi-value">
-            {loading ? '—' : `£${(stats?.unpaidAmount ?? 0).toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`}
-          </div>
-          <div className={`kpi-sub ${(stats?.overdueInvoices ?? 0) > 0 ? 'warning' : 'neutral'}`}>
-            {loading ? '' : `${stats?.unpaidInvoices ?? 0} unpaid${(stats?.overdueInvoices ?? 0) > 0 ? `, ${stats?.overdueInvoices} overdue` : ''}`}
-          </div>
+          {loading && !stats ? (
+            <><div className="skeleton" style={{ height: 28, width: '60%', marginBottom: 6 }} /><div className="skeleton" style={{ height: 14, width: '70%' }} /></>
+          ) : (
+            <><div className="kpi-value">£{(stats?.unpaidAmount ?? 0).toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</div><div className={`kpi-sub ${(stats?.overdueInvoices ?? 0) > 0 ? 'warning' : 'neutral'}`}>{stats?.unpaidInvoices ?? 0} unpaid{(stats?.overdueInvoices ?? 0) > 0 ? `, ${stats?.overdueInvoices} overdue` : ''}</div></>
+          )}
         </div>
 
         <div
@@ -248,8 +233,11 @@ export default function DashboardPage() {
           onClick={() => navigate('/app/ai?tab=aria')}
         >
           <div className="kpi-label">AI receptionist</div>
-          <div className="kpi-value">{loading ? '—' : `${stats?.aiResolutionRate ?? 0}%`}</div>
-          <div className="kpi-sub accent">resolution rate</div>
+          {loading && !stats ? (
+            <><div className="skeleton" style={{ height: 28, width: '40%', marginBottom: 6 }} /><div className="skeleton" style={{ height: 14, width: '60%' }} /></>
+          ) : (
+            <><div className="kpi-value">{stats?.aiResolutionRate ?? 0}%</div><div className="kpi-sub accent">resolution rate</div></>
+          )}
         </div>
       </div>
 
@@ -327,13 +315,9 @@ export default function DashboardPage() {
               )}
             </div>
           ) : (
-            <div style={{
-              fontSize: 13,
-              color: 'hsl(var(--muted-foreground))',
-              textAlign: 'center',
-              padding: '20px 0',
-            }}>
-              Loading...
+            <div style={{ padding: '12px 0' }}>
+              <div className="skeleton" style={{ height: 14, width: '40%', marginBottom: 8 }} />
+              <div className="skeleton" style={{ height: 14, width: '60%' }} />
             </div>
           )}
         </div>
