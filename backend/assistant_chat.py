@@ -14,6 +14,121 @@ from assistant_tools import TOOL_DEFINITIONS, execute_tool
 
 logger = logging.getLogger(__name__)
 
+
+async def _execute_tool_async(tool_name: str, arguments: dict, business_id: str, timezone: str = "Europe/London") -> dict:
+    """Wrapper that handles async booking tools, delegating everything else to the sync execute_tool."""
+    if tool_name == "check_calendar_availability":
+        from assistant_tools import check_calendar_availability
+        from db import get_session_context
+        from sqlalchemy import text as sql_text
+        import json as _json
+
+        date_str = arguments.get("date")
+        duration = arguments.get("duration_minutes", 60)
+        calendar_id = arguments.get("calendar_id", "primary")
+        start_hour, end_hour = 9, 17
+
+        try:
+            with get_session_context() as session:
+                settings_row = session.execute(
+                    sql_text("SELECT * FROM booking_settings WHERE business_id = :bid"),
+                    {"bid": business_id},
+                ).fetchone()
+
+            if settings_row and settings_row.enabled:
+                import datetime as _dt
+                day_name = _dt.datetime.fromisoformat(date_str).strftime("%A").lower()
+                business_hours = (
+                    settings_row.business_hours
+                    if isinstance(settings_row.business_hours, list)
+                    else _json.loads(settings_row.business_hours or "[]")
+                )
+                day_config = next((d for d in business_hours if d.get("day") == day_name), None)
+                if day_config and day_config.get("enabled"):
+                    start_hour = int(day_config["start"].split(":")[0])
+                    end_hour = int(day_config["end"].split(":")[0])
+                if calendar_id == "primary" and getattr(settings_row, "calendar_id", None):
+                    calendar_id = settings_row.calendar_id
+        except Exception as e:
+            logger.warning(f"Failed to load booking settings: {e}")
+
+        return await check_calendar_availability(
+            business_id=business_id,
+            date=date_str,
+            duration_minutes=duration,
+            start_hour=start_hour,
+            end_hour=end_hour,
+            calendar_id=calendar_id,
+        )
+
+    elif tool_name == "create_calendar_event":
+        from assistant_tools import create_calendar_event
+        from db import get_session_context
+        from sqlalchemy import text as sql_text
+
+        calendar_id = arguments.get("calendar_id", "primary")
+        try:
+            with get_session_context() as session:
+                settings_row = session.execute(
+                    sql_text("SELECT calendar_id FROM booking_settings WHERE business_id = :bid"),
+                    {"bid": business_id},
+                ).fetchone()
+            if settings_row and calendar_id == "primary" and getattr(settings_row, "calendar_id", None):
+                calendar_id = settings_row.calendar_id
+        except Exception:
+            pass
+
+        return await create_calendar_event(
+            business_id=business_id,
+            title=arguments.get("title", "Appointment"),
+            start_time=arguments.get("start_time"),
+            end_time=arguments.get("end_time"),
+            description=arguments.get("description", ""),
+            attendee_email=arguments.get("attendee_email"),
+            attendee_name=arguments.get("attendee_name"),
+            location=arguments.get("location"),
+            timezone=timezone,
+            calendar_id=calendar_id,
+        )
+
+    elif tool_name == "list_google_calendars":
+        import httpx
+        from assistant_tools import _get_google_calendar_token, _get_engine, _refresh_google_token
+
+        engine = _get_engine()
+        access_token, account_id, refresh_ciphertext = _get_google_calendar_token(engine, business_id)
+        if not access_token:
+            return {"error": "Google Calendar not connected"}
+
+        async def _fetch(token: str):
+            async with httpx.AsyncClient(timeout=30) as client:
+                return await client.get(
+                    "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={"minAccessRole": "writer"},
+                )
+
+        resp = await _fetch(access_token)
+        if resp.status_code == 401 and refresh_ciphertext:
+            try:
+                access_token = _refresh_google_token(engine, account_id, refresh_ciphertext)
+                resp = await _fetch(access_token)
+            except Exception:
+                return {"error": "Calendar token expired — please reconnect Google"}
+
+        if resp.status_code != 200:
+            return {"error": f"Failed to fetch calendars: {resp.status_code}"}
+
+        return {
+            "calendars": [
+                {"id": c.get("id"), "name": c.get("summary", "Unnamed"), "primary": c.get("primary", False)}
+                for c in resp.json().get("items", [])
+            ]
+        }
+
+    else:
+        return execute_tool(tool_name, arguments, business_id, timezone)
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_DATABASE_URL = os.getenv("SUPABASE_DATABASE_URL")
 
@@ -84,6 +199,9 @@ Good: "Let me check your calendar... Okay, you've got a quiet morning but there'
 - send_email: Send an email on behalf of the user (requires to, subject, and body)
 - list_calendar_events: View upcoming calendar events and appointments
 - get_calendar_briefing: Get today's schedule, upcoming meetings, and tomorrow's events
+- check_calendar_availability: Find free appointment slots on a specific date
+- create_calendar_event: Book an appointment or add an event to Google Calendar
+- list_google_calendars: Show which Google Calendars the user has
 - get_accounting_summary: Get financial summary (income, expenses, profit/loss) for a period
 - list_transactions: List and search accounting transactions
 - analyze_spending: Analyze spending patterns by category
@@ -118,6 +236,18 @@ When asked about the user's schedule, appointments, or meetings:
 4. Highlight any conflicts or busy periods
 5. Include meeting links (Zoom/Teams/Meet) if available
 6. Mention attendees when relevant
+
+### Booking Appointments
+You can also help manage the calendar and book appointments:
+- Use check_calendar_availability to find free slots on a specific date
+- Use create_calendar_event to book appointments or add events
+- Use list_google_calendars to show which calendars the user has
+
+When booking an appointment:
+1. Confirm the date, time, and title with the user
+2. Check availability first if unsure about conflicts
+3. If the user mentions a specific calendar (e.g., "Induction calendar"), use list_google_calendars to find the right calendar ID, then use that ID when creating the event
+4. Create the event and confirm the details
 
 ### Sending Emails
 When the user asks to send an email:
@@ -619,7 +749,7 @@ async def process_chat_message(
             logger.info(f"Executing tool (round {tool_round}): {tool_name} with args: {arguments}")
 
             try:
-                tool_result = execute_tool(tool_name, arguments, business.id, business.timezone)
+                tool_result = await _execute_tool_async(tool_name, arguments, business.id, business.timezone)
             except Exception as e:
                 logger.error(f"Tool execution error: {e}")
                 tool_result = {"success": False, "error": str(e)}

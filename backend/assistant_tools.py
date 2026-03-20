@@ -402,7 +402,56 @@ TOOL_DEFINITIONS = [
                 "required": []
             }
         }
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_calendar_availability",
+            "description": "Check available appointment slots on a specific date. Use this when the user asks to book or schedule something, or wants to know when they're free.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "The date to check availability for in YYYY-MM-DD format"},
+                    "duration_minutes": {"type": "integer", "description": "How long the appointment should be in minutes (default 60)"},
+                    "calendar_id": {"type": "string", "description": "Which Google Calendar to check. Use 'primary' for the main calendar, or a specific calendar ID."},
+                },
+                "required": ["date"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_calendar_event",
+            "description": "Create an event on the user's Google Calendar. Use this to book appointments, schedule meetings, or add events. Always confirm details with the user before booking.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Title/name of the event"},
+                    "start_time": {"type": "string", "description": "Start date and time in ISO format, e.g. 2026-03-21T10:00:00"},
+                    "end_time": {"type": "string", "description": "End date and time in ISO format, e.g. 2026-03-21T11:00:00"},
+                    "description": {"type": "string", "description": "Description or notes for the event"},
+                    "attendee_email": {"type": "string", "description": "Email address of an attendee to invite (optional)"},
+                    "attendee_name": {"type": "string", "description": "Name of the attendee (optional)"},
+                    "location": {"type": "string", "description": "Location of the event (optional)"},
+                    "calendar_id": {"type": "string", "description": "Which Google Calendar to create the event in. Use 'primary' for the main calendar, or a specific calendar ID."},
+                },
+                "required": ["title", "start_time", "end_time"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_google_calendars",
+            "description": "List all available Google Calendars for the user. Use this when the user wants to know which calendars they have, or when they want to choose which calendar to book into.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
 ]
 
 
