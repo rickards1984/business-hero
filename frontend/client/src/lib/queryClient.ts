@@ -47,18 +47,31 @@ export async function apiRequest(
   data?: unknown | undefined,
 ): Promise<Response> {
   const resolvedUrl = resolveApiUrl(url);
-  const authHeaders = await getAuthHeaders();
-  
-  const headers: Record<string, string> = { ...authHeaders };
-  if (data) {
-    headers["Content-Type"] = "application/json";
+
+  const makeRequest = async () => {
+    const authHeaders = await getAuthHeaders();
+    const headers: Record<string, string> = { ...authHeaders };
+    if (data) {
+      headers["Content-Type"] = "application/json";
+    }
+    return fetch(resolvedUrl, {
+      method,
+      headers,
+      body: data ? JSON.stringify(data) : undefined,
+    });
+  };
+
+  let res = await makeRequest();
+
+  // If 401, try refreshing the token and retry once
+  if (res.status === 401) {
+    try {
+      const { error } = await supabase.auth.refreshSession();
+      if (!error) {
+        res = await makeRequest();
+      }
+    } catch {}
   }
-  
-  const res = await fetch(resolvedUrl, {
-    method,
-    headers,
-    body: data ? JSON.stringify(data) : undefined,
-  });
 
   await throwIfResNotOk(res);
   return res;
@@ -72,11 +85,23 @@ export const getQueryFn: <T>(options: {
   async ({ queryKey }) => {
     const url = queryKey.join("/") as string;
     const resolvedUrl = resolveApiUrl(url);
-    const authHeaders = await getAuthHeaders();
-    
-    const res = await fetch(resolvedUrl, {
-      headers: authHeaders,
-    });
+
+    const makeRequest = async () => {
+      const authHeaders = await getAuthHeaders();
+      return fetch(resolvedUrl, { headers: authHeaders });
+    };
+
+    let res = await makeRequest();
+
+    // If 401, try refreshing the token and retry once
+    if (res.status === 401) {
+      try {
+        const { error } = await supabase.auth.refreshSession();
+        if (!error) {
+          res = await makeRequest();
+        }
+      } catch {}
+    }
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
       return null;
@@ -95,7 +120,11 @@ export const queryClient = new QueryClient({
       refetchOnWindowFocus: false,
       refetchOnMount: false,
       refetchInterval: false,
-      retry: 1,
+      retry: (failureCount, error: any) => {
+        const status = error?.status ?? parseInt(error?.message, 10);
+        if (status === 401 || status === 403) return false;
+        return failureCount < 1;
+      },
     },
     mutations: {
       retry: false,

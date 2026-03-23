@@ -17,7 +17,7 @@ type Section = 'dashboard' | 'comms' | 'finance' | 'ai';
 export default function AppShell() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, signOut, loading: authLoading } = useAuth();
+  const { user, session, signOut, loading: authLoading } = useAuth();
   const { data: me } = useMe();
   const isMobile = useIsMobile();
   const [supportPanelOpen, setSupportPanelOpen] = useState(false);
@@ -31,8 +31,8 @@ export default function AppShell() {
   }, [location.pathname]);
 
   useEffect(() => {
-    if (!authLoading && !user) navigate('/login');
-  }, [user, authLoading, navigate]);
+    if (!authLoading && (!user || !session)) navigate('/login');
+  }, [user, session, authLoading, navigate]);
 
   if (!user) return null;
 

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useCallback, useState, type ReactNode } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { User, Session } from '@supabase/supabase-js';
 
@@ -117,10 +117,63 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const signOut = async () => {
+  const signOut = useCallback(async () => {
     await supabase.auth.signOut();
     setIsAdmin(false);
-  };
+  }, []);
+
+  // Proactive token refresh every 10 minutes while the app is active
+  useEffect(() => {
+    if (!session) return;
+
+    const refreshInterval = setInterval(async () => {
+      try {
+        const { error } = await supabase.auth.refreshSession();
+        if (error) {
+          console.error('Session refresh failed:', error);
+          if (error.message?.includes('Invalid Refresh Token') ||
+              error.message?.includes('refresh_token_not_found')) {
+            await signOut();
+          }
+        }
+      } catch (err) {
+        console.error('Session refresh error:', err);
+      }
+    }, 10 * 60 * 1000);
+
+    return () => clearInterval(refreshInterval);
+  }, [session, signOut]);
+
+  // Refresh token when user returns to the app after being away
+  useEffect(() => {
+    if (!session) return;
+
+    const refreshOnReturn = async () => {
+      try {
+        const { error } = await supabase.auth.refreshSession();
+        if (error) {
+          console.error('Focus refresh failed:', error);
+          if (error.message?.includes('Invalid Refresh Token') ||
+              error.message?.includes('refresh_token_not_found')) {
+            await signOut();
+          }
+        }
+      } catch (err) {
+        console.error('Focus refresh error:', err);
+      }
+    };
+
+    window.addEventListener('focus', refreshOnReturn);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') refreshOnReturn();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      window.removeEventListener('focus', refreshOnReturn);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [session, signOut]);
 
   return (
     <AuthContext.Provider
