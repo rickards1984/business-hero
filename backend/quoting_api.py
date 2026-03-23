@@ -112,6 +112,7 @@ def _row_to_quote(row) -> dict:
         "viewed_at": row.viewed_at.isoformat() if row.viewed_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "project_reference": getattr(row, "project_reference", None),
     }
 
 
@@ -248,13 +249,14 @@ async def create_quote(
              customer_phone, customer_address, job_title, job_description, job_location,
              subtotal, tax_rate, tax_amount, discount_amount, discount_type, total,
              currency, markup_percentage, status, issue_date, valid_until, terms,
-             notes, customer_notes, ai_generated, ai_prompt, ai_model, created_by)
+             notes, customer_notes, ai_generated, ai_prompt, ai_model, created_by,
+             project_reference)
             VALUES
             (:id, :bid, :qnum, :ref, :cname, :cemail, :cphone, :caddr,
              :jtitle, :jdesc, :jloc, :subtotal, :tax_rate, :tax_amount,
              :discount_amount, :discount_type, :total, :currency, :markup,
              'draft', :issue_date, :valid_until, :terms, :notes, :cnotes,
-             :ai_gen, :ai_prompt, :ai_model, :created_by)
+             :ai_gen, :ai_prompt, :ai_model, :created_by, :project_ref)
         """),
         {
             "id": quote_id,
@@ -284,6 +286,7 @@ async def create_quote(
             "ai_gen": data.get("ai_generated", False),
             "ai_prompt": data.get("ai_prompt"),
             "ai_model": data.get("ai_model"),
+            "project_ref": data.get("project_reference"),
             "created_by": user_id,
         },
     )
@@ -360,7 +363,8 @@ async def update_quote(
                 discount_amount = :discount_amount, discount_type = :discount_type,
                 total = :total, markup_percentage = :markup,
                 terms = :terms, notes = :notes, customer_notes = :cnotes,
-                valid_until = :valid_until, updated_at = now()
+                valid_until = :valid_until, project_reference = :project_ref,
+                updated_at = now()
             WHERE id = :qid AND business_id = :bid
         """),
         {
@@ -384,6 +388,7 @@ async def update_quote(
             "notes": data.get("notes"),
             "cnotes": data.get("customer_notes"),
             "valid_until": data.get("valid_until"),
+            "project_ref": data.get("project_reference"),
         },
     )
 

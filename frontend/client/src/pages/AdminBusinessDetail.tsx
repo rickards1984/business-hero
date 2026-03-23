@@ -622,6 +622,19 @@ export default function AdminBusinessDetail() {
                   <Chip label={`Calendar: ${health.business.feature_flags?.calendar ? 'On' : 'Off'}`} size="small" />
                   <Chip label={`Voice: ${health.business.feature_flags?.voice ? 'On' : 'Off'}`} size="small" />
                   <Chip label={`Receptionist: ${health.business.feature_flags?.receptionist ? 'On' : 'Off'}`} size="small" />
+                  <Chip
+                    label={`Quoting: ${health.business.feature_flags?.quoting_enabled !== false ? 'On' : 'Off'}`}
+                    size="small"
+                    color={health.business.feature_flags?.quoting_enabled !== false ? 'primary' : 'default'}
+                    onClick={async () => {
+                      const current = health.business.feature_flags?.quoting_enabled !== false;
+                      const flags = { ...(health.business.feature_flags || {}), quoting_enabled: !current };
+                      await supabase.from('businesses').update({ feature_flags: flags }).eq('id', id);
+                      loadBusiness();
+                      loadHealth();
+                    }}
+                    sx={{ cursor: 'pointer' }}
+                  />
                 </Box>
 
                 <Divider />

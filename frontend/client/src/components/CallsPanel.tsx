@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import LoadingMessage from '@/components/LoadingMessage';
 import {
   Box,
   Typography,
@@ -346,11 +347,10 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
 
       {/* Calls List */}
       {callsLoading && calls.length === 0 ? (
-        <Box>
-          {[1, 2, 3, 4].map(i => (
-            <div key={i} className="skeleton skeleton-card" style={{ height: 72, marginBottom: 8 }} />
-          ))}
-        </Box>
+        <LoadingMessage
+          messages={["Loading your recent calls...", "Pulling up transcripts and summaries..."]}
+          icon="📞"
+        />
       ) : filteredCalls.length === 0 ? (
         <Card sx={{ p: 4, textAlign: 'center' }}>
           <PhoneIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 2 }} />

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import LoadingMessage from '@/components/LoadingMessage';
 import {
   Box,
   Typography,
@@ -694,11 +695,10 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
       </Box>
 
       {invoicesLoading && invoices.length === 0 ? (
-        <Box sx={{ py: 1 }}>
-          {[1, 2, 3, 4].map(i => (
-            <div key={i} className="skeleton skeleton-card" style={{ height: 56, marginBottom: 8 }} />
-          ))}
-        </Box>
+        <LoadingMessage
+          messages={["Syncing with your accounting software...", "Matching invoices and updating statuses...", "This keeps everything accurate and up to date!"]}
+          icon="📄"
+        />
       ) : invoices.length === 0 ? (
         <Box sx={{ textAlign: 'center', py: 4 }}>
           <ReceiptIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />

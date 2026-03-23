@@ -12,7 +12,7 @@ import SupportHelpButton from './SupportHelpButton';
 import SupportPanel from './SupportPanel';
 import ThemeToggle from '@/components/ThemeToggle';
 
-type Section = 'dashboard' | 'comms' | 'finance' | 'ai';
+type Section = 'dashboard' | 'comms' | 'finance' | 'quotes' | 'ai';
 
 export default function AppShell() {
   const navigate = useNavigate();
@@ -22,10 +22,13 @@ export default function AppShell() {
   const isMobile = useIsMobile();
   const [supportPanelOpen, setSupportPanelOpen] = useState(false);
 
+  const showQuotes = me?.feature_flags?.quoting_enabled !== false;
+
   const activeSection: Section = useMemo(() => {
     const path = location.pathname;
     if (path.startsWith('/app/comms')) return 'comms';
     if (path.startsWith('/app/finance')) return 'finance';
+    if (path.startsWith('/app/quotes')) return 'quotes';
     if (path.startsWith('/app/ai')) return 'ai';
     return 'dashboard';
   }, [location.pathname]);
@@ -49,6 +52,7 @@ export default function AppShell() {
           userEmail={user.email || ''}
           onSignOut={signOut}
           onHelpClick={() => setSupportPanelOpen(true)}
+          showQuotes={showQuotes}
         />
       )}
 
@@ -84,6 +88,7 @@ export default function AppShell() {
         <MobileBottomNav
           activeSection={activeSection}
           onNavigate={handleNavigate}
+          showQuotes={showQuotes}
         />
       )}
 

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import LoadingMessage from '@/components/LoadingMessage';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import {
@@ -121,7 +122,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
   if (authLoading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh' }}>
-        <CircularProgress />
+        <LoadingMessage messages={["Aria is getting ready..."]} icon="🤖" />
       </Box>
     );
   }
@@ -360,7 +361,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
               ))}
               {loading && (
                 <Box sx={{ alignSelf: 'flex-start', p: 2 }}>
-                  <CircularProgress size={20} sx={{ color: 'var(--color-aria-500)' }} />
+                  <LoadingMessage messages={["Aria is thinking...", "Pulling together the best answer for you..."]} icon="🤖" />
                 </Box>
               )}
               <div ref={messagesEndRef} />

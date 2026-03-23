@@ -28,6 +28,7 @@ import DashboardPage from '@/pages/DashboardPage';
 import CommsPage from '@/pages/CommsPage';
 import FinancePage from '@/pages/FinancePage';
 import AIHubPage from '@/pages/AIHubPage';
+import QuotesPage from '@/pages/QuotesPage';
 
 const SHARED_TYPOGRAPHY = {
   fontFamily: "'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
@@ -531,6 +532,7 @@ function App() {
                   <Route path="dashboard" element={<DashboardPage />} />
                   <Route path="comms" element={<CommsPage />} />
                   <Route path="finance" element={<FinancePage />} />
+                  <Route path="quotes" element={<QuotesPage />} />
                   <Route path="ai" element={<AIHubPage />} />
                   <Route path="settings/branding" element={<BrandingSettings />} />
                   <Route path="settings/billing" element={<BillingSettings />} />

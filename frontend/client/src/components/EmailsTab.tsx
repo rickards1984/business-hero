@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import LoadingMessage from '@/components/LoadingMessage';
 import { useNavigate } from 'react-router-dom';
 import {
   Box,
@@ -495,11 +496,10 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
 
       {/* Email list */}
       {loading && emails.length === 0 ? (
-        <Box sx={{ py: 1 }}>
-          {[1, 2, 3, 4, 5].map(i => (
-            <div key={i} className="skeleton skeleton-card" style={{ height: 64, marginBottom: 8 }} />
-          ))}
-        </Box>
+        <LoadingMessage
+          messages={["Fetching your latest emails...", "Organising and categorising everything...", "Identifying what needs your attention...", "Nearly done — this saves you hours of inbox time!"]}
+          icon="📧"
+        />
       ) : filteredEmails.length === 0 ? (
         <Box sx={{ textAlign: 'center', py: 6 }}>
           <MailOutlineIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />

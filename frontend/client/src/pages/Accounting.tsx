@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import LoadingMessage from '@/components/LoadingMessage';
 import {
   Box,
   Container,
@@ -805,7 +806,10 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
   if (loading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: embedded ? '40vh' : '100vh' }}>
-        <CircularProgress />
+        <LoadingMessage
+          messages={["Analysing your business finances in depth...", "Calculating profit, loss, and cash flow...", "Taking my time to ensure accuracy — nearly there!"]}
+          icon="💷"
+        />
       </Box>
     );
   }

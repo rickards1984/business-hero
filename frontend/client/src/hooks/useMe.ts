@@ -7,6 +7,7 @@ export interface BusinessProfile {
   timezone: string;
   logo_url: string | null;
   brand_color?: string | null;
+  feature_flags?: Record<string, any>;
 }
 
 /**

@@ -4,6 +4,7 @@ import {
   GridViewOutlined,
   ChatOutlined,
   AccountBalanceWalletOutlined,
+  RequestQuoteOutlined,
   AutoAwesomeOutlined,
   Logout as LogoutIcon,
   Settings as SettingsIcon,
@@ -21,12 +22,14 @@ interface SidebarProps {
   userEmail: string;
   onSignOut: () => void;
   onHelpClick?: () => void;
+  showQuotes?: boolean;
 }
 
-const NAV_ITEMS = [
+const BASE_NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard', Icon: GridViewOutlined },
   { key: 'comms',     label: 'Comms',     Icon: ChatOutlined },
   { key: 'finance',   label: 'Finance',   Icon: AccountBalanceWalletOutlined },
+  { key: 'quotes',    label: 'Quotes',    Icon: RequestQuoteOutlined, feature: 'quotes' as const },
   { key: 'ai',        label: 'AI Hub',    Icon: AutoAwesomeOutlined },
 ];
 
@@ -49,6 +52,7 @@ export default function Sidebar({
   userEmail,
   onSignOut,
   onHelpClick,
+  showQuotes = true,
 }: SidebarProps) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -73,7 +77,7 @@ export default function Sidebar({
 
       {/* Navigation */}
       <nav className="sidebar-nav">
-        {NAV_ITEMS.map(({ key, label, Icon }) => {
+        {BASE_NAV_ITEMS.filter(item => !item.feature || (item.feature === 'quotes' && showQuotes)).map(({ key, label, Icon }) => {
           const isActive = activeSection === key;
           return (
             <button
