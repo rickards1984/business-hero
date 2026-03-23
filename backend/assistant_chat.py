@@ -126,6 +126,65 @@ async def _execute_tool_async(tool_name: str, arguments: dict, business_id: str,
             ]
         }
 
+    elif tool_name == "generate_ai_quote":
+        import httpx as _httpx
+
+        description = arguments.get("description", "")
+        if not description:
+            return {"error": "Job description is required"}
+
+        openai_key = os.getenv("OPENAI_API_KEY")
+        system_prompt = """You are an expert quantity surveyor and pricing specialist for UK trades.
+Given a job description, break it down into a detailed itemised quote with realistic UK pricing.
+Respond with ONLY a JSON object with: job_title, groups (each with name and items array), estimated_duration, notes.
+Each item needs: description, quantity, unit, unit_cost, category (labour/materials/equipment/subcontractor/other)."""
+
+        try:
+            async with _httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
+                    json={
+                        "model": "gpt-4o",
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": description},
+                        ],
+                        "temperature": 0.3,
+                        "response_format": {"type": "json_object"},
+                    },
+                )
+
+            if resp.status_code != 200:
+                return {"error": "Failed to generate quote. Please try again."}
+
+            ai_data = resp.json()
+            content = ai_data["choices"][0]["message"]["content"]
+            quote_data = json.loads(content)
+
+            total = 0
+            summary_lines = []
+            for group in quote_data.get("groups", []):
+                group_total = sum(
+                    float(i.get("quantity", 1)) * float(i.get("unit_cost", 0))
+                    for i in group.get("items", [])
+                )
+                total += group_total
+                summary_lines.append(f"  {group['name']}: £{group_total:,.2f}")
+
+            return {
+                "job_title": quote_data.get("job_title", ""),
+                "subtotal": round(total, 2),
+                "vat_20_percent": round(total * 0.2, 2),
+                "total_inc_vat": round(total * 1.2, 2),
+                "groups_summary": "\n".join(summary_lines),
+                "estimated_duration": quote_data.get("estimated_duration", ""),
+                "notes": quote_data.get("notes", ""),
+                "message": f"I've priced up the job at £{total:,.2f} + VAT (£{total*1.2:,.2f} inc VAT). Would you like me to save this as a quote?",
+            }
+        except Exception as e:
+            return {"error": f"Quote generation failed: {str(e)}"}
+
     else:
         return execute_tool(tool_name, arguments, business_id, timezone)
 
@@ -205,6 +264,8 @@ Good: "Let me check your calendar... Okay, you've got a quiet morning but there'
 - get_accounting_summary: Get financial summary (income, expenses, profit/loss) for a period
 - list_transactions: List and search accounting transactions
 - analyze_spending: Analyze spending patterns by category
+- generate_ai_quote: Generate a detailed itemised quote from a job description
+- list_quotes: View recent quotes and estimates
 
 When using tools, always briefly acknowledge to the user that you're checking before making the call. This prevents awkward silences during data fetching.
 
@@ -279,6 +340,14 @@ When asked about finances, money, profit, or business performance:
 - Use analyze_spending to identify where money is going
 - Present financial data clearly with pound amounts (£)
 - Offer insights and suggestions based on the data
+
+### Quoting
+You can help generate and manage quotes/estimates for jobs:
+1. Use generate_ai_quote when the user describes a job they need priced up
+2. Use list_quotes to show recent quotes or check quote statuses
+3. When generating a quote, present a clear cost breakdown with group totals, subtotal, and VAT
+4. Offer to save the generated quote if the user is happy with it
+5. Use UK pricing and trade terminology
 
 ## CRITICAL RULES - NEVER VIOLATE THESE:
 

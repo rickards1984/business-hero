@@ -452,6 +452,48 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_ai_quote",
+            "description": "Generate a detailed, itemised quote from a job description. Use when the user asks to price up a job, create a quote, or estimate costs for work.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "Description of the job to quote for"
+                    },
+                    "customer_name": {
+                        "type": "string",
+                        "description": "Customer name (optional)"
+                    }
+                },
+                "required": ["description"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_quotes",
+            "description": "List recent quotes. Use when the user asks about their quotes, estimates, or pricing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status: draft, sent, accepted, declined, invoiced"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of quotes to return (default 10)"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
 ]
 
 
@@ -527,6 +569,8 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _get_business_overview(engine, business_id, arguments, timezone)
     elif tool_name == "get_cashflow_forecast":
         return _get_cashflow_forecast(engine, business_id, arguments)
+    elif tool_name == "list_quotes":
+        return _list_quotes(engine, business_id, arguments)
     else:
         return {"error": f"Unknown tool: {tool_name}"}
 
@@ -2725,3 +2769,35 @@ def _get_cashflow_forecast(engine, business_id: str, args: dict) -> dict:
         pass
 
     return forecast
+
+
+# ── Quoting ──────────────────────────────────────────────
+
+def _list_quotes(engine, business_id: str, args: dict) -> dict:
+    """List recent quotes for the business."""
+    status_filter = args.get("status")
+    limit = min(args.get("limit", 10), 50)
+
+    with engine.connect() as conn:
+        query = "SELECT quote_number, customer_name, job_title, total, status, created_at FROM quotes WHERE business_id = :bid"
+        params: dict = {"bid": business_id}
+        if status_filter:
+            query += " AND status = :status"
+            params["status"] = status_filter
+        query += " ORDER BY created_at DESC LIMIT :limit"
+        params["limit"] = limit
+
+        rows = conn.execute(text(query), params).fetchall()
+
+    quotes = [
+        {
+            "quote_number": r[0],
+            "customer": r[1],
+            "job": r[2],
+            "total": float(r[3]) if r[3] else 0,
+            "status": r[4],
+            "date": r[5].isoformat() if r[5] else None,
+        }
+        for r in rows
+    ]
+    return {"quotes": quotes, "count": len(quotes)}

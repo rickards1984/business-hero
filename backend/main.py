@@ -351,6 +351,9 @@ app.include_router(automation_router)
 from booking_api import router as booking_router
 app.include_router(booking_router)
 
+from quoting_api import router as quoting_router
+app.include_router(quoting_router)
+
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
