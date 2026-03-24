@@ -24,10 +24,35 @@ import {
   Select,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
+import Switch from '@mui/material/Switch';
 import { supabase, type Business, type BusinessMember } from '@/lib/supabase';
 import { apiRequest } from '@/lib/queryClient';
 import AdminReceptionistSection from '@/components/AdminReceptionistSection';
 import AdminWhatsAppSection from '@/components/AdminWhatsAppSection';
+
+const FEATURE_TOGGLE_LIST = [
+  { key: 'quoting_enabled', label: 'Quoting & Quantity Surveying', description: 'AI-powered quotes, quantity surveying, PDF generation, quote-to-invoice', icon: '📋', defaultEnabled: false },
+  { key: 'calendar_booking_enabled', label: 'Calendar Booking', description: 'AI receptionist can check availability and book appointments', icon: '📅', defaultEnabled: false },
+  { key: 'whatsapp_enabled', label: 'WhatsApp CEO Briefing', description: 'Daily pulse, weekly briefing, and real-time alerts via WhatsApp', icon: '💬', defaultEnabled: false },
+  { key: 'ai_receptionist_enabled', label: 'AI Receptionist', description: 'AI-powered phone receptionist with call handling', icon: '🤖', defaultEnabled: true },
+  { key: 'email_management_enabled', label: 'Email Management', description: 'Gmail sync, AI categorisation, and email management', icon: '📧', defaultEnabled: true },
+  { key: 'invoice_chasing_enabled', label: 'Invoice Chasing', description: 'Automated invoice reminders and chase management', icon: '📄', defaultEnabled: true },
+  { key: 'accounting_enabled', label: 'Accounting Integration', description: 'Connect to Xero, FreeAgent, or QuickBooks', icon: '💷', defaultEnabled: false },
+];
+
+const INDUSTRY_PRESETS: Record<string, string[]> = {
+  general: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled'],
+  construction: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'quoting_enabled', 'calendar_booking_enabled', 'accounting_enabled'],
+  plumbing: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'quoting_enabled', 'calendar_booking_enabled'],
+  electrical: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'quoting_enabled', 'calendar_booking_enabled'],
+  fitness: ['email_management_enabled', 'ai_receptionist_enabled', 'calendar_booking_enabled', 'whatsapp_enabled'],
+  cleaning: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'quoting_enabled'],
+  landscaping: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'quoting_enabled'],
+  consulting: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'calendar_booking_enabled', 'accounting_enabled'],
+  automotive: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'quoting_enabled'],
+  property: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'accounting_enabled'],
+  other: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled'],
+};
 
 interface AwazIntegration {
   webhook_url: string;
@@ -622,19 +647,6 @@ export default function AdminBusinessDetail() {
                   <Chip label={`Calendar: ${health.business.feature_flags?.calendar ? 'On' : 'Off'}`} size="small" />
                   <Chip label={`Voice: ${health.business.feature_flags?.voice ? 'On' : 'Off'}`} size="small" />
                   <Chip label={`Receptionist: ${health.business.feature_flags?.receptionist ? 'On' : 'Off'}`} size="small" />
-                  <Chip
-                    label={`Quoting: ${health.business.feature_flags?.quoting_enabled !== false ? 'On' : 'Off'}`}
-                    size="small"
-                    color={health.business.feature_flags?.quoting_enabled !== false ? 'primary' : 'default'}
-                    onClick={async () => {
-                      const current = health.business.feature_flags?.quoting_enabled !== false;
-                      const flags = { ...(health.business.feature_flags || {}), quoting_enabled: !current };
-                      await supabase.from('businesses').update({ feature_flags: flags }).eq('id', id);
-                      loadBusiness();
-                      loadHealth();
-                    }}
-                    sx={{ cursor: 'pointer' }}
-                  />
                 </Box>
 
                 <Divider />
@@ -796,6 +808,59 @@ export default function AdminBusinessDetail() {
                 </Typography>
               </Box>
             </Box>
+
+            <Divider sx={{ my: 3 }} />
+            <Typography variant="h6" gutterBottom>Feature Configuration</Typography>
+
+            <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+              <InputLabel>Industry</InputLabel>
+              <Select
+                value={business?.feature_flags?.industry || 'general'}
+                label="Industry"
+                onChange={(e) => {
+                  const industry = e.target.value as string;
+                  const presets = INDUSTRY_PRESETS[industry] || [];
+                  const updatedFlags: Record<string, any> = { ...(business?.feature_flags || {}), industry };
+                  FEATURE_TOGGLE_LIST.forEach(f => {
+                    updatedFlags[f.key] = presets.includes(f.key);
+                  });
+                  setBusiness((prev: any) => prev ? { ...prev, feature_flags: updatedFlags } : prev);
+                  setFeatureFlagsText(JSON.stringify(updatedFlags, null, 2));
+                }}
+              >
+                <MenuItem value="general">General</MenuItem>
+                <MenuItem value="construction">Construction &amp; Building</MenuItem>
+                <MenuItem value="plumbing">Plumbing &amp; Heating</MenuItem>
+                <MenuItem value="electrical">Electrical</MenuItem>
+                <MenuItem value="landscaping">Landscaping &amp; Gardening</MenuItem>
+                <MenuItem value="cleaning">Cleaning Services</MenuItem>
+                <MenuItem value="fitness">Fitness &amp; Wellness</MenuItem>
+                <MenuItem value="automotive">Automotive</MenuItem>
+                <MenuItem value="property">Property Management</MenuItem>
+                <MenuItem value="consulting">Consulting &amp; Professional Services</MenuItem>
+                <MenuItem value="other">Other</MenuItem>
+              </Select>
+            </FormControl>
+
+            {FEATURE_TOGGLE_LIST.map((feature) => (
+              <Box key={feature.key} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', py: 1.5, borderBottom: '1px solid', borderColor: 'divider' }}>
+                <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.5, flex: 1 }}>
+                  <Typography sx={{ fontSize: 20, lineHeight: 1 }}>{feature.icon}</Typography>
+                  <Box>
+                    <Typography variant="body2" fontWeight={500}>{feature.label}</Typography>
+                    <Typography variant="caption" color="text.secondary">{feature.description}</Typography>
+                  </Box>
+                </Box>
+                <Switch
+                  checked={business?.feature_flags?.[feature.key] ?? feature.defaultEnabled}
+                  onChange={(e) => {
+                    const updatedFlags = { ...(business?.feature_flags || {}), [feature.key]: e.target.checked };
+                    setBusiness((prev: any) => prev ? { ...prev, feature_flags: updatedFlags } : prev);
+                    setFeatureFlagsText(JSON.stringify(updatedFlags, null, 2));
+                  }}
+                />
+              </Box>
+            ))}
 
             <Divider sx={{ my: 3 }} />
 

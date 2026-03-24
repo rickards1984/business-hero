@@ -700,6 +700,7 @@ async def list_businesses_summary(
             b.plan_tier,
             b.is_active,
             b.subscription_status,
+            b.feature_flags,
             (
                 SELECT NULLIF(i.config->>'last_received_at', '')::timestamptz
                 FROM integrations i
@@ -763,6 +764,7 @@ async def list_businesses_summary(
                     "plan_tier": business.plan_tier,
                     "is_active": business.is_active,
                     "subscription_status": business.subscription_status,
+                    "feature_flags": business.feature_flags or {},
                     "last_awaz_webhook_at": None,
                     "awaz_connected": False,
                     "email_connected": False,

@@ -675,6 +675,7 @@ export default function AdminDashboard() {
                       <TableCell>Name</TableCell>
                       <TableCell>Plan</TableCell>
                       <TableCell>Sub</TableCell>
+                      <TableCell>Features</TableCell>
                       <TableCell>Awaz</TableCell>
                       <TableCell>Email</TableCell>
                       <TableCell>Calendar</TableCell>
@@ -690,7 +691,7 @@ export default function AdminDashboard() {
                   <TableBody>
                     {filteredBusinesses.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={13} align="center" sx={{ py: 4 }}>
+                        <TableCell colSpan={14} align="center" sx={{ py: 4 }}>
                           <Typography color="text.secondary">No businesses found</Typography>
                         </TableCell>
                       </TableRow>
@@ -712,6 +713,19 @@ export default function AdminDashboard() {
                               size="small"
                               color={business.subscription_status === 'active' ? 'success' : 'default'}
                             />
+                          </TableCell>
+                          <TableCell>
+                            <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                              {business.feature_flags?.quoting_enabled && (
+                                <Chip label="QTE" size="small" sx={{ fontSize: 10, height: 20, bgcolor: 'rgba(124,92,252,0.1)', color: '#7c5cfc' }} />
+                              )}
+                              {business.feature_flags?.calendar_booking_enabled && (
+                                <Chip label="CAL" size="small" sx={{ fontSize: 10, height: 20, bgcolor: 'rgba(45,212,140,0.1)', color: '#2dd48c' }} />
+                              )}
+                              {business.feature_flags?.whatsapp_enabled && (
+                                <Chip label="WA" size="small" sx={{ fontSize: 10, height: 20, bgcolor: 'rgba(96,165,250,0.1)', color: '#60a5fa' }} />
+                              )}
+                            </Box>
                           </TableCell>
                           <TableCell>
                             <Chip

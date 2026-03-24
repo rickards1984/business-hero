@@ -56,7 +56,25 @@ const ALL_FEATURE_KEYS = [
   { key: 'aria_voice', label: 'AI Assistant (Voice)' },
   { key: 'receptionist', label: 'AI Receptionist' },
   { key: 'accounting', label: 'Accounting' },
+  { key: 'quoting', label: 'Quoting & Quantity Surveying' },
+  { key: 'calendar_booking', label: 'Calendar Booking' },
+  { key: 'whatsapp_briefing', label: 'WhatsApp Briefing' },
+  { key: 'invoice_chasing', label: 'Invoice Chasing' },
 ];
+
+const ONBOARDING_INDUSTRY_PRESETS: Record<string, string[]> = {
+  general: ['email', 'receptionist', 'invoice_chasing'],
+  construction: ['email', 'receptionist', 'invoice_chasing', 'quoting', 'calendar_booking', 'accounting'],
+  plumbing: ['email', 'receptionist', 'invoice_chasing', 'quoting', 'calendar_booking'],
+  electrical: ['email', 'receptionist', 'invoice_chasing', 'quoting', 'calendar_booking'],
+  fitness: ['email', 'receptionist', 'calendar_booking', 'whatsapp_briefing'],
+  cleaning: ['email', 'receptionist', 'invoice_chasing', 'quoting'],
+  landscaping: ['email', 'receptionist', 'invoice_chasing', 'quoting'],
+  consulting: ['email', 'receptionist', 'invoice_chasing', 'calendar_booking', 'accounting'],
+  automotive: ['email', 'receptionist', 'invoice_chasing', 'quoting'],
+  property: ['email', 'receptionist', 'invoice_chasing', 'accounting'],
+  other: ['email', 'receptionist', 'invoice_chasing'],
+};
 
 interface PlanDef {
   id: string;
@@ -155,6 +173,7 @@ export default function AdminOnboardingWizard() {
   // Step 3
   const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
   const [planFeatureDefaults, setPlanFeatureDefaults] = useState<Record<string, boolean>>({});
+  const [industry, setIndustry] = useState('general');
 
   // Step 4
   const [emailNotes, setEmailNotes] = useState('');
@@ -283,6 +302,7 @@ export default function AdminOnboardingWizard() {
       }
       if (wd.plan_features) {
         setFeatureFlags(wd.plan_features.feature_flags || {});
+        if (wd.plan_features.feature_flags?.industry) setIndustry(wd.plan_features.feature_flags.industry);
         const cb = wd.plan_features.ceo_briefing;
         if (cb) {
           setWhatsappNumber(cb.phone_number || '');
@@ -384,7 +404,7 @@ export default function AdminOnboardingWizard() {
           break;
         case 'plan_features':
           stepData = {
-            feature_flags: featureFlags,
+            feature_flags: { ...featureFlags, industry },
             ceo_briefing: {
               phone_number: whatsappNumber,
               owner_name: whatsappOwnerName,
@@ -729,6 +749,38 @@ export default function AdminOnboardingWizard() {
               <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
                 Based on the <strong>{selectedPlan?.name || bizPlan}</strong> plan. You can override individual features below.
               </Typography>
+
+              <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+                <InputLabel>Business Industry</InputLabel>
+                <Select
+                  value={industry}
+                  label="Business Industry"
+                  onChange={(e) => {
+                    const ind = e.target.value as string;
+                    setIndustry(ind);
+                    const presets = ONBOARDING_INDUSTRY_PRESETS[ind] || [];
+                    const updated: Record<string, boolean> = { ...featureFlags };
+                    ALL_FEATURE_KEYS.forEach(f => { updated[f.key] = presets.includes(f.key); });
+                    setFeatureFlags(updated);
+                  }}
+                >
+                  <MenuItem value="general">General</MenuItem>
+                  <MenuItem value="construction">Construction &amp; Building</MenuItem>
+                  <MenuItem value="plumbing">Plumbing &amp; Heating</MenuItem>
+                  <MenuItem value="electrical">Electrical</MenuItem>
+                  <MenuItem value="landscaping">Landscaping &amp; Gardening</MenuItem>
+                  <MenuItem value="cleaning">Cleaning Services</MenuItem>
+                  <MenuItem value="fitness">Fitness &amp; Wellness</MenuItem>
+                  <MenuItem value="automotive">Automotive</MenuItem>
+                  <MenuItem value="property">Property Management</MenuItem>
+                  <MenuItem value="consulting">Consulting &amp; Professional Services</MenuItem>
+                  <MenuItem value="other">Other</MenuItem>
+                </Select>
+              </FormControl>
+              <Typography variant="caption" color="text.secondary" sx={{ mb: 2, display: 'block' }}>
+                Selecting an industry pre-configures the recommended features. You can customise these at any time.
+              </Typography>
+
               <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                 {ALL_FEATURE_KEYS.map((f) => {
                   const planDefault = planFeatureDefaults[f.key] ?? false;
