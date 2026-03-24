@@ -566,6 +566,261 @@ async def convert_to_invoice(
     return {"status": "invoiced", "invoice_id": invoice_id, "invoice_number": inv_number}
 
 
+# ── PDF Generation & Sending ─────────────────────────────
+
+def _get_quote_pdf_data(session, quote_id: str, business_id: str):
+    """Fetch quote, line items, and settings for PDF generation."""
+    quote_row = session.execute(
+        text("SELECT * FROM quotes WHERE id = :qid AND business_id = :bid"),
+        {"qid": quote_id, "bid": business_id},
+    ).fetchone()
+    if not quote_row:
+        return None, None, None
+
+    items = session.execute(
+        text("SELECT * FROM quote_line_items WHERE quote_id = :qid ORDER BY sort_order"),
+        {"qid": quote_id},
+    ).fetchall()
+
+    settings_row = session.execute(
+        text("SELECT * FROM quote_settings WHERE business_id = :bid"),
+        {"bid": business_id},
+    ).fetchone()
+
+    quote_dict = _row_to_quote(quote_row)
+    items_list = [
+        {
+            "description": i.description,
+            "quantity": float(i.quantity),
+            "unit": i.unit,
+            "unit_cost": float(i.unit_cost),
+            "line_total": float(i.line_total),
+            "category": i.category,
+            "group_name": i.group_name,
+            "markup_percentage": float(i.markup_percentage) if i.markup_percentage else 0,
+        }
+        for i in items
+    ]
+
+    settings_dict = {}
+    if settings_row:
+        settings_dict = {
+            "company_name": settings_row.company_name,
+            "company_address": settings_row.company_address,
+            "company_phone": settings_row.company_phone,
+            "company_email": settings_row.company_email,
+            "company_logo_url": getattr(settings_row, "company_logo_url", None),
+            "company_registration": settings_row.company_registration,
+            "vat_number": settings_row.vat_number,
+        }
+
+    return quote_dict, items_list, settings_dict
+
+
+@router.post("/{quote_id}/generate-pdf")
+async def generate_pdf(
+    quote_id: str,
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Generate a PDF for a quote and return it as a download."""
+    from services.quote_pdf import generate_quote_pdf
+    from fastapi.responses import Response
+
+    business_id = str(auth_ctx["business_id"])
+    quote_dict, items_list, settings_dict = _get_quote_pdf_data(session, quote_id, business_id)
+    if not quote_dict:
+        raise HTTPException(status_code=404, detail="Quote not found")
+
+    pdf_bytes = await generate_quote_pdf(quote_dict, items_list, settings_dict)
+    filename = f"{quote_dict.get('quote_number', 'quote')}.pdf"
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/{quote_id}/send-email")
+async def send_quote_email(
+    quote_id: str,
+    data: dict,
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Generate PDF and send quote via email using Gmail API."""
+    import os
+    import base64
+    import email.mime.multipart
+    import email.mime.text
+    import email.mime.application
+    import httpx as _httpx
+    from services.quote_pdf import generate_quote_pdf
+    from cryptography.fernet import Fernet
+
+    business_id = str(auth_ctx["business_id"])
+
+    quote_dict, items_list, settings_dict = _get_quote_pdf_data(session, quote_id, business_id)
+    if not quote_dict:
+        raise HTTPException(status_code=404, detail="Quote not found")
+
+    customer_email = data.get("email") or quote_dict.get("customer_email")
+    if not customer_email:
+        raise HTTPException(status_code=400, detail="No customer email provided")
+
+    # Get Google OAuth token for Gmail
+    row = session.execute(
+        text("""
+            SELECT id, token_ciphertext, refresh_token_ciphertext
+            FROM email_accounts
+            WHERE business_id = :bid AND provider = 'google'
+            ORDER BY created_at DESC LIMIT 1
+        """),
+        {"bid": business_id},
+    ).fetchone()
+
+    if not row or not row[1]:
+        raise HTTPException(status_code=400, detail="Gmail not connected. Please connect Google in Email settings.")
+
+    enc_key = os.getenv("EMAIL_ENCRYPTION_KEY")
+    if not enc_key:
+        raise HTTPException(status_code=500, detail="Email encryption not configured")
+    fernet = Fernet(enc_key.encode("utf-8"))
+
+    try:
+        access_token = fernet.decrypt(row[1].encode("utf-8")).decode("utf-8")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to decrypt email token")
+
+    # Generate PDF
+    pdf_bytes = await generate_quote_pdf(quote_dict, items_list, settings_dict)
+
+    company_name = settings_dict.get('company_name', 'Our team')
+    subject = data.get("subject") or f"Quote {quote_dict['quote_number']} from {company_name}"
+    body_text = data.get("message") or (
+        f"Dear {quote_dict.get('customer_name', 'Customer')},\n\n"
+        f"Please find attached our quote {quote_dict['quote_number']} for {quote_dict.get('job_title', 'the requested work')}.\n\n"
+        f"Total: £{float(quote_dict.get('total', 0)):,.2f} (inc. VAT)\n\n"
+        + (f"This quote is valid until {quote_dict.get('valid_until')}.\n\n" if quote_dict.get('valid_until') else "")
+        + "If you have any questions or would like to proceed, please don't hesitate to get in touch.\n\n"
+        f"Kind regards,\n{company_name}"
+    )
+
+    # Build MIME email with PDF attachment
+    msg = email.mime.multipart.MIMEMultipart()
+    msg['to'] = customer_email
+    msg['subject'] = subject
+    msg.attach(email.mime.text.MIMEText(body_text, 'plain'))
+
+    pdf_attachment = email.mime.application.MIMEApplication(pdf_bytes, _subtype='pdf')
+    pdf_attachment.add_header(
+        'Content-Disposition', 'attachment',
+        filename=f"{quote_dict.get('quote_number', 'quote')}.pdf",
+    )
+    msg.attach(pdf_attachment)
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode('utf-8')
+
+    try:
+        async with _httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                headers={"Authorization": f"Bearer {access_token}"},
+                json={"raw": raw},
+            )
+
+        if resp.status_code in (200, 201):
+            session.execute(
+                text("""
+                    UPDATE quotes SET
+                        status = CASE WHEN status = 'draft' THEN 'sent' ELSE status END,
+                        sent_at = now(), sent_via = 'email', updated_at = now()
+                    WHERE id = :qid AND business_id = :bid
+                """),
+                {"qid": quote_id, "bid": business_id},
+            )
+            session.commit()
+            return {"status": "sent", "email": customer_email}
+        else:
+            logger.error(f"Gmail send failed: {resp.status_code} {resp.text}")
+            raise HTTPException(status_code=502, detail="Failed to send email via Gmail")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Quote email send failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to send quote email: {str(e)}")
+
+
+@router.post("/{quote_id}/send-whatsapp")
+async def send_quote_whatsapp(
+    quote_id: str,
+    data: dict,
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Send quote summary via WhatsApp."""
+    from services.whatsapp_service import send_whatsapp_message
+
+    business_id = str(auth_ctx["business_id"])
+
+    quote_row = session.execute(
+        text("SELECT * FROM quotes WHERE id = :qid AND business_id = :bid"),
+        {"qid": quote_id, "bid": business_id},
+    ).fetchone()
+    if not quote_row:
+        raise HTTPException(status_code=404, detail="Quote not found")
+
+    phone = data.get("phone") or quote_row.customer_phone
+    if not phone:
+        raise HTTPException(status_code=400, detail="No customer phone number provided")
+
+    quote_dict = _row_to_quote(quote_row)
+
+    company_name = ""
+    settings_row = session.execute(
+        text("SELECT company_name FROM quote_settings WHERE business_id = :bid"),
+        {"bid": business_id},
+    ).fetchone()
+    if settings_row:
+        company_name = settings_row[0] or ""
+
+    message = (
+        f"📋 *Quote {quote_dict['quote_number']}*\n"
+        f"From: {company_name}\n\n"
+        f"*{quote_dict.get('job_title', 'Quoted Work')}*\n"
+        + (f"{quote_dict.get('job_description', '')[:200]}\n\n" if quote_dict.get('job_description') else "\n")
+        + f"💷 *Total: £{float(quote_dict.get('total', 0)):,.2f}* (inc. VAT)\n\n"
+        + (f"Valid until: {quote_dict.get('valid_until')}\n\n" if quote_dict.get('valid_until') else "")
+        + "Please reply or call us to accept this quote or ask any questions.\n\n"
+        "_Sent via Business Hero_"
+    )
+
+    msg_sid = await send_whatsapp_message(
+        to_number=phone,
+        body=message,
+        business_id=business_id,
+        message_type="notification",
+        related_entity_type="quote",
+        related_entity_id=quote_id,
+    )
+
+    if msg_sid:
+        session.execute(
+            text("""
+                UPDATE quotes SET
+                    status = CASE WHEN status = 'draft' THEN 'sent' ELSE status END,
+                    sent_at = now(), sent_via = 'whatsapp', updated_at = now()
+                WHERE id = :qid AND business_id = :bid
+            """),
+            {"qid": quote_id, "bid": business_id},
+        )
+        session.commit()
+        return {"status": "sent", "phone": phone, "message_sid": msg_sid}
+    else:
+        raise HTTPException(status_code=502, detail="Failed to send WhatsApp message")
+
+
 # ── Quote Settings ───────────────────────────────────────
 
 @router.get("/settings/config")

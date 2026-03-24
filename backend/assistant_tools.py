@@ -494,6 +494,28 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_quote",
+            "description": "Send a quote to a customer via email or WhatsApp. Use when the user says to send a quote.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "quote_number": {
+                        "type": "string",
+                        "description": "The quote number (e.g., QTE-0001)"
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["email", "whatsapp"],
+                        "description": "How to send the quote"
+                    }
+                },
+                "required": ["quote_number", "method"]
+            }
+        }
+    },
 ]
 
 
@@ -571,6 +593,8 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _get_cashflow_forecast(engine, business_id, arguments)
     elif tool_name == "list_quotes":
         return _list_quotes(engine, business_id, arguments)
+    elif tool_name == "send_quote":
+        return _send_quote_via_aria(engine, business_id, arguments)
     else:
         return {"error": f"Unknown tool: {tool_name}"}
 
@@ -2801,3 +2825,33 @@ def _list_quotes(engine, business_id: str, args: dict) -> dict:
         for r in rows
     ]
     return {"quotes": quotes, "count": len(quotes)}
+
+
+def _send_quote_via_aria(engine, business_id: str, args: dict) -> dict:
+    """Look up a quote and guide the user to send it from the Quotes section."""
+    quote_number = args.get("quote_number", "")
+    method = args.get("method", "email")
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT id, customer_email, customer_phone, quote_number, status FROM quotes WHERE business_id = :bid AND quote_number = :qnum"),
+            {"bid": business_id, "qnum": quote_number},
+        ).fetchone()
+
+    if not row:
+        return {"error": f"Quote {quote_number} not found"}
+
+    if method == "email" and not row[1]:
+        return {"error": "No customer email on this quote. Please add their email first."}
+    if method == "whatsapp" and not row[2]:
+        return {"error": "No customer phone number on this quote. Please add their number first."}
+
+    contact = row[1] if method == "email" else row[2]
+    return {
+        "message": f"Quote {quote_number} is ready to send via {method} to {contact}. "
+                   f"Please go to the Quotes section and click 'Send Quote' on this quote to generate the PDF and send it.",
+        "quote_number": quote_number,
+        "status": row[4],
+        "method": method,
+        "contact": contact,
+    }

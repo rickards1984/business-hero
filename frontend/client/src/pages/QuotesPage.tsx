@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
-  Box, Button, TextField, IconButton, Chip, Drawer, Divider,
+  Box, Button, TextField, IconButton, Chip, Drawer, Divider, Dialog,
+  DialogTitle, DialogContent, DialogActions, Tabs, Tab,
   Select, MenuItem, FormControl, InputLabel, Switch, FormControlLabel,
 } from '@mui/material';
 import {
@@ -9,7 +10,8 @@ import {
   Edit as EditIcon, Delete as DeleteIcon, ContentCopy as DuplicateIcon,
   AutoAwesome as AIIcon, ChevronRight as ChevronRightIcon,
   Close as CloseIcon, ExpandMore as ExpandMoreIcon, ExpandLess as ExpandLessIcon,
-  Send as SendIcon,
+  Send as SendIcon, PictureAsPdf as PdfIcon, Visibility as PreviewIcon,
+  WhatsApp as WhatsAppIcon, Email as EmailIcon, Download as DownloadIcon,
 } from '@mui/icons-material';
 import { useMe } from '@/hooks/useMe';
 import { apiRequest } from '@/lib/queryClient';
@@ -152,6 +154,15 @@ export default function QuotesPage() {
   const [settings, setSettings] = useState<QuoteSettings | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
+
+  // Send dialog state
+  const [sendDialogOpen, setSendDialogOpen] = useState(false);
+  const [sendTab, setSendTab] = useState(0);
+  const [sendEmail, setSendEmail] = useState('');
+  const [sendSubject, setSendSubject] = useState('');
+  const [sendMessage, setSendMessage] = useState('');
+  const [sendPhone, setSendPhone] = useState('');
+  const [sending, setSending] = useState(false);
 
   // Collapsed groups in line items
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
@@ -413,6 +424,81 @@ export default function QuotesPage() {
       await apiRequest('PUT', '/v1/quotes/settings/config', settings);
     } catch {}
     finally { setSettingsSaving(false); }
+  };
+
+  const handleDownloadPDF = async (quoteId: string, quoteNumber: string) => {
+    try {
+      const res = await apiRequest('POST', `/v1/quotes/${quoteId}/generate-pdf`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${quoteNumber}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      alert('PDF download failed. Please try again.');
+    }
+  };
+
+  const handlePreviewPDF = async (quoteId: string) => {
+    try {
+      const res = await apiRequest('POST', `/v1/quotes/${quoteId}/generate-pdf`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+    } catch {
+      alert('PDF preview failed. Please try again.');
+    }
+  };
+
+  const openSendDialog = (quote: Quote) => {
+    setSendEmail(quote.customer_email || '');
+    setSendPhone(quote.customer_phone || '');
+    setSendSubject(`Quote ${quote.quote_number}`);
+    setSendMessage(
+      `Dear ${quote.customer_name || 'Customer'},\n\n` +
+      `Please find attached our quote ${quote.quote_number} for ${quote.job_title || 'the requested work'}.\n\n` +
+      `Total: £${quote.total.toLocaleString('en-GB', { minimumFractionDigits: 2 })} (inc. VAT)\n\n` +
+      (quote.valid_until ? `This quote is valid until ${quote.valid_until}.\n\n` : '') +
+      `If you have any questions or would like to proceed, please don't hesitate to get in touch.\n\nKind regards`
+    );
+    setSendTab(0);
+    setSendDialogOpen(true);
+  };
+
+  const handleSendEmail = async () => {
+    if (!selectedQuote || !sendEmail) return;
+    setSending(true);
+    try {
+      await apiRequest('POST', `/v1/quotes/${selectedQuote.id}/send-email`, {
+        email: sendEmail,
+        subject: sendSubject,
+        message: sendMessage,
+      });
+      setSendDialogOpen(false);
+      fetchQuotes();
+      const res = await apiRequest('GET', `/v1/quotes/${selectedQuote.id}`);
+      setSelectedQuote(await res.json());
+    } catch {
+      alert('Failed to send email. Make sure Gmail is connected in Email Settings.');
+    } finally { setSending(false); }
+  };
+
+  const handleSendWhatsApp = async () => {
+    if (!selectedQuote || !sendPhone) return;
+    setSending(true);
+    try {
+      await apiRequest('POST', `/v1/quotes/${selectedQuote.id}/send-whatsapp`, {
+        phone: sendPhone,
+      });
+      setSendDialogOpen(false);
+      fetchQuotes();
+      const res = await apiRequest('GET', `/v1/quotes/${selectedQuote.id}`);
+      setSelectedQuote(await res.json());
+    } catch {
+      alert('Failed to send WhatsApp message.');
+    } finally { setSending(false); }
   };
 
   // ─── RENDER ──────────────────────────────────────────────
@@ -740,13 +826,19 @@ export default function QuotesPage() {
               <div style={{ fontSize: 18, fontWeight: 700, color: '#2dd48c' }}>Total: £{selectedQuote.total.toFixed(2)}</div>
             </div>
 
-            {/* Status Actions */}
+            {/* PDF Actions */}
             <Divider sx={{ my: 2, borderColor: 'rgba(255,255,255,0.06)' }} />
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              <Button size="small" variant="outlined" onClick={() => handlePreviewPDF(selectedQuote.id)} startIcon={<PreviewIcon />} sx={{ borderColor: 'rgba(255,255,255,0.12)', color: 'hsl(var(--foreground))' }}>Preview PDF</Button>
+              <Button size="small" variant="outlined" onClick={() => handleDownloadPDF(selectedQuote.id, selectedQuote.quote_number)} startIcon={<DownloadIcon />} sx={{ borderColor: 'rgba(255,255,255,0.12)', color: 'hsl(var(--foreground))' }}>Download PDF</Button>
+            </div>
+
+            {/* Status Actions */}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {selectedQuote.status === 'draft' && (
                 <>
                   <Button size="small" variant="contained" onClick={() => openEdit(selectedQuote.id)} startIcon={<EditIcon />} sx={{ background: 'rgba(255,255,255,0.08)' }}>Edit</Button>
-                  <Button size="small" variant="contained" onClick={() => handleStatusAction(selectedQuote.id, 'send', { via: 'email' })} startIcon={<SendIcon />} sx={{ background: '#7c5cfc', '&:hover': { background: '#6a4de0' } }}>Mark as Sent</Button>
+                  <Button size="small" variant="contained" onClick={() => openSendDialog(selectedQuote)} startIcon={<SendIcon />} sx={{ background: '#7c5cfc', '&:hover': { background: '#6a4de0' } }}>Send Quote</Button>
                   <Button size="small" color="error" onClick={() => handleDeleteQuote(selectedQuote.id)} startIcon={<DeleteIcon />}>Delete</Button>
                 </>
               )}
@@ -755,6 +847,7 @@ export default function QuotesPage() {
                   <Button size="small" variant="contained" onClick={() => handleStatusAction(selectedQuote.id, 'accept')} sx={{ background: 'rgba(45,212,140,0.15)', color: '#2dd48c' }}>Mark Accepted</Button>
                   <Button size="small" variant="contained" onClick={() => handleStatusAction(selectedQuote.id, 'decline')} sx={{ background: 'rgba(248,113,113,0.15)', color: '#f87171' }}>Mark Declined</Button>
                   <Button size="small" onClick={() => openEdit(selectedQuote.id)} startIcon={<EditIcon />}>Edit</Button>
+                  <Button size="small" onClick={() => openSendDialog(selectedQuote)} startIcon={<SendIcon />}>Resend</Button>
                 </>
               )}
               {selectedQuote.status === 'accepted' && (
@@ -770,6 +863,63 @@ export default function QuotesPage() {
           </Box>
         )}
       </Drawer>
+
+      {/* Send Quote Dialog */}
+      <Dialog open={sendDialogOpen} onClose={() => setSendDialogOpen(false)} maxWidth="sm" fullWidth
+        PaperProps={{ sx: { background: 'var(--glass-bg, #1a1c22)', backdropFilter: 'blur(20px)', color: 'hsl(var(--foreground))', border: '1px solid rgba(255,255,255,0.08)' } }}>
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', pb: 0 }}>
+          <span style={{ fontSize: 16, fontWeight: 600 }}>Send Quote</span>
+          <IconButton size="small" onClick={() => setSendDialogOpen(false)}><CloseIcon /></IconButton>
+        </DialogTitle>
+        <DialogContent>
+          <Tabs value={sendTab} onChange={(_, v) => setSendTab(v)} sx={{ mb: 2, '& .MuiTab-root': { color: 'hsl(var(--muted-foreground))', minHeight: 40 }, '& .Mui-selected': { color: '#7c5cfc' }, '& .MuiTabs-indicator': { backgroundColor: '#7c5cfc' } }}>
+            <Tab icon={<EmailIcon sx={{ fontSize: 18 }} />} iconPosition="start" label="Email" sx={{ textTransform: 'none', fontSize: 13 }} />
+            <Tab icon={<WhatsAppIcon sx={{ fontSize: 18 }} />} iconPosition="start" label="WhatsApp" sx={{ textTransform: 'none', fontSize: 13 }} />
+          </Tabs>
+
+          {sending ? (
+            <LoadingMessage messages={["Generating your professional PDF and sending it now...", "Almost there — just a moment..."]} icon="📨" rotateInterval={3000} />
+          ) : sendTab === 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <TextField label="Customer Email" size="small" fullWidth value={sendEmail} onChange={e => setSendEmail(e.target.value)} />
+              <TextField label="Subject" size="small" fullWidth value={sendSubject} onChange={e => setSendSubject(e.target.value)} />
+              <TextField label="Message" size="small" fullWidth multiline minRows={6} value={sendMessage} onChange={e => setSendMessage(e.target.value)} />
+              <div style={{ fontSize: 11, color: 'hsl(var(--muted-foreground))' }}>
+                <PdfIcon sx={{ fontSize: 14, verticalAlign: 'middle', mr: 0.5 }} />
+                A professional PDF quote will be attached automatically.
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <TextField label="Customer Phone" size="small" fullWidth value={sendPhone} onChange={e => setSendPhone(e.target.value)} placeholder="+447..." />
+              <div className="glass-card" style={{ padding: 12, fontSize: 12, color: 'hsl(var(--muted-foreground))', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                {selectedQuote && (
+                  <>
+                    📋 <strong>Quote {selectedQuote.quote_number}</strong>{'\n'}
+                    {'\n'}
+                    <strong>{selectedQuote.job_title}</strong>{'\n'}
+                    {'\n'}
+                    💷 <strong>Total: £{selectedQuote.total.toLocaleString('en-GB', { minimumFractionDigits: 2 })}</strong> (inc. VAT){'\n'}
+                    {selectedQuote.valid_until && <>{'\n'}Valid until: {selectedQuote.valid_until}{'\n'}</>}
+                    {'\n'}
+                    <em>This is a text summary — PDFs cannot be sent via WhatsApp.</em>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </DialogContent>
+        {!sending && (
+          <DialogActions sx={{ px: 3, pb: 2 }}>
+            <Button onClick={() => setSendDialogOpen(false)} sx={{ color: 'hsl(var(--muted-foreground))' }}>Cancel</Button>
+            {sendTab === 0 ? (
+              <Button variant="contained" onClick={handleSendEmail} disabled={!sendEmail} startIcon={<EmailIcon />} sx={{ background: '#7c5cfc', '&:hover': { background: '#6a4de0' } }}>Send Email</Button>
+            ) : (
+              <Button variant="contained" onClick={handleSendWhatsApp} disabled={!sendPhone} startIcon={<WhatsAppIcon />} sx={{ background: '#25d366', '&:hover': { background: '#1da851' } }}>Send WhatsApp</Button>
+            )}
+          </DialogActions>
+        )}
+      </Dialog>
     </div>
   );
 }
