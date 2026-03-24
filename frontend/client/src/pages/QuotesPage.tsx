@@ -4,6 +4,7 @@ import {
   Box, Button, TextField, IconButton, Chip, Drawer, Divider, Dialog,
   DialogTitle, DialogContent, DialogActions, Tabs, Tab,
   Select, MenuItem, FormControl, InputLabel, Switch, FormControlLabel,
+  Snackbar, Alert,
 } from '@mui/material';
 import {
   Add as AddIcon, Search as SearchIcon, Clear as ClearIcon,
@@ -68,6 +69,11 @@ interface Quote {
   project_reference?: string;
 }
 
+interface LabourRate {
+  role: string;
+  daily_rate: number;
+}
+
 interface QuoteSettings {
   quote_prefix: string;
   next_quote_number: number;
@@ -84,6 +90,7 @@ interface QuoteSettings {
   company_registration?: string;
   vat_number?: string;
   industry: string;
+  labour_rates?: LabourRate[];
 }
 
 const STATUS_COLORS: Record<string, { bg: string; color: string }> = {
@@ -167,6 +174,13 @@ export default function QuotesPage() {
   // Collapsed groups in line items
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
+  // File upload state
+  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
+  const [uploadPreviews, setUploadPreviews] = useState<string[]>([]);
+
+  // Snackbar
+  const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' | 'info' }>({ open: false, message: '', severity: 'info' });
+
   const fetchQuotes = useCallback(async () => {
     if (!businessId) return;
     setLoading(true);
@@ -236,15 +250,62 @@ export default function QuotesPage() {
     return filtered;
   }, [quotes, search]);
 
+  const handleFileUpload = (files: File[]) => {
+    const validFiles = files.filter(f =>
+      f.type.startsWith('image/') || f.type === 'application/pdf'
+    );
+    setUploadedFiles(prev => [...prev, ...validFiles]);
+    validFiles.forEach(file => {
+      if (file.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          setUploadPreviews(prev => [...prev, e.target?.result as string]);
+        };
+        reader.readAsDataURL(file);
+      } else {
+        setUploadPreviews(prev => [...prev, '']);
+      }
+    });
+  };
+
+  const removeFile = (index: number) => {
+    setUploadedFiles(prev => prev.filter((_, i) => i !== index));
+    setUploadPreviews(prev => prev.filter((_, i) => i !== index));
+  };
+
   const handleGenerateAI = async () => {
     if (!aiDescription.trim()) return;
     setAiGenerating(true);
     try {
-      const res = await apiRequest('POST', '/v1/quotes/ai/generate', { description: aiDescription });
+      const requestBody: any = { description: aiDescription };
+
+      if (uploadedFiles.length > 0) {
+        const imageData: string[] = [];
+        for (const file of uploadedFiles) {
+          if (file.type.startsWith('image/')) {
+            const base64 = await new Promise<string>((resolve) => {
+              const reader = new FileReader();
+              reader.onload = (e) => resolve(e.target?.result as string);
+              reader.readAsDataURL(file);
+            });
+            imageData.push(base64);
+          }
+        }
+        if (imageData.length > 0) {
+          requestBody.images = imageData;
+        }
+      }
+
+      const res = await apiRequest('POST', '/v1/quotes/ai/generate', requestBody);
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.detail || 'AI generation failed');
+      }
       const data = await res.json();
+
       setFormData(prev => ({
         ...prev,
-        job_title: data.job_title || '',
+        job_title: data.job_title || prev.job_title || '',
         job_description: aiDescription,
         notes: data.notes || '',
       }));
@@ -254,7 +315,7 @@ export default function QuotesPage() {
         quantity: item.quantity || 1,
         unit: item.unit || 'each',
         unit_cost: item.unit_cost || 0,
-        line_total: item.line_total || 0,
+        line_total: item.line_total || (item.quantity * item.unit_cost) || 0,
         markup_percentage: 0,
         markup_amount: 0,
         sort_order: i,
@@ -262,8 +323,10 @@ export default function QuotesPage() {
       }));
       setLineItems(items);
       setFormMode('manual');
-    } catch {
-      alert('Failed to generate quote. Please try again.');
+      setSnackbar({ open: true, message: `AI generated ${items.length} line items — review and edit below`, severity: 'success' });
+    } catch (err: any) {
+      console.error('AI generation failed:', err);
+      setSnackbar({ open: true, message: err.message || 'Failed to generate quote. Try simplifying the description.', severity: 'error' });
     } finally { setAiGenerating(false); }
   };
 
@@ -374,6 +437,8 @@ export default function QuotesPage() {
     setEditingQuoteId(null);
     setAiDescription('');
     setFormMode('ai');
+    setUploadedFiles([]);
+    setUploadPreviews([]);
   };
 
   const addLineItem = (groupName: string = 'General') => {
@@ -540,6 +605,66 @@ export default function QuotesPage() {
               </FormControl>
             </div>
             <TextField label="Company Address" size="small" fullWidth multiline minRows={2} value={settings.company_address || ''} onChange={e => setSettings({ ...settings, company_address: e.target.value })} sx={{ mb: 2 }} />
+            <Divider sx={{ my: 2, borderColor: 'rgba(255,255,255,0.06)' }} />
+            <h3 style={{ fontSize: 14, fontWeight: 600, color: 'hsl(var(--foreground))', marginBottom: 4 }}>Your Labour Rates</h3>
+            <p style={{ fontSize: 12, color: 'hsl(var(--muted-foreground))', marginBottom: 12 }}>
+              Set your standard rates. AI will use these instead of industry averages when generating quotes.
+            </p>
+            {(settings.labour_rates && settings.labour_rates.length > 0 ? settings.labour_rates : [
+              { role: 'Labourer', daily_rate: 150 },
+              { role: 'Skilled Tradesperson', daily_rate: 280 },
+              { role: 'Electrician', daily_rate: 320 },
+              { role: 'Plumber', daily_rate: 300 },
+              { role: 'Painter/Decorator', daily_rate: 220 },
+            ]).map((rate: LabourRate, index: number) => (
+              <div key={index} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                <TextField
+                  size="small" value={rate.role} placeholder="Role" sx={{ flex: 1 }}
+                  onChange={(e) => {
+                    const updated = [...(settings.labour_rates && settings.labour_rates.length > 0 ? settings.labour_rates : [
+                      { role: 'Labourer', daily_rate: 150 }, { role: 'Skilled Tradesperson', daily_rate: 280 },
+                      { role: 'Electrician', daily_rate: 320 }, { role: 'Plumber', daily_rate: 300 },
+                      { role: 'Painter/Decorator', daily_rate: 220 },
+                    ])];
+                    updated[index] = { ...updated[index], role: e.target.value };
+                    setSettings({ ...settings, labour_rates: updated });
+                  }}
+                />
+                <TextField
+                  size="small" type="number" value={rate.daily_rate} label="£/day" sx={{ width: 100 }}
+                  InputLabelProps={{ shrink: true }}
+                  onChange={(e) => {
+                    const updated = [...(settings.labour_rates && settings.labour_rates.length > 0 ? settings.labour_rates : [
+                      { role: 'Labourer', daily_rate: 150 }, { role: 'Skilled Tradesperson', daily_rate: 280 },
+                      { role: 'Electrician', daily_rate: 320 }, { role: 'Plumber', daily_rate: 300 },
+                      { role: 'Painter/Decorator', daily_rate: 220 },
+                    ])];
+                    updated[index] = { ...updated[index], daily_rate: parseFloat(e.target.value) || 0 };
+                    setSettings({ ...settings, labour_rates: updated });
+                  }}
+                />
+                <IconButton size="small" onClick={() => {
+                  const current = settings.labour_rates && settings.labour_rates.length > 0 ? settings.labour_rates : [
+                    { role: 'Labourer', daily_rate: 150 }, { role: 'Skilled Tradesperson', daily_rate: 280 },
+                    { role: 'Electrician', daily_rate: 320 }, { role: 'Plumber', daily_rate: 300 },
+                    { role: 'Painter/Decorator', daily_rate: 220 },
+                  ];
+                  setSettings({ ...settings, labour_rates: current.filter((_: any, i: number) => i !== index) });
+                }} sx={{ color: 'rgba(248,113,113,0.7)' }}>
+                  <DeleteIcon fontSize="small" />
+                </IconButton>
+              </div>
+            ))}
+            <Button size="small" startIcon={<AddIcon />} onClick={() => {
+              const current = settings.labour_rates && settings.labour_rates.length > 0 ? settings.labour_rates : [
+                { role: 'Labourer', daily_rate: 150 }, { role: 'Skilled Tradesperson', daily_rate: 280 },
+                { role: 'Electrician', daily_rate: 320 }, { role: 'Plumber', daily_rate: 300 },
+                { role: 'Painter/Decorator', daily_rate: 220 },
+              ];
+              setSettings({ ...settings, labour_rates: [...current, { role: '', daily_rate: 0 }] });
+            }} sx={{ color: '#a78bfa', textTransform: 'none', mb: 2 }}>
+              Add rate
+            </Button>
             <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
               <Button variant="contained" onClick={handleSaveSettings} disabled={settingsSaving} sx={{ background: '#7c5cfc', '&:hover': { background: '#6a4de0' } }}>
                 {settingsSaving ? 'Saving...' : 'Save Settings'}
@@ -564,37 +689,152 @@ export default function QuotesPage() {
 
         {/* AI Generation — only for new quotes */}
         {!editingQuoteId && formMode === 'ai' && lineItems.length === 0 && (
-          <div className="glass-card" style={{ padding: 20, marginBottom: 20 }}>
-            <h3 style={{ fontSize: 14, fontWeight: 600, color: 'hsl(var(--foreground))', marginBottom: 8 }}>
-              ✨ AI-Assisted Quote
-            </h3>
-            <p style={{ fontSize: 13, color: 'hsl(var(--muted-foreground))', marginBottom: 12 }}>
-              Describe the job and let AI generate an itemised quote with UK trade pricing.
-            </p>
-            <TextField
-              fullWidth multiline minRows={4} size="small"
-              placeholder={'e.g., "Kitchen extension, 4m x 3m single storey, brick build, flat roof,\nnew window, relocate radiator, 2 new sockets, plastering and painting"'}
-              value={aiDescription}
-              onChange={e => setAiDescription(e.target.value)}
-              disabled={aiGenerating}
-              sx={{ mb: 2 }}
-            />
-            {aiGenerating ? (
-              <LoadingMessage
-                messages={["Analysing the job requirements...", "Calculating material quantities...", "Pricing up each trade at current UK rates...", "Building your itemised quote — nearly done!"]}
-                icon="🔨" rotateInterval={3000}
+          <>
+            <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+              <h3 style={{ fontSize: 14, fontWeight: 600, color: 'hsl(var(--foreground))', marginBottom: 8 }}>
+                ✨ AI-Assisted Quote
+              </h3>
+              <p style={{ fontSize: 13, color: 'hsl(var(--muted-foreground))', marginBottom: 12 }}>
+                Describe the job and optionally upload site photos — AI will generate an itemised quote with UK trade pricing.
+              </p>
+              <TextField
+                fullWidth multiline minRows={4} size="small"
+                placeholder={'e.g., "Kitchen extension, 4m x 3m single storey, brick build, flat roof,\nnew window, relocate radiator, 2 new sockets, plastering and painting"'}
+                value={aiDescription}
+                onChange={e => setAiDescription(e.target.value)}
+                disabled={aiGenerating}
+                sx={{ mb: 2 }}
               />
-            ) : (
-              <div style={{ display: 'flex', gap: 8 }}>
-                <Button variant="contained" onClick={handleGenerateAI} disabled={!aiDescription.trim()} startIcon={<AIIcon />} sx={{ background: '#7c5cfc', '&:hover': { background: '#6a4de0' } }}>
-                  Generate Quote
-                </Button>
-                <Button variant="outlined" onClick={() => setFormMode('manual')} sx={{ borderColor: 'rgba(255,255,255,0.12)', color: 'hsl(var(--foreground))' }}>
-                  Manual Entry
-                </Button>
+            </div>
+
+            {/* Photo & Drawing Upload */}
+            <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'hsl(var(--foreground))', marginBottom: 4 }}>
+                📸 Photos & Drawings
               </div>
-            )}
-          </div>
+              <div style={{ fontSize: 12, color: 'hsl(var(--muted-foreground))', marginBottom: 12 }}>
+                Upload site photos, drawings, plans, or specifications. AI will analyse these alongside your description to generate a more accurate quote.
+              </div>
+              <div
+                onDragOver={(e) => { e.preventDefault(); e.currentTarget.style.borderColor = '#7c5cfc'; }}
+                onDragLeave={(e) => { e.currentTarget.style.borderColor = 'var(--glass-border)'; }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.currentTarget.style.borderColor = 'var(--glass-border)';
+                  handleFileUpload(Array.from(e.dataTransfer.files));
+                }}
+                onClick={() => document.getElementById('quote-file-upload')?.click()}
+                style={{
+                  border: '2px dashed var(--glass-border)',
+                  borderRadius: 12,
+                  padding: '24px 16px',
+                  textAlign: 'center',
+                  cursor: 'pointer',
+                  transition: 'all 200ms',
+                  background: 'var(--glass-bg)',
+                }}
+              >
+                <input
+                  id="quote-file-upload"
+                  type="file"
+                  multiple
+                  accept="image/*,.pdf,.dwg,.dxf"
+                  style={{ display: 'none' }}
+                  onChange={(e) => { handleFileUpload(Array.from(e.target.files || [])); e.target.value = ''; }}
+                />
+                <div style={{ fontSize: 28, marginBottom: 8 }}>📷</div>
+                <div style={{ fontSize: 13, fontWeight: 500, color: 'hsl(var(--foreground))' }}>
+                  Drop photos, drawings, or plans here
+                </div>
+                <div style={{ fontSize: 12, color: 'hsl(var(--muted-foreground))', marginTop: 4 }}>
+                  or click to browse — JPG, PNG, PDF supported
+                </div>
+              </div>
+              {uploadedFiles.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+                  {uploadedFiles.map((file, index) => (
+                    <div key={index} style={{
+                      position: 'relative', width: 80, height: 80, borderRadius: 8,
+                      overflow: 'hidden', border: '0.5px solid var(--glass-border)',
+                    }}>
+                      {file.type.startsWith('image/') ? (
+                        <img src={uploadPreviews[index]} alt={file.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      ) : (
+                        <div style={{
+                          width: '100%', height: '100%', display: 'flex', flexDirection: 'column',
+                          alignItems: 'center', justifyContent: 'center', background: 'var(--glass-bg)',
+                          fontSize: 10, color: 'hsl(var(--muted-foreground))', padding: 4, textAlign: 'center',
+                        }}>
+                          📄
+                          <span style={{ marginTop: 2, wordBreak: 'break-all' }}>{file.name.slice(0, 15)}</span>
+                        </div>
+                      )}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); removeFile(index); }}
+                        style={{
+                          position: 'absolute', top: 2, right: 2, width: 18, height: 18, borderRadius: '50%',
+                          background: 'rgba(0,0,0,0.6)', color: '#fff', border: 'none', cursor: 'pointer',
+                          fontSize: 10, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* AI Generate Button */}
+            <div style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              padding: '20px 16px', marginBottom: 16, borderRadius: 12,
+              background: 'rgba(124, 92, 252, 0.06)', border: '0.5px solid rgba(124, 92, 252, 0.15)',
+            }}>
+              {!aiGenerating ? (
+                <>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: 'hsl(var(--foreground))', marginBottom: 4, textAlign: 'center' }}>
+                    Ready to generate your quote?
+                  </div>
+                  <div style={{ fontSize: 12, color: 'hsl(var(--muted-foreground))', marginBottom: 12, textAlign: 'center' }}>
+                    AI will analyse your job description{uploadedFiles.length > 0 ? ` and ${uploadedFiles.length} uploaded file${uploadedFiles.length > 1 ? 's' : ''}` : ''} to create an itemised quote with UK trade rates
+                  </div>
+                  <Button
+                    variant="contained" onClick={handleGenerateAI} disabled={!aiDescription.trim()}
+                    startIcon={<span>✨</span>}
+                    sx={{
+                      backgroundColor: '#7c5cfc', color: '#fff', textTransform: 'none',
+                      fontWeight: 600, px: 4, py: 1.2, borderRadius: 2, fontSize: 14,
+                      '&:hover': { backgroundColor: '#5a3fd4' },
+                      '&:disabled': { backgroundColor: 'rgba(124,92,252,0.3)', color: 'rgba(255,255,255,0.5)' },
+                    }}
+                  >
+                    Generate Quote with AI
+                  </Button>
+                  {!aiDescription.trim() && (
+                    <div style={{ fontSize: 11, color: 'hsl(var(--muted-foreground))', marginTop: 8 }}>
+                      Add a job description above to enable AI generation
+                    </div>
+                  )}
+                  <Button size="small" onClick={() => setFormMode('manual')} sx={{ mt: 1.5, color: 'hsl(var(--muted-foreground))', textTransform: 'none', fontSize: 12 }}>
+                    or enter items manually
+                  </Button>
+                </>
+              ) : (
+                <LoadingMessage
+                  messages={[
+                    "Analysing the job requirements...",
+                    uploadedFiles.length > 0 ? "Studying your photos and drawings..." : "Breaking down the scope of work...",
+                    "Calculating material quantities...",
+                    "Pricing up each trade at current UK rates...",
+                    "Building your itemised quote...",
+                    "Nearly done — just reviewing the numbers!",
+                  ]}
+                  icon="🔨" rotateInterval={3000}
+                />
+              )}
+            </div>
+          </>
         )}
 
         {/* Manual Form — always shown in edit mode or after AI generates */}
@@ -920,6 +1160,13 @@ export default function QuotesPage() {
           </DialogActions>
         )}
       </Dialog>
+
+      {/* Snackbar */}
+      <Snackbar open={snackbar.open} autoHideDuration={5000} onClose={() => setSnackbar(prev => ({ ...prev, open: false }))} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
+        <Alert onClose={() => setSnackbar(prev => ({ ...prev, open: false }))} severity={snackbar.severity} sx={{ width: '100%' }}>
+          {snackbar.message}
+        </Alert>
+      </Snackbar>
     </div>
   );
 }

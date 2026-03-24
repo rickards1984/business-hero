@@ -845,7 +845,12 @@ async def get_quote_settings(
             "include_tax": True,
             "default_markup": 0,
             "industry": "general",
+            "labour_rates": [],
         }
+
+    labour_rates_raw = getattr(row, "labour_rates", None)
+    if labour_rates_raw and isinstance(labour_rates_raw, str):
+        labour_rates_raw = json.loads(labour_rates_raw)
 
     return {
         "quote_prefix": row.quote_prefix,
@@ -863,6 +868,7 @@ async def get_quote_settings(
         "company_registration": row.company_registration,
         "vat_number": row.vat_number,
         "industry": row.industry,
+        "labour_rates": labour_rates_raw or [],
     }
 
 
@@ -880,6 +886,10 @@ async def update_quote_settings(
         {"bid": business_id},
     ).fetchone()
 
+    labour_rates_val = settings.get("labour_rates")
+    if labour_rates_val and not isinstance(labour_rates_val, str):
+        labour_rates_val = json.dumps(labour_rates_val)
+
     params = {
         "bid": business_id,
         "prefix": settings.get("quote_prefix", "QTE-"),
@@ -896,6 +906,7 @@ async def update_quote_settings(
         "co_reg": settings.get("company_registration"),
         "vat": settings.get("vat_number"),
         "industry": settings.get("industry", "general"),
+        "labour_rates": labour_rates_val or '[]',
     }
 
     if existing:
@@ -908,7 +919,8 @@ async def update_quote_settings(
                     company_name = :co_name, company_address = :co_addr,
                     company_phone = :co_phone, company_email = :co_email,
                     company_logo_url = :co_logo, company_registration = :co_reg,
-                    vat_number = :vat, industry = :industry, updated_at = now()
+                    vat_number = :vat, industry = :industry,
+                    labour_rates = :labour_rates, updated_at = now()
                 WHERE business_id = :bid
             """),
             params,
@@ -920,10 +932,10 @@ async def update_quote_settings(
                 (business_id, quote_prefix, default_terms, default_valid_days,
                  default_tax_rate, include_tax, default_markup, company_name,
                  company_address, company_phone, company_email, company_logo_url,
-                 company_registration, vat_number, industry)
+                 company_registration, vat_number, industry, labour_rates)
                 VALUES (:bid, :prefix, :terms, :valid_days, :tax_rate, :inc_tax,
                         :markup, :co_name, :co_addr, :co_phone, :co_email,
-                        :co_logo, :co_reg, :vat, :industry)
+                        :co_logo, :co_reg, :vat, :industry, :labour_rates)
             """),
             params,
         )
@@ -940,26 +952,35 @@ async def generate_ai_quote(
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
-    """Generate a quote using AI from a job description."""
+    """Generate a quote using AI from a job description and optional photos."""
     import httpx
     import os
 
     business_id = str(auth_ctx["business_id"])
     job_description = data.get("description", "")
+    images = data.get("images", [])
 
     if not job_description:
         raise HTTPException(status_code=400, detail="Job description is required")
 
     settings_row = session.execute(
-        text("SELECT industry, default_markup, default_tax_rate FROM quote_settings WHERE business_id = :bid"),
+        text("SELECT industry, default_markup, default_tax_rate, labour_rates FROM quote_settings WHERE business_id = :bid"),
         {"bid": business_id},
     ).fetchone()
 
     industry = settings_row[0] if settings_row else "general"
 
+    biz_row = session.execute(
+        text("SELECT feature_flags FROM businesses WHERE id = :bid"),
+        {"bid": business_id},
+    ).fetchone()
+    if biz_row and biz_row[0]:
+        flags = biz_row[0] if isinstance(biz_row[0], dict) else json.loads(biz_row[0] or '{}')
+        industry = flags.get('industry', industry)
+
     system_prompt = f"""You are an expert quantity surveyor and pricing specialist for the {industry} industry in the UK.
 
-Given a job description, break it down into a detailed, itemised quote with realistic UK pricing.
+Given a job description (and optionally photos/drawings of the site), break it down into a detailed, itemised quote with realistic UK pricing.
 
 Group items by trade/category. For each line item provide:
 - group_name: the trade group (e.g., "Groundworks", "Electrical", "Plumbing", "Decorating")
@@ -975,7 +996,14 @@ Use current UK trade rates:
 - Electrician: £250-400/day
 - Plumber: £250-350/day
 - Painter/decorator: £180-280/day
-- Use realistic UK material prices
+- Use realistic UK material prices from major suppliers
+
+If photos or drawings are provided, analyse them carefully to:
+- Assess the scope and scale of work
+- Identify materials visible in the photos
+- Estimate dimensions from visual cues
+- Note the condition of existing structures
+- Identify any additional work that may be needed based on what you see
 
 Be thorough but realistic. Include all necessary items that a professional would include.
 Do NOT include VAT — that's calculated separately.
@@ -993,12 +1021,36 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
     }}
   ],
   "estimated_duration": "estimated time to complete",
-  "notes": "any important assumptions or exclusions"
+  "notes": "any important assumptions, exclusions, or observations from the photos"
 }}"""
+
+    custom_rates = ""
+    if settings_row and settings_row[3]:
+        rates = settings_row[3] if isinstance(settings_row[3], list) else json.loads(settings_row[3] or '[]')
+        if rates:
+            custom_rates = "\n\nIMPORTANT - Use these CUSTOM labour rates (set by the business owner) instead of the defaults above:\n"
+            for rate in rates:
+                custom_rates += f"- {rate.get('role', 'Worker')}: £{rate.get('daily_rate', 0)}/day\n"
+            system_prompt += custom_rates
 
     try:
         openai_key = os.getenv("OPENAI_API_KEY")
-        async with httpx.AsyncClient(timeout=60.0) as client:
+
+        user_content: list = [{"type": "text", "text": job_description}]
+
+        for img_data in images[:5]:
+            if img_data.startswith('data:'):
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": img_data, "detail": "high"},
+                })
+            else:
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{img_data}", "detail": "high"},
+                })
+
+        async with httpx.AsyncClient(timeout=90.0) as client:
             resp = await client.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={
@@ -1006,17 +1058,19 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "gpt-4o",
+                    "model": "gpt-5.4",
                     "messages": [
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": job_description},
+                        {"role": "user", "content": user_content},
                     ],
                     "temperature": 0.3,
+                    "max_tokens": 4096,
                     "response_format": {"type": "json_object"},
                 },
             )
 
         if resp.status_code != 200:
+            logger.error(f"OpenAI API error: {resp.status_code} {resp.text}")
             raise HTTPException(status_code=502, detail=f"AI service error: {resp.status_code}")
 
         ai_response = resp.json()
@@ -1040,12 +1094,15 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
             "subtotal": round(subtotal, 2),
             "estimated_duration": quote_data.get("estimated_duration", ""),
             "notes": quote_data.get("notes", ""),
-            "ai_model": "gpt-4o",
+            "ai_model": "gpt-5.4",
             "ai_prompt": job_description,
+            "images_analysed": len(images[:5]),
         }
 
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="AI returned invalid response format")
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="AI took too long to respond. Try a shorter description or fewer images.")
     except HTTPException:
         raise
     except Exception as e:
