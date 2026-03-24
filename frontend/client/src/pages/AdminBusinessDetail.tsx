@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import ThemeToggle from '@/components/ThemeToggle';
 import {
   Alert,
   AppBar,
@@ -587,7 +588,7 @@ export default function AdminBusinessDetail() {
   }
 
   return (
-    <Box sx={{ minHeight: '100vh', bgcolor: 'grey.100' }}>
+    <Box sx={{ minHeight: '100vh', bgcolor: 'background.default' }}>
       <AppBar position="static">
         <Box sx={{ display: 'flex', alignItems: 'center', px: 2, py: 1 }}>
           <Button
@@ -597,9 +598,10 @@ export default function AdminBusinessDetail() {
           >
             Back to Admin Businesses
           </Button>
-          <Typography variant="h6" sx={{ ml: 2 }}>
+          <Typography variant="h6" sx={{ ml: 2, flexGrow: 1 }}>
             {business?.name || 'Business'}
           </Typography>
+          <ThemeToggle />
         </Box>
       </AppBar>
 

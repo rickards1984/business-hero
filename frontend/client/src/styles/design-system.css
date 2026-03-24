@@ -2229,3 +2229,236 @@ input, textarea, select, button, a, svg, canvas, video, img {
   height: 80px;
   margin-bottom: 12px;
 }
+
+/* ========== ADMIN SECTION DARK MODE ========== */
+
+.dark .MuiAppBar-root {
+  background-color: rgba(13, 15, 19, 0.9) !important;
+  color: #e8e6e1 !important;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
+}
+
+.dark .MuiContainer-root {
+  background: transparent !important;
+}
+
+.dark .MuiPaper-root {
+  background-color: rgba(255, 255, 255, 0.04) !important;
+  color: #e8e6e1 !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+.dark .MuiTab-root {
+  color: rgba(232, 230, 225, 0.5) !important;
+}
+.dark .MuiTab-root.Mui-selected {
+  color: #a78bfa !important;
+}
+.dark .MuiTabs-indicator {
+  background-color: #7c5cfc !important;
+}
+
+.dark .MuiTypography-root {
+  color: inherit;
+}
+.dark .MuiTypography-h4,
+.dark .MuiTypography-h5,
+.dark .MuiTypography-h6 {
+  color: #e8e6e1 !important;
+}
+.dark .MuiTypography-body1 {
+  color: #e8e6e1 !important;
+}
+.dark .MuiTypography-body2 {
+  color: rgba(232, 230, 225, 0.7) !important;
+}
+.dark .MuiTypography-caption {
+  color: rgba(232, 230, 225, 0.5) !important;
+}
+
+.dark h2, .dark h3, .dark h4, .dark h5, .dark h6 {
+  color: #e8e6e1;
+}
+
+.dark .MuiTypography-colorTextSecondary,
+.dark [class*="MuiTypography-colorText"] {
+  color: rgba(232, 230, 225, 0.5) !important;
+}
+
+.dark .MuiButton-outlined {
+  color: #e8e6e1 !important;
+  border-color: rgba(255, 255, 255, 0.2) !important;
+}
+.dark .MuiButton-outlined:hover {
+  background-color: rgba(255, 255, 255, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.3) !important;
+}
+.dark .MuiButton-text {
+  color: #e8e6e1 !important;
+}
+
+.dark .MuiChip-outlined {
+  color: #e8e6e1 !important;
+  border-color: rgba(255, 255, 255, 0.15) !important;
+}
+.dark .MuiChip-filled {
+  color: #e8e6e1 !important;
+}
+.dark .MuiChip-colorSuccess {
+  background-color: rgba(45, 212, 140, 0.15) !important;
+  color: #2dd48c !important;
+}
+.dark .MuiChip-colorWarning {
+  background-color: rgba(251, 191, 36, 0.15) !important;
+  color: #fbbf24 !important;
+}
+.dark .MuiChip-colorError {
+  background-color: rgba(248, 113, 113, 0.15) !important;
+  color: #f87171 !important;
+}
+.dark .MuiChip-colorInfo {
+  background-color: rgba(96, 165, 250, 0.15) !important;
+  color: #60a5fa !important;
+}
+
+.dark .MuiTableContainer-root {
+  background-color: rgba(255, 255, 255, 0.02) !important;
+}
+.dark .MuiTableHead-root .MuiTableCell-root {
+  background-color: rgba(255, 255, 255, 0.04) !important;
+  color: rgba(232, 230, 225, 0.6) !important;
+  border-bottom-color: rgba(255, 255, 255, 0.08) !important;
+  font-weight: 600;
+}
+.dark .MuiTableBody-root .MuiTableCell-root {
+  color: #e8e6e1 !important;
+  border-bottom-color: rgba(255, 255, 255, 0.06) !important;
+}
+.dark .MuiTableBody-root .MuiTableRow-root:hover {
+  background-color: rgba(255, 255, 255, 0.04) !important;
+}
+
+.dark .MuiInputBase-root {
+  color: #e8e6e1 !important;
+}
+.dark .MuiOutlinedInput-notchedOutline {
+  border-color: rgba(255, 255, 255, 0.15) !important;
+}
+.dark .MuiInputLabel-root {
+  color: rgba(232, 230, 225, 0.5) !important;
+}
+.dark .MuiInputLabel-root.Mui-focused {
+  color: #a78bfa !important;
+}
+.dark .MuiSelect-icon {
+  color: rgba(232, 230, 225, 0.5) !important;
+}
+
+.dark .MuiDrawer-paper {
+  background-color: #0d0f13 !important;
+  color: #e8e6e1 !important;
+  border-right-color: rgba(255, 255, 255, 0.08) !important;
+}
+.dark .MuiListItemButton-root {
+  color: #e8e6e1 !important;
+}
+.dark .MuiListItemButton-root:hover {
+  background-color: rgba(255, 255, 255, 0.06) !important;
+}
+.dark .MuiListItemButton-root.Mui-selected {
+  background-color: rgba(124, 92, 252, 0.12) !important;
+  color: #a78bfa !important;
+}
+.dark .MuiListItemIcon-root {
+  color: inherit !important;
+}
+.dark .MuiListItemText-primary {
+  color: inherit !important;
+}
+
+.dark .MuiDivider-root {
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+.dark .MuiDialog-paper {
+  background-color: #1a1c22 !important;
+  color: #e8e6e1 !important;
+  border: 0.5px solid rgba(255, 255, 255, 0.1) !important;
+}
+.dark .MuiDialogTitle-root {
+  color: #e8e6e1 !important;
+}
+.dark .MuiDialogContent-root {
+  color: #e8e6e1 !important;
+}
+.dark .MuiDialogContentText-root {
+  color: rgba(232, 230, 225, 0.7) !important;
+}
+
+.dark .MuiSwitch-root .MuiSwitch-track {
+  background-color: rgba(255, 255, 255, 0.2) !important;
+}
+
+.dark [style*="background-color: white"],
+.dark [style*="background-color: #fff"],
+.dark [style*="backgroundColor: white"],
+.dark [style*="background: white"],
+.dark [style*="background: #fff"] {
+  background-color: rgba(255, 255, 255, 0.04) !important;
+  background: rgba(255, 255, 255, 0.04) !important;
+}
+
+.dark [style*="color: #111"],
+.dark [style*="color: #333"],
+.dark [style*="color: #666"],
+.dark [style*="color: rgb(17"],
+.dark [style*="color: rgb(51"],
+.dark [style*="color: rgb(102"] {
+  color: #e8e6e1 !important;
+}
+
+.dark body {
+  background-color: #0d0f13;
+}
+
+.dark section,
+.dark .MuiBox-root > .MuiPaper-root {
+  background-color: rgba(255, 255, 255, 0.03) !important;
+}
+
+.dark .MuiButton-contained {
+  color: #ffffff !important;
+}
+.dark .MuiButton-containedPrimary {
+  background-color: #7c5cfc !important;
+}
+.dark .MuiButton-containedPrimary:hover {
+  background-color: #5a3fd4 !important;
+}
+
+.dark .MuiTooltip-tooltip {
+  background-color: #1a1c22 !important;
+  color: #e8e6e1 !important;
+  border: 0.5px solid rgba(255, 255, 255, 0.1) !important;
+}
+
+.dark .MuiCircularProgress-root {
+  color: #7c5cfc !important;
+}
+
+.dark .MuiAlert-standardInfo {
+  background-color: rgba(96, 165, 250, 0.1) !important;
+  color: #60a5fa !important;
+}
+.dark .MuiAlert-standardWarning {
+  background-color: rgba(251, 191, 36, 0.1) !important;
+  color: #fbbf24 !important;
+}
+.dark .MuiAlert-standardSuccess {
+  background-color: rgba(45, 212, 140, 0.1) !important;
+  color: #2dd48c !important;
+}
+.dark .MuiAlert-standardError {
+  background-color: rgba(248, 113, 113, 0.1) !important;
+  color: #f87171 !important;
+}

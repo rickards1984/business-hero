@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import ThemeToggle from '@/components/ThemeToggle';
 import {
   Box,
   AppBar,
@@ -514,7 +515,8 @@ export default function AdminDashboard() {
           <Typography variant="h6" noWrap sx={{ flexGrow: 1 }}>
             Admin Dashboard
           </Typography>
-          <Typography variant="body2" sx={{ mr: 2 }}>
+          <ThemeToggle />
+          <Typography variant="body2" sx={{ mx: 2 }}>
             {user?.email}
           </Typography>
         </Toolbar>
