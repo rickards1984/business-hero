@@ -24,144 +24,117 @@ function formatDate(): string {
   });
 }
 
-interface DashboardStats {
-  callsToday: number;
-  callsThisWeek: number;
-  emailsToday: number;
-  emailsActionRequired: number;
-  unpaidInvoices: number;
-  unpaidAmount: number;
-  overdueInvoices: number;
-  aiResolutionRate: number;
-  openTasks: number;
-  highPriorityTasks: number;
-}
-
 export default function DashboardPage() {
   const { data: me } = useMe();
   const isMobile = useIsMobile();
   const navigate = useNavigate();
   const [showTasks, setShowTasks] = useState(false);
   const [ownerName, setOwnerName] = useState<string>('');
+  const businessId = me?.id;
 
   useEffect(() => {
-    const fetchOwnerName = async () => {
-      try {
-        const res = await apiRequest('GET', '/v1/whatsapp/config');
-        const config = await res.json();
-        if (config?.owner_name) setOwnerName(config.owner_name);
-      } catch {}
-    };
-    fetchOwnerName();
-  }, []);
+    if (!businessId) return;
+    apiRequest('GET', '/v1/whatsapp/config')
+      .then(r => r.json())
+      .then(c => { if (c?.owner_name) setOwnerName(c.owner_name); })
+      .catch(() => {});
+  }, [businessId]);
 
-  const { data: stats, isLoading: loading } = useQuery<DashboardStats>({
-    queryKey: ['dashboard-stats', me?.id],
+  // Each query runs INDEPENDENTLY and IN PARALLEL — each card renders as its data arrives
+  const { data: callsData, isLoading: callsLoading } = useQuery({
+    queryKey: ['dashboard-calls', businessId],
     queryFn: async () => {
-      let callsToday = 0;
-      let callsThisWeek = 0;
-      let aiHandled = 0;
-      let totalReceptionist = 0;
-      try {
-        const { data: calls } = await supabase
-          .from('calls')
-          .select('started_at, created_at, source, outcome')
-          .eq('business_id', me!.id)
-          .order('created_at', { ascending: false })
-          .limit(500);
-        if (calls) {
-          const now = new Date();
-          const todayStr = now.toISOString().slice(0, 10);
-          const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-          callsToday = calls.filter(c =>
-            (c.started_at || c.created_at)?.slice(0, 10) === todayStr
-          ).length;
-          callsThisWeek = calls.filter(c =>
-            new Date(c.started_at || c.created_at) >= weekAgo
-          ).length;
-          const receptionist = calls.filter(c => c.source === 'receptionist');
-          totalReceptionist = receptionist.length;
-          aiHandled = receptionist.filter(c => c.outcome === 'handled').length;
-        }
-      } catch {}
-
-      let emailsToday = 0;
-      let emailsAction = 0;
-      try {
-        const emailsRes = await apiRequest('GET', '/v1/email/messages?limit=200');
-        const emailsData = await emailsRes.json();
-        const allEmails = Array.isArray(emailsData) ? emailsData : (emailsData.messages || []);
-        const todayDate = new Date().toDateString();
-        emailsToday = allEmails.filter((e: any) => e.received_at && new Date(e.received_at).toDateString() === todayDate).length;
-        emailsAction = allEmails.filter((e: any) => e.ai_category === 'Action Required').length;
-      } catch {}
-
-      let unpaidCount = 0;
-      let unpaidAmount = 0;
-      let overdueCount = 0;
-      try {
-        const invRes = await apiRequest('GET', '/v1/invoices');
-        const invData = await invRes.json();
-        const invoices = Array.isArray(invData) ? invData : (invData.invoices || []);
-        const unpaid = invoices.filter((i: any) =>
-          ['unpaid', 'authorised', 'sent'].includes(i.status) && !i.archived
-        );
-        unpaidCount = unpaid.length;
-        unpaidAmount = unpaid.reduce((sum: number, i: any) =>
-          sum + (parseFloat(i.amount_due) || parseFloat(i.amount) || 0), 0
-        );
-        const today = new Date().toISOString().slice(0, 10);
-        overdueCount = unpaid.filter((i: any) => i.due_date && i.due_date < today).length;
-      } catch {}
-
-      let openTasks = 0;
-      let highPriority = 0;
-      try {
-        const { data: tasks } = await supabase
-          .from('tasks')
-          .select('status, priority')
-          .eq('business_id', me!.id)
-          .is('deleted_at', null);
-        if (tasks) {
-          const open = tasks.filter(t => t.status !== 'completed');
-          openTasks = open.length;
-          highPriority = open.filter(t => t.priority === 'high').length;
-        }
-      } catch {}
-
+      const { data: calls } = await supabase
+        .from('calls')
+        .select('started_at, created_at, source, outcome')
+        .eq('business_id', businessId!)
+        .order('created_at', { ascending: false })
+        .limit(500);
+      if (!calls) return { callsToday: 0, callsThisWeek: 0, aiResolutionRate: 0 };
+      const now = new Date();
+      const todayStr = now.toISOString().slice(0, 10);
+      const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      const callsToday = calls.filter(c => (c.started_at || c.created_at)?.slice(0, 10) === todayStr).length;
+      const callsThisWeek = calls.filter(c => new Date(c.started_at || c.created_at) >= weekAgo).length;
+      const receptionist = calls.filter(c => c.source === 'receptionist');
+      const aiHandled = receptionist.filter(c => c.outcome === 'handled').length;
       return {
         callsToday,
         callsThisWeek,
-        emailsToday,
-        emailsActionRequired: emailsAction,
-        unpaidInvoices: unpaidCount,
-        unpaidAmount,
-        overdueInvoices: overdueCount,
-        aiResolutionRate: totalReceptionist > 0
-          ? Math.round((aiHandled / totalReceptionist) * 100)
-          : 0,
-        openTasks,
-        highPriorityTasks: highPriority,
+        aiResolutionRate: receptionist.length > 0 ? Math.round((aiHandled / receptionist.length) * 100) : 0,
       };
     },
-    enabled: !!me?.id,
+    enabled: !!businessId,
     staleTime: 3 * 60 * 1000,
-    refetchOnMount: true,
   });
 
+  const { data: emailsData, isLoading: emailsLoading } = useQuery({
+    queryKey: ['dashboard-emails', businessId],
+    queryFn: async () => {
+      const res = await apiRequest('GET', '/v1/email/messages?limit=200');
+      const data = await res.json();
+      const emails = Array.isArray(data) ? data : (data.messages || []);
+      const todayDate = new Date().toDateString();
+      return {
+        emailsToday: emails.filter((e: any) => e.received_at && new Date(e.received_at).toDateString() === todayDate).length,
+        emailsActionRequired: emails.filter((e: any) => e.ai_category === 'Action Required').length,
+      };
+    },
+    enabled: !!businessId,
+    staleTime: 3 * 60 * 1000,
+  });
+
+  const { data: invoicesData, isLoading: invoicesLoading } = useQuery({
+    queryKey: ['dashboard-invoices', businessId],
+    queryFn: async () => {
+      const res = await apiRequest('GET', '/v1/invoices');
+      const data = await res.json();
+      const invoices = Array.isArray(data) ? data : (data.invoices || []);
+      const unpaid = invoices.filter((i: any) => ['unpaid', 'authorised', 'sent'].includes(i.status) && !i.archived);
+      const today = new Date().toISOString().slice(0, 10);
+      return {
+        unpaidCount: unpaid.length,
+        unpaidAmount: unpaid.reduce((sum: number, i: any) => sum + (parseFloat(i.amount_due) || parseFloat(i.amount) || 0), 0),
+        overdueCount: unpaid.filter((i: any) => i.due_date && i.due_date < today).length,
+      };
+    },
+    enabled: !!businessId,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const { data: tasksData, isLoading: tasksLoading } = useQuery({
+    queryKey: ['dashboard-tasks', businessId],
+    queryFn: async () => {
+      const { data: tasks } = await supabase
+        .from('tasks')
+        .select('status, priority')
+        .eq('business_id', businessId!)
+        .is('deleted_at', null);
+      if (!tasks) return { openTasks: 0, highPriorityTasks: 0 };
+      const open = tasks.filter(t => t.status !== 'completed');
+      return {
+        openTasks: open.length,
+        highPriorityTasks: open.filter(t => t.priority === 'high').length,
+      };
+    },
+    enabled: !!businessId,
+    staleTime: 3 * 60 * 1000,
+  });
+
+  // Background email sync — fire and forget, NEVER blocks UI
   useEffect(() => {
-    if (me?.id) {
+    if (businessId) {
       runEmailSync().catch(() => {});
     }
-  }, [me?.id]);
+  }, [businessId]);
 
-  if (!me?.id) return null;
+  if (!businessId) return null;
 
-  const displayName = ownerName || me.name?.split(' ')[0] || 'there';
+  const displayName = ownerName || me?.name?.split(' ')[0] || 'there';
 
   return (
     <div>
-      {/* Greeting header */}
+      {/* Greeting — renders immediately, no data dependency */}
       <div style={{ marginBottom: 24 }}>
         <h1 style={{
           fontSize: 22,
@@ -181,62 +154,52 @@ export default function DashboardPage() {
         </p>
       </div>
 
-      {/* KPI Cards */}
+      {/* KPI Cards — each renders independently */}
       <div style={{
         display: 'grid',
         gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)',
         gap: 12,
         marginBottom: 24,
       }}>
-        <div
-          className="kpi-card"
-          style={{ cursor: 'pointer' }}
-          onClick={() => navigate('/app/comms?tab=calls')}
-        >
+        <div className="kpi-card" style={{ cursor: 'pointer' }} onClick={() => navigate('/app/comms?tab=calls')}>
           <div className="kpi-label">Calls today</div>
-          {loading && !stats ? (
+          {callsLoading ? (
             <><div className="skeleton" style={{ height: 28, width: '50%', marginBottom: 6 }} /><div className="skeleton" style={{ height: 14, width: '70%' }} /></>
           ) : (
-            <><div className="kpi-value">{stats?.callsToday ?? 0}</div><div className="kpi-sub neutral">{stats?.callsThisWeek ?? 0} this week</div></>
+            <><div className="kpi-value">{callsData?.callsToday ?? 0}</div><div className="kpi-sub neutral">{callsData?.callsThisWeek ?? 0} this week</div></>
           )}
         </div>
 
-        <div
-          className="kpi-card"
-          style={{ cursor: 'pointer' }}
-          onClick={() => navigate('/app/comms?tab=emails')}
-        >
+        <div className="kpi-card" style={{ cursor: 'pointer' }} onClick={() => navigate('/app/comms?tab=emails')}>
           <div className="kpi-label">Emails today</div>
-          {loading && !stats ? (
+          {emailsLoading ? (
             <><div className="skeleton" style={{ height: 28, width: '50%', marginBottom: 6 }} /><div className="skeleton" style={{ height: 14, width: '70%' }} /></>
           ) : (
-            <><div className="kpi-value">{stats?.emailsToday ?? 0}</div><div className={`kpi-sub ${(stats?.emailsActionRequired ?? 0) > 0 ? 'warning' : 'neutral'}`}>{(stats?.emailsActionRequired ?? 0) > 0 ? `${stats?.emailsActionRequired} need action` : 'No action required'}</div></>
+            <><div className="kpi-value">{emailsData?.emailsToday ?? 0}</div>
+            <div className={`kpi-sub ${(emailsData?.emailsActionRequired ?? 0) > 0 ? 'warning' : 'neutral'}`}>
+              {(emailsData?.emailsActionRequired ?? 0) > 0 ? `${emailsData?.emailsActionRequired} need action` : 'No action required'}
+            </div></>
           )}
         </div>
 
-        <div
-          className="kpi-card"
-          style={{ cursor: 'pointer' }}
-          onClick={() => navigate('/app/finance?tab=invoices')}
-        >
+        <div className="kpi-card" style={{ cursor: 'pointer' }} onClick={() => navigate('/app/finance?tab=invoices')}>
           <div className="kpi-label">Invoices</div>
-          {loading && !stats ? (
+          {invoicesLoading ? (
             <><div className="skeleton" style={{ height: 28, width: '60%', marginBottom: 6 }} /><div className="skeleton" style={{ height: 14, width: '70%' }} /></>
           ) : (
-            <><div className="kpi-value">£{(stats?.unpaidAmount ?? 0).toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</div><div className={`kpi-sub ${(stats?.overdueInvoices ?? 0) > 0 ? 'warning' : 'neutral'}`}>{stats?.unpaidInvoices ?? 0} unpaid{(stats?.overdueInvoices ?? 0) > 0 ? `, ${stats?.overdueInvoices} overdue` : ''}</div></>
+            <><div className="kpi-value">£{(invoicesData?.unpaidAmount ?? 0).toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</div>
+            <div className={`kpi-sub ${(invoicesData?.overdueCount ?? 0) > 0 ? 'warning' : 'neutral'}`}>
+              {invoicesData?.unpaidCount ?? 0} unpaid{(invoicesData?.overdueCount ?? 0) > 0 ? `, ${invoicesData?.overdueCount} overdue` : ''}
+            </div></>
           )}
         </div>
 
-        <div
-          className="kpi-card"
-          style={{ cursor: 'pointer' }}
-          onClick={() => navigate('/app/ai?tab=aria')}
-        >
+        <div className="kpi-card" style={{ cursor: 'pointer' }} onClick={() => navigate('/app/ai?tab=aria')}>
           <div className="kpi-label">AI receptionist</div>
-          {loading && !stats ? (
+          {callsLoading ? (
             <><div className="skeleton" style={{ height: 28, width: '40%', marginBottom: 6 }} /><div className="skeleton" style={{ height: 14, width: '60%' }} /></>
           ) : (
-            <><div className="kpi-value">{stats?.aiResolutionRate ?? 0}%</div><div className="kpi-sub accent">resolution rate</div></>
+            <><div className="kpi-value">{callsData?.aiResolutionRate ?? 0}%</div><div className="kpi-sub accent">resolution rate</div></>
           )}
         </div>
       </div>
@@ -281,29 +244,29 @@ export default function DashboardPage() {
               {showTasks ? 'Hide full list' : 'View all'}
             </span>
           </div>
-          {stats && !loading ? (
+          {!tasksLoading && tasksData ? (
             <div>
               <div style={{
                 display: 'flex',
                 gap: 16,
-                marginBottom: stats.openTasks > 0 ? 12 : 0,
+                marginBottom: tasksData.openTasks > 0 ? 12 : 0,
                 fontSize: 13,
                 color: 'hsl(var(--muted-foreground))',
               }}>
                 <span>
                   <strong style={{ color: 'hsl(var(--foreground))', fontWeight: 600 }}>
-                    {stats.openTasks}
+                    {tasksData.openTasks}
                   </strong> open
                 </span>
-                {stats.highPriorityTasks > 0 && (
+                {tasksData.highPriorityTasks > 0 && (
                   <span>
                     <strong style={{ color: '#f87171', fontWeight: 600 }}>
-                      {stats.highPriorityTasks}
+                      {tasksData.highPriorityTasks}
                     </strong> high priority
                   </span>
                 )}
               </div>
-              {stats.openTasks === 0 && (
+              {tasksData.openTasks === 0 && (
                 <div style={{
                   fontSize: 13,
                   color: 'hsl(var(--muted-foreground))',
@@ -326,7 +289,7 @@ export default function DashboardPage() {
       {/* Full tasks panel (toggleable) */}
       {showTasks && (
         <div style={{ marginTop: 12 }}>
-          <TasksPanel businessId={me.id} />
+          <TasksPanel businessId={me!.id} />
         </div>
       )}
     </div>

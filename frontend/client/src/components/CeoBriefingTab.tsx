@@ -4,6 +4,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import LoadingMessage from '@/components/LoadingMessage';
 import {
   Box,
   Card,
@@ -281,9 +282,13 @@ export default function CeoBriefingTab() {
 
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" py={6}>
-        <CircularProgress />
-      </Box>
+      <LoadingMessage
+        messages={[
+          "Loading your briefing preferences...",
+          "Checking WhatsApp configuration...",
+        ]}
+        icon="📋"
+      />
     );
   }
 

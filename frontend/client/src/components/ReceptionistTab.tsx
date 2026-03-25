@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import LoadingMessage from '@/components/LoadingMessage';
 import {
   Box,
   Typography,
@@ -422,9 +423,13 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
 
   if (loading) {
     return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
-        <CircularProgress />
-      </Box>
+      <LoadingMessage
+        messages={[
+          "Loading your AI receptionist settings...",
+          "Checking voice configuration and knowledge base...",
+        ]}
+        icon="🤖"
+      />
     );
   }
 

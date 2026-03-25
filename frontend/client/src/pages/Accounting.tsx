@@ -153,15 +153,24 @@ interface AccountingProps {
   embedded?: boolean;
 }
 
+const ACCT_CACHE_KEY = 'bh_accounting_cache';
+function getAccountingCache() {
+  try {
+    const raw = sessionStorage.getItem(ACCT_CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
 const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState(0);
-  const [loading, setLoading] = useState(true);
+  const _cached = getAccountingCache();
+  const [loading, setLoading] = useState(!_cached);
   
   // Data
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
+  const [summary, setSummary] = useState<Summary | null>(_cached?.summary ?? null);
+  const [transactions, setTransactions] = useState<Transaction[]>(_cached?.transactions ?? []);
+  const [categories, setCategories] = useState<Category[]>(_cached?.categories ?? []);
   const [totalTransactions, setTotalTransactions] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -241,6 +250,10 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
       if (response.ok) {
         const data = await response.json();
         setSummary(data);
+        try {
+          const prev = getAccountingCache() || {};
+          sessionStorage.setItem(ACCT_CACHE_KEY, JSON.stringify({ ...prev, summary: data }));
+        } catch {}
       }
     } catch (error) {
       console.error('Failed to fetch summary:', error);
@@ -262,6 +275,10 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
         setTransactions(data.transactions);
         setTotalTransactions(data.total);
         setTotalPages(data.total_pages || 1);
+        try {
+          const prev = getAccountingCache() || {};
+          sessionStorage.setItem(ACCT_CACHE_KEY, JSON.stringify({ ...prev, transactions: data.transactions }));
+        } catch {}
       }
     } catch (error) {
       console.error('Failed to fetch transactions:', error);
@@ -274,6 +291,10 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
       if (response.ok) {
         const data = await response.json();
         setCategories(data.categories);
+        try {
+          const prev = getAccountingCache() || {};
+          sessionStorage.setItem(ACCT_CACHE_KEY, JSON.stringify({ ...prev, categories: data.categories }));
+        } catch {}
       }
     } catch (error) {
       console.error('Failed to fetch categories:', error);
@@ -387,8 +408,9 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
   };
 
   useEffect(() => {
+    const hasCachedData = !!(summary || transactions.length);
     const loadData = async () => {
-      setLoading(true);
+      if (!hasCachedData) setLoading(true);
       await Promise.all([fetchSummary(), fetchTransactions(), fetchCategories()]);
       setLoading(false);
     };
