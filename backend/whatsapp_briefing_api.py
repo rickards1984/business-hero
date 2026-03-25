@@ -48,7 +48,10 @@ async def get_whatsapp_config(
             SELECT id, business_id, phone_number, enabled, timezone, owner_name,
                    daily_pulse_enabled, daily_pulse_time,
                    weekly_briefing_enabled, weekly_briefing_day, weekly_briefing_time,
-                   preferred_detail_level, created_at, updated_at
+                   preferred_detail_level, created_at, updated_at,
+                   COALESCE(task_reminder_enabled, false) as task_reminder_enabled,
+                   COALESCE(task_reminder_frequency, 'daily') as task_reminder_frequency,
+                   COALESCE(task_reminder_time, '08:00') as task_reminder_time
             FROM whatsapp_configs
             WHERE business_id = :business_id
         """),
@@ -74,6 +77,9 @@ async def get_whatsapp_config(
         "preferred_detail_level": row[11],
         "created_at": row[12].isoformat() if row[12] else None,
         "updated_at": row[13].isoformat() if row[13] else None,
+        "task_reminder_enabled": bool(row[14]),
+        "task_reminder_frequency": row[15] or "daily",
+        "task_reminder_time": row[16] or "08:00",
     }
 
 
@@ -93,6 +99,24 @@ async def upsert_whatsapp_config(
         {"business_id": business_id},
     ).fetchone()
 
+    cfg_params = {
+        "business_id": business_id,
+        "phone_number": phone,
+        "enabled": config.get("enabled", True),
+        "timezone": config.get("timezone", "Europe/London"),
+        "owner_name": config.get("owner_name") or None,
+        "daily_pulse_enabled": config.get("daily_pulse_enabled", False),
+        "daily_pulse_time": config.get("daily_pulse_time", "07:30"),
+        "weekly_briefing_enabled": config.get("weekly_briefing_enabled", False),
+        "weekly_briefing_day": (config.get("weekly_briefing_day") or "monday").lower(),
+        "weekly_briefing_time": config.get("weekly_briefing_time", "08:00"),
+        "preferred_detail_level": config.get("preferred_detail_level", "standard"),
+        "task_reminder_enabled": config.get("task_reminder_enabled", False),
+        "task_reminder_frequency": config.get("task_reminder_frequency", "daily"),
+        "task_reminder_time": config.get("task_reminder_time", "08:00"),
+        "updated_at": now,
+    }
+
     if existing:
         session.execute(
             text("""
@@ -107,23 +131,13 @@ async def upsert_whatsapp_config(
                     weekly_briefing_day = :weekly_briefing_day,
                     weekly_briefing_time = :weekly_briefing_time,
                     preferred_detail_level = :preferred_detail_level,
+                    task_reminder_enabled = :task_reminder_enabled,
+                    task_reminder_frequency = :task_reminder_frequency,
+                    task_reminder_time = :task_reminder_time,
                     updated_at = :updated_at
                 WHERE business_id = :business_id
             """),
-            {
-                "business_id": business_id,
-                "phone_number": phone,
-                "enabled": config.get("enabled", True),
-                "timezone": config.get("timezone", "Europe/London"),
-                "owner_name": config.get("owner_name") or None,
-                "daily_pulse_enabled": config.get("daily_pulse_enabled", False),
-                "daily_pulse_time": config.get("daily_pulse_time", "07:30"),
-                "weekly_briefing_enabled": config.get("weekly_briefing_enabled", False),
-                "weekly_briefing_day": (config.get("weekly_briefing_day") or "monday").lower(),
-                "weekly_briefing_time": config.get("weekly_briefing_time", "08:00"),
-                "preferred_detail_level": config.get("preferred_detail_level", "standard"),
-                "updated_at": now,
-            },
+            cfg_params,
         )
     else:
         session.execute(
@@ -132,26 +146,17 @@ async def upsert_whatsapp_config(
                 (business_id, phone_number, enabled, timezone, owner_name,
                  daily_pulse_enabled, daily_pulse_time,
                  weekly_briefing_enabled, weekly_briefing_day, weekly_briefing_time,
-                 preferred_detail_level, updated_at)
+                 preferred_detail_level,
+                 task_reminder_enabled, task_reminder_frequency, task_reminder_time,
+                 updated_at)
                 VALUES (:business_id, :phone_number, :enabled, :timezone, :owner_name,
                         :daily_pulse_enabled, :daily_pulse_time,
                         :weekly_briefing_enabled, :weekly_briefing_day, :weekly_briefing_time,
-                        :preferred_detail_level, :updated_at)
+                        :preferred_detail_level,
+                        :task_reminder_enabled, :task_reminder_frequency, :task_reminder_time,
+                        :updated_at)
             """),
-            {
-                "business_id": business_id,
-                "phone_number": phone,
-                "enabled": config.get("enabled", True),
-                "timezone": config.get("timezone", "Europe/London"),
-                "owner_name": config.get("owner_name") or None,
-                "daily_pulse_enabled": config.get("daily_pulse_enabled", False),
-                "daily_pulse_time": config.get("daily_pulse_time", "07:30"),
-                "weekly_briefing_enabled": config.get("weekly_briefing_enabled", False),
-                "weekly_briefing_day": (config.get("weekly_briefing_day") or "monday").lower(),
-                "weekly_briefing_time": config.get("weekly_briefing_time", "08:00"),
-                "preferred_detail_level": config.get("preferred_detail_level", "standard"),
-                "updated_at": now,
-            },
+            cfg_params,
         )
     session.commit()
 
@@ -160,7 +165,10 @@ async def upsert_whatsapp_config(
             SELECT id, phone_number, enabled, timezone, owner_name,
                    daily_pulse_enabled, daily_pulse_time,
                    weekly_briefing_enabled, weekly_briefing_day, weekly_briefing_time,
-                   preferred_detail_level, updated_at
+                   preferred_detail_level, updated_at,
+                   COALESCE(task_reminder_enabled, false),
+                   COALESCE(task_reminder_frequency, 'daily'),
+                   COALESCE(task_reminder_time, '08:00')
             FROM whatsapp_configs
             WHERE business_id = :business_id
         """),
@@ -180,6 +188,9 @@ async def upsert_whatsapp_config(
         "weekly_briefing_time": row[9],
         "preferred_detail_level": row[10],
         "updated_at": row[11].isoformat() if row[11] else None,
+        "task_reminder_enabled": bool(row[12]),
+        "task_reminder_frequency": row[13] or "daily",
+        "task_reminder_time": row[14] or "08:00",
     }
 
 
@@ -348,6 +359,41 @@ async def trigger_weekly_briefing(
         "sent": bool(sid),
         "message_sid": sid,
     }
+
+
+@router.post("/send-task-reminder")
+async def trigger_task_reminder(
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Manually trigger a task reminder (for testing)"""
+    business_id = str(auth_ctx["business_id"])
+
+    config_row = session.execute(
+        text("""
+            SELECT phone_number
+            FROM whatsapp_configs
+            WHERE business_id = :business_id AND enabled = true
+        """),
+        {"business_id": business_id},
+    ).fetchone()
+
+    if not config_row or not config_row[0]:
+        raise HTTPException(status_code=400, detail="WhatsApp not configured")
+
+    biz_row = session.execute(
+        text("SELECT name FROM businesses WHERE id = :bid"),
+        {"bid": business_id},
+    ).fetchone()
+
+    from services.briefing_scheduler import _send_task_reminder
+    await _send_task_reminder(
+        business_id=business_id,
+        phone=config_row[0],
+        business_name=biz_row[0] if biz_row else "Your Business",
+    )
+
+    return {"status": "sent"}
 
 
 # ---------------------------------------------------------------------------

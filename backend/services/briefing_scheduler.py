@@ -52,7 +52,10 @@ async def _check_and_send_scheduled_messages():
                        wc.owner_name, wc.daily_pulse_enabled, wc.daily_pulse_time,
                        wc.weekly_briefing_enabled, wc.weekly_briefing_day, wc.weekly_briefing_time,
                        wc.preferred_detail_level, b.name as business_name,
-                       COALESCE(wc.real_time_alerts_enabled, false) as real_time_alerts_enabled
+                       COALESCE(wc.real_time_alerts_enabled, false) as real_time_alerts_enabled,
+                       COALESCE(wc.task_reminder_enabled, false) as task_reminder_enabled,
+                       COALESCE(wc.task_reminder_frequency, 'daily') as task_reminder_frequency,
+                       COALESCE(wc.task_reminder_time, '08:00') as task_reminder_time
                 FROM whatsapp_configs wc
                 LEFT JOIN businesses b ON wc.business_id = b.id
                 WHERE wc.enabled = true
@@ -75,6 +78,9 @@ async def _check_and_send_scheduled_messages():
                 "preferred_detail_level": row[10] or "standard",
                 "business_name": row[11] or "Your Business",
                 "real_time_alerts_enabled": bool(row[12]) if len(row) > 12 else False,
+                "task_reminder_enabled": bool(row[13]) if len(row) > 13 else False,
+                "task_reminder_frequency": (row[14] or "daily") if len(row) > 14 else "daily",
+                "task_reminder_time": (row[15] or "08:00") if len(row) > 15 else "08:00",
             }
 
             tz = pytz.timezone(config["timezone"])
@@ -118,6 +124,27 @@ async def _check_and_send_scheduled_messages():
                     await _send_weekly_briefing(
                         business_id, phone, business_name, owner_name, detail_level
                     )
+
+            # Check task reminder
+            if config.get("task_reminder_enabled"):
+                task_reminder_time = config.get("task_reminder_time", "08:00")
+                task_reminder_freq = config.get("task_reminder_frequency", "daily")
+
+                should_send_task = False
+                if task_reminder_freq == "daily" and current_time == task_reminder_time:
+                    should_send_task = True
+                elif task_reminder_freq == "weekly" and current_day == "monday" and current_time == task_reminder_time:
+                    should_send_task = True
+
+                if should_send_task:
+                    already_sent = await _was_sent_today(
+                        business_id, "task_reminder", now_local.date()
+                    )
+                    if not already_sent:
+                        logger.info(f"[Scheduler] Sending task reminder to {business_name}")
+                        await _send_task_reminder(
+                            business_id, phone, business_name
+                        )
 
             # Evaluate automation rules and invoice overdue alerts every 5 minutes
             if now_local.minute % 5 == 0:
@@ -232,6 +259,134 @@ async def _was_sent_today(business_id: str, message_type: str, today: date) -> b
     return result is not None
 
 
+async def _sync_accounting_for_pulse(business_id: str):
+    """
+    Trigger a lightweight accounting sync before the daily pulse.
+    Uses stored OAuth tokens to pull latest invoices and transactions
+    from Xero/FreeAgent/QuickBooks via the provider-agnostic service.
+    """
+    from providers.accounting_service import AccountingService
+
+    with get_session_context() as session:
+        svc = AccountingService(business_id, session)
+        connection = svc.get_connection()
+        if not connection:
+            logger.info(f"[Scheduler] No accounting connection for {business_id}, skipping sync")
+            return
+
+        provider = svc.get_provider()
+        if not provider:
+            return
+
+        provider_name = connection["provider"]
+        logger.info(f"[Scheduler] Syncing {provider_name} data for {business_id} before pulse")
+
+        # Sync invoices
+        try:
+            invoices = await provider.get_invoices()
+            for inv in invoices:
+                try:
+                    session.execute(
+                        text("""
+                            INSERT INTO invoices (
+                                id, business_id, external_id, external_source,
+                                invoice_number, customer_name, customer_email,
+                                amount, amount_due, amount_paid,
+                                status, due_date, currency, source, archived,
+                                created_at, updated_at
+                            ) VALUES (
+                                gen_random_uuid(), :bid, :eid, :esrc,
+                                :inum, :cname, :cemail,
+                                :amt, :amt_due, :amt_paid,
+                                :status, :due, :currency, :source, false,
+                                NOW(), NOW()
+                            )
+                            ON CONFLICT (business_id, external_source, external_id)
+                            WHERE external_id IS NOT NULL
+                            DO UPDATE SET
+                                amount = EXCLUDED.amount,
+                                amount_due = EXCLUDED.amount_due,
+                                amount_paid = EXCLUDED.amount_paid,
+                                status = EXCLUDED.status,
+                                due_date = EXCLUDED.due_date,
+                                updated_at = NOW()
+                        """),
+                        {
+                            "bid": business_id,
+                            "eid": inv.external_id,
+                            "esrc": provider_name,
+                            "inum": inv.invoice_number,
+                            "cname": inv.contact_name,
+                            "cemail": inv.contact_email,
+                            "amt": inv.total,
+                            "amt_due": inv.amount_due,
+                            "amt_paid": inv.amount_paid,
+                            "status": inv.status,
+                            "due": inv.due_date,
+                            "currency": inv.currency or "GBP",
+                            "source": provider_name,
+                        },
+                    )
+                except Exception:
+                    pass
+            logger.info(f"[Scheduler] Synced {len(invoices)} invoices for {business_id}")
+        except Exception as e:
+            logger.warning(f"[Scheduler] Invoice sync failed for {business_id}: {e}")
+
+        # Sync bank transactions (for revenue/expense figures)
+        try:
+            last_sync = connection.get("last_sync_at")
+            modified_since = last_sync.isoformat() if last_sync and hasattr(last_sync, "isoformat") else None
+            txns = await provider.get_all_bank_transactions(modified_since=modified_since)
+            for txn in txns:
+                try:
+                    session.execute(
+                        text("""
+                            INSERT INTO accounting_transactions
+                                (business_id, transaction_date, description, amount, type,
+                                 reference, payee_payer, external_id, external_source)
+                            VALUES
+                                (:bid, :txn_date, :desc, :amt, :type,
+                                 :ref, :payee, :eid, :esrc)
+                            ON CONFLICT (business_id, external_source, external_id)
+                            WHERE external_id IS NOT NULL
+                            DO UPDATE SET
+                                description = EXCLUDED.description,
+                                amount = EXCLUDED.amount,
+                                type = EXCLUDED.type,
+                                reference = EXCLUDED.reference,
+                                payee_payer = EXCLUDED.payee_payer,
+                                updated_at = NOW()
+                        """),
+                        {
+                            "bid": business_id,
+                            "txn_date": txn.date,
+                            "desc": txn.description,
+                            "amt": txn.amount,
+                            "type": txn.transaction_type,
+                            "ref": txn.reference,
+                            "payee": txn.contact_name,
+                            "eid": txn.external_id,
+                            "esrc": provider_name,
+                        },
+                    )
+                except Exception:
+                    pass
+            logger.info(f"[Scheduler] Synced {len(txns)} transactions for {business_id}")
+        except Exception as e:
+            logger.warning(f"[Scheduler] Transaction sync failed for {business_id}: {e}")
+
+        # Update last_sync_at
+        try:
+            session.execute(
+                text("UPDATE accounting_connections SET last_sync_at = NOW() WHERE id = :cid"),
+                {"cid": connection["id"]},
+            )
+            session.commit()
+        except Exception as e:
+            logger.warning(f"[Scheduler] Failed to update last_sync_at: {e}")
+
+
 async def _send_daily_pulse(
     business_id: str,
     phone: str,
@@ -243,6 +398,12 @@ async def _send_daily_pulse(
     from services.briefing_data import gather_business_data
     from services.briefing_generator import generate_daily_pulse
     from services.whatsapp_service import send_whatsapp_message
+
+    # Sync accounting data before gathering (so financials are fresh)
+    try:
+        await _sync_accounting_for_pulse(business_id)
+    except Exception as e:
+        logger.warning(f"[Scheduler] Pre-pulse accounting sync failed for {business_id}: {e}")
 
     with get_session_context() as session:
         data = await gather_business_data(session, business_id, period="yesterday")
@@ -338,6 +499,81 @@ async def _send_daily_pulse(
         logger.warning(f"[Scheduler] Failed to save daily snapshot: {e}")
 
 
+async def _send_task_reminder(
+    business_id: str,
+    phone: str,
+    business_name: str,
+):
+    """Generate and send task reminder via WhatsApp."""
+    from services.whatsapp_service import send_whatsapp_message
+
+    with get_session_context() as session:
+        tasks_rows = session.execute(
+            text("""
+                SELECT id, title, status, priority, category, due_date
+                FROM tasks
+                WHERE business_id = :bid
+                  AND status = 'open'
+                  AND deleted_at IS NULL
+                ORDER BY
+                  CASE WHEN priority = 'high' THEN 0 WHEN priority = 'medium' THEN 1 ELSE 2 END,
+                  due_date ASC NULLS LAST
+            """),
+            {"bid": business_id},
+        ).fetchall()
+
+    if not tasks_rows:
+        return
+
+    tasks = [
+        {
+            "title": r[1],
+            "priority": r[3],
+            "due_date": r[5].isoformat() if r[5] else None,
+        }
+        for r in tasks_rows
+    ]
+
+    today = date.today()
+
+    open_count = len(tasks)
+    overdue = [t for t in tasks if t["due_date"] and date.fromisoformat(t["due_date"]) < today]
+    high_priority = [t for t in tasks if t["priority"] == "high"]
+
+    open_summary = f"{open_count} open task{'s' if open_count != 1 else ''}."
+
+    if overdue:
+        overdue_lines = []
+        for t in overdue[:3]:
+            days = (today - date.fromisoformat(t["due_date"])).days
+            overdue_lines.append(f"\u2022 {t['title']} ({days} day{'s' if days != 1 else ''} overdue)")
+        overdue_summary = "\n".join(overdue_lines)
+        if len(overdue) > 3:
+            overdue_summary += f"\n...and {len(overdue) - 3} more"
+    else:
+        overdue_summary = "None \u2014 all caught up!"
+
+    if high_priority:
+        hp_lines = [f"\u2022 {t['title']}" for t in high_priority[:3]]
+        hp_summary = "\n".join(hp_lines)
+        if len(high_priority) > 3:
+            hp_summary += f"\n...and {len(high_priority) - 3} more"
+    else:
+        hp_summary = "None right now."
+
+    await send_whatsapp_message(
+        to_number=phone,
+        body=json.dumps({
+            "1": business_name,
+            "2": open_summary[:MAX_TEMPLATE_VAR_LENGTH],
+            "3": overdue_summary[:MAX_TEMPLATE_VAR_LENGTH],
+            "4": hp_summary[:MAX_TEMPLATE_VAR_LENGTH],
+        }),
+        business_id=business_id,
+        message_type="task_reminder",
+    )
+
+
 async def _send_weekly_briefing(
     business_id: str,
     phone: str,
@@ -349,6 +585,12 @@ async def _send_weekly_briefing(
     from services.briefing_data import gather_business_data
     from services.briefing_generator import generate_weekly_briefing
     from services.whatsapp_service import send_whatsapp_message
+
+    # Sync accounting data before gathering
+    try:
+        await _sync_accounting_for_pulse(business_id)
+    except Exception as e:
+        logger.warning(f"[Scheduler] Pre-briefing accounting sync failed for {business_id}: {e}")
 
     with get_session_context() as session:
         data = await gather_business_data(

@@ -24,6 +24,9 @@ export interface WhatsAppConfig {
   alert_urgent_emails?: boolean;
   alert_bank_balance_threshold?: number;
   alert_invoice_overdue_days?: number;
+  task_reminder_enabled?: boolean;
+  task_reminder_frequency?: string;
+  task_reminder_time?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -75,6 +78,11 @@ export async function sendTestBriefing(): Promise<{ sent: boolean; message_sid?:
 
 export async function sendTestPulse(): Promise<{ sent: boolean; message_sid?: string }> {
   const res = await apiRequest('POST', '/v1/whatsapp/send-daily-pulse');
+  return res.json();
+}
+
+export async function sendTestTaskReminder(): Promise<{ status: string }> {
+  const res = await apiRequest('POST', '/v1/whatsapp/send-task-reminder');
   return res.json();
 }
 

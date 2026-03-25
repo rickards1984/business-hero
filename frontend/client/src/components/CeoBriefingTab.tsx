@@ -30,6 +30,7 @@ import {
   saveWhatsAppConfig,
   sendTestBriefing,
   sendTestPulse,
+  sendTestTaskReminder,
   fetchWhatsAppMessages,
   fetchAutomationRules,
   provisionDefaultRules,
@@ -102,6 +103,7 @@ function formatMessageTime(createdAt: string): string {
 function messageTypeIcon(type: string): string {
   if (type === 'weekly_briefing') return '📊';
   if (type === 'daily_pulse') return '🌅';
+  if (type === 'task_reminder') return '📝';
   if (type === 'alert') return '⚡';
   return '💬';
 }
@@ -109,6 +111,7 @@ function messageTypeIcon(type: string): string {
 function messageTypeLabel(type: string): string {
   if (type === 'weekly_briefing') return 'Weekly Briefing';
   if (type === 'daily_pulse') return 'Daily Pulse';
+  if (type === 'task_reminder') return 'Task Reminder';
   if (type === 'alert') return 'Alert';
   return type.replace(/_/g, ' ');
 }
@@ -136,6 +139,9 @@ export default function CeoBriefingTab() {
   const [weeklyBriefingDay, setWeeklyBriefingDay] = useState('monday');
   const [weeklyBriefingTime, setWeeklyBriefingTime] = useState('08:00');
   const [preferredDetailLevel, setPreferredDetailLevel] = useState('standard');
+  const [taskReminderEnabled, setTaskReminderEnabled] = useState(false);
+  const [taskReminderFrequency, setTaskReminderFrequency] = useState('daily');
+  const [taskReminderTime, setTaskReminderTime] = useState('08:00');
   const [realTimeAlertsEnabled, setRealTimeAlertsEnabled] = useState(false);
   const [alertTransfers, setAlertTransfers] = useState(true);
   const [alertPayments, setAlertPayments] = useState(true);
@@ -160,6 +166,9 @@ export default function CeoBriefingTab() {
         setWeeklyBriefingDay(data.weekly_briefing_day || 'monday');
         setWeeklyBriefingTime(data.weekly_briefing_time || '08:00');
         setPreferredDetailLevel(data.preferred_detail_level || 'standard');
+        setTaskReminderEnabled(data.task_reminder_enabled ?? false);
+        setTaskReminderFrequency(data.task_reminder_frequency || 'daily');
+        setTaskReminderTime(data.task_reminder_time || '08:00');
         setRealTimeAlertsEnabled((data as any).real_time_alerts_enabled ?? false);
         setAlertTransfers((data as any).alert_receptionist_transfers ?? true);
         setAlertPayments((data as any).alert_payment_received ?? true);
@@ -243,6 +252,9 @@ export default function CeoBriefingTab() {
         weekly_briefing_day: weeklyBriefingDay,
         weekly_briefing_time: weeklyBriefingTime,
         preferred_detail_level: preferredDetailLevel,
+        task_reminder_enabled: taskReminderEnabled,
+        task_reminder_frequency: taskReminderFrequency,
+        task_reminder_time: taskReminderTime,
         real_time_alerts_enabled: realTimeAlertsEnabled,
         alert_receptionist_transfers: alertTransfers,
         alert_payment_received_threshold: alertPayments ? alertPaymentsThreshold : undefined,
@@ -426,6 +438,34 @@ export default function CeoBriefingTab() {
             />
             <TextField size="small" type="time" value={dailyPulseTime} onChange={(e) => setDailyPulseTime(e.target.value)} sx={{ width: 100 }} />
             <TestButton label="Send Test Pulse" onSend={sendTestPulse} />
+          </Box>
+        </Box>
+        <Box sx={{ p: 2, borderBottom: 1, borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Typography sx={{ fontSize: 18 }}>📝</Typography>
+            <Box>
+              <Typography variant="subtitle2" fontWeight={600}>Task Reminders</Typography>
+              <Typography variant="caption" color="text.secondary">Get reminded of open and overdue tasks</Typography>
+            </Box>
+          </Box>
+          <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
+            <FormControlLabel
+              control={<Switch checked={taskReminderEnabled} onChange={(e) => setTaskReminderEnabled(e.target.checked)} />}
+              label="Enabled"
+            />
+            {taskReminderEnabled && (
+              <>
+                <FormControl size="small" sx={{ minWidth: 120 }}>
+                  <InputLabel>Frequency</InputLabel>
+                  <Select value={taskReminderFrequency} label="Frequency" onChange={(e) => setTaskReminderFrequency(e.target.value)}>
+                    <MenuItem value="daily">Daily</MenuItem>
+                    <MenuItem value="weekly">Weekly (Mon)</MenuItem>
+                  </Select>
+                </FormControl>
+                <TextField size="small" type="time" value={taskReminderTime} onChange={(e) => setTaskReminderTime(e.target.value)} sx={{ width: 100 }} InputLabelProps={{ shrink: true }} />
+                <TestButton label="Send Test" onSend={sendTestTaskReminder} />
+              </>
+            )}
           </Box>
         </Box>
         <Box sx={{ p: 2 }}>
