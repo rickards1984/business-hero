@@ -1059,9 +1059,13 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                         </Typography>
                       )}
                     </>
+                  ) : xeroStatus?.connected ? (
+                    <Typography variant="body2" color="text.secondary">
+                      Sync failed — try Sync Now
+                    </Typography>
                   ) : (
                     <Typography variant="body2" color="text.secondary">
-                      Connect Xero to see balance
+                      Connect accounting to see balance
                     </Typography>
                   )}
                 </CardContent>
@@ -1093,9 +1097,13 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                         {formatCurrency(financialSummary.profit_and_loss.income)} in · {formatCurrency(financialSummary.profit_and_loss.expenses)} out
                       </Typography>
                     </>
+                  ) : xeroStatus?.connected ? (
+                    <Typography variant="body2" color="text.secondary">
+                      Sync failed — try Sync Now
+                    </Typography>
                   ) : (
                     <Typography variant="body2" color="text.secondary">
-                      Connect Xero to see P&L
+                      Connect accounting to see P&L
                     </Typography>
                   )}
                 </CardContent>
@@ -1132,9 +1140,13 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                         This month
                       </Typography>
                     </Box>
+                  ) : xeroStatus?.connected ? (
+                    <Typography variant="body2" color="text.secondary">
+                      Sync failed — try Sync Now
+                    </Typography>
                   ) : (
                     <Typography variant="body2" color="text.secondary">
-                      Connect Xero to see cash flow
+                      Connect accounting to see cash flow
                     </Typography>
                   )}
                 </CardContent>
