@@ -3563,30 +3563,104 @@ async def xero_connection_status(
     }
 
 
-def _reset_xero_sync_cursor(session, business_id: str, connection_id: str, logger):
-    """Reset sync_cursor to NULL so the next successful sync does a full fetch."""
+def _reset_xero_sync_cursor(session, business_id, connection_id, logger):
+    """Reset sync cursor AND last_sync_at so next sync is a full fetch."""
     try:
         session.execute(
             text("""
-                UPDATE xero_connections 
-                SET sync_cursor = NULL 
+                UPDATE xero_connections
+                SET sync_cursor = NULL, last_sync_at = NULL, updated_at = NOW()
                 WHERE id = :conn_id
             """),
             {"conn_id": connection_id},
         )
-        session.commit()
         session.execute(
             text("""
                 UPDATE accounting_connections
-                SET sync_cursor = NULL
+                SET sync_cursor = NULL, last_sync_at = NULL, updated_at = NOW()
                 WHERE business_id = :bid AND provider = 'xero'
             """),
             {"bid": business_id},
         )
         session.commit()
-        logger.warning(f"Reset sync cursor for business {business_id} — next sync will be full")
+        logger.warning(f"Reset sync cursor and last_sync_at for business {business_id} — next sync will be full")
     except Exception as reset_err:
         logger.error(f"Failed to reset sync cursor: {reset_err}")
+
+
+async def _refresh_xero_token_and_retry(
+    session,
+    connection_id: str,
+    tenant_id: str,
+    business_id: str,
+    logger,
+) -> tuple:
+    """
+    Refresh the Xero token and return (new_access_token, new_provider).
+    Returns (None, None) if refresh fails.
+    """
+    from datetime import datetime, timedelta, timezone
+    from providers.xero_oauth import refresh_xero_token
+
+    refresh_row = session.execute(
+        text("SELECT refresh_token_ciphertext FROM xero_connections WHERE id = :conn_id"),
+        {"conn_id": connection_id},
+    ).fetchone()
+
+    if not refresh_row:
+        return None, None
+
+    refresh_token_val = decrypt_str(refresh_row[0])
+
+    try:
+        new_access, new_refresh, expires_in = refresh_xero_token(refresh_token_val)
+        now = datetime.now(timezone.utc)
+
+        session.execute(
+            text("""
+                UPDATE xero_connections
+                SET token_ciphertext = :token,
+                    refresh_token_ciphertext = :refresh,
+                    token_expires_at = :expires_at,
+                    updated_at = NOW()
+                WHERE id = :conn_id
+            """),
+            {
+                "token": encrypt_str(new_access),
+                "refresh": encrypt_str(new_refresh),
+                "expires_at": now + timedelta(seconds=expires_in),
+                "conn_id": connection_id,
+            },
+        )
+        try:
+            session.execute(
+                text("""
+                    UPDATE accounting_connections
+                    SET token_ciphertext = :token,
+                        refresh_token_ciphertext = :refresh,
+                        token_expires_at = :expires_at,
+                        updated_at = NOW()
+                    WHERE business_id = :business_id AND provider = 'xero'
+                """),
+                {
+                    "token": encrypt_str(new_access),
+                    "refresh": encrypt_str(new_refresh),
+                    "expires_at": now + timedelta(seconds=expires_in),
+                    "business_id": business_id,
+                },
+            )
+        except Exception:
+            pass
+        session.commit()
+
+        provider = XeroProvider(access_token=new_access, tenant_id=tenant_id)
+        logger.info("Xero token refreshed successfully")
+        return new_access, provider
+
+    except Exception as e:
+        logger.error(f"Xero token refresh error: {e}")
+        return None, None
+
 
 
 @app.post("/v1/accounting/xero/sync")
@@ -3649,58 +3723,24 @@ async def sync_xero_transactions(
 
         if now >= (expires_at - timedelta(minutes=2)):
             _sync_logger.info(f"Xero token expired for business {business_id}, refreshing...")
-            from providers.xero_oauth import refresh_xero_token
-            new_access, new_refresh, expires_in = refresh_xero_token(refresh_token)
-
-            # Update stored tokens
-            session.execute(
-                text("""
-                    UPDATE xero_connections 
-                    SET token_ciphertext = :token, refresh_token_ciphertext = :refresh,
-                        token_expires_at = :expires_at, updated_at = NOW()
-                    WHERE id = :conn_id
-                """),
-                {
-                    "token": encrypt_str(new_access),
-                    "refresh": encrypt_str(new_refresh),
-                    "expires_at": now + timedelta(seconds=expires_in),
-                    "conn_id": connection_id,
-                }
+            new_access, provider = await _refresh_xero_token_and_retry(
+                session, connection_id, tenant_id, business_id, _sync_logger
             )
-            session.commit()
+            if not new_access:
+                _reset_xero_sync_cursor(session, business_id, connection_id, _sync_logger)
+                raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
             access_token = new_access
-            _sync_logger.info("Xero token refreshed successfully")
-
-            # Dual-write refreshed token to accounting_connections
-            try:
-                session.execute(
-                    text("""
-                        UPDATE accounting_connections
-                        SET token_ciphertext = :token,
-                            refresh_token_ciphertext = :refresh,
-                            token_expires_at = :expires_at,
-                            updated_at = NOW()
-                        WHERE business_id = :business_id AND provider = 'xero'
-                    """),
-                    {
-                        "token": encrypt_str(new_access),
-                        "refresh": encrypt_str(new_refresh),
-                        "expires_at": now + timedelta(seconds=expires_in),
-                        "business_id": business_id,
-                    },
-                )
-                session.commit()
-            except Exception:
-                pass
+    except HTTPException:
+        raise
     except Exception as e:
         _sync_logger.error(f"Xero token refresh failed: {e}")
+        _reset_xero_sync_cursor(session, business_id, connection_id, _sync_logger)
         raise HTTPException(status_code=401, detail=f"Xero authentication failed. Please reconnect Xero. Error: {str(e)}")
 
     # 3. Fetch transactions from Xero
     try:
         provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
 
-        # Use last_sync_at for incremental sync (if available)
         modified_since = None
         if last_sync_at:
             if last_sync_at.tzinfo is None:
@@ -3710,45 +3750,24 @@ async def sync_xero_transactions(
         xero_transactions = await provider.get_all_bank_transactions(modified_since=modified_since)
         _sync_logger.info(f"Fetched {len(xero_transactions)} transactions from Xero for {tenant_name}")
 
-    except XeroAuthError:
-        _sync_logger.warning(f"Xero auth error for business {business_id}, refreshing token and retrying")
-        try:
-            from providers.xero_oauth import refresh_xero_token as _refresh
-            fresh_result = session.execute(
-                text("SELECT refresh_token_ciphertext FROM xero_connections WHERE id = :conn_id"),
-                {"conn_id": connection_id}
+    except (XeroAuthError, Exception) as e:
+        is_auth_error = isinstance(e, XeroAuthError) or any(
+            s in str(e) for s in ("401", "403", "Forbidden", "Unauthorized")
+        )
+        if is_auth_error:
+            _sync_logger.warning("Xero auth error during transaction fetch, attempting token refresh and retry")
+            new_token, new_provider = await _refresh_xero_token_and_retry(
+                session, connection_id, tenant_id, business_id, _sync_logger
             )
-            fresh_row = fresh_result.fetchone()
-            if not fresh_row:
-                raise Exception("No Xero connection found for token refresh")
-            fresh_refresh = decrypt_str(fresh_row[0])
-            new_access, new_refresh, expires_in = _refresh(fresh_refresh)
-            now_retry = datetime.now(timezone.utc)
-            session.execute(
-                text("""
-                    UPDATE xero_connections 
-                    SET token_ciphertext = :token, refresh_token_ciphertext = :refresh,
-                        token_expires_at = :expires_at, updated_at = NOW()
-                    WHERE id = :conn_id
-                """),
-                {
-                    "token": encrypt_str(new_access),
-                    "refresh": encrypt_str(new_refresh),
-                    "expires_at": now_retry + timedelta(seconds=expires_in),
-                    "conn_id": connection_id,
-                }
-            )
-            session.commit()
-            provider = XeroProvider(access_token=new_access, tenant_id=tenant_id)
-            xero_transactions = await provider.get_all_bank_transactions(modified_since=modified_since)
-            _sync_logger.info(f"Retry succeeded: fetched {len(xero_transactions)} transactions after token refresh")
-        except Exception as retry_err:
-            _sync_logger.error(f"Xero retry failed after token refresh: {retry_err}")
-            _reset_xero_sync_cursor(session, business_id, connection_id, _sync_logger)
-            raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
-    except Exception as e:
-        _sync_logger.error(f"Failed to fetch Xero transactions: {e}")
-        raise HTTPException(status_code=502, detail=f"Failed to fetch transactions from Xero: {str(e)}")
+            if new_provider:
+                xero_transactions = await new_provider.get_all_bank_transactions(modified_since=modified_since)
+                _sync_logger.info(f"Retry succeeded: fetched {len(xero_transactions)} transactions")
+            else:
+                _reset_xero_sync_cursor(session, business_id, connection_id, _sync_logger)
+                raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
+        else:
+            _sync_logger.error(f"Failed to fetch Xero transactions: {e}")
+            raise HTTPException(status_code=502, detail=f"Failed to fetch transactions from Xero: {str(e)}")
 
     # 4. Map and upsert transactions
     new_count = 0
@@ -3914,53 +3933,18 @@ async def sync_xero_invoices(
 
         if now >= (expires_at - timedelta(minutes=2)):
             _inv_sync_logger.info(f"Refreshing Xero token for invoice sync, business {business_id}")
-            from providers.xero_oauth import refresh_xero_token
-            new_access, new_refresh, expires_in = refresh_xero_token(refresh_token)
-
-            encrypted_new_access = encrypt_str(new_access)
-            encrypted_new_refresh = encrypt_str(new_refresh)
-            new_expires_at = now + timedelta(seconds=expires_in)
-
-            session.execute(
-                text("""
-                    UPDATE xero_connections
-                    SET token_ciphertext = :token, refresh_token_ciphertext = :refresh,
-                        token_expires_at = :expires_at, updated_at = NOW()
-                    WHERE id = :conn_id
-                """),
-                {
-                    "token": encrypted_new_access,
-                    "refresh": encrypted_new_refresh,
-                    "expires_at": new_expires_at,
-                    "conn_id": connection_id,
-                }
+            new_access, provider = await _refresh_xero_token_and_retry(
+                session, connection_id, tenant_id, business_id, _inv_sync_logger
             )
-            session.commit()
+            if not new_access:
+                _reset_xero_sync_cursor(session, business_id, connection_id, _inv_sync_logger)
+                raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
             access_token = new_access
-
-            # Dual-write refreshed token to accounting_connections
-            try:
-                session.execute(
-                    text("""
-                        UPDATE accounting_connections
-                        SET token_ciphertext = :token,
-                            refresh_token_ciphertext = :refresh,
-                            token_expires_at = :expires_at,
-                            updated_at = NOW()
-                        WHERE business_id = :business_id AND provider = 'xero'
-                    """),
-                    {
-                        "token": encrypted_new_access,
-                        "refresh": encrypted_new_refresh,
-                        "expires_at": new_expires_at,
-                        "business_id": business_id,
-                    },
-                )
-                session.commit()
-            except Exception:
-                pass
+    except HTTPException:
+        raise
     except Exception as e:
         _inv_sync_logger.error(f"Xero token error during invoice sync: {e}")
+        _reset_xero_sync_cursor(session, business_id, connection_id, _inv_sync_logger)
         raise HTTPException(status_code=401, detail=f"Xero authentication failed: {str(e)}")
 
     try:
@@ -3972,47 +3956,26 @@ async def sync_xero_invoices(
             f"Fetched {len(outstanding)} outstanding + {len(paid)} paid invoices "
             f"from Xero for {tenant_name}"
         )
-    except XeroAuthError:
-        _inv_sync_logger.warning(f"Xero auth error during invoice sync for {business_id}, refreshing token and retrying")
-        try:
-            from providers.xero_oauth import refresh_xero_token as _refresh
-            fresh_result = session.execute(
-                text("SELECT refresh_token_ciphertext FROM xero_connections WHERE id = :conn_id"),
-                {"conn_id": connection_id}
+    except (XeroAuthError, Exception) as e:
+        is_auth_error = isinstance(e, XeroAuthError) or any(
+            s in str(e) for s in ("401", "403", "Forbidden", "Unauthorized")
+        )
+        if is_auth_error:
+            _inv_sync_logger.warning("Xero auth error during invoice fetch, attempting token refresh and retry")
+            new_token, new_provider = await _refresh_xero_token_and_retry(
+                session, connection_id, tenant_id, business_id, _inv_sync_logger
             )
-            fresh_row = fresh_result.fetchone()
-            if not fresh_row:
-                raise Exception("No Xero connection found for token refresh")
-            fresh_refresh = decrypt_str(fresh_row[0])
-            new_access, new_refresh, expires_in = _refresh(fresh_refresh)
-            now_retry = datetime.now(timezone.utc)
-            session.execute(
-                text("""
-                    UPDATE xero_connections 
-                    SET token_ciphertext = :token, refresh_token_ciphertext = :refresh,
-                        token_expires_at = :expires_at, updated_at = NOW()
-                    WHERE id = :conn_id
-                """),
-                {
-                    "token": encrypt_str(new_access),
-                    "refresh": encrypt_str(new_refresh),
-                    "expires_at": now_retry + timedelta(seconds=expires_in),
-                    "conn_id": connection_id,
-                }
-            )
-            session.commit()
-            provider = XeroProvider(access_token=new_access, tenant_id=tenant_id)
-            outstanding = await provider.get_all_invoices(statuses="AUTHORISED,SUBMITTED")
-            paid = await provider.get_all_invoices(statuses="PAID")
-            all_invoices = outstanding + paid
-            _inv_sync_logger.info(f"Retry succeeded: fetched {len(all_invoices)} invoices after token refresh")
-        except Exception as retry_err:
-            _inv_sync_logger.error(f"Xero invoice retry failed after token refresh: {retry_err}")
-            _reset_xero_sync_cursor(session, business_id, connection_id, _inv_sync_logger)
-            raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
-    except Exception as e:
-        _inv_sync_logger.error(f"Failed to fetch Xero invoices: {e}")
-        raise HTTPException(status_code=502, detail=f"Failed to fetch invoices from Xero: {str(e)}")
+            if new_provider:
+                outstanding = await new_provider.get_all_invoices(statuses="AUTHORISED,SUBMITTED")
+                paid = await new_provider.get_all_invoices(statuses="PAID")
+                all_invoices = outstanding + paid
+                _inv_sync_logger.info(f"Retry succeeded: fetched {len(all_invoices)} invoices")
+            else:
+                _reset_xero_sync_cursor(session, business_id, connection_id, _inv_sync_logger)
+                raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
+        else:
+            _inv_sync_logger.error(f"Failed to fetch Xero invoices: {e}")
+            raise HTTPException(status_code=502, detail=f"Failed to fetch invoices from Xero: {str(e)}")
 
     new_count = 0
     updated_count = 0
