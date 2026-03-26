@@ -59,8 +59,8 @@ class XeroProvider:
                 _logger.info("Xero returned 304 Not Modified — no new transactions")
                 return {"BankTransactions": []}
 
-            if resp.status_code == 401:
-                _logger.error("Xero token expired or invalid")
+            if resp.status_code in (401, 403):
+                _logger.error(f"Xero returned {resp.status_code} — token expired, invalid, or forbidden")
                 raise XeroAuthError("Xero access token is expired or invalid")
 
             if resp.status_code == 429:
@@ -113,6 +113,8 @@ class XeroProvider:
         url = f"{XERO_API_BASE}/Accounts"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers)
+            if resp.status_code in (401, 403):
+                raise XeroAuthError("Xero access token is expired or invalid")
             resp.raise_for_status()
             return resp.json().get("Accounts", [])
 
@@ -122,6 +124,8 @@ class XeroProvider:
         params = {"page": page}
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers, params=params)
+            if resp.status_code in (401, 403):
+                raise XeroAuthError("Xero access token is expired or invalid")
             resp.raise_for_status()
             return resp.json().get("Contacts", [])
 
@@ -143,6 +147,8 @@ class XeroProvider:
         url = f"{XERO_API_BASE}/Organisation"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers)
+            if resp.status_code in (401, 403):
+                raise XeroAuthError("Xero access token is expired or invalid")
             resp.raise_for_status()
             orgs = resp.json().get("Organisations", [])
             return orgs[0] if orgs else {}
@@ -157,7 +163,7 @@ class XeroProvider:
         url = f"{XERO_API_BASE}/Reports/BankSummary"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers)
-            if resp.status_code == 401:
+            if resp.status_code in (401, 403):
                 raise XeroAuthError("Xero access token is expired or invalid")
             resp.raise_for_status()
             return resp.json()
@@ -185,7 +191,7 @@ class XeroProvider:
         
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers, params=params)
-            if resp.status_code == 401:
+            if resp.status_code in (401, 403):
                 raise XeroAuthError("Xero access token is expired or invalid")
             resp.raise_for_status()
             return resp.json()
@@ -202,7 +208,7 @@ class XeroProvider:
             params["date"] = date
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers, params=params)
-            if resp.status_code == 401:
+            if resp.status_code in (401, 403):
                 raise XeroAuthError("Xero access token is expired or invalid")
             resp.raise_for_status()
             return resp.json()
@@ -219,7 +225,7 @@ class XeroProvider:
             params["date"] = date
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers, params=params)
-            if resp.status_code == 401:
+            if resp.status_code in (401, 403):
                 raise XeroAuthError("Xero access token is expired or invalid")
             resp.raise_for_status()
             return resp.json()
@@ -229,7 +235,7 @@ class XeroProvider:
         url = f"{XERO_API_BASE}/Reports/AgedReceivablesByContact"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers)
-            if resp.status_code == 401:
+            if resp.status_code in (401, 403):
                 raise XeroAuthError("Xero access token is expired or invalid")
             resp.raise_for_status()
             return resp.json()
@@ -239,7 +245,7 @@ class XeroProvider:
         url = f"{XERO_API_BASE}/Reports/AgedPayablesByContact"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers)
-            if resp.status_code == 401:
+            if resp.status_code in (401, 403):
                 raise XeroAuthError("Xero access token is expired or invalid")
             resp.raise_for_status()
             return resp.json()
@@ -271,7 +277,7 @@ class XeroProvider:
             _logger.info(f"Fetching Xero invoices page={page} status={status}")
             resp = await client.get(url, headers=headers, params=params)
 
-            if resp.status_code == 401:
+            if resp.status_code in (401, 403):
                 raise XeroAuthError("Xero access token is expired or invalid")
             if resp.status_code == 304:
                 return {"Invoices": []}
