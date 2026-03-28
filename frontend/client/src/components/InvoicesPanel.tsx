@@ -456,25 +456,14 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
     return () => clearTimeout(timer);
   }, [invoiceSearch]);
 
-  // Check Xero status and auto-sync invoices once daily
+  // Check Xero connection status (invoice sync is handled by Accounting.tsx via sync-all)
   useEffect(() => {
-    const SYNC_KEY = 'bh_xero_invoice_last_sync';
-    const shouldAutoSync = (): boolean => {
-      const lastSync = localStorage.getItem(SYNC_KEY);
-      if (!lastSync) return true;
-      return lastSync.slice(0, 10) !== new Date().toISOString().slice(0, 10);
-    };
-
     const checkXero = async () => {
       try {
         const resp = await apiRequest('GET', '/v1/accounting/xero/status');
         if (resp.ok) {
           const data = await resp.json();
           setXeroConnected(data.connected);
-          if (data.connected && shouldAutoSync()) {
-            await syncXeroInvoices();
-            localStorage.setItem(SYNC_KEY, new Date().toISOString());
-          }
         }
       } catch (e) {
         console.error('Xero status check failed:', e);

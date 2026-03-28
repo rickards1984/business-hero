@@ -558,11 +558,14 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
         setXeroSyncing(true);
 
         let response: Response | null = null;
-        if (accountingProvider && accountingProvider !== 'xero') {
-          try { response = await apiRequest('POST', `/v1/accounting/${accountingProvider}/sync`); } catch { /* fallback */ }
-        }
+        try { response = await apiRequest('POST', '/v1/accounting/sync-all'); } catch { /* fallback */ }
         if (!response || !response.ok) {
-          response = await apiRequest('POST', '/v1/accounting/xero/sync');
+          if (accountingProvider && accountingProvider !== 'xero') {
+            try { response = await apiRequest('POST', `/v1/accounting/${accountingProvider}/sync`); } catch { /* fallback */ }
+          }
+          if (!response || !response.ok) {
+            response = await apiRequest('POST', '/v1/accounting/xero/sync');
+          }
         }
 
         if (response.ok) {
@@ -683,17 +686,15 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
     try {
       setXeroSyncing(true);
 
-      // Use the appropriate sync endpoint per provider
       let response: Response | null = null;
-      if (accountingProvider && accountingProvider !== 'xero') {
-        try {
-          response = await apiRequest('POST', `/v1/accounting/${accountingProvider}/sync`);
-        } catch {
-          // provider-specific sync not available yet — fall back to Xero
-        }
-      }
+      try { response = await apiRequest('POST', '/v1/accounting/sync-all'); } catch { /* fallback */ }
       if (!response || !response.ok) {
-        response = await apiRequest('POST', '/v1/accounting/xero/sync');
+        if (accountingProvider && accountingProvider !== 'xero') {
+          try { response = await apiRequest('POST', `/v1/accounting/${accountingProvider}/sync`); } catch { /* fallback */ }
+        }
+        if (!response || !response.ok) {
+          response = await apiRequest('POST', '/v1/accounting/xero/sync');
+        }
       }
 
       if (response.ok) {

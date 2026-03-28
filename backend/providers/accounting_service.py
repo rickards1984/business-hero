@@ -6,6 +6,7 @@ Provider-agnostic endpoints call this service; existing Xero-specific endpoints
 continue to work as before and are NOT affected.
 """
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,7 @@ from sqlmodel import Session
 
 from email_utils import encrypt_str, decrypt_str
 from providers.accounting_base import AccountingProvider
+from providers.token_refresh_lock import coordinated_token_refresh
 
 _logger = logging.getLogger("accounting_service")
 
@@ -67,7 +69,7 @@ class AccountingService:
         }
         return self._connection
 
-    def get_provider(self) -> Optional[AccountingProvider]:
+    async def get_provider(self) -> Optional[AccountingProvider]:
         if self._provider is not None:
             return self._provider
 
@@ -77,7 +79,7 @@ class AccountingService:
 
         provider_type = connection["provider"]
         access_token = decrypt_str(connection["token_ciphertext"])
-        access_token = self._ensure_valid_token(connection, access_token)
+        access_token = await self._ensure_valid_token(connection, access_token)
 
         if provider_type == "xero":
             from providers.xero import XeroProvider
@@ -106,7 +108,7 @@ class AccountingService:
 
         return self._provider
 
-    def _ensure_valid_token(self, connection: Dict[str, Any], access_token: str) -> str:
+    async def _ensure_valid_token(self, connection: Dict[str, Any], access_token: str) -> str:
         expires_at = connection.get("token_expires_at")
         if not expires_at:
             return access_token
@@ -120,31 +122,67 @@ class AccountingService:
         if now < (expires_at - timedelta(minutes=2)):
             return access_token
 
-        _logger.info(f"Token expired for business {self.business_id}, refreshing...")
-        refresh_token = decrypt_str(connection["refresh_token_ciphertext"])
         provider_type = connection["provider"]
-        new_access, new_refresh, expires_in = self._refresh_token(provider_type, refresh_token)
+        conn_id = connection["id"]
+        db = self.db
+        business_id = self.business_id
 
-        new_expires = now + timedelta(seconds=expires_in)
-        self.db.execute(
-            text("""
-                UPDATE accounting_connections
-                SET token_ciphertext = :token,
-                    refresh_token_ciphertext = :refresh,
-                    token_expires_at = :expires_at,
-                    updated_at = NOW()
-                WHERE id = :conn_id
-            """),
-            {
-                "token": encrypt_str(new_access),
-                "refresh": encrypt_str(new_refresh),
-                "expires_at": new_expires,
-                "conn_id": connection["id"],
-            },
+        _last_expires_in = [1800]
+
+        async def get_current_tokens():
+            row = db.execute(
+                text("""
+                    SELECT token_ciphertext, refresh_token_ciphertext, token_refreshed_at
+                    FROM accounting_connections
+                    WHERE id = :conn_id
+                """),
+                {"conn_id": conn_id},
+            ).fetchone()
+            return {
+                "access_token": decrypt_str(row[0]),
+                "refresh_token": decrypt_str(row[1]),
+                "token_refreshed_at": row[2],
+            }
+
+        async def do_refresh(refresh_token: str):
+            new_access, new_refresh, expires_in = await asyncio.to_thread(
+                self._refresh_token, provider_type, refresh_token
+            )
+            _last_expires_in[0] = expires_in
+            return {
+                "access_token": new_access,
+                "refresh_token": new_refresh,
+            }
+
+        async def save_tokens(new_access: str, new_refresh: str, refreshed_at: datetime):
+            new_expires = refreshed_at + timedelta(seconds=_last_expires_in[0])
+            db.execute(
+                text("""
+                    UPDATE accounting_connections
+                    SET token_ciphertext = :token,
+                        refresh_token_ciphertext = :refresh,
+                        token_expires_at = :expires_at,
+                        token_refreshed_at = :refreshed_at,
+                        updated_at = NOW()
+                    WHERE id = :conn_id
+                """),
+                {
+                    "token": encrypt_str(new_access),
+                    "refresh": encrypt_str(new_refresh),
+                    "expires_at": new_expires,
+                    "refreshed_at": refreshed_at,
+                    "conn_id": conn_id,
+                },
+            )
+            db.commit()
+
+        return await coordinated_token_refresh(
+            business_id=business_id,
+            provider_name=provider_type,
+            get_current_tokens=get_current_tokens,
+            do_refresh=do_refresh,
+            save_tokens=save_tokens,
         )
-        self.db.commit()
-        _logger.info(f"Token refreshed for business {self.business_id}")
-        return new_access
 
     @staticmethod
     def _refresh_token(provider: str, refresh_token: str):

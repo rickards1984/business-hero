@@ -274,7 +274,7 @@ async def _sync_accounting_for_pulse(business_id: str):
             logger.info(f"[Scheduler] No accounting connection for {business_id}, skipping sync")
             return
 
-        provider = svc.get_provider()
+        provider = await svc.get_provider()
         if not provider:
             return
 

@@ -3596,39 +3596,56 @@ async def _refresh_xero_token_and_retry(
     logger,
 ) -> tuple:
     """
-    Refresh the Xero token and return (new_access_token, new_provider).
+    Refresh the Xero token via coordinated lock and return (new_access_token, new_provider).
     Returns (None, None) if refresh fails.
     """
+    import asyncio
     from datetime import datetime, timedelta, timezone
     from providers.xero_oauth import refresh_xero_token
+    from providers.token_refresh_lock import coordinated_token_refresh
 
-    refresh_row = session.execute(
-        text("SELECT refresh_token_ciphertext FROM xero_connections WHERE id = :conn_id"),
-        {"conn_id": connection_id},
-    ).fetchone()
+    _last_expires_in = [1800]
 
-    if not refresh_row:
-        return None, None
+    async def get_current_tokens():
+        row = session.execute(
+            text("""
+                SELECT token_ciphertext, refresh_token_ciphertext, token_refreshed_at
+                FROM xero_connections WHERE id = :conn_id
+            """),
+            {"conn_id": connection_id},
+        ).fetchone()
+        if not row:
+            raise Exception("No Xero connection found")
+        return {
+            "access_token": decrypt_str(row[0]),
+            "refresh_token": decrypt_str(row[1]),
+            "token_refreshed_at": row[2],
+        }
 
-    refresh_token_val = decrypt_str(refresh_row[0])
+    async def do_refresh(refresh_token: str):
+        new_access, new_refresh, expires_in = await asyncio.to_thread(
+            refresh_xero_token, refresh_token
+        )
+        _last_expires_in[0] = expires_in
+        return {"access_token": new_access, "refresh_token": new_refresh}
 
-    try:
-        new_access, new_refresh, expires_in = refresh_xero_token(refresh_token_val)
-        now = datetime.now(timezone.utc)
-
+    async def save_tokens(new_access: str, new_refresh: str, refreshed_at: datetime):
+        new_expires = refreshed_at + timedelta(seconds=_last_expires_in[0])
         session.execute(
             text("""
                 UPDATE xero_connections
                 SET token_ciphertext = :token,
                     refresh_token_ciphertext = :refresh,
                     token_expires_at = :expires_at,
+                    token_refreshed_at = :refreshed_at,
                     updated_at = NOW()
                 WHERE id = :conn_id
             """),
             {
                 "token": encrypt_str(new_access),
                 "refresh": encrypt_str(new_refresh),
-                "expires_at": now + timedelta(seconds=expires_in),
+                "expires_at": new_expires,
+                "refreshed_at": refreshed_at,
                 "conn_id": connection_id,
             },
         )
@@ -3639,13 +3656,15 @@ async def _refresh_xero_token_and_retry(
                     SET token_ciphertext = :token,
                         refresh_token_ciphertext = :refresh,
                         token_expires_at = :expires_at,
+                        token_refreshed_at = :refreshed_at,
                         updated_at = NOW()
                     WHERE business_id = :business_id AND provider = 'xero'
                 """),
                 {
                     "token": encrypt_str(new_access),
                     "refresh": encrypt_str(new_refresh),
-                    "expires_at": now + timedelta(seconds=expires_in),
+                    "expires_at": new_expires,
+                    "refreshed_at": refreshed_at,
                     "business_id": business_id,
                 },
             )
@@ -3653,10 +3672,16 @@ async def _refresh_xero_token_and_retry(
             pass
         session.commit()
 
+    try:
+        new_access = await coordinated_token_refresh(
+            business_id=business_id,
+            provider_name="xero",
+            get_current_tokens=get_current_tokens,
+            do_refresh=do_refresh,
+            save_tokens=save_tokens,
+        )
         provider = XeroProvider(access_token=new_access, tenant_id=tenant_id)
-        logger.info("Xero token refreshed successfully")
         return new_access, provider
-
     except Exception as e:
         logger.error(f"Xero token refresh error: {e}")
         return None, None
@@ -4092,6 +4117,96 @@ async def sync_xero_invoices(
     }
 
 
+@app.post("/v1/accounting/sync-all")
+async def sync_all_accounting(
+    user_business=Depends(get_current_user_and_business),
+    session: Session = Depends(get_session),
+):
+    """
+    Runs transaction sync then invoice sync SEQUENTIALLY with a single
+    coordinated token refresh. Prevents the race condition that occurs
+    when the frontend fires both syncs in parallel.
+    """
+    import logging
+    _sync_all_logger = logging.getLogger("xero_sync_all")
+
+    _, business = user_business
+    business_id = str(business.id)
+
+    from datetime import timezone
+
+    result = session.execute(
+        text("""
+            SELECT provider FROM accounting_connections
+            WHERE business_id = :business_id AND is_active = true
+            LIMIT 1
+        """),
+        {"business_id": business_id}
+    )
+    row = result.fetchone()
+
+    xero_connected = False
+    if not row:
+        xero_check = session.execute(
+            text("""
+                SELECT 1 FROM xero_connections
+                WHERE business_id = :business_id AND is_active = true
+                LIMIT 1
+            """),
+            {"business_id": business_id}
+        ).fetchone()
+        if xero_check:
+            xero_connected = True
+
+    provider_name = row[0] if row else ("xero" if xero_connected else None)
+
+    if not provider_name:
+        raise HTTPException(status_code=404, detail="No accounting connection found. Please connect an accounting provider first.")
+
+    txn_result = None
+    inv_result = None
+
+    if provider_name == "xero" or xero_connected:
+        try:
+            txn_result = await sync_xero_transactions(user_business=user_business, session=session)
+        except HTTPException as e:
+            _sync_all_logger.warning(f"Transaction sync failed: {e.detail}")
+            txn_result = {"success": False, "error": e.detail}
+        except Exception as e:
+            _sync_all_logger.warning(f"Transaction sync failed: {e}")
+            txn_result = {"success": False, "error": str(e)}
+
+        try:
+            inv_result = await sync_xero_invoices(user_business=user_business, session=session)
+        except HTTPException as e:
+            _sync_all_logger.warning(f"Invoice sync failed: {e.detail}")
+            inv_result = {"success": False, "error": e.detail}
+        except Exception as e:
+            _sync_all_logger.warning(f"Invoice sync failed: {e}")
+            inv_result = {"success": False, "error": str(e)}
+    else:
+        from providers.accounting_service import AccountingService
+        svc = AccountingService(business_id, session)
+        try:
+            provider = await svc.get_provider()
+            if not provider:
+                raise HTTPException(status_code=401, detail="Failed to get accounting provider. Token may have expired.")
+            txn_result = {"success": True, "message": f"{provider_name} sync via accounting service"}
+        except Exception as e:
+            _sync_all_logger.warning(f"Provider-agnostic sync failed: {e}")
+            txn_result = {"success": False, "error": str(e)}
+
+    sync_time = datetime.now(timezone.utc)
+    return {
+        "success": True,
+        "transactions": txn_result,
+        "invoices": inv_result,
+        "synced_at": sync_time.isoformat(),
+        "new_transactions": (txn_result or {}).get("new_transactions", 0),
+        "updated_transactions": (txn_result or {}).get("updated_transactions", 0),
+    }
+
+
 @app.get("/v1/accounting/xero/financial-summary")
 async def xero_financial_summary(
     user_business=Depends(get_current_user_and_business),
@@ -4154,10 +4269,9 @@ async def xero_financial_summary(
         refresh_token_ciphertext = row[3]
         token_expires_at = row[4]
 
-        # Get valid access token (refresh if needed)
+        # Get valid access token (refresh if needed via coordinator)
         try:
             access_token = decrypt_str(token_ciphertext)
-            refresh_token_val = decrypt_str(refresh_token_ciphertext)
 
             now = datetime.now(timezone.utc)
             expires_at = token_expires_at
@@ -4165,96 +4279,22 @@ async def xero_financial_summary(
                 expires_at = expires_at.replace(tzinfo=timezone.utc)
 
             if now >= (expires_at - timedelta(minutes=2)):
-                from providers.xero_oauth import refresh_xero_token
-                new_access, new_refresh, expires_in = refresh_xero_token(refresh_token_val)
-                encrypted_new_a = encrypt_str(new_access)
-                encrypted_new_r = encrypt_str(new_refresh)
-                new_exp = now + timedelta(seconds=expires_in)
-                session.execute(
-                    text("""
-                        UPDATE xero_connections 
-                        SET token_ciphertext = :token, refresh_token_ciphertext = :refresh,
-                            token_expires_at = :expires_at, updated_at = NOW()
-                        WHERE id = :conn_id
-                    """),
-                    {
-                        "token": encrypted_new_a,
-                        "refresh": encrypted_new_r,
-                        "expires_at": new_exp,
-                        "conn_id": connection_id,
-                    }
+                new_access, _ = await _refresh_xero_token_and_retry(
+                    session, connection_id, tenant_id, business_id, _summary_logger
                 )
-                session.commit()
-                access_token = new_access
-
-                # Dual-write to accounting_connections
-                try:
-                    session.execute(
-                        text("""
-                            UPDATE accounting_connections
-                            SET token_ciphertext = :token,
-                                refresh_token_ciphertext = :refresh,
-                                token_expires_at = :expires_at,
-                                updated_at = NOW()
-                            WHERE business_id = :business_id AND provider = 'xero'
-                        """),
-                        {
-                            "token": encrypted_new_a,
-                            "refresh": encrypted_new_r,
-                            "expires_at": new_exp,
-                            "business_id": business_id,
-                        },
-                    )
-                    session.commit()
-                except Exception:
-                    pass
-
-            # Re-read token from DB in case sync endpoint refreshed it concurrently
-            result_fresh = session.execute(
-                text("""
-                    SELECT token_ciphertext
-                    FROM xero_connections
-                    WHERE business_id = :business_id AND is_active = true
-                    LIMIT 1
-                """),
-                {"business_id": business_id}
-            )
-            fresh_row = result_fresh.fetchone()
-            if fresh_row:
-                access_token = decrypt_str(fresh_row[0])
+                if new_access:
+                    access_token = new_access
 
             provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
 
-            # Helper to refresh token and create new provider
             async def refresh_and_retry():
                 nonlocal provider
                 _summary_logger.info("Xero auth error (401/403), refreshing token and retrying")
-                from providers.xero_oauth import refresh_xero_token
-                fresh_result = session.execute(
-                    text("SELECT refresh_token_ciphertext FROM xero_connections WHERE business_id = :bid AND is_active = true LIMIT 1"),
-                    {"bid": business_id}
+                new_access, new_provider = await _refresh_xero_token_and_retry(
+                    session, connection_id, tenant_id, business_id, _summary_logger
                 )
-                fresh_refresh_row = fresh_result.fetchone()
-                if fresh_refresh_row:
-                    refresh_val = decrypt_str(fresh_refresh_row[0])
-                    new_access, new_refresh, expires_in = refresh_xero_token(refresh_val)
-                    now_refresh = datetime.now(timezone.utc)
-                    session.execute(
-                        text("""
-                            UPDATE xero_connections 
-                            SET token_ciphertext = :token, refresh_token_ciphertext = :refresh,
-                                token_expires_at = :expires_at, updated_at = NOW()
-                            WHERE business_id = :bid AND is_active = true
-                        """),
-                        {
-                            "token": encrypt_str(new_access),
-                            "refresh": encrypt_str(new_refresh),
-                            "expires_at": now_refresh + timedelta(seconds=expires_in),
-                            "bid": business_id,
-                        }
-                    )
-                    session.commit()
-                    provider = XeroProvider(access_token=new_access, tenant_id=tenant_id)
+                if new_provider:
+                    provider = new_provider
                     return True
                 return False
 
@@ -4776,7 +4816,7 @@ async def export_accountant_pack(
     # ── TABS 3-7: XERO REPORTS ──
     xero_result = session.execute(
         text("""
-            SELECT tenant_id, token_ciphertext, refresh_token_ciphertext, token_expires_at
+            SELECT id, tenant_id, token_ciphertext, token_expires_at
             FROM xero_connections
             WHERE business_id = :business_id AND is_active = true
             LIMIT 1
@@ -4786,17 +4826,11 @@ async def export_accountant_pack(
     xero_row = xero_result.fetchone()
 
     if xero_row:
-        tenant_id = xero_row[0]
+        xero_conn_id = str(xero_row[0])
+        tenant_id = xero_row[1]
         try:
-            # Re-read latest token (another endpoint may have refreshed it)
-            fresh_check = session.execute(
-                text("SELECT token_ciphertext, refresh_token_ciphertext, token_expires_at FROM xero_connections WHERE business_id = :bid AND is_active = true LIMIT 1"),
-                {"bid": business_id}
-            )
-            fresh = fresh_check.fetchone()
-            access_token = decrypt_str(fresh[0])
-            refresh_token_val = decrypt_str(fresh[1])
-            token_expires_at = fresh[2]
+            access_token = decrypt_str(xero_row[2])
+            token_expires_at = xero_row[3]
 
             now_utc = datetime.now(timezone.utc)
             exp = token_expires_at
@@ -4804,24 +4838,11 @@ async def export_accountant_pack(
                 exp = exp.replace(tzinfo=timezone.utc)
 
             if now_utc >= (exp - timedelta(minutes=2)):
-                from providers.xero_oauth import refresh_xero_token
-                new_access, new_refresh, expires_in = refresh_xero_token(refresh_token_val)
-                session.execute(
-                    text("""
-                        UPDATE xero_connections
-                        SET token_ciphertext = :token, refresh_token_ciphertext = :refresh,
-                            token_expires_at = :expires_at, updated_at = NOW()
-                        WHERE business_id = :bid AND is_active = true
-                    """),
-                    {
-                        "token": encrypt_str(new_access),
-                        "refresh": encrypt_str(new_refresh),
-                        "expires_at": now_utc + timedelta(seconds=expires_in),
-                        "bid": business_id,
-                    }
+                new_access, _ = await _refresh_xero_token_and_retry(
+                    session, xero_conn_id, tenant_id, business_id, _export_logger
                 )
-                session.commit()
-                access_token = new_access
+                if new_access:
+                    access_token = new_access
 
             provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
 
