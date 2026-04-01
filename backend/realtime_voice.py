@@ -237,7 +237,7 @@ REALTIME_TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "email_id": {"type": "string", "description": "Email ID"},
+                "email_id": {"type": "string", "description": "The email id from the list_emails results. Can be a UUID or a provider message ID."},
                 "tone": {"type": "string", "description": "professional, friendly, or brief"}
             },
             "required": ["email_id"]
@@ -958,7 +958,12 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             "OpenAI-Beta": "realtime=v1"
         }
         
-        openai_ws = await websockets.connect(OPENAI_REALTIME_URL, additional_headers=headers)
+        openai_ws = await websockets.connect(
+            OPENAI_REALTIME_URL,
+            additional_headers=headers,
+            ping_interval=20,
+            ping_timeout=10,
+        )
         _logger.info("Connected to OpenAI Realtime API")
         
         # Configure turn detection based on quiet mode
@@ -1087,21 +1092,19 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         
         async def forward_to_client():
             """Forward messages from OpenAI to client, handling tool calls."""
+            import websockets as _ws_lib
             try:
                 async for message in openai_ws:
                     event = json.loads(message)
                     event_type = event.get("type")
-                    _logger.info(f"OpenAI event received: {event_type}")  # Changed to INFO for visibility
+                    _logger.debug(f"OpenAI event received: {event_type}")
                     
-                    # Log full event for function calls
                     if "function" in event_type or "tool" in event_type:
                         _logger.info(f"Function/Tool event details: {json.dumps(event)[:500]}")
                     
-                    # Log errors with full details
                     if event_type == "error":
                         _logger.error(f"OpenAI Realtime API error: {json.dumps(event)}")
                     
-                    # Handle function calls - OpenAI Realtime uses these event types
                     if event_type == "response.function_call_arguments.done":
                         call_id = event.get("call_id")
                         name = event.get("name")
@@ -1109,12 +1112,17 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                         
                         _logger.info(f"Tool call received: {name}({arguments})")
                         
-                        # Execute the tool
-                        result = await execute_tool(name, arguments, user_id, business_id)
+                        try:
+                            result = await asyncio.wait_for(
+                                execute_tool(name, arguments, user_id, business_id),
+                                timeout=25.0,
+                            )
+                        except asyncio.TimeoutError:
+                            _logger.warning(f"Tool {name} timed out after 25s")
+                            result = json.dumps({"error": f"Tool {name} timed out. Please try again."})
                         
                         _logger.info(f"Tool result: {result[:200]}...")
                         
-                        # Send the result back to OpenAI
                         tool_response = {
                             "type": "conversation.item.create",
                             "item": {
@@ -1126,11 +1134,8 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                         await openai_ws.send(json.dumps(tool_response))
                         _logger.info(f"Sent tool response for {name}")
                         
-                        # Trigger response generation
                         await openai_ws.send(json.dumps({"type": "response.create"}))
-                        _logger.info("Triggered response.create after tool call")
                         
-                    # Forward audio and other events to client
                     elif event_type in [
                         "response.audio.delta",
                         "response.audio.done", 
@@ -1145,23 +1150,34 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                     ]:
                         await websocket.send_json(event)
             
+            except (_ws_lib.exceptions.ConnectionClosed, _ws_lib.exceptions.ConnectionClosedOK):
+                _logger.info("OpenAI WebSocket closed")
+            except WebSocketDisconnect:
+                _logger.info("Client disconnected while forwarding from OpenAI")
             except Exception as e:
                 error_str = str(e).lower()
-                if "disconnect" in error_str or "closed" in error_str or "connectionclosed" in error_str:
+                if "disconnect" in error_str or "closed" in error_str:
                     _logger.info("WebSocket connection closed")
                 else:
                     _logger.error(f"Forward to client error: {e}")
         
-        # Run both directions concurrently with keepalive
+        # Run both directions concurrently with keepalive;
+        # cancel the other direction when one finishes
         keepalive_task = asyncio.create_task(send_keepalive())
+        forward_oai_task = asyncio.create_task(forward_to_openai())
+        forward_client_task = asyncio.create_task(forward_to_client())
         try:
-            await asyncio.gather(
-                forward_to_openai(),
-                forward_to_client(),
-                return_exceptions=True
+            done, pending = await asyncio.wait(
+                [forward_oai_task, forward_client_task],
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         finally:
-            # Cancel keepalive when done
             keepalive_task.cancel()
             try:
                 await keepalive_task

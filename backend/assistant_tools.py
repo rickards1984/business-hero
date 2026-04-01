@@ -2611,18 +2611,36 @@ def _get_overdue_invoices(engine, business_id: str, args: dict) -> dict:
 def _draft_email_reply(engine, business_id: str, args: dict) -> dict:
     """Generate draft reply options for an email."""
     import json as _json
+    import uuid as _uuid
     email_id = args.get("email_id", "")
     preferred_tone = args.get("tone")
 
     if not email_id:
         return {"error": "email_id is required. Use list_emails to find email IDs."}
 
+    # Detect UUID vs provider message ID (e.g. Gmail hex string like "19d48ca6fee32b1f")
+    is_uuid = False
+    try:
+        _uuid.UUID(email_id)
+        is_uuid = True
+    except (ValueError, AttributeError):
+        pass
+
     with engine.connect() as conn:
-        result = conn.execute(text("""
-            SELECT id, from_email, from_name, subject, snippet, body_text, received_at
-            FROM email_messages
-            WHERE id = :email_id AND business_id = :business_id
-        """), {"email_id": email_id, "business_id": business_id})
+        if is_uuid:
+            result = conn.execute(text("""
+                SELECT id, from_email, from_name, subject, snippet, body_text, received_at
+                FROM email_messages
+                WHERE id = :email_id AND business_id = :business_id
+            """), {"email_id": email_id, "business_id": business_id})
+        else:
+            result = conn.execute(text("""
+                SELECT id, from_email, from_name, subject, snippet, body_text, received_at
+                FROM email_messages
+                WHERE provider_message_id = :email_id AND business_id = :business_id
+                ORDER BY received_at DESC
+                LIMIT 1
+            """), {"email_id": email_id, "business_id": business_id})
         row = result.fetchone()
 
     if not row:

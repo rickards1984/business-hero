@@ -192,7 +192,8 @@ export default function Login() {
         </Box>
       </Box>
 
-      {/* Form Panel */}
+      {/* Form Panel — force light-mode input styles on the white background
+         since the global theme may be dark */}
       <Box
         sx={{
           width: { xs: '100%', md: '55%' },
@@ -202,6 +203,24 @@ export default function Login() {
           p: { xs: 3, sm: 4, md: 6 },
           bgcolor: 'white',
           flex: { xs: 1, md: 'none' },
+          '& .MuiOutlinedInput-root': {
+            color: '#1a1a2e',
+            backgroundColor: '#ffffff',
+            '& fieldset': { borderColor: '#d1d5db' },
+            '&:hover fieldset': { borderColor: '#9ca3af' },
+            '&.Mui-focused fieldset': { borderColor: '#2563EB' },
+          },
+          '& .MuiOutlinedInput-input': {
+            color: '#1a1a2e',
+            '&::placeholder': { color: '#9ca3af', opacity: 1 },
+          },
+          '& .MuiInputLabel-root': {
+            color: '#6B7280',
+            '&.Mui-focused': { color: '#2563EB' },
+          },
+          '& .MuiFormHelperText-root': {
+            color: '#6B7280',
+          },
         }}
       >
         <Box sx={{ width: '100%', maxWidth: 400 }}>
@@ -209,7 +228,7 @@ export default function Login() {
             sx={{
               fontSize: '1.5rem',
               fontWeight: 700,
-              color: 'var(--color-neutral-900)',
+              color: '#111827',
               mb: 0.5,
             }}
           >
@@ -218,7 +237,7 @@ export default function Login() {
           <Typography
             sx={{
               fontSize: '0.8125rem',
-              color: 'var(--color-neutral-500)',
+              color: '#6B7280',
               mb: 4,
             }}
           >
@@ -282,13 +301,13 @@ export default function Login() {
                 {loading ? <CircularProgress size={24} color="inherit" /> : 'Sign In'}
               </Button>
               <Box sx={{ textAlign: 'center' }}>
-                <Typography variant="body2" sx={{ color: 'var(--color-neutral-500)' }}>
+                <Typography variant="body2" sx={{ color: '#6B7280' }}>
                   Don&apos;t have an account?{' '}
                   <Link
                     component="button"
                     type="button"
                     onClick={() => { setMode('signup'); setError(''); setSuccess(''); }}
-                    sx={{ fontWeight: 600, cursor: 'pointer' }}
+                    sx={{ fontWeight: 600, cursor: 'pointer', color: '#2563EB' }}
                     data-testid="tab-signup"
                   >
                     Sign Up
@@ -353,13 +372,13 @@ export default function Login() {
                 {loading ? <CircularProgress size={24} color="inherit" /> : 'Create Account'}
               </Button>
               <Box sx={{ textAlign: 'center' }}>
-                <Typography variant="body2" sx={{ color: 'var(--color-neutral-500)' }}>
+                <Typography variant="body2" sx={{ color: '#6B7280' }}>
                   Already have an account?{' '}
                   <Link
                     component="button"
                     type="button"
                     onClick={() => { setMode('login'); setError(''); setSuccess(''); }}
-                    sx={{ fontWeight: 600, cursor: 'pointer' }}
+                    sx={{ fontWeight: 600, cursor: 'pointer', color: '#2563EB' }}
                     data-testid="tab-login"
                   >
                     Sign In
