@@ -130,19 +130,40 @@ class AccountingService:
         _last_expires_in = [1800]
 
         async def get_current_tokens():
-            row = db.execute(
-                text("""
-                    SELECT token_ciphertext, refresh_token_ciphertext, token_refreshed_at
-                    FROM accounting_connections
-                    WHERE id = :conn_id
-                """),
-                {"conn_id": conn_id},
-            ).fetchone()
-            return {
-                "access_token": decrypt_str(row[0]),
-                "refresh_token": decrypt_str(row[1]),
-                "token_refreshed_at": row[2],
-            }
+            # Query without token_refreshed_at first for compatibility
+            # (column may not exist if migration hasn't been applied)
+            try:
+                row = db.execute(
+                    text("""
+                        SELECT token_ciphertext, refresh_token_ciphertext, token_refreshed_at
+                        FROM accounting_connections
+                        WHERE id = :conn_id
+                    """),
+                    {"conn_id": conn_id},
+                ).fetchone()
+                return {
+                    "access_token": decrypt_str(row[0]),
+                    "refresh_token": decrypt_str(row[1]),
+                    "token_refreshed_at": row[2],
+                }
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                row = db.execute(
+                    text("""
+                        SELECT token_ciphertext, refresh_token_ciphertext
+                        FROM accounting_connections
+                        WHERE id = :conn_id
+                    """),
+                    {"conn_id": conn_id},
+                ).fetchone()
+                return {
+                    "access_token": decrypt_str(row[0]),
+                    "refresh_token": decrypt_str(row[1]),
+                    "token_refreshed_at": None,
+                }
 
         async def do_refresh(refresh_token: str):
             new_access, new_refresh, expires_in = await asyncio.to_thread(
@@ -156,25 +177,49 @@ class AccountingService:
 
         async def save_tokens(new_access: str, new_refresh: str, refreshed_at: datetime):
             new_expires = refreshed_at + timedelta(seconds=_last_expires_in[0])
-            db.execute(
-                text("""
-                    UPDATE accounting_connections
-                    SET token_ciphertext = :token,
-                        refresh_token_ciphertext = :refresh,
-                        token_expires_at = :expires_at,
-                        token_refreshed_at = :refreshed_at,
-                        updated_at = NOW()
-                    WHERE id = :conn_id
-                """),
-                {
-                    "token": encrypt_str(new_access),
-                    "refresh": encrypt_str(new_refresh),
-                    "expires_at": new_expires,
-                    "refreshed_at": refreshed_at,
-                    "conn_id": conn_id,
-                },
-            )
-            db.commit()
+            # Try with token_refreshed_at first; fall back without it
+            try:
+                db.execute(
+                    text("""
+                        UPDATE accounting_connections
+                        SET token_ciphertext = :token,
+                            refresh_token_ciphertext = :refresh,
+                            token_expires_at = :expires_at,
+                            token_refreshed_at = :refreshed_at,
+                            updated_at = NOW()
+                        WHERE id = :conn_id
+                    """),
+                    {
+                        "token": encrypt_str(new_access),
+                        "refresh": encrypt_str(new_refresh),
+                        "expires_at": new_expires,
+                        "refreshed_at": refreshed_at,
+                        "conn_id": conn_id,
+                    },
+                )
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                db.execute(
+                    text("""
+                        UPDATE accounting_connections
+                        SET token_ciphertext = :token,
+                            refresh_token_ciphertext = :refresh,
+                            token_expires_at = :expires_at,
+                            updated_at = NOW()
+                        WHERE id = :conn_id
+                    """),
+                    {
+                        "token": encrypt_str(new_access),
+                        "refresh": encrypt_str(new_refresh),
+                        "expires_at": new_expires,
+                        "conn_id": conn_id,
+                    },
+                )
+                db.commit()
 
         return await coordinated_token_refresh(
             business_id=business_id,

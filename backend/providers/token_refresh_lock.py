@@ -19,6 +19,7 @@ from typing import Awaitable, Callable
 logger = logging.getLogger(__name__)
 
 _refresh_locks: dict[str, asyncio.Lock] = {}
+_last_refresh_times: dict[str, datetime] = {}
 
 
 def _get_lock(business_id: str) -> asyncio.Lock:
@@ -52,29 +53,46 @@ async def coordinated_token_refresh(
 
     Flow:
         1. Acquire async lock for this business_id
-        2. Re-read tokens from DB (another caller may have refreshed while we waited)
-        3. If token_refreshed_at is within staleness_window_seconds -> return existing token
-        4. Otherwise -> refresh, save with timestamp, return new token
+        2. Check in-memory staleness cache (survives failed DB writes)
+        3. Re-read tokens from DB; check DB-based staleness as fallback
+        4. If stale -> refresh, save with timestamp, update in-memory cache
     """
     lock = _get_lock(business_id)
 
     async with lock:
+        now = datetime.now(timezone.utc)
+
+        # In-memory staleness check (works even if DB write of
+        # token_refreshed_at failed due to transaction rollback)
+        last_time = _last_refresh_times.get(business_id)
+        if last_time:
+            age = (now - last_time).total_seconds()
+            if age < staleness_window_seconds:
+                logger.info(
+                    f"[{provider_name}] Token for business {business_id} was refreshed "
+                    f"{age:.1f}s ago — using existing token (in-memory)"
+                )
+                current = await get_current_tokens()
+                return current["access_token"]
+
         current = await get_current_tokens()
 
-        if current.get("token_refreshed_at"):
-            refreshed_at = current["token_refreshed_at"]
+        # DB-based staleness check (covers process restarts)
+        refreshed_at = current.get("token_refreshed_at")
+        if refreshed_at:
             if isinstance(refreshed_at, str):
                 refreshed_at = datetime.fromisoformat(
                     refreshed_at.replace("Z", "+00:00")
                 )
 
-            age = (datetime.now(timezone.utc) - refreshed_at).total_seconds()
+            age = (now - refreshed_at).total_seconds()
 
             if age < staleness_window_seconds:
                 logger.info(
                     f"[{provider_name}] Token for business {business_id} was refreshed "
                     f"{age:.1f}s ago — using existing token"
                 )
+                _last_refresh_times[business_id] = refreshed_at
                 return current["access_token"]
 
         logger.info(f"[{provider_name}] Refreshing token for business {business_id}")
@@ -88,6 +106,8 @@ async def coordinated_token_refresh(
                 new_tokens["refresh_token"],
                 refreshed_at,
             )
+
+            _last_refresh_times[business_id] = refreshed_at
 
             logger.info(
                 f"[{provider_name}] Token refreshed OK for business {business_id}"

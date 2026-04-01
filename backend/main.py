@@ -3631,6 +3631,12 @@ async def _refresh_xero_token_and_retry(
 
     async def save_tokens(new_access: str, new_refresh: str, refreshed_at: datetime):
         new_expires = refreshed_at + timedelta(seconds=_last_expires_in[0])
+        token_params = {
+            "token": encrypt_str(new_access),
+            "refresh": encrypt_str(new_refresh),
+            "expires_at": new_expires,
+            "refreshed_at": refreshed_at,
+        }
         session.execute(
             text("""
                 UPDATE xero_connections
@@ -3641,14 +3647,13 @@ async def _refresh_xero_token_and_retry(
                     updated_at = NOW()
                 WHERE id = :conn_id
             """),
-            {
-                "token": encrypt_str(new_access),
-                "refresh": encrypt_str(new_refresh),
-                "expires_at": new_expires,
-                "refreshed_at": refreshed_at,
-                "conn_id": connection_id,
-            },
+            {**token_params, "conn_id": connection_id},
         )
+        session.commit()
+
+        # Dual-write to accounting_connections in a separate transaction
+        # so a failure here (e.g. missing column) doesn't roll back the
+        # xero_connections write above
         try:
             session.execute(
                 text("""
@@ -3656,21 +3661,17 @@ async def _refresh_xero_token_and_retry(
                     SET token_ciphertext = :token,
                         refresh_token_ciphertext = :refresh,
                         token_expires_at = :expires_at,
-                        token_refreshed_at = :refreshed_at,
                         updated_at = NOW()
                     WHERE business_id = :business_id AND provider = 'xero'
                 """),
-                {
-                    "token": encrypt_str(new_access),
-                    "refresh": encrypt_str(new_refresh),
-                    "expires_at": new_expires,
-                    "refreshed_at": refreshed_at,
-                    "business_id": business_id,
-                },
+                {**token_params, "business_id": business_id},
             )
+            session.commit()
         except Exception:
-            pass
-        session.commit()
+            try:
+                session.rollback()
+            except Exception:
+                pass
 
     try:
         new_access = await coordinated_token_refresh(
