@@ -340,19 +340,32 @@ async def get_tenant_connections(access_token: str) -> List[Dict[str, Any]]:
         return connections
 
 
-def map_xero_transaction_to_business_hero(xero_txn: Dict[str, Any]) -> Dict[str, Any]:
+XERO_ACCOUNT_TYPE_MAP = {
+    "REVENUE": "income",
+    "SALES": "income",
+    "OTHERINCOME": "income",
+    "DIRECTCOSTS": "expense",
+    "EXPENSE": "expense",
+    "OVERHEADS": "expense",
+    "CURRLIAB": "expense",
+    "LIABILITY": "expense",
+    "EQUITY": "other",
+    "FIXED": "other",
+    "CURRENT": "other",
+}
+
+
+def map_xero_transaction_to_business_hero(
+    xero_txn: Dict[str, Any],
+    account_lookup: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Optional[Dict[str, Any]]:
     """
     Map a Xero BankTransaction dict to Business Hero's accounting_transactions format.
     
-    Xero BankTransaction fields used:
-        - BankTransactionID (unique ID for dedup)
-        - Type: "SPEND" or "RECEIVE"
-        - Date: ISO date string
-        - Total: Transaction total (always positive in Xero)
-        - Reference: Optional reference text
-        - Contact.Name: Payee/payer name
-        - LineItems[0].Description: Transaction description
-        - Status: "AUTHORISED", "DELETED", etc.
+    Args:
+        xero_txn: Raw Xero BankTransaction dict
+        account_lookup: Optional dict of {AccountCode: {"name": str, "type": str}}
+            built from get_accounts(). Used to resolve account codes to names/types.
     """
     status = xero_txn.get("Status", "")
     if status in ("DELETED", "VOIDED"):
@@ -377,6 +390,25 @@ def map_xero_transaction_to_business_hero(xero_txn: Dict[str, Any]) -> Dict[str,
     raw_date = xero_txn.get("Date", "")
     transaction_date = _parse_xero_date(raw_date)
 
+    # Extract category from line items
+    category_name = None
+    category_code = None
+    category_type = None
+
+    if line_items:
+        target_item = line_items[0] if len(line_items) == 1 else max(
+            line_items, key=lambda li: abs(float(li.get("LineAmount", 0) or 0))
+        )
+        category_code = target_item.get("AccountCode")
+
+        if category_code and account_lookup:
+            acct_info = account_lookup.get(category_code, {})
+            category_name = acct_info.get("name", category_code)
+            raw_type = acct_info.get("type", "")
+            category_type = XERO_ACCOUNT_TYPE_MAP.get(raw_type, "expense")
+        elif category_code:
+            category_name = category_code
+
     return {
         "transaction_date": transaction_date,
         "description": description.strip(),
@@ -386,6 +418,9 @@ def map_xero_transaction_to_business_hero(xero_txn: Dict[str, Any]) -> Dict[str,
         "payee_payer": contact_name or None,
         "external_id": xero_txn.get("BankTransactionID"),
         "external_source": "xero",
+        "provider_category_name": category_name,
+        "provider_category_code": category_code,
+        "provider_category_type": category_type,
     }
 
 

@@ -139,19 +139,25 @@ class FreeAgentProvider(AccountingProvider):
         transactions = []
         for txn in data.get("bank_transactions", []):
             amount = float(txn.get("amount", 0))
+            category_url = txn.get("category", "") or ""
+            category_name = category_url.rsplit("/", 1)[-1] if category_url else None
+            txn_type = "income" if amount >= 0 else "expense"
             transactions.append(Transaction(
                 external_id=txn.get("url", ""),
                 date=txn.get("dated_on", ""),
                 description=txn.get("description", "") or txn.get("full_description", ""),
                 amount=amount,
-                transaction_type="income" if amount >= 0 else "expense",
-                category=txn.get("category", None),
+                transaction_type=txn_type,
+                category=category_name,
                 contact_name=None,
                 reference=(txn.get("bank_transaction_explanation") or {}).get("description", ""),
                 account_name=txn.get("bank_account", ""),
                 is_reconciled=txn.get("is_reconciled", False),
                 provider="freeagent",
                 raw_data=txn,
+                provider_category_name=category_name,
+                provider_category_code=category_url.rsplit("/", 1)[-1] if category_url else None,
+                provider_category_type=txn_type,
             ))
         return transactions
 

@@ -338,16 +338,46 @@ async def _sync_accounting_for_pulse(business_id: str):
             last_sync = connection.get("last_sync_at")
             modified_since = last_sync.isoformat() if last_sync and hasattr(last_sync, "isoformat") else None
             txns = await provider.get_all_bank_transactions(modified_since=modified_since)
+
+            sched_cat_cache = {}
             for txn in txns:
                 try:
+                    category_id = None
+                    cat_name = getattr(txn, "provider_category_name", None) or txn.category
+                    if cat_name:
+                        if cat_name in sched_cat_cache:
+                            category_id = sched_cat_cache[cat_name]
+                        else:
+                            existing = session.execute(
+                                text("SELECT id FROM accounting_categories WHERE business_id = :bid AND LOWER(name) = LOWER(:name)"),
+                                {"bid": business_id, "name": cat_name},
+                            ).fetchone()
+                            if existing:
+                                category_id = str(existing[0])
+                            else:
+                                cat_type = getattr(txn, "provider_category_type", None) or (
+                                    "income" if txn.transaction_type == "income" else "expense"
+                                )
+                                new_cat = session.execute(
+                                    text("""
+                                        INSERT INTO accounting_categories
+                                            (business_id, name, type, color, created_at, updated_at)
+                                        VALUES (:bid, :name, :cat_type, '#6B7280', NOW(), NOW())
+                                        RETURNING id
+                                    """),
+                                    {"bid": business_id, "name": cat_name, "cat_type": cat_type},
+                                ).fetchone()
+                                category_id = str(new_cat[0]) if new_cat else None
+                            sched_cat_cache[cat_name] = category_id
+
                     session.execute(
                         text("""
                             INSERT INTO accounting_transactions
                                 (business_id, transaction_date, description, amount, type,
-                                 reference, payee_payer, external_id, external_source)
+                                 reference, payee_payer, external_id, external_source, category_id)
                             VALUES
                                 (:bid, :txn_date, :desc, :amt, :type,
-                                 :ref, :payee, :eid, :esrc)
+                                 :ref, :payee, :eid, :esrc, :category_id)
                             ON CONFLICT (business_id, external_source, external_id)
                             WHERE external_id IS NOT NULL
                             DO UPDATE SET
@@ -356,6 +386,7 @@ async def _sync_accounting_for_pulse(business_id: str):
                                 type = EXCLUDED.type,
                                 reference = EXCLUDED.reference,
                                 payee_payer = EXCLUDED.payee_payer,
+                                category_id = COALESCE(EXCLUDED.category_id, accounting_transactions.category_id),
                                 updated_at = NOW()
                         """),
                         {
@@ -368,6 +399,7 @@ async def _sync_accounting_for_pulse(business_id: str):
                             "payee": txn.contact_name,
                             "eid": txn.external_id,
                             "esrc": provider_name,
+                            "category_id": category_id,
                         },
                     )
                 except Exception:

@@ -50,6 +50,9 @@ class Transaction:
     is_reconciled: bool = False
     provider: str = ""
     raw_data: Optional[Dict] = None
+    provider_category_name: Optional[str] = None
+    provider_category_code: Optional[str] = None
+    provider_category_type: Optional[str] = None
 
 
 @dataclass

@@ -150,19 +150,23 @@ class QuickBooksProvider(AccountingProvider):
             amount = -abs(float(txn.get("TotalAmt", 0)))
             acct_ref = txn.get("AccountRef")
             entity_ref = txn.get("EntityRef")
+            acct_name = acct_ref.get("name", "") if isinstance(acct_ref, dict) else ""
             transactions.append(Transaction(
                 external_id=str(txn.get("Id", "")),
                 date=txn.get("TxnDate", ""),
                 description=txn.get("PrivateNote", "") or _get_line_description(txn),
                 amount=amount,
                 transaction_type="expense",
-                category=acct_ref.get("name", "") if isinstance(acct_ref, dict) else "",
+                category=acct_name,
                 contact_name=entity_ref.get("name", "") if isinstance(entity_ref, dict) else "",
                 reference=str(txn.get("DocNumber", "")),
-                account_name=acct_ref.get("name", "") if isinstance(acct_ref, dict) else "",
+                account_name=acct_name,
                 is_reconciled=False,
                 provider="quickbooks",
                 raw_data=txn,
+                provider_category_name=acct_name or None,
+                provider_category_code=str(acct_ref.get("value", "")) if isinstance(acct_ref, dict) else None,
+                provider_category_type="expense",
             ))
 
         # Deposits (income)
@@ -174,6 +178,7 @@ class QuickBooksProvider(AccountingProvider):
         for txn in await self._query(dq):
             amount = abs(float(txn.get("TotalAmt", 0)))
             dep_ref = txn.get("DepositToAccountRef")
+            dep_name = dep_ref.get("name", "") if isinstance(dep_ref, dict) else ""
             transactions.append(Transaction(
                 external_id=str(txn.get("Id", "")),
                 date=txn.get("TxnDate", ""),
@@ -182,10 +187,13 @@ class QuickBooksProvider(AccountingProvider):
                 transaction_type="income",
                 contact_name="",
                 reference=str(txn.get("DocNumber", "")),
-                account_name=dep_ref.get("name", "") if isinstance(dep_ref, dict) else "",
+                account_name=dep_name,
                 is_reconciled=False,
                 provider="quickbooks",
                 raw_data=txn,
+                provider_category_name=dep_name or None,
+                provider_category_code=str(dep_ref.get("value", "")) if isinstance(dep_ref, dict) else None,
+                provider_category_type="income",
             ))
 
         transactions.sort(key=lambda t: t.date, reverse=True)

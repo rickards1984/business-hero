@@ -3697,6 +3697,18 @@ async def sync_xero_transactions(
         xero_transactions = await provider.get_all_bank_transactions(modified_since=modified_since)
         _sync_logger.info(f"Fetched {len(xero_transactions)} transactions from Xero for {tenant_name}")
 
+        # Fetch Chart of Accounts for category name resolution
+        try:
+            accounts = await provider.get_accounts()
+            account_lookup = {
+                acc.get("Code"): {"name": acc.get("Name", ""), "type": acc.get("Type", "")}
+                for acc in accounts if acc.get("Code")
+            }
+            _sync_logger.info(f"Loaded {len(account_lookup)} Xero accounts for category mapping")
+        except Exception as acct_err:
+            _sync_logger.warning(f"Could not fetch Chart of Accounts (categories will use codes): {acct_err}")
+            account_lookup = {}
+
     except (XeroAuthError, Exception) as e:
         is_auth_error = isinstance(e, XeroAuthError) or any(
             s in str(e) for s in ("401", "403", "Forbidden", "Unauthorized")
@@ -3709,6 +3721,14 @@ async def sync_xero_transactions(
             if new_provider:
                 xero_transactions = await new_provider.get_all_bank_transactions(modified_since=modified_since)
                 _sync_logger.info(f"Retry succeeded: fetched {len(xero_transactions)} transactions")
+                try:
+                    accounts = await new_provider.get_accounts()
+                    account_lookup = {
+                        acc.get("Code"): {"name": acc.get("Name", ""), "type": acc.get("Type", "")}
+                        for acc in accounts if acc.get("Code")
+                    }
+                except Exception:
+                    account_lookup = {}
             else:
                 _reset_xero_sync_cursor(session, business_id, connection_id, _sync_logger)
                 raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
@@ -3716,29 +3736,62 @@ async def sync_xero_transactions(
             _sync_logger.error(f"Failed to fetch Xero transactions: {e}")
             raise HTTPException(status_code=502, detail=f"Failed to fetch transactions from Xero: {str(e)}")
 
-    # 4. Map and upsert transactions
+    # 4. Map and upsert transactions (with category resolution)
     new_count = 0
     updated_count = 0
     skipped_count = 0
     errors = []
+    category_cache = {}
 
     for xero_txn in xero_transactions:
         try:
-            mapped = map_xero_transaction_to_business_hero(xero_txn)
+            mapped = map_xero_transaction_to_business_hero(xero_txn, account_lookup=account_lookup)
 
             if mapped is None:
                 skipped_count += 1
                 continue
 
-            # Upsert: insert new or update existing (based on external_id + external_source)
+            # Resolve category_id from provider category name
+            category_id = None
+            cat_name = mapped.get("provider_category_name")
+            if cat_name:
+                if cat_name in category_cache:
+                    category_id = category_cache[cat_name]
+                else:
+                    existing = session.execute(
+                        text("""
+                            SELECT id FROM accounting_categories
+                            WHERE business_id = :business_id AND LOWER(name) = LOWER(:name)
+                        """),
+                        {"business_id": business_id, "name": cat_name},
+                    ).fetchone()
+                    if existing:
+                        category_id = str(existing[0])
+                    else:
+                        cat_type = mapped.get("provider_category_type") or (
+                            "income" if mapped["type"] == "income" else "expense"
+                        )
+                        new_cat = session.execute(
+                            text("""
+                                INSERT INTO accounting_categories
+                                    (business_id, name, type, color, created_at, updated_at)
+                                VALUES
+                                    (:business_id, :name, :cat_type, '#6B7280', NOW(), NOW())
+                                RETURNING id
+                            """),
+                            {"business_id": business_id, "name": cat_name, "cat_type": cat_type},
+                        ).fetchone()
+                        category_id = str(new_cat[0]) if new_cat else None
+                    category_cache[cat_name] = category_id
+
             result = session.execute(
                 text("""
                     INSERT INTO accounting_transactions 
                         (business_id, transaction_date, description, amount, type, 
-                         reference, payee_payer, external_id, external_source)
+                         reference, payee_payer, external_id, external_source, category_id)
                     VALUES 
                         (:business_id, :transaction_date, :description, :amount, :type,
-                         :reference, :payee_payer, :external_id, :external_source)
+                         :reference, :payee_payer, :external_id, :external_source, :category_id)
                     ON CONFLICT (business_id, external_source, external_id) 
                     WHERE external_id IS NOT NULL
                     DO UPDATE SET
@@ -3747,6 +3800,7 @@ async def sync_xero_transactions(
                         type = EXCLUDED.type,
                         reference = EXCLUDED.reference,
                         payee_payer = EXCLUDED.payee_payer,
+                        category_id = COALESCE(EXCLUDED.category_id, accounting_transactions.category_id),
                         updated_at = NOW()
                     RETURNING xmax
                 """),
@@ -3760,6 +3814,7 @@ async def sync_xero_transactions(
                     "payee_payer": mapped.get("payee_payer"),
                     "external_id": mapped["external_id"],
                     "external_source": mapped["external_source"],
+                    "category_id": category_id,
                 }
             )
             
