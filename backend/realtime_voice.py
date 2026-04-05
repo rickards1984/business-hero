@@ -232,6 +232,18 @@ REALTIME_TOOLS = [
     },
     {
         "type": "function",
+        "name": "read_email",
+        "description": "Read the full content of a specific email. Use this when the user asks to read, open, or see the details of a particular email. Returns the complete email body.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "email_id": {"type": "string", "description": "The email id from the list_emails results."}
+            },
+            "required": ["email_id"]
+        }
+    },
+    {
+        "type": "function",
         "name": "draft_reply",
         "description": "Generate reply options for an email in different tones.",
         "parameters": {
@@ -288,6 +300,7 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
             "get_xero_financials": "get_xero_financial_summary",
             "send_chase": "send_invoice_chase",
             "get_overdue": "get_overdue_invoices",
+            "read_email": "get_email_detail",
             "draft_reply": "draft_email_reply",
             "business_overview": "get_business_overview",
             "cashflow_forecast": "get_cashflow_forecast",
@@ -342,6 +355,8 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
             mapped_args = {"invoice_id": args.get("invoice_id", ""), "chase_stage": args.get("chase_stage")}
         elif tool_name == "get_overdue":
             mapped_args = {}
+        elif tool_name == "read_email":
+            mapped_args = {"email_id": args.get("email_id", "")}
         elif tool_name == "draft_reply":
             mapped_args = {"email_id": args.get("email_id", ""), "tone": args.get("tone")}
         elif tool_name == "business_overview":
@@ -718,7 +733,8 @@ Your personality:
    - "Xero", "Xero figures", "Xero summary", "accounts from Xero" → get_xero_financials
    - "chase", "chase invoice", "nudge", "send a reminder" → send_chase (requires invoice_id)
    - "overdue invoices", "who hasn't paid", "late payments" → get_overdue
-   - "reply", "draft a reply", "respond to that email" → draft_reply (requires email_message_id)
+   - "read email", "open email", "what does it say", "read that", "full email" → read_email (requires email_id from list_emails)
+   - "reply", "draft a reply", "respond to that email" → draft_reply (requires email_id from list_emails)
    - "business overview", "how's the business", "give me a summary" → business_overview
    - "cash flow", "cashflow", "forecast", "will I have enough" → cashflow_forecast
    - "send", "send it", "send that", "send the email", "email them" → send_email_reply (requires to_email, subject, body — ALWAYS confirm with user first)
