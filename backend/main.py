@@ -3685,7 +3685,6 @@ async def sync_xero_transactions(
         raise HTTPException(status_code=401, detail=f"Xero authentication failed. Please reconnect Xero. Error: {str(e)}")
 
     # 3. Re-read the LATEST token from DB (another request may have refreshed it)
-    #    and create a single provider instance for all Xero API calls
     try:
         fresh_token_row = session.execute(
             text("SELECT token_ciphertext FROM xero_connections WHERE id = :conn_id"),
@@ -3698,46 +3697,39 @@ async def sync_xero_transactions(
 
     account_lookup = {}
     provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
-    _sync_logger.info(f"[XeroSync] Provider created with token ending ...{access_token[-8:]}")
 
-    # Fetch Chart of Accounts FIRST (single fast call), then transactions (slow paginated)
+    # Build account lookup from Trial Balance report (uses accounting.reports.read scope)
     try:
-        try:
-            _sync_logger.info(f"[XeroSync] Calling get_accounts with token ending ...{access_token[-8:]}")
-            accounts = await provider.get_accounts()
-            account_lookup = {
-                acc.get("Code"): {"name": acc.get("Name", ""), "type": acc.get("Type", "")}
-                for acc in accounts if acc.get("Code")
-            }
-            _sync_logger.info(f"Loaded {len(account_lookup)} Xero accounts for category mapping")
-        except XeroAuthError:
-            # Token was stale for accounts — refresh and retry just this call
-            _sync_logger.warning("Auth error on get_accounts, refreshing token and retrying")
-            new_access, new_provider = await _refresh_xero_token_and_retry(
-                session, connection_id, tenant_id, business_id, _sync_logger
-            )
-            if new_provider:
-                provider = new_provider
-                access_token = new_access
-                try:
-                    accounts = await provider.get_accounts()
-                    account_lookup = {
-                        acc.get("Code"): {"name": acc.get("Name", ""), "type": acc.get("Type", "")}
-                        for acc in accounts if acc.get("Code")
-                    }
-                    _sync_logger.info(f"Loaded {len(account_lookup)} Xero accounts after token refresh")
-                except Exception as acct_err2:
-                    _sync_logger.warning(f"Could not fetch Chart of Accounts even after refresh: {acct_err2}")
-        except Exception as acct_err:
-            _sync_logger.warning(f"Could not fetch Chart of Accounts: {acct_err}")
+        tb_data = await provider.get_trial_balance()
+        if tb_data and "Reports" in tb_data:
+            for report in tb_data["Reports"]:
+                for row in report.get("Rows", []):
+                    if row.get("RowType") == "Section":
+                        section_title = row.get("Title", "")
+                        is_income = section_title.lower() in ("revenue", "income", "other income", "other revenue")
+                        for sub_row in row.get("Rows", []):
+                            cells = sub_row.get("Cells", [])
+                            if len(cells) >= 2:
+                                account_name = cells[0].get("Value", "")
+                                attrs = cells[0].get("Attributes", [])
+                                account_code = attrs[0].get("Value", "") if attrs else ""
+                                if account_code and account_name:
+                                    account_lookup[account_code] = {
+                                        "name": account_name,
+                                        "type": "income" if is_income else "expense",
+                                    }
+        _sync_logger.info(f"Built account lookup from Trial Balance: {len(account_lookup)} accounts")
+    except Exception as tb_err:
+        _sync_logger.warning(f"Could not fetch Trial Balance for account lookup: {tb_err}")
 
+    # Fetch transactions
+    try:
         modified_since = None
         if last_sync_at:
             if last_sync_at.tzinfo is None:
                 last_sync_at = last_sync_at.replace(tzinfo=timezone.utc)
             modified_since = last_sync_at.strftime("%Y-%m-%dT%H:%M:%S")
 
-        _sync_logger.info(f"[XeroSync] Calling get_all_bank_transactions with token ending ...{access_token[-8:]}")
         xero_transactions = await provider.get_all_bank_transactions(modified_since=modified_since)
         _sync_logger.info(f"Fetched {len(xero_transactions)} transactions from Xero for {tenant_name}")
 
@@ -3753,11 +3745,24 @@ async def sync_xero_transactions(
             if new_provider:
                 if not account_lookup:
                     try:
-                        accounts = await new_provider.get_accounts()
-                        account_lookup = {
-                            acc.get("Code"): {"name": acc.get("Name", ""), "type": acc.get("Type", "")}
-                            for acc in accounts if acc.get("Code")
-                        }
+                        tb_data = await new_provider.get_trial_balance()
+                        if tb_data and "Reports" in tb_data:
+                            for report in tb_data["Reports"]:
+                                for row in report.get("Rows", []):
+                                    if row.get("RowType") == "Section":
+                                        section_title = row.get("Title", "")
+                                        is_income = section_title.lower() in ("revenue", "income", "other income", "other revenue")
+                                        for sub_row in row.get("Rows", []):
+                                            cells = sub_row.get("Cells", [])
+                                            if len(cells) >= 2:
+                                                account_name = cells[0].get("Value", "")
+                                                attrs = cells[0].get("Attributes", [])
+                                                account_code = attrs[0].get("Value", "") if attrs else ""
+                                                if account_code and account_name:
+                                                    account_lookup[account_code] = {
+                                                        "name": account_name,
+                                                        "type": "income" if is_income else "expense",
+                                                    }
                     except Exception:
                         pass
                 xero_transactions = await new_provider.get_all_bank_transactions(modified_since=modified_since)
