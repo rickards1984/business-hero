@@ -702,8 +702,6 @@ async def _send_weekly_briefing(
         tasks = data.get("tasks", {})
         invoices = data.get("invoices", {})
 
-        import json
-
         with get_session_context() as session:
             session.execute(
                 text("""

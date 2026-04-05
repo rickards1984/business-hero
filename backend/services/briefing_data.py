@@ -282,16 +282,44 @@ async def gather_business_data(
         ).fetchall()
 
         transactions = [{"type": r[2], "amount": float(r[1]) if r[1] else 0} for r in txns_rows]
-        income = sum(
-            abs(t.get("amount", 0))
-            for t in transactions
-            if t.get("type") == "income" or t.get("amount", 0) > 0
-        )
-        expenses = sum(
-            abs(t.get("amount", 0))
-            for t in transactions
-            if t.get("type") == "expense" or t.get("amount", 0) < 0
-        )
+
+        if transactions:
+            type_counts = {}
+            sample_amounts = []
+            for t in transactions[:20]:
+                ttype = t.get("type", "NULL")
+                type_counts[ttype] = type_counts.get(ttype, 0) + 1
+                sample_amounts.append({"type": ttype, "amount": t.get("amount", 0)})
+            logger.info(f"[Briefing Data] Transaction type distribution: {type_counts}")
+            logger.info(f"[Briefing Data] Sample transactions: {sample_amounts[:5]}")
+        else:
+            logger.info(f"[Briefing Data] No transactions found for period {period_start} to {period_end}")
+
+        INCOME_TYPES = {
+            "income", "RECEIVE", "receive", "ACCRECPAYMENT", "AROVERPAYMENT",
+            "EXPPAYMENT", "credit", "Credit", "CREDIT",
+        }
+        EXPENSE_TYPES = {
+            "expense", "SPEND", "spend", "ACCPAYPAYMENT", "APOVERPAYMENT",
+            "APCREDITPAYMENT", "debit", "Debit", "DEBIT",
+        }
+        TRANSFER_TYPES = {"TRANSFER", "transfer", "Transfer"}
+
+        income = 0.0
+        expenses = 0.0
+        for t in transactions:
+            amt = t.get("amount", 0) or 0
+            ttype = (t.get("type") or "").strip()
+            if ttype in TRANSFER_TYPES:
+                continue
+            if ttype in INCOME_TYPES:
+                income += abs(amt)
+            elif ttype in EXPENSE_TYPES:
+                expenses += abs(amt)
+            elif amt > 0:
+                income += abs(amt)
+            elif amt < 0:
+                expenses += abs(amt)
 
         data["financial"] = {
             "revenue": round(income, 2),
@@ -335,16 +363,21 @@ async def gather_business_data(
                 },
             ).fetchall()
             prev_data = [{"type": r[2], "amount": float(r[1]) if r[1] else 0} for r in prev_txns]
-            prev_income = sum(
-                abs(t.get("amount", 0))
-                for t in prev_data
-                if t.get("type") == "income" or t.get("amount", 0) > 0
-            )
-            prev_expenses = sum(
-                abs(t.get("amount", 0))
-                for t in prev_data
-                if t.get("type") == "expense" or t.get("amount", 0) < 0
-            )
+            prev_income = 0.0
+            prev_expenses = 0.0
+            for t in prev_data:
+                amt = t.get("amount", 0) or 0
+                ttype = (t.get("type") or "").strip()
+                if ttype in TRANSFER_TYPES:
+                    continue
+                if ttype in INCOME_TYPES:
+                    prev_income += abs(amt)
+                elif ttype in EXPENSE_TYPES:
+                    prev_expenses += abs(amt)
+                elif amt > 0:
+                    prev_income += abs(amt)
+                elif amt < 0:
+                    prev_expenses += abs(amt)
             data["financial"]["previous_revenue"] = round(prev_income, 2)
             data["financial"]["previous_expenses"] = round(prev_expenses, 2)
             data["financial"]["previous_net_profit"] = round(
@@ -353,6 +386,32 @@ async def gather_business_data(
     except Exception as e:
         logger.error(f"[Briefing Data] Failed to gather financials: {e}")
         data["financial"] = {"revenue": 0, "expenses": 0, "net_profit": 0, "error": str(e)}
+
+    # --- P&L cross-check from accounting provider ---
+    try:
+        from providers.accounting_service import AccountingService
+        svc = AccountingService(business_id, session)
+        connection = svc.get_connection()
+        if connection and data["financial"].get("revenue", 0) == 0 and data["financial"].get("expenses", 0) == 0:
+            provider = await svc.get_provider()
+            if provider and hasattr(provider, "get_profit_and_loss"):
+                pnl_data = await provider.get_profit_and_loss(
+                    from_date=period_start.isoformat(),
+                    to_date=period_end.isoformat(),
+                )
+                if pnl_data:
+                    from main import _parse_profit_and_loss
+                    pnl = _parse_profit_and_loss(pnl_data)
+                    pnl_income = pnl.get("income", 0)
+                    pnl_expenses = pnl.get("expenses", 0)
+                    if float(pnl_income) > 0 or float(pnl_expenses) > 0:
+                        logger.info(f"[Briefing Data] Using P&L report instead of transaction sum: income={pnl_income}, expenses={pnl_expenses}")
+                        data["financial"]["revenue"] = round(abs(float(pnl_income)), 2)
+                        data["financial"]["expenses"] = round(abs(float(pnl_expenses)), 2)
+                        data["financial"]["net_profit"] = round(float(pnl_income) - abs(float(pnl_expenses)), 2)
+                        data["financial"]["pnl_source"] = "provider_report"
+    except Exception as e:
+        logger.warning(f"[Briefing Data] P&L cross-check failed (non-fatal): {e}")
 
     # --- Receptionist Knowledge Base Gaps ---
     try:

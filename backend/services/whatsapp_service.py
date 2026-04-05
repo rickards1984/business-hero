@@ -41,6 +41,25 @@ def get_twilio_client():
         _twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     return _twilio_client
 
+def _sanitize_template_vars(variables: dict) -> dict:
+    """Ensure all template variables are non-null, non-empty strings within Twilio limits."""
+    sanitized = {}
+    for key, value in variables.items():
+        if value is None:
+            sanitized[str(key)] = "N/A"
+        elif isinstance(value, (int, float)):
+            sanitized[str(key)] = str(value)
+        elif isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                sanitized[str(key)] = "N/A"
+            else:
+                sanitized[str(key)] = cleaned[:1024]
+        else:
+            sanitized[str(key)] = str(value)[:1024] or "N/A"
+    return sanitized
+
+
 def split_message(text: str, max_length: int = 4000) -> List[str]:
     """Split a long message into chunks, breaking at newlines where possible"""
     if len(text) <= max_length:
@@ -167,6 +186,12 @@ async def send_whatsapp_message(
                 variables = json.loads(body) if body.startswith("{") else {"1": body[:4000]}
             except (json.JSONDecodeError, AttributeError):
                 variables = {"1": (body or "")[:4000]}
+
+            variables = _sanitize_template_vars(variables)
+
+            if all(v == "N/A" for v in variables.values()):
+                logger.info(f"[WhatsApp] Skipping {message_type} — all variables are empty")
+                return None
 
             message = client.messages.create(
                 from_=TWILIO_WHATSAPP_FROM,
