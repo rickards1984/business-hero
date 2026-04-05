@@ -123,6 +123,26 @@ class AccountingService:
             return access_token
 
         provider_type = connection["provider"]
+
+        # For Xero: use the unified refresh that reads from xero_connections
+        # and writes to BOTH tables, preventing the split-brain token problem
+        if provider_type == "xero":
+            from providers.xero_oauth import refresh_and_persist_xero_token
+            xero_row = self.db.execute(
+                text("""
+                    SELECT id FROM xero_connections
+                    WHERE business_id = :business_id AND is_active = true
+                    LIMIT 1
+                """),
+                {"business_id": self.business_id},
+            ).fetchone()
+            if xero_row:
+                return await refresh_and_persist_xero_token(
+                    self.db, str(xero_row[0]), self.business_id
+                )
+
+        # For FreeAgent/QuickBooks (or Xero fallback if no xero_connections row):
+        # use the accounting_connections-only path
         conn_id = connection["id"]
         db = self.db
         business_id = self.business_id
@@ -130,8 +150,6 @@ class AccountingService:
         _last_expires_in = [1800]
 
         async def get_current_tokens():
-            # Query without token_refreshed_at first for compatibility
-            # (column may not exist if migration hasn't been applied)
             try:
                 row = db.execute(
                     text("""
@@ -177,7 +195,6 @@ class AccountingService:
 
         async def save_tokens(new_access: str, new_refresh: str, refreshed_at: datetime):
             new_expires = refreshed_at + timedelta(seconds=_last_expires_in[0])
-            # Try with token_refreshed_at first; fall back without it
             try:
                 db.execute(
                     text("""

@@ -3596,91 +3596,12 @@ async def _refresh_xero_token_and_retry(
     logger,
 ) -> tuple:
     """
-    Refresh the Xero token via coordinated lock and return (new_access_token, new_provider).
-    Returns (None, None) if refresh fails.
+    Refresh Xero token using the unified refresh function that writes to BOTH tables.
+    Returns (new_access_token, new_provider) or (None, None) on failure.
     """
-    import asyncio
-    from datetime import datetime, timedelta, timezone
-    from providers.xero_oauth import refresh_xero_token
-    from providers.token_refresh_lock import coordinated_token_refresh
-
-    _last_expires_in = [1800]
-
-    async def get_current_tokens():
-        row = session.execute(
-            text("""
-                SELECT token_ciphertext, refresh_token_ciphertext, token_refreshed_at
-                FROM xero_connections WHERE id = :conn_id
-            """),
-            {"conn_id": connection_id},
-        ).fetchone()
-        if not row:
-            raise Exception("No Xero connection found")
-        return {
-            "access_token": decrypt_str(row[0]),
-            "refresh_token": decrypt_str(row[1]),
-            "token_refreshed_at": row[2],
-        }
-
-    async def do_refresh(refresh_token: str):
-        new_access, new_refresh, expires_in = await asyncio.to_thread(
-            refresh_xero_token, refresh_token
-        )
-        _last_expires_in[0] = expires_in
-        return {"access_token": new_access, "refresh_token": new_refresh}
-
-    async def save_tokens(new_access: str, new_refresh: str, refreshed_at: datetime):
-        new_expires = refreshed_at + timedelta(seconds=_last_expires_in[0])
-        token_params = {
-            "token": encrypt_str(new_access),
-            "refresh": encrypt_str(new_refresh),
-            "expires_at": new_expires,
-            "refreshed_at": refreshed_at,
-        }
-        session.execute(
-            text("""
-                UPDATE xero_connections
-                SET token_ciphertext = :token,
-                    refresh_token_ciphertext = :refresh,
-                    token_expires_at = :expires_at,
-                    token_refreshed_at = :refreshed_at,
-                    updated_at = NOW()
-                WHERE id = :conn_id
-            """),
-            {**token_params, "conn_id": connection_id},
-        )
-        session.commit()
-
-        # Dual-write to accounting_connections in a separate transaction
-        # so a failure here (e.g. missing column) doesn't roll back the
-        # xero_connections write above
-        try:
-            session.execute(
-                text("""
-                    UPDATE accounting_connections
-                    SET token_ciphertext = :token,
-                        refresh_token_ciphertext = :refresh,
-                        token_expires_at = :expires_at,
-                        updated_at = NOW()
-                    WHERE business_id = :business_id AND provider = 'xero'
-                """),
-                {**token_params, "business_id": business_id},
-            )
-            session.commit()
-        except Exception:
-            try:
-                session.rollback()
-            except Exception:
-                pass
-
     try:
-        new_access = await coordinated_token_refresh(
-            business_id=business_id,
-            provider_name="xero",
-            get_current_tokens=get_current_tokens,
-            do_refresh=do_refresh,
-            save_tokens=save_tokens,
-        )
+        from providers.xero_oauth import refresh_and_persist_xero_token
+        new_access = await refresh_and_persist_xero_token(session, connection_id, business_id)
         provider = XeroProvider(access_token=new_access, tenant_id=tenant_id)
         return new_access, provider
     except Exception as e:

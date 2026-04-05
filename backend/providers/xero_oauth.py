@@ -127,6 +127,107 @@ def refresh_xero_token(refresh_token: str) -> Tuple[str, str, int]:
     )
 
 
+async def refresh_and_persist_xero_token(session, xero_connection_id: str, business_id: str) -> str:
+    """
+    THE ONLY function that should refresh Xero tokens. Reads from xero_connections
+    (the primary source) and writes to BOTH xero_connections and accounting_connections
+    atomically. Goes through the coordinated_token_refresh lock to prevent race conditions.
+
+    Returns the new access token.
+    """
+    from sqlalchemy import text as _text
+    from providers.token_refresh_lock import coordinated_token_refresh
+
+    async def get_current_tokens():
+        row = session.execute(
+            _text("""
+                SELECT token_ciphertext, refresh_token_ciphertext, token_refreshed_at
+                FROM xero_connections WHERE id = :conn_id
+            """),
+            {"conn_id": xero_connection_id},
+        ).fetchone()
+        if not row:
+            raise Exception(f"Xero connection {xero_connection_id} not found")
+        return {
+            "access_token": decrypt_str(row[0]),
+            "refresh_token": decrypt_str(row[1]),
+            "token_refreshed_at": row[2],
+        }
+
+    async def do_refresh(current_refresh_token: str):
+        new_access, new_refresh, expires_in = refresh_xero_token(current_refresh_token)
+        return {
+            "access_token": new_access,
+            "refresh_token": new_refresh,
+            "expires_in": expires_in,
+        }
+
+    _last_expires_in = [1800]
+
+    async def _do_refresh_wrapper(current_refresh_token: str):
+        result = await do_refresh(current_refresh_token)
+        _last_expires_in[0] = result.get("expires_in", 1800)
+        return {"access_token": result["access_token"], "refresh_token": result["refresh_token"]}
+
+    async def save_tokens(new_access: str, new_refresh: str, refreshed_at: datetime):
+        encrypted_access = encrypt_str(new_access)
+        encrypted_refresh = encrypt_str(new_refresh)
+        expires_at = refreshed_at + timedelta(seconds=_last_expires_in[0])
+
+        # Update xero_connections (PRIMARY source of truth)
+        session.execute(
+            _text("""
+                UPDATE xero_connections
+                SET token_ciphertext = :token,
+                    refresh_token_ciphertext = :refresh,
+                    token_expires_at = :expires_at,
+                    token_refreshed_at = :refreshed_at,
+                    updated_at = NOW()
+                WHERE id = :conn_id
+            """),
+            {
+                "token": encrypted_access,
+                "refresh": encrypted_refresh,
+                "expires_at": expires_at,
+                "refreshed_at": refreshed_at,
+                "conn_id": xero_connection_id,
+            },
+        )
+
+        # ALSO update accounting_connections (keeps provider-agnostic layer in sync)
+        try:
+            session.execute(
+                _text("""
+                    UPDATE accounting_connections
+                    SET token_ciphertext = :token,
+                        refresh_token_ciphertext = :refresh,
+                        token_expires_at = :expires_at,
+                        token_refreshed_at = :refreshed_at,
+                        updated_at = NOW()
+                    WHERE business_id = :business_id AND provider = 'xero'
+                """),
+                {
+                    "token": encrypted_access,
+                    "refresh": encrypted_refresh,
+                    "expires_at": expires_at,
+                    "refreshed_at": refreshed_at,
+                    "business_id": business_id,
+                },
+            )
+        except Exception:
+            _logger.warning(f"Failed to dual-write token to accounting_connections for business {business_id}")
+
+        session.commit()
+
+    return await coordinated_token_refresh(
+        business_id=business_id,
+        provider_name="xero",
+        get_current_tokens=get_current_tokens,
+        do_refresh=_do_refresh_wrapper,
+        save_tokens=save_tokens,
+    )
+
+
 def get_valid_xero_access_token(xero_connection) -> str:
     """
     Get a valid (non-expired) Xero access token from a XeroConnection record.
