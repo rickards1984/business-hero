@@ -33,7 +33,7 @@ def get_xero_auth_url(business_id: str, redirect_uri: str) -> str:
     client_id = os.getenv("XERO_CLIENT_ID")
     scopes = os.getenv(
         "XERO_SCOPES",
-        "openid profile email accounting.transactions.read accounting.contacts.read accounting.settings.read offline_access"
+        "openid profile email accounting.transactions.read accounting.contacts.read accounting.reports.read accounting.settings.read offline_access"
     )
 
     state = encrypt_str(business_id)
