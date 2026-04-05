@@ -424,7 +424,7 @@ async def _sync_accounting_for_pulse(business_id: str):
                 try:
                     category_id = None
                     cat_name = getattr(txn, "provider_category_name", None) or txn.category
-                    if cat_name:
+                    if cat_name and not str(cat_name).strip().isdigit():
                         if cat_name in sched_cat_cache:
                             category_id = sched_cat_cache[cat_name]
                         else:

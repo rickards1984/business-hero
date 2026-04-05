@@ -261,7 +261,7 @@ async def _sync_financial_for_connection(conn: dict):
                     try:
                         cat_name = getattr(txn, "provider_category_name", None) or txn.category
                         category_id = None
-                        if cat_name:
+                        if cat_name and not str(cat_name).strip().isdigit():
                             existing = session.execute(
                                 text("SELECT id FROM accounting_categories WHERE business_id = :bid AND LOWER(name) = LOWER(:name)"),
                                 {"bid": bid, "name": cat_name},

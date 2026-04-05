@@ -3754,7 +3754,7 @@ async def sync_xero_transactions(
             # Resolve category_id from provider category name
             category_id = None
             cat_name = mapped.get("provider_category_name")
-            if cat_name:
+            if cat_name and not cat_name.strip().isdigit():
                 if cat_name in category_cache:
                     category_id = category_cache[cat_name]
                 else:

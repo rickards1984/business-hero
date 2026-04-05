@@ -403,11 +403,13 @@ def map_xero_transaction_to_business_hero(
 
         if category_code and account_lookup:
             acct_info = account_lookup.get(category_code, {})
-            category_name = acct_info.get("name", category_code)
-            raw_type = acct_info.get("type", "")
-            category_type = XERO_ACCOUNT_TYPE_MAP.get(raw_type, "expense")
-        elif category_code:
-            category_name = category_code
+            resolved_name = acct_info.get("name", "")
+            if resolved_name and resolved_name != category_code:
+                category_name = resolved_name
+                raw_type = acct_info.get("type", "")
+                category_type = XERO_ACCOUNT_TYPE_MAP.get(raw_type, "expense")
+            # If name couldn't be resolved (missing from Chart of Accounts),
+            # leave category_name as None — never use the raw code as a name
 
     return {
         "transaction_date": transaction_date,
