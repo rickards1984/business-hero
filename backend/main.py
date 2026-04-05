@@ -4238,7 +4238,46 @@ async def xero_financial_summary(
         "xero_connected": row is not None,
     }
 
-    # 2. If Xero is connected, fetch bank summary and P&L
+    # Check financial summary cache first (populated by background sync)
+    try:
+        cached = session.execute(
+            text("""
+                SELECT bank_summary, profit_and_loss, invoices_summary, cached_at, period_start, period_end
+                FROM financial_summary_cache
+                WHERE business_id = :business_id
+                LIMIT 1
+            """),
+            {"business_id": business_id}
+        ).fetchone()
+        if cached and cached[3]:
+            import json as _json
+            cache_age_hours = (datetime.now(timezone.utc) - cached[3].replace(tzinfo=timezone.utc) if cached[3].tzinfo is None else cached[3]).total_seconds() / 3600 if cached[3] else 999
+            if cache_age_hours < 8:
+                _summary_logger.info(f"Serving financial summary from cache ({cache_age_hours:.1f}h old)")
+                if cached[0]:
+                    bank_data = _json.loads(cached[0]) if isinstance(cached[0], str) else cached[0]
+                    bank_accounts = _parse_bank_summary(bank_data) if bank_data else []
+                    summary["bank_accounts"] = bank_accounts
+                    summary["total_bank_balance"] = sum(acc["balance"] for acc in bank_accounts) if bank_accounts else None
+                if cached[1]:
+                    pnl_data = _json.loads(cached[1]) if isinstance(cached[1], str) else cached[1]
+                    pnl = _parse_profit_and_loss(pnl_data) if pnl_data else {}
+                    summary["profit_and_loss"] = {
+                        **pnl,
+                        "period_start": str(cached[4]) if cached[4] else None,
+                        "period_end": str(cached[5]) if cached[5] else None,
+                    }
+                if cached[2]:
+                    inv_data = _json.loads(cached[2]) if isinstance(cached[2], str) else cached[2]
+                    summary["invoices"] = inv_data
+                    summary["invoices"]["total_outstanding"] = float(inv_data.get("due_amount", 0))
+                summary["from_cache"] = True
+                summary["cached_at"] = cached[3].isoformat() if cached[3] else None
+                return summary
+    except Exception as e:
+        _summary_logger.debug(f"Cache check failed (will fetch live): {e}")
+
+    # 2. If Xero is connected, fetch bank summary and P&L (live)
     if row:
         connection_id = str(row[0])
         tenant_id = row[1]

@@ -239,6 +239,8 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
       total_outstanding: number;
     };
     xero_connected: boolean;
+    from_cache?: boolean;
+    cached_at?: string;
   } | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
 
@@ -548,8 +550,10 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
 
     const SYNC_KEY = 'bh_xero_accounting_last_sync';
     const lastSync = localStorage.getItem(SYNC_KEY);
-    const today = new Date().toISOString().slice(0, 10);
-    if (lastSync && lastSync.slice(0, 10) === today) return;
+    if (lastSync) {
+      const hoursSince = (Date.now() - new Date(lastSync).getTime()) / (1000 * 60 * 60);
+      if (hoursSince < 4) return;
+    }
 
     const autoSync = async () => {
       const providerLabel = accountingProvider === 'freeagent' ? 'FreeAgent'

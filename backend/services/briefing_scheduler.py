@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 _scheduler_running = False
 MAX_TEMPLATE_VAR_LENGTH = 500
 
+_last_email_sync: datetime | None = None
+_last_financial_sync: datetime | None = None
+_FINANCIAL_SYNC_HOURS = {7, 13, 19}
+
 
 async def start_briefing_scheduler():
     """Start the background scheduler. Call this on app startup."""
@@ -38,7 +42,46 @@ async def _scheduler_loop():
         except Exception as e:
             logger.error(f"[Scheduler] Error in scheduler loop: {e}")
 
+        # Background sync jobs
+        try:
+            await _run_background_sync_jobs()
+        except Exception as e:
+            logger.error(f"[Scheduler] Error in background sync: {e}")
+
         await asyncio.sleep(60)
+
+
+async def _run_background_sync_jobs():
+    """Check and run background email + financial sync jobs."""
+    global _last_email_sync, _last_financial_sync
+    now = datetime.now(timezone.utc)
+
+    # Hourly email sync
+    if _last_email_sync is None or (now - _last_email_sync).total_seconds() >= 3600:
+        _last_email_sync = now
+        try:
+            from services.background_sync import background_email_sync_all
+            logger.info("[Scheduler] Starting hourly background email sync")
+            await background_email_sync_all()
+        except Exception as e:
+            logger.error(f"[Scheduler] Background email sync failed: {e}")
+
+    # 3x daily financial sync (07:00, 13:00, 19:00 UTC)
+    current_hour = now.hour
+    if current_hour in _FINANCIAL_SYNC_HOURS:
+        should_run = (
+            _last_financial_sync is None
+            or _last_financial_sync.hour != current_hour
+            or (now - _last_financial_sync).total_seconds() >= 3600
+        )
+        if should_run:
+            _last_financial_sync = now
+            try:
+                from services.background_sync import background_financial_sync_all
+                logger.info(f"[Scheduler] Starting background financial sync ({current_hour:02d}:00)")
+                await background_financial_sync_all()
+            except Exception as e:
+                logger.error(f"[Scheduler] Background financial sync failed: {e}")
 
 
 async def _check_and_send_scheduled_messages():
@@ -262,9 +305,27 @@ async def _was_sent_today(business_id: str, message_type: str, today: date) -> b
 async def _sync_accounting_for_pulse(business_id: str):
     """
     Trigger a lightweight accounting sync before the daily pulse.
-    Uses stored OAuth tokens to pull latest invoices and transactions
-    from Xero/FreeAgent/QuickBooks via the provider-agnostic service.
+    If the background financial sync ran recently (< 2 hours), skip the live sync
+    since data is already fresh in the database.
     """
+    try:
+        with get_session_context() as session:
+            cached = session.execute(
+                text("""
+                    SELECT cached_at FROM financial_summary_cache
+                    WHERE business_id = :bid
+                    LIMIT 1
+                """),
+                {"bid": business_id},
+            ).fetchone()
+            if cached and cached[0]:
+                cache_age = (datetime.now(timezone.utc) - (cached[0].replace(tzinfo=timezone.utc) if cached[0].tzinfo is None else cached[0])).total_seconds() / 3600
+                if cache_age < 2:
+                    logger.info(f"[Scheduler] Financial cache is fresh ({cache_age:.1f}h old), skipping live sync for {business_id}")
+                    return
+    except Exception:
+        pass
+
     from providers.accounting_service import AccountingService
 
     with get_session_context() as session:
