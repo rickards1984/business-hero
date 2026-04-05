@@ -21,14 +21,22 @@ MAX_TEMPLATE_VAR_LENGTH = 500
 _last_email_sync: datetime | None = None
 _last_financial_sync: datetime | None = None
 _FINANCIAL_SYNC_HOURS = {7, 13, 19}
+_STARTUP_DELAY_MINUTES = 5
 
 
 async def start_briefing_scheduler():
     """Start the background scheduler. Call this on app startup."""
-    global _scheduler_running
+    global _scheduler_running, _last_email_sync, _last_financial_sync
     if _scheduler_running:
         return
     _scheduler_running = True
+
+    # Pretend the last sync happened recently so the first run is delayed
+    # by _STARTUP_DELAY_MINUTES. This lets the app finish starting and
+    # respond to Railway's healthcheck before any heavy sync work begins.
+    now = datetime.now(timezone.utc)
+    _last_email_sync = now - timedelta(minutes=60 - _STARTUP_DELAY_MINUTES)
+    _last_financial_sync = now
 
     logger.info("[Scheduler] Starting CEO briefing scheduler")
     asyncio.create_task(_scheduler_loop())
@@ -42,29 +50,24 @@ async def _scheduler_loop():
         except Exception as e:
             logger.error(f"[Scheduler] Error in scheduler loop: {e}")
 
-        # Background sync jobs
+        # Background sync jobs (fire-and-forget so they don't block the loop)
         try:
-            await _run_background_sync_jobs()
+            _run_background_sync_jobs_nonblocking()
         except Exception as e:
-            logger.error(f"[Scheduler] Error in background sync: {e}")
+            logger.error(f"[Scheduler] Error scheduling background sync: {e}")
 
         await asyncio.sleep(60)
 
 
-async def _run_background_sync_jobs():
-    """Check and run background email + financial sync jobs."""
+def _run_background_sync_jobs_nonblocking():
+    """Check if background sync jobs are due and fire them as non-blocking tasks."""
     global _last_email_sync, _last_financial_sync
     now = datetime.now(timezone.utc)
 
     # Hourly email sync
     if _last_email_sync is None or (now - _last_email_sync).total_seconds() >= 3600:
         _last_email_sync = now
-        try:
-            from services.background_sync import background_email_sync_all
-            logger.info("[Scheduler] Starting hourly background email sync")
-            await background_email_sync_all()
-        except Exception as e:
-            logger.error(f"[Scheduler] Background email sync failed: {e}")
+        asyncio.create_task(_safe_background_email_sync())
 
     # 3x daily financial sync (07:00, 13:00, 19:00 UTC)
     current_hour = now.hour
@@ -76,12 +79,28 @@ async def _run_background_sync_jobs():
         )
         if should_run:
             _last_financial_sync = now
-            try:
-                from services.background_sync import background_financial_sync_all
-                logger.info(f"[Scheduler] Starting background financial sync ({current_hour:02d}:00)")
-                await background_financial_sync_all()
-            except Exception as e:
-                logger.error(f"[Scheduler] Background financial sync failed: {e}")
+            asyncio.create_task(_safe_background_financial_sync())
+
+
+async def _safe_background_email_sync():
+    """Run email sync in a fire-and-forget task with error handling."""
+    try:
+        from services.background_sync import background_email_sync_all
+        logger.info("[Scheduler] Starting hourly background email sync")
+        await background_email_sync_all()
+    except Exception as e:
+        logger.error(f"[Scheduler] Background email sync failed: {e}")
+
+
+async def _safe_background_financial_sync():
+    """Run financial sync in a fire-and-forget task with error handling."""
+    try:
+        from services.background_sync import background_financial_sync_all
+        current_hour = datetime.now(timezone.utc).hour
+        logger.info(f"[Scheduler] Starting background financial sync ({current_hour:02d}:00)")
+        await background_financial_sync_all()
+    except Exception as e:
+        logger.error(f"[Scheduler] Background financial sync failed: {e}")
 
 
 async def _check_and_send_scheduled_messages():
