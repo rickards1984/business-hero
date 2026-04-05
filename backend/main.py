@@ -3684,9 +3684,22 @@ async def sync_xero_transactions(
         _reset_xero_sync_cursor(session, business_id, connection_id, _sync_logger)
         raise HTTPException(status_code=401, detail=f"Xero authentication failed. Please reconnect Xero. Error: {str(e)}")
 
-    # 3. Fetch transactions from Xero
+    # 3. Fetch Chart of Accounts FIRST (single fast call), then transactions (slow paginated)
+    # This order minimizes the risk of the token being invalidated by a concurrent refresh
+    account_lookup = {}
     try:
         provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
+
+        # Fetch Chart of Accounts first for category name resolution
+        try:
+            accounts = await provider.get_accounts()
+            account_lookup = {
+                acc.get("Code"): {"name": acc.get("Name", ""), "type": acc.get("Type", "")}
+                for acc in accounts if acc.get("Code")
+            }
+            _sync_logger.info(f"Loaded {len(account_lookup)} Xero accounts for category mapping")
+        except Exception as acct_err:
+            _sync_logger.warning(f"Could not fetch Chart of Accounts: {acct_err}")
 
         modified_since = None
         if last_sync_at:
@@ -3697,30 +3710,16 @@ async def sync_xero_transactions(
         xero_transactions = await provider.get_all_bank_transactions(modified_since=modified_since)
         _sync_logger.info(f"Fetched {len(xero_transactions)} transactions from Xero for {tenant_name}")
 
-        # Fetch Chart of Accounts for category name resolution
-        try:
-            accounts = await provider.get_accounts()
-            account_lookup = {
-                acc.get("Code"): {"name": acc.get("Name", ""), "type": acc.get("Type", "")}
-                for acc in accounts if acc.get("Code")
-            }
-            _sync_logger.info(f"Loaded {len(account_lookup)} Xero accounts for category mapping")
-        except Exception as acct_err:
-            _sync_logger.warning(f"Could not fetch Chart of Accounts (categories will use codes): {acct_err}")
-            account_lookup = {}
-
     except (XeroAuthError, Exception) as e:
         is_auth_error = isinstance(e, XeroAuthError) or any(
             s in str(e) for s in ("401", "403", "Forbidden", "Unauthorized")
         )
         if is_auth_error:
-            _sync_logger.warning("Xero auth error during transaction fetch, attempting token refresh and retry")
+            _sync_logger.warning("Xero auth error during fetch, attempting token refresh and retry")
             new_token, new_provider = await _refresh_xero_token_and_retry(
                 session, connection_id, tenant_id, business_id, _sync_logger
             )
             if new_provider:
-                xero_transactions = await new_provider.get_all_bank_transactions(modified_since=modified_since)
-                _sync_logger.info(f"Retry succeeded: fetched {len(xero_transactions)} transactions")
                 try:
                     accounts = await new_provider.get_accounts()
                     account_lookup = {
@@ -3728,7 +3727,9 @@ async def sync_xero_transactions(
                         for acc in accounts if acc.get("Code")
                     }
                 except Exception:
-                    account_lookup = {}
+                    pass
+                xero_transactions = await new_provider.get_all_bank_transactions(modified_since=modified_since)
+                _sync_logger.info(f"Retry succeeded: fetched {len(xero_transactions)} transactions")
             else:
                 _reset_xero_sync_cursor(session, business_id, connection_id, _sync_logger)
                 raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")

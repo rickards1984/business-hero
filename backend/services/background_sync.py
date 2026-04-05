@@ -310,6 +310,10 @@ async def _sync_financial_for_connection(conn: dict):
                 logger.info(f"[BackgroundSync] Synced {len(txns)} transactions for {tenant_name}")
             except Exception as e:
                 logger.warning(f"[BackgroundSync] Transaction sync failed for {tenant_name}: {e}")
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
 
             # Sync invoices
             try:
@@ -367,6 +371,10 @@ async def _sync_financial_for_connection(conn: dict):
                 logger.info(f"[BackgroundSync] Synced {len(invoices)} invoices for {tenant_name}")
             except Exception as e:
                 logger.warning(f"[BackgroundSync] Invoice sync failed for {tenant_name}: {e}")
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
 
             # Cache financial summary
             try:
@@ -427,25 +435,33 @@ async def _refresh_financial_summary_cache(session, business_id: str, provider, 
     except Exception as e:
         logger.debug(f"[BackgroundSync] P&L fetch failed: {e}")
 
-    inv_row = session.execute(
-        text("""
-            SELECT
-                COUNT(*) FILTER (WHERE status IN ('overdue', 'OVERDUE') OR (due_date < CURRENT_DATE AND status NOT IN ('paid', 'PAID', 'cancelled', 'VOIDED'))) as overdue_count,
-                COALESCE(SUM(amount_due) FILTER (WHERE status IN ('overdue', 'OVERDUE') OR (due_date < CURRENT_DATE AND status NOT IN ('paid', 'PAID', 'cancelled', 'VOIDED'))), 0) as overdue_amount,
-                COUNT(*) FILTER (WHERE status NOT IN ('paid', 'PAID', 'cancelled', 'VOIDED', 'DELETED') AND amount_due > 0) as due_count,
-                COALESCE(SUM(amount_due) FILTER (WHERE status NOT IN ('paid', 'PAID', 'cancelled', 'VOIDED', 'DELETED') AND amount_due > 0), 0) as due_amount
-            FROM invoices
-            WHERE business_id = :bid AND archived = false
-        """),
-        {"bid": business_id},
-    ).fetchone()
-
-    invoices_summary = {
-        "overdue_count": int(inv_row[0]) if inv_row else 0,
-        "overdue_amount": float(inv_row[1]) if inv_row else 0,
-        "due_count": int(inv_row[2]) if inv_row else 0,
-        "due_amount": float(inv_row[3]) if inv_row else 0,
-    }
+    invoices_summary = {"overdue_count": 0, "overdue_amount": 0, "due_count": 0, "due_amount": 0}
+    try:
+        inv_row = session.execute(
+            text("""
+                SELECT
+                    COUNT(*) FILTER (WHERE status IN ('overdue', 'OVERDUE') OR (due_date < CURRENT_DATE AND status NOT IN ('paid', 'PAID', 'cancelled', 'VOIDED'))) as overdue_count,
+                    COALESCE(SUM(amount_due) FILTER (WHERE status IN ('overdue', 'OVERDUE') OR (due_date < CURRENT_DATE AND status NOT IN ('paid', 'PAID', 'cancelled', 'VOIDED'))), 0) as overdue_amount,
+                    COUNT(*) FILTER (WHERE status NOT IN ('paid', 'PAID', 'cancelled', 'VOIDED', 'DELETED') AND amount_due > 0) as due_count,
+                    COALESCE(SUM(amount_due) FILTER (WHERE status NOT IN ('paid', 'PAID', 'cancelled', 'VOIDED', 'DELETED') AND amount_due > 0), 0) as due_amount
+                FROM invoices
+                WHERE business_id = :bid AND archived = false
+            """),
+            {"bid": business_id},
+        ).fetchone()
+        if inv_row:
+            invoices_summary = {
+                "overdue_count": int(inv_row[0]),
+                "overdue_amount": float(inv_row[1]),
+                "due_count": int(inv_row[2]),
+                "due_amount": float(inv_row[3]),
+            }
+    except Exception as e:
+        logger.debug(f"[BackgroundSync] Invoice summary query failed: {e}")
+        try:
+            session.rollback()
+        except Exception:
+            pass
 
     session.execute(
         text("""
