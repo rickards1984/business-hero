@@ -3714,6 +3714,18 @@ async def sync_xero_transactions(
                                 attrs = cells[0].get("Attributes", [])
                                 account_code = attrs[0].get("Value", "") if attrs else ""
                                 if account_code and account_name:
+                                    import re as _re
+                                    # Attributes[0].Value is the Account ID (UUID),
+                                    # but the real numeric AccountCode is in the name: "Sales (200)"
+                                    code_match = _re.search(r'\((\d+)\)\s*$', account_name)
+                                    if code_match:
+                                        real_code = code_match.group(1)
+                                        clean_name = _re.sub(r'\s*\(\d+\)\s*$', '', account_name).strip()
+                                        account_lookup[real_code] = {
+                                            "name": clean_name,
+                                            "type": "income" if is_income else "expense",
+                                        }
+                                    # Also store by UUID as fallback
                                     account_lookup[account_code] = {
                                         "name": account_name,
                                         "type": "income" if is_income else "expense",
@@ -3762,6 +3774,15 @@ async def sync_xero_transactions(
                                                 attrs = cells[0].get("Attributes", [])
                                                 account_code = attrs[0].get("Value", "") if attrs else ""
                                                 if account_code and account_name:
+                                                    import re as _re
+                                                    code_match = _re.search(r'\((\d+)\)\s*$', account_name)
+                                                    if code_match:
+                                                        real_code = code_match.group(1)
+                                                        clean_name = _re.sub(r'\s*\(\d+\)\s*$', '', account_name).strip()
+                                                        account_lookup[real_code] = {
+                                                            "name": clean_name,
+                                                            "type": "income" if is_income else "expense",
+                                                        }
                                                     account_lookup[account_code] = {
                                                         "name": account_name,
                                                         "type": "income" if is_income else "expense",
