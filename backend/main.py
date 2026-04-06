@@ -3719,6 +3719,9 @@ async def sync_xero_transactions(
                                         "type": "income" if is_income else "expense",
                                     }
         _sync_logger.info(f"Built account lookup from Trial Balance: {len(account_lookup)} accounts")
+        if account_lookup:
+            _sync_logger.info(f"[XeroSync] Account lookup codes: {list(account_lookup.keys())}")
+            _sync_logger.info(f"[XeroSync] Account lookup sample: {dict(list(account_lookup.items())[:3])}")
     except Exception as tb_err:
         _sync_logger.warning(f"Could not fetch Trial Balance for account lookup: {tb_err}")
 
@@ -3789,6 +3792,16 @@ async def sync_xero_transactions(
                 skipped_count += 1
                 continue
 
+            # Diagnostic: log first 5 transactions to trace category pipeline
+            if len(errors) == 0 and (new_count + updated_count + skipped_count) < 5:
+                _sync_logger.info(
+                    f"[XeroSync] Transaction sample: "
+                    f"external_id={mapped.get('external_id', '')[:8]}, "
+                    f"category_code={mapped.get('provider_category_code')}, "
+                    f"category_name={mapped.get('provider_category_name')}, "
+                    f"raw_line_items={xero_txn.get('LineItems', [{}])[0].get('AccountCode', 'NO_CODE') if xero_txn.get('LineItems') else 'NO_LINEITEMS'}"
+                )
+
             # Resolve category_id from provider category name
             category_id = None
             cat_name = mapped.get("provider_category_name")
@@ -3821,6 +3834,10 @@ async def sync_xero_transactions(
                         ).fetchone()
                         category_id = str(new_cat[0]) if new_cat else None
                     category_cache[cat_name] = category_id
+
+            # Log category_id for first 5 transactions
+            if len(errors) == 0 and (new_count + updated_count + skipped_count) < 5:
+                _sync_logger.info(f"[XeroSync] → category_id={category_id}")
 
             result = session.execute(
                 text("""
@@ -3906,9 +3923,15 @@ async def sync_xero_transactions(
     except Exception:
         pass
 
+    categorized_count = sum(1 for v in category_cache.values() if v is not None)
+    _sync_logger.info(
+        f"[XeroSync] Category stats: {len(category_cache)} unique categories resolved, "
+        f"cache contents: {category_cache}"
+    )
     _sync_logger.info(
         f"Xero sync complete for {tenant_name}: "
-        f"{new_count} new, {updated_count} updated, {skipped_count} skipped, {len(errors)} errors"
+        f"{new_count} new, {updated_count} updated, {skipped_count} skipped, {len(errors)} errors, "
+        f"{categorized_count} categories"
     )
 
     return {
