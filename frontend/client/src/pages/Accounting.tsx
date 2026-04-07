@@ -380,12 +380,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
     setAiInsights({ loading: true, data: null, error: null });
     setShowInsights(true);
 
-    if ((xeroStatus?.connected || !!accountingProvider) && financialSummary) {
-      const data = buildProviderInsights();
-      setAiInsights({ loading: false, data, error: null });
-      return;
-    }
-
+    // Always call the backend endpoint — it includes category breakdowns
     try {
       const session = await supabase.auth.getSession();
       const response = await fetch(
@@ -399,13 +394,28 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
       
       if (response.ok) {
         const data = await response.json();
-        data.dataSource = 'manual_upload';
+        const providerLabel = accountingProvider === 'freeagent' ? 'FreeAgent'
+          : accountingProvider === 'quickbooks' ? 'QuickBooks'
+          : accountingProvider === 'xero' ? 'Xero' : 'manual_upload';
+        data.dataSource = providerLabel;
         setAiInsights({ loading: false, data, error: null });
       } else {
-        setAiInsights({ loading: false, data: null, error: 'Failed to generate insights' });
+        // Fall back to frontend-built insights if the backend fails
+        if ((xeroStatus?.connected || !!accountingProvider) && financialSummary) {
+          const data = buildProviderInsights();
+          setAiInsights({ loading: false, data, error: null });
+        } else {
+          setAiInsights({ loading: false, data: null, error: 'Failed to generate insights' });
+        }
       }
     } catch (error) {
-      setAiInsights({ loading: false, data: null, error: 'Failed to connect to AI service' });
+      // Fall back to frontend-built insights
+      if ((xeroStatus?.connected || !!accountingProvider) && financialSummary) {
+        const data = buildProviderInsights();
+        setAiInsights({ loading: false, data, error: null });
+      } else {
+        setAiInsights({ loading: false, data: null, error: 'Failed to connect to AI service' });
+      }
     }
   };
 

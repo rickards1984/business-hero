@@ -204,22 +204,29 @@ export default function Login() {
           bgcolor: 'white',
           flex: { xs: 1, md: 'none' },
           '& .MuiOutlinedInput-root': {
-            color: '#1a1a2e',
-            backgroundColor: '#ffffff',
-            '& fieldset': { borderColor: '#d1d5db' },
-            '&:hover fieldset': { borderColor: '#9ca3af' },
-            '&.Mui-focused fieldset': { borderColor: '#2563EB' },
+            color: '#1e293b',
+            backgroundColor: 'rgba(255, 255, 255, 0.95)',
+            borderRadius: '8px',
+            '& fieldset': { borderColor: '#94a3b8', borderWidth: '1.5px' },
+            '&:hover fieldset': { borderColor: '#64748b' },
+            '&.Mui-focused fieldset': { borderColor: '#7c3aed', borderWidth: '2px' },
+            '&.Mui-focused': { backgroundColor: 'rgba(255, 255, 255, 0.98)' },
           },
           '& .MuiOutlinedInput-input': {
-            color: '#1a1a2e',
-            '&::placeholder': { color: '#9ca3af', opacity: 1 },
+            color: '#1e293b',
+            '&::placeholder': { color: '#94a3b8', opacity: 1 },
+            '&:-webkit-autofill': {
+              WebkitBoxShadow: '0 0 0 100px rgba(255, 255, 255, 0.95) inset',
+              WebkitTextFillColor: '#1e293b',
+            },
           },
           '& .MuiInputLabel-root': {
-            color: '#6B7280',
-            '&.Mui-focused': { color: '#2563EB' },
+            color: '#475569',
+            fontWeight: 500,
+            '&.Mui-focused': { color: '#7c3aed' },
           },
           '& .MuiFormHelperText-root': {
-            color: '#6B7280',
+            color: '#64748b',
           },
         }}
       >
@@ -307,7 +314,7 @@ export default function Login() {
                     component="button"
                     type="button"
                     onClick={() => { setMode('signup'); setError(''); setSuccess(''); }}
-                    sx={{ fontWeight: 600, cursor: 'pointer', color: '#2563EB' }}
+                    sx={{ fontWeight: 600, cursor: 'pointer', color: '#7c3aed' }}
                     data-testid="tab-signup"
                   >
                     Sign Up
@@ -378,7 +385,7 @@ export default function Login() {
                     component="button"
                     type="button"
                     onClick={() => { setMode('login'); setError(''); setSuccess(''); }}
-                    sx={{ fontWeight: 600, cursor: 'pointer', color: '#2563EB' }}
+                    sx={{ fontWeight: 600, cursor: 'pointer', color: '#7c3aed' }}
                     data-testid="tab-login"
                   >
                     Sign In

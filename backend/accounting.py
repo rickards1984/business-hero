@@ -952,9 +952,25 @@ async def get_ai_insights(
         AND t.is_archived = false
         GROUP BY c.name
         ORDER BY total DESC
-        LIMIT 5
+        LIMIT 10
     """), {"business_id": business_id, "start_date": start_date, "end_date": end_date})
     top_expenses = [(row[0], float(row[1])) for row in categories_result.fetchall()]
+    
+    # Income by category
+    income_cats_result = session.execute(text("""
+        SELECT c.name, SUM(ABS(t.amount)) as total
+        FROM accounting_transactions t
+        JOIN accounting_categories c ON t.category_id = c.id
+        WHERE t.business_id = :business_id
+        AND t.amount > 0
+        AND t.transaction_date >= :start_date
+        AND t.transaction_date <= :end_date
+        AND t.is_archived = false
+        GROUP BY c.name
+        ORDER BY total DESC
+        LIMIT 10
+    """), {"business_id": business_id, "start_date": start_date, "end_date": end_date})
+    top_income = [(row[0], float(row[1])) for row in income_cats_result.fetchall()]
     
     # Generate insights
     profit_emoji = "📈" if net > 0 else "📉" if net < 0 else "➡️"
@@ -969,7 +985,15 @@ async def get_ai_insights(
     
     if top_expenses:
         top_cat = top_expenses[0]
-        summary += f"Your biggest expense category is {top_cat[0]} at £{top_cat[1]:,.2f}. "
+        pct = (top_cat[1] / total_expenses * 100) if total_expenses > 0 else 0
+        summary += f"Your biggest expense category is {top_cat[0]} at £{top_cat[1]:,.2f} ({pct:.0f}% of total expenses). "
+    
+    if top_income and len(top_income) == 1 and total_income > 0:
+        summary += f"All your income comes from {top_income[0][0]} — consider diversifying your revenue streams. "
+    elif top_income and total_income > 0:
+        top_inc_pct = (top_income[0][1] / total_income * 100) if total_income > 0 else 0
+        if top_inc_pct > 80:
+            summary += f"Income is heavily concentrated in {top_income[0][0]} ({top_inc_pct:.0f}%). "
     
     if uncategorized > 0:
         summary += f"I've noticed {uncategorized} transactions still need categorizing - worth tidying those up for clearer insights."
@@ -984,6 +1008,13 @@ async def get_ai_insights(
         f"Transactions this period: {transaction_count}"
     ]
     
+    income_breakdown = []
+    for cat, amount in top_income:
+        pct = (amount / total_income * 100) if total_income > 0 else 0
+        income_breakdown.append(f"{cat}: £{amount:,.2f} ({pct:.1f}% of income)")
+    if not income_breakdown:
+        income_breakdown.append("No categorized income to analyze yet")
+    
     spending = []
     for cat, amount in top_expenses:
         pct = (amount / total_expenses * 100) if total_expenses > 0 else 0
@@ -996,6 +1027,8 @@ async def get_ai_insights(
         top_pct = (top_expenses[0][1] / total_expenses * 100)
         if top_pct > 40:
             suggestions.append(f"{top_expenses[0][0]} makes up {top_pct:.0f}% of your spending - might be worth reviewing if there's room to optimize")
+    if top_income and len(top_income) == 1 and total_income > 0:
+        suggestions.append(f"All income comes from one source ({top_income[0][0]}) - consider diversifying revenue streams")
     if net < 0:
         suggestions.append("Consider reviewing recurring expenses for potential savings")
         suggestions.append("Look for opportunities to increase income streams")
@@ -1017,10 +1050,11 @@ async def get_ai_insights(
     return {
         "summary": summary,
         "overview": overview,
+        "income": income_breakdown,
         "spending": spending,
         "suggestions": suggestions,
         "dataQuality": data_quality,
-        "period": period
+        "period": period,
     }
 
 

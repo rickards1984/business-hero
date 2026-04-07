@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
-import { IconButton } from '@mui/material';
+import { Box, CircularProgress, IconButton, Typography } from '@mui/material';
 import { Settings as SettingsIcon } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { useMe } from '@/hooks/useMe';
@@ -11,6 +11,7 @@ import MobileBottomNav from './MobileBottomNav';
 import SupportHelpButton from './SupportHelpButton';
 import SupportPanel from './SupportPanel';
 import ThemeToggle from '@/components/ThemeToggle';
+import SectionErrorBoundary from './SectionErrorBoundary';
 
 type Section = 'dashboard' | 'comms' | 'finance' | 'quotes' | 'ai';
 
@@ -36,6 +37,15 @@ export default function AppShell() {
   useEffect(() => {
     if (!authLoading && (!user || !session)) navigate('/login');
   }, [user, session, authLoading, navigate]);
+
+  if (authLoading) {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 2 }}>
+        <CircularProgress size={32} />
+        <Typography variant="body2" color="text.secondary">Loading...</Typography>
+      </Box>
+    );
+  }
 
   if (!user) return null;
 
@@ -81,7 +91,9 @@ export default function AppShell() {
             </div>
           </div>
         )}
-        <Outlet />
+        <SectionErrorBoundary>
+          <Outlet />
+        </SectionErrorBoundary>
       </main>
 
       {isMobile && (
