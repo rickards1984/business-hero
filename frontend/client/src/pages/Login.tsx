@@ -236,7 +236,7 @@ export default function Login() {
             sx={{
               fontSize: '1.5rem',
               fontWeight: 700,
-              color: '#111827',
+              color: '#1e293b',
               mb: 0.5,
             }}
           >
@@ -245,7 +245,7 @@ export default function Login() {
           <Typography
             sx={{
               fontSize: '0.8125rem',
-              color: '#6B7280',
+              color: '#475569',
               mb: 4,
             }}
           >
@@ -278,6 +278,7 @@ export default function Login() {
                 autoComplete="email"
                 autoFocus
                 variant="outlined"
+
                 data-testid="input-email"
               />
               <TextField
@@ -290,6 +291,7 @@ export default function Login() {
                 required
                 autoComplete="current-password"
                 variant="outlined"
+
                 data-testid="input-password"
               />
               <Button
@@ -309,7 +311,7 @@ export default function Login() {
                 {loading ? <CircularProgress size={24} color="inherit" /> : 'Sign In'}
               </Button>
               <Box sx={{ textAlign: 'center' }}>
-                <Typography variant="body2" sx={{ color: '#6B7280' }}>
+                <Typography variant="body2" sx={{ color: '#475569' }}>
                   Don&apos;t have an account?{' '}
                   <Link
                     component="button"
@@ -336,6 +338,7 @@ export default function Login() {
                 autoComplete="email"
                 autoFocus
                 variant="outlined"
+
                 data-testid="input-signup-email"
               />
               <TextField
@@ -349,6 +352,7 @@ export default function Login() {
                 autoComplete="new-password"
                 variant="outlined"
                 helperText="At least 6 characters"
+
                 data-testid="input-signup-password"
               />
               <TextField
@@ -361,6 +365,7 @@ export default function Login() {
                 required
                 autoComplete="new-password"
                 variant="outlined"
+
                 data-testid="input-signup-confirm"
               />
               <Button
@@ -380,7 +385,7 @@ export default function Login() {
                 {loading ? <CircularProgress size={24} color="inherit" /> : 'Create Account'}
               </Button>
               <Box sx={{ textAlign: 'center' }}>
-                <Typography variant="body2" sx={{ color: '#6B7280' }}>
+                <Typography variant="body2" sx={{ color: '#475569' }}>
                   Already have an account?{' '}
                   <Link
                     component="button"
