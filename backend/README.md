@@ -300,7 +300,7 @@ Returns:
 | `STRIPE_WEBHOOK_SECRET` | Yes | Stripe webhook signing secret |
 | `STRIPE_PRICE_STARTER` | Yes | Stripe price ID for starter plan |
 | `STRIPE_PRICE_PRO` | Yes | Stripe price ID for pro plan |
-| `STRIPE_PRICE_ELITE` | Yes | Stripe price ID for elite plan |
+| `STRIPE_PRICE_BUSINESS` | Yes | Stripe price ID for business plan |
 | `APP_BASE_URL` | Yes | Frontend base URL for billing redirects |
 
 ### Stripe billing setup

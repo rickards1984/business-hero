@@ -81,6 +81,7 @@ interface PlanDef {
   name: string;
   description: string | null;
   monthly_price_gbp: number | null;
+  setup_fee_gbp: number | null;
   features: Record<string, boolean>;
   limits: Record<string, any>;
   sort_order: number;
@@ -682,10 +683,15 @@ export default function AdminOnboardingWizard() {
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                           <Radio checked={bizPlan === plan.id} />
                           <Typography variant="subtitle1" fontWeight="bold">{plan.name}</Typography>
-                          {plan.id === 'pro' && <Chip label="Popular" size="small" color="primary" />}
+                          {plan.id === 'pro' && <Chip label="Recommended" size="small" color="primary" />}
                         </Box>
                         {plan.monthly_price_gbp != null && (
-                          <Typography variant="subtitle1" fontWeight="bold">£{plan.monthly_price_gbp}/mo</Typography>
+                          <Box sx={{ textAlign: 'right' }}>
+                            <Typography variant="subtitle1" fontWeight="bold">£{plan.monthly_price_gbp}/mo</Typography>
+                            {plan.setup_fee_gbp != null && plan.setup_fee_gbp > 0 && (
+                              <Typography variant="caption" color="text.secondary">+ £{plan.setup_fee_gbp} setup</Typography>
+                            )}
+                          </Box>
                         )}
                       </Box>
                       <Typography variant="body2" color="text.secondary" sx={{ ml: 5, mb: 1 }}>{plan.description}</Typography>

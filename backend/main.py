@@ -818,8 +818,8 @@ async def create_checkout_session(
         session.commit()
 
     plan_tier = payload.plan_tier.lower()
-    if plan_tier == "premium":
-        plan_tier = "elite"
+    if plan_tier in ("premium", "elite"):
+        plan_tier = "business"
     prices = config.get("prices", {})
     price_id = prices.get(plan_tier)
     if not price_id:
@@ -849,7 +849,7 @@ async def billing_status(auth_ctx=Depends(get_user_business_context)):
         "prices": {
             "starter": bool(prices.get("starter")),
             "pro": bool(prices.get("pro")),
-            "elite": bool(prices.get("elite")),
+            "business": bool(prices.get("business")),
         },
     }
 
@@ -2303,7 +2303,7 @@ def _plan_feature_defaults(plan_tier: str) -> Dict[str, bool]:
     defaults = {
         "starter": {},
         "pro": {"email": True},
-        "elite": {"email": True, "calendar": True, "voice": True},
+        "business": {"email": True, "calendar": True, "voice": True},
         "beta": {"email": True, "calendar": True, "voice": True},
         "paused": {},
     }
@@ -2325,8 +2325,8 @@ def _resolve_plan_from_price(price_id: str) -> Optional[str]:
         return "starter"
     if price_id == prices.get("pro"):
         return "pro"
-    if price_id == prices.get("elite"):
-        return "elite"
+    if price_id == prices.get("business"):
+        return "business"
     return None
 
 

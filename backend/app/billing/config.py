@@ -31,7 +31,7 @@ def get_stripe_config() -> Dict[str, Union[str, Dict[str, Optional[str]], None]]
         "prices": {
             "starter": _get_env("STRIPE_PRICE_STARTER", ["PRICE_ID_STARTER"]),
             "pro": _get_env("STRIPE_PRICE_PRO", ["PRICE_ID_PRO"]),
-            "elite": _get_env("STRIPE_PRICE_ELITE", ["PRICE_ID_PREMIUM"]),
+            "business": _get_env("STRIPE_PRICE_BUSINESS", ["STRIPE_PRICE_ELITE", "PRICE_ID_PREMIUM"]),
         },
     }
 
@@ -51,8 +51,8 @@ def validate_stripe_config() -> Tuple[bool, List[str]]:
         missing.append("STRIPE_PRICE_STARTER")
     if not prices.get("pro"):
         missing.append("STRIPE_PRICE_PRO")
-    if not prices.get("elite"):
-        missing.append("STRIPE_PRICE_ELITE")
+    if not prices.get("business"):
+        missing.append("STRIPE_PRICE_BUSINESS")
 
     return (len(missing) == 0), missing
 

@@ -69,7 +69,7 @@ const TIMEZONES = [
 ];
 
 const ROLES = ['owner', 'admin', 'member'];
-const PLAN_TIERS = ['starter', 'pro', 'elite', 'beta'];
+const PLAN_TIERS = ['starter', 'pro', 'business', 'beta'];
 const SUBSCRIPTION_STATUSES = ['active', 'past_due', 'canceled'];
 
 interface BusinessSummary {
@@ -89,9 +89,43 @@ interface BusinessSummary {
   last_calendar_sync_at: string | null;
 }
 const FEATURE_PRESETS: Record<string, { feature_flags: Record<string, any>; limits: Record<string, any> }> = {
-  starter: { feature_flags: { ai_briefings: false }, limits: { users: 3, tasks: 200 } },
-  pro: { feature_flags: { ai_briefings: true }, limits: { users: 10, tasks: 1000 } },
-  elite: { feature_flags: { ai_briefings: true, premium_support: true }, limits: { users: 50, tasks: 5000 } },
+  starter: {
+    feature_flags: {
+      email: true,
+      accounting: true,
+      ai_briefings: true,
+      whatsapp_briefing: true,
+      receptionist: false,
+      quoting: false,
+      calendar_booking: false,
+    },
+    limits: { users: 1, businesses: 1 },
+  },
+  pro: {
+    feature_flags: {
+      email: true,
+      accounting: true,
+      ai_briefings: true,
+      whatsapp_briefing: true,
+      receptionist: true,
+      quoting: true,
+      calendar_booking: true,
+    },
+    limits: { users: 5, businesses: 3 },
+  },
+  business: {
+    feature_flags: {
+      email: true,
+      accounting: true,
+      ai_briefings: true,
+      whatsapp_briefing: true,
+      receptionist: true,
+      quoting: true,
+      calendar_booking: true,
+      premium_support: true,
+    },
+    limits: { users: 20, businesses: -1 },
+  },
 };
 
 export default function AdminDashboard() {

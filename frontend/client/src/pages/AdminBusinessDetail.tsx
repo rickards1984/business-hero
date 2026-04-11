@@ -108,7 +108,7 @@ interface BusinessHealth {
 
 type TabKey = 'overview' | 'members' | 'integrations' | 'activity' | 'support';
 
-const PLAN_TIERS = ['starter', 'pro', 'elite', 'beta', 'paused'];
+const PLAN_TIERS = ['starter', 'pro', 'business', 'beta', 'paused'];
 const ROLES = ['owner', 'admin', 'member'];
 const SUPPORT_PRIORITIES = ['low', 'normal', 'high', 'urgent'];
 

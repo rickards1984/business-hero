@@ -250,7 +250,7 @@ def _plan_feature_defaults(plan_tier: Optional[str]) -> Dict[str, bool]:
     defaults = {
         "starter": {},
         "pro": {"email": True},
-        "elite": {"email": True, "calendar": True, "voice": True},
+        "business": {"email": True, "calendar": True, "voice": True},
         "beta": {"email": True, "calendar": True, "voice": True},
         "paused": {},
     }
