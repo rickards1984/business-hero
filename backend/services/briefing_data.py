@@ -3,6 +3,7 @@ Data aggregation engine for CEO briefings.
 Pulls data from all Business Hero features: calls, emails, tasks, invoices, accounting.
 """
 
+import json
 import logging
 from typing import Dict, Any
 from datetime import datetime, timedelta, timezone, date
@@ -263,71 +264,11 @@ async def gather_business_data(
         logger.error(f"[Briefing Data] Failed to gather invoices: {e}")
         data["invoices"] = {"unpaid_count": 0, "error": str(e)}
 
-    # --- Financial Summary (accounting_transactions) ---
+    # --- Financial Summary (from financial_summary_cache, fallback to transactions) ---
     try:
-        txns_rows = session.execute(
-            text("""
-                SELECT id, amount, type, transaction_date
-                FROM accounting_transactions
-                WHERE business_id = :business_id
-                  AND is_archived = false
-                  AND transaction_date >= :period_start
-                  AND transaction_date <= :period_end
-            """),
-            {
-                "business_id": business_id,
-                "period_start": period_start.isoformat(),
-                "period_end": period_end.isoformat(),
-            },
-        ).fetchall()
-
-        transactions = [{"type": r[2], "amount": float(r[1]) if r[1] else 0} for r in txns_rows]
-
-        if transactions:
-            type_counts = {}
-            sample_amounts = []
-            for t in transactions[:20]:
-                ttype = t.get("type", "NULL")
-                type_counts[ttype] = type_counts.get(ttype, 0) + 1
-                sample_amounts.append({"type": ttype, "amount": t.get("amount", 0)})
-            logger.info(f"[Briefing Data] Transaction type distribution: {type_counts}")
-            logger.info(f"[Briefing Data] Sample transactions: {sample_amounts[:5]}")
-        else:
-            logger.info(f"[Briefing Data] No transactions found for period {period_start} to {period_end}")
-
-        INCOME_TYPES = {
-            "income", "RECEIVE", "receive", "ACCRECPAYMENT", "AROVERPAYMENT",
-            "EXPPAYMENT", "credit", "Credit", "CREDIT",
-        }
-        EXPENSE_TYPES = {
-            "expense", "SPEND", "spend", "ACCPAYPAYMENT", "APOVERPAYMENT",
-            "APCREDITPAYMENT", "debit", "Debit", "DEBIT",
-        }
-        TRANSFER_TYPES = {"TRANSFER", "transfer", "Transfer"}
-
-        income = 0.0
-        expenses = 0.0
-        for t in transactions:
-            amt = t.get("amount", 0) or 0
-            ttype = (t.get("type") or "").strip()
-            if ttype in TRANSFER_TYPES:
-                continue
-            if ttype in INCOME_TYPES:
-                income += abs(amt)
-            elif ttype in EXPENSE_TYPES:
-                expenses += abs(amt)
-            elif amt > 0:
-                income += abs(amt)
-            elif amt < 0:
-                expenses += abs(amt)
-
-        data["financial"] = {
-            "revenue": round(income, 2),
-            "expenses": round(expenses, 2),
-            "net_profit": round(income - expenses, 2),
-            "transaction_count": len(transactions),
-        }
-
+        # Check accounting connection first
+        accounting_connected = False
+        accounting_provider = None
         try:
             conn_row = session.execute(
                 text("""
@@ -339,79 +280,194 @@ async def gather_business_data(
                 {"business_id": business_id},
             ).fetchone()
             if conn_row:
-                data["financial"]["accounting_connected"] = True
-                data["financial"]["provider"] = conn_row[0]
-            else:
-                data["financial"]["accounting_connected"] = False
+                accounting_connected = True
+                accounting_provider = conn_row[0]
         except Exception:
-            data["financial"]["accounting_connected"] = False
+            pass
 
-        if include_previous:
-            prev_txns = session.execute(
+        # Primary source: financial_summary_cache (updated 3x daily by background sync)
+        cached = session.execute(
+            text("""
+                SELECT bank_summary, profit_and_loss, invoices_summary, cached_at
+                FROM financial_summary_cache
+                WHERE business_id = :business_id
+                ORDER BY cached_at DESC LIMIT 1
+            """),
+            {"business_id": str(business_id)},
+        ).fetchone()
+
+        cache_used = False
+        if cached:
+            try:
+                bank_data = json.loads(cached[0]) if isinstance(cached[0], str) else cached[0] or {}
+                pnl_data = json.loads(cached[1]) if isinstance(cached[1], str) else cached[1] or {}
+                invoice_data = json.loads(cached[2]) if isinstance(cached[2], str) else cached[2] or {}
+            except (json.JSONDecodeError, TypeError):
+                bank_data, pnl_data, invoice_data = {}, {}, {}
+
+            # Check cache age
+            cache_age_hours = 999.0
+            if cached[3]:
+                cached_at = cached[3]
+                if cached_at.tzinfo is None:
+                    cached_at = cached_at.replace(tzinfo=timezone.utc)
+                cache_age_hours = (now - cached_at).total_seconds() / 3600
+
+            if cache_age_hours > 24:
+                logger.warning(f"[Briefing Data] Financial cache is {cache_age_hours:.1f}h old — data may be stale")
+
+            # Parse P&L from cached Xero report using the same logic as main.py
+            pnl_income = 0.0
+            pnl_expenses = 0.0
+            pnl_net = 0.0
+            if pnl_data:
+                try:
+                    reports = pnl_data.get("Reports", [])
+                    if reports:
+                        for row in reports[0].get("Rows", []):
+                            if row.get("RowType") == "Section":
+                                for sr in row.get("Rows", []):
+                                    if sr.get("RowType") == "SummaryRow":
+                                        cells = sr.get("Cells", [])
+                                        if len(cells) >= 2:
+                                            label = cells[0].get("Value", "")
+                                            try:
+                                                value = float(cells[-1].get("Value", "0").replace(",", ""))
+                                            except (ValueError, AttributeError):
+                                                value = 0.0
+                                            if "Total Income" in label or "Total Revenue" in label:
+                                                pnl_income = value
+                                            elif "Total Operating Expenses" in label or "Total Expenses" in label:
+                                                pnl_expenses = abs(value)
+                                            elif "Total Cost of Sales" in label:
+                                                pnl_expenses += abs(value)
+                            elif row.get("RowType") == "Row":
+                                cells = row.get("Cells", [])
+                                if len(cells) >= 2:
+                                    label = cells[0].get("Value", "")
+                                    if "Net Profit" in label or "Net Loss" in label:
+                                        try:
+                                            pnl_net = float(cells[-1].get("Value", "0").replace(",", ""))
+                                        except (ValueError, AttributeError):
+                                            pass
+                    if pnl_net == 0.0 and (pnl_income > 0 or pnl_expenses > 0):
+                        pnl_net = pnl_income - pnl_expenses
+                except Exception as e:
+                    logger.debug(f"[Briefing Data] P&L parse from cache failed: {e}")
+
+            # Parse bank balance from cached data
+            bank_balance = None
+            if bank_data:
+                try:
+                    accounts = bank_data.get("Accounts", [])
+                    if accounts:
+                        bank_balance = sum(
+                            float(a.get("Total", 0)) for a in accounts if a.get("Total") is not None
+                        )
+                except Exception:
+                    pass
+
+            if pnl_income > 0 or pnl_expenses > 0 or bank_balance is not None:
+                cache_used = True
+                data["financial"] = {
+                    "revenue": round(pnl_income, 2),
+                    "expenses": round(pnl_expenses, 2),
+                    "net_profit": round(pnl_net, 2),
+                    "source": "financial_summary_cache",
+                    "cached_at": cached[3].isoformat() if cached[3] else None,
+                }
+                if bank_balance is not None:
+                    data["financial"]["bank_balance"] = round(bank_balance, 2)
+                if invoice_data:
+                    data["financial"]["invoices_overdue_count"] = invoice_data.get("overdue_count", 0)
+                    data["financial"]["invoices_overdue_amount"] = float(invoice_data.get("overdue_amount", 0))
+                    data["financial"]["invoices_outstanding_count"] = invoice_data.get("due_count", 0)
+                    data["financial"]["invoices_outstanding_amount"] = float(invoice_data.get("due_amount", 0))
+                logger.info(f"[Briefing Data] Using cached financial data: income={pnl_income}, expenses={pnl_expenses}, bank={bank_balance}")
+
+        # Fallback: count transactions for the period (supplementary context)
+        txn_count = 0
+        try:
+            txn_row = session.execute(
                 text("""
-                    SELECT id, amount, type
+                    SELECT COUNT(*)
                     FROM accounting_transactions
                     WHERE business_id = :business_id
                       AND is_archived = false
-                      AND transaction_date >= :prev_start
-                      AND transaction_date <= :prev_end
+                      AND transaction_date >= :period_start
+                      AND transaction_date <= :period_end
                 """),
                 {
                     "business_id": business_id,
-                    "prev_start": prev_start.isoformat(),
-                    "prev_end": prev_end.isoformat(),
+                    "period_start": period_start.isoformat(),
+                    "period_end": period_end.isoformat(),
+                },
+            ).fetchone()
+            txn_count = int(txn_row[0]) if txn_row else 0
+        except Exception:
+            pass
+
+        if not cache_used:
+            # No cache available — fall back to transaction-based sums
+            logger.info(f"[Briefing Data] No cached financial data, falling back to transaction sums")
+            txns_rows = session.execute(
+                text("""
+                    SELECT id, amount, type, transaction_date
+                    FROM accounting_transactions
+                    WHERE business_id = :business_id
+                      AND is_archived = false
+                      AND transaction_date >= :period_start
+                      AND transaction_date <= :period_end
+                """),
+                {
+                    "business_id": business_id,
+                    "period_start": period_start.isoformat(),
+                    "period_end": period_end.isoformat(),
                 },
             ).fetchall()
-            prev_data = [{"type": r[2], "amount": float(r[1]) if r[1] else 0} for r in prev_txns]
-            prev_income = 0.0
-            prev_expenses = 0.0
-            for t in prev_data:
+
+            transactions = [{"type": r[2], "amount": float(r[1]) if r[1] else 0} for r in txns_rows]
+
+            INCOME_TYPES = {
+                "income", "RECEIVE", "receive", "ACCRECPAYMENT", "AROVERPAYMENT",
+                "EXPPAYMENT", "credit", "Credit", "CREDIT",
+            }
+            EXPENSE_TYPES = {
+                "expense", "SPEND", "spend", "ACCPAYPAYMENT", "APOVERPAYMENT",
+                "APCREDITPAYMENT", "debit", "Debit", "DEBIT",
+            }
+            TRANSFER_TYPES = {"TRANSFER", "transfer", "Transfer"}
+
+            income = 0.0
+            expenses = 0.0
+            for t in transactions:
                 amt = t.get("amount", 0) or 0
                 ttype = (t.get("type") or "").strip()
                 if ttype in TRANSFER_TYPES:
                     continue
                 if ttype in INCOME_TYPES:
-                    prev_income += abs(amt)
+                    income += abs(amt)
                 elif ttype in EXPENSE_TYPES:
-                    prev_expenses += abs(amt)
+                    expenses += abs(amt)
                 elif amt > 0:
-                    prev_income += abs(amt)
+                    income += abs(amt)
                 elif amt < 0:
-                    prev_expenses += abs(amt)
-            data["financial"]["previous_revenue"] = round(prev_income, 2)
-            data["financial"]["previous_expenses"] = round(prev_expenses, 2)
-            data["financial"]["previous_net_profit"] = round(
-                prev_income - prev_expenses, 2
-            )
+                    expenses += abs(amt)
+
+            data["financial"] = {
+                "revenue": round(income, 2),
+                "expenses": round(expenses, 2),
+                "net_profit": round(income - expenses, 2),
+                "source": "transactions",
+            }
+
+        data["financial"]["transaction_count"] = txn_count
+        data["financial"]["accounting_connected"] = accounting_connected
+        if accounting_provider:
+            data["financial"]["provider"] = accounting_provider
     except Exception as e:
         logger.error(f"[Briefing Data] Failed to gather financials: {e}")
         data["financial"] = {"revenue": 0, "expenses": 0, "net_profit": 0, "error": str(e)}
-
-    # --- P&L cross-check from accounting provider ---
-    try:
-        from providers.accounting_service import AccountingService
-        svc = AccountingService(business_id, session)
-        connection = svc.get_connection()
-        if connection and data["financial"].get("revenue", 0) == 0 and data["financial"].get("expenses", 0) == 0:
-            provider = await svc.get_provider()
-            if provider and hasattr(provider, "get_profit_and_loss"):
-                pnl_data = await provider.get_profit_and_loss(
-                    from_date=period_start.isoformat(),
-                    to_date=period_end.isoformat(),
-                )
-                if pnl_data:
-                    from main import _parse_profit_and_loss
-                    pnl = _parse_profit_and_loss(pnl_data)
-                    pnl_income = pnl.get("income", 0)
-                    pnl_expenses = pnl.get("expenses", 0)
-                    if float(pnl_income) > 0 or float(pnl_expenses) > 0:
-                        logger.info(f"[Briefing Data] Using P&L report instead of transaction sum: income={pnl_income}, expenses={pnl_expenses}")
-                        data["financial"]["revenue"] = round(abs(float(pnl_income)), 2)
-                        data["financial"]["expenses"] = round(abs(float(pnl_expenses)), 2)
-                        data["financial"]["net_profit"] = round(float(pnl_income) - abs(float(pnl_expenses)), 2)
-                        data["financial"]["pnl_source"] = "provider_report"
-    except Exception as e:
-        logger.warning(f"[Briefing Data] P&L cross-check failed (non-fatal): {e}")
 
     # --- Receptionist Knowledge Base Gaps ---
     try:
