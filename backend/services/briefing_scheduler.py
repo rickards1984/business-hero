@@ -35,7 +35,7 @@ async def start_briefing_scheduler():
     # by _STARTUP_DELAY_MINUTES. This lets the app finish starting and
     # respond to Railway's healthcheck before any heavy sync work begins.
     now = datetime.now(timezone.utc)
-    _last_email_sync = now - timedelta(minutes=60 - _STARTUP_DELAY_MINUTES)
+    _last_email_sync = now - timedelta(minutes=120 - _STARTUP_DELAY_MINUTES)
     _last_financial_sync = now
 
     logger.info("[Scheduler] Starting CEO briefing scheduler")
@@ -64,8 +64,13 @@ def _run_background_sync_jobs_nonblocking():
     global _last_email_sync, _last_financial_sync
     now = datetime.now(timezone.utc)
 
-    # Hourly email sync
-    if _last_email_sync is None or (now - _last_email_sync).total_seconds() >= 3600:
+    # Email sync: every 2 hours during business hours (08–18), weekdays only
+    london_tz = pytz.timezone("Europe/London")
+    now_london = now.astimezone(london_tz)
+    is_business_hours = now_london.weekday() < 5 and 8 <= now_london.hour <= 18
+    if is_business_hours and (
+        _last_email_sync is None or (now - _last_email_sync).total_seconds() >= 7200
+    ):
         _last_email_sync = now
         asyncio.create_task(_safe_background_email_sync())
 
@@ -156,9 +161,11 @@ async def _check_and_send_scheduled_messages():
             owner_name = config["owner_name"]
             detail_level = config["preferred_detail_level"]
 
-            # Check daily pulse
+            # Check daily pulse (weekdays only)
+            is_weekday = now_local.weekday() < 5  # Mon=0 … Fri=4
             if (
                 config["daily_pulse_enabled"]
+                and is_weekday
                 and current_time == config["daily_pulse_time"]
             ):
                 already_sent = await _was_sent_today(
