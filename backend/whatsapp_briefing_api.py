@@ -458,10 +458,6 @@ async def whatsapp_webhook(request: Request):
 
     _logger.info(f"[WhatsApp Webhook] Received from {from_number}: {body[:80]}")
 
-    with get_session() as session:
-        # Session is a generator - we need the actual session
-        pass
-    # Use get_session_context for non-dependency use
     from db import get_session_context
 
     with get_session_context() as session:
