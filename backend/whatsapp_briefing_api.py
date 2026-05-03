@@ -451,123 +451,130 @@ async def whatsapp_webhook(request: Request):
     Twilio webhook for incoming WhatsApp messages.
     Handles numbered replies to take action from briefings/alerts.
     """
-    form_data = await request.form()
-    from_number = form_data.get("From", "").replace("whatsapp:", "").strip()
-    body = form_data.get("Body", "").strip()
-    message_sid = form_data.get("MessageSid", "")
-
-    _logger.info(f"[WhatsApp Webhook] Received from {from_number}: {body[:80]}")
-
-    from db import get_session_context
-
-    with get_session_context() as session:
-        config_row = session.execute(
-            text("""
-                SELECT business_id, phone_number, owner_name
-                FROM whatsapp_configs
-                WHERE phone_number = :phone AND enabled = true
-            """),
-            {"phone": from_number},
-        ).fetchone()
-
-    if not config_row:
-        _logger.warning(f"[WhatsApp Webhook] No config found for number: {from_number}")
-        return Response(content="", status_code=200)
-
-    business_id = str(config_row[0])
-    owner_name = config_row[2] or ""
-
-    # Log the inbound message
     try:
-        from services.whatsapp_service import log_whatsapp_message
-        log_whatsapp_message(
-            business_id=business_id,
-            direction="inbound",
-            message_type="user_reply",
-            phone_number=from_number,
-            content=body[:5000],
-            twilio_message_sid=message_sid,
-            twilio_status="received",
-        )
-    except Exception as e:
-        _logger.warning(f"[WhatsApp Webhook] Failed to log inbound message: {e}")
+        form_data = await request.form()
+        from_number = form_data.get("From", "").replace("whatsapp:", "").strip()
+        body = form_data.get("Body", "").strip()
+        message_sid = form_data.get("MessageSid", "")
 
-    reply_text = body.strip()
-    action_number = None
-    if reply_text.isdigit():
-        action_number = int(reply_text)
-    elif reply_text.lower() in ("one", "1️⃣"):
-        action_number = 1
-    elif reply_text.lower() in ("two", "2️⃣"):
-        action_number = 2
-    elif reply_text.lower() in ("three", "3️⃣"):
-        action_number = 3
-    elif reply_text.lower() in ("four", "4️⃣"):
-        action_number = 4
-    elif reply_text.lower() in ("five", "5️⃣"):
-        action_number = 5
+        _logger.info(f"[WhatsApp Webhook] Received from {from_number}: {body[:80]}")
 
-    if action_number:
+        from db import get_session_context, get_session_transactional
+
         with get_session_context() as session:
-            action_row = session.execute(
+            config_row = session.execute(
                 text("""
-                    SELECT id, action_type, action_config
-                    FROM whatsapp_pending_actions
-                    WHERE business_id = :business_id
-                      AND action_number = :action_number
-                      AND (status IS NULL OR status = 'pending')
-                    ORDER BY created_at DESC
-                    LIMIT 1
+                    SELECT business_id, phone_number, owner_name
+                    FROM whatsapp_configs
+                    WHERE phone_number = :phone AND enabled = true
                 """),
-                {"business_id": business_id, "action_number": action_number},
+                {"phone": from_number},
             ).fetchone()
 
-        if action_row:
-            action = {
-                "id": str(action_row[0]),
-                "action_type": action_row[1],
-                "action_config": action_row[2] or {},
-            }
-            if isinstance(action["action_config"], str):
-                import json
-                try:
-                    action["action_config"] = json.loads(action["action_config"])
-                except Exception:
-                    action["action_config"] = {}
+        if not config_row:
+            _logger.warning(f"[WhatsApp Webhook] No config found for number: {from_number}")
+            return Response(content="", status_code=200)
 
-            await _execute_whatsapp_action(
-                action, business_id, from_number, owner_name
+        business_id = str(config_row[0])
+        owner_name = config_row[2] or ""
+
+        # Log the inbound message
+        try:
+            from services.whatsapp_service import log_whatsapp_message
+            log_whatsapp_message(
+                business_id=business_id,
+                direction="inbound",
+                message_type="user_reply",
+                phone_number=from_number,
+                content=body[:5000],
+                twilio_message_sid=message_sid,
+                twilio_status="received",
             )
+        except Exception as e:
+            _logger.warning(f"[WhatsApp Webhook] Failed to log inbound message: {e}")
 
+        reply_text = body.strip()
+        action_number = None
+        if reply_text.isdigit():
+            action_number = int(reply_text)
+        elif reply_text.lower() in ("one", "1️⃣"):
+            action_number = 1
+        elif reply_text.lower() in ("two", "2️⃣"):
+            action_number = 2
+        elif reply_text.lower() in ("three", "3️⃣"):
+            action_number = 3
+        elif reply_text.lower() in ("four", "4️⃣"):
+            action_number = 4
+        elif reply_text.lower() in ("five", "5️⃣"):
+            action_number = 5
+
+        if action_number:
             with get_session_context() as session:
-                session.execute(
+                action_row = session.execute(
                     text("""
-                        UPDATE whatsapp_pending_actions
-                        SET status = 'executed', executed_at = :now
-                        WHERE id = :action_id
+                        SELECT id, action_type, action_config
+                        FROM whatsapp_pending_actions
+                        WHERE business_id = :business_id
+                          AND action_number = :action_number
+                          AND (status IS NULL OR status = 'pending')
+                        ORDER BY created_at DESC
+                        LIMIT 1
                     """),
-                    {
-                        "action_id": action["id"],
-                        "now": datetime.utcnow().isoformat(),
-                    },
+                    {"business_id": business_id, "action_number": action_number},
+                ).fetchone()
+
+            if action_row:
+                action = {
+                    "id": str(action_row[0]),
+                    "action_type": action_row[1],
+                    "action_config": action_row[2] or {},
+                }
+                if isinstance(action["action_config"], str):
+                    import json
+                    try:
+                        action["action_config"] = json.loads(action["action_config"])
+                    except Exception:
+                        action["action_config"] = {}
+
+                await _execute_whatsapp_action(
+                    action, business_id, from_number, owner_name
                 )
-                session.commit()
+
+                with get_session_transactional() as session:
+                    session.execute(
+                        text("""
+                            UPDATE whatsapp_pending_actions
+                            SET status = 'executed', executed_at = :now
+                            WHERE id = :action_id
+                        """),
+                        {
+                            "action_id": action["id"],
+                            "now": datetime.utcnow().isoformat(),
+                        },
+                    )
+            else:
+                await send_whatsapp_message(
+                    to_number=from_number,
+                    body=f"Sorry, I don't have an active action for option {action_number}. Actions expire after 24 hours. You can trigger a new briefing from your Business Hero dashboard.",
+                    business_id=business_id,
+                    message_type="action_confirmation",
+                )
         else:
             await send_whatsapp_message(
                 to_number=from_number,
-                body=f"Sorry, I don't have an active action for option {action_number}. Actions expire after 24 hours. You can trigger a new briefing from your Business Hero dashboard.",
+                body="Thanks for your message! To take a quick action, reply with a number (1, 2, 3...) from your last briefing. For anything else, head to your Business Hero dashboard.",
                 business_id=business_id,
                 message_type="action_confirmation",
             )
-    else:
-        await send_whatsapp_message(
-            to_number=from_number,
-            body="Thanks for your message! To take a quick action, reply with a number (1, 2, 3...) from your last briefing. For anything else, head to your Business Hero dashboard.",
-            business_id=business_id,
-            message_type="action_confirmation",
-        )
 
-    return Response(content="", status_code=200)
+        return Response(content="", status_code=200)
+
+    except Exception as exc:
+        _logger.exception(
+            "[WhatsApp Webhook] Unhandled exception — returning 200 "
+            "to Twilio to prevent retry. Investigate immediately."
+        )
+        return Response(content="", status_code=200)
 
 
 async def _execute_whatsapp_action(
@@ -709,9 +716,9 @@ async def _execute_whatsapp_action(
     elif action_type == "reject_automation":
         execution_id = action_config.get("execution_id")
         if execution_id:
-            from db import get_session_context
+            from db import get_session_transactional
 
-            with get_session_context() as session:
+            with get_session_transactional() as session:
                 session.execute(
                     text("""
                         UPDATE automation_executions
@@ -724,7 +731,6 @@ async def _execute_whatsapp_action(
                         "now": datetime.utcnow().isoformat(),
                     },
                 )
-                session.commit()
         await send_whatsapp_message(
             to_number=phone,
             body="👍 Automation skipped as requested.",
