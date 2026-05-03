@@ -10,7 +10,7 @@ from typing import List, Dict, Any
 
 from sqlalchemy import text
 
-from db import get_session_context
+from db import get_session_context, get_session_transactional
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,7 @@ async def _execute_automation_rule(rule: dict, business_id: str) -> None:
     logger.info(f"[Automation] Executing rule: {rule.get('name')} ({action_type})")
 
     execution_id = None
-    with get_session_context() as session:
+    with get_session_transactional() as session:
         row = session.execute(
             text("""
                 INSERT INTO automation_executions
@@ -152,7 +152,6 @@ async def _execute_automation_rule(rule: dict, business_id: str) -> None:
         ).fetchone()
         if row:
             execution_id = str(row[0])
-        session.commit()
 
     if requires_approval:
         with get_session_context() as session:
@@ -172,7 +171,7 @@ async def _execute_automation_rule(rule: dict, business_id: str) -> None:
             )
 
             if execution_id:
-                with get_session_context() as session:
+                with get_session_transactional() as session:
                     for num, lbl, atype, aconfig in [
                         (1, "Approve", "approve_automation", {"execution_id": execution_id, "action_type": action_type, "action_config": action_config}),
                         (2, "Skip", "reject_automation", {"execution_id": execution_id}),
@@ -191,7 +190,6 @@ async def _execute_automation_rule(rule: dict, business_id: str) -> None:
                                 "config": json.dumps(aconfig),
                             },
                         )
-                    session.commit()
         return
 
     await _do_execute_action(action_type, action_config, business_id, execution_id, rule["id"])
@@ -210,7 +208,7 @@ async def _do_execute_action(
         logger.info(f"[Automation] Would send Stage {stage} chase for business {business_id}")
 
     elif action_type == "create_task":
-        with get_session_context() as session:
+        with get_session_transactional() as session:
             session.execute(
                 text("""
                     INSERT INTO tasks (business_id, title, description, status, priority, category, source)
@@ -224,7 +222,6 @@ async def _do_execute_action(
                     "category": config.get("category", "General"),
                 },
             )
-            session.commit()
         logger.info(f"[Automation] Created task: {config.get('title', 'Automated task')}")
 
     elif action_type == "send_whatsapp_alert":
@@ -232,7 +229,7 @@ async def _do_execute_action(
         await dispatch_alert(business_id, config.get("template", "general"), config)
 
     if execution_id:
-        with get_session_context() as session:
+        with get_session_transactional() as session:
             session.execute(
                 text("""
                     UPDATE automation_executions
@@ -246,10 +243,9 @@ async def _do_execute_action(
                     "result": json.dumps({"action_type": action_type, "success": True}),
                 },
             )
-            session.commit()
 
     if rule_id:
-        with get_session_context() as session:
+        with get_session_transactional() as session:
             session.execute(
                 text("""
                     UPDATE automation_rules
@@ -258,4 +254,3 @@ async def _do_execute_action(
                 """),
                 {"rule_id": rule_id, "now": datetime.now(timezone.utc).isoformat()},
             )
-            session.commit()
