@@ -4,7 +4,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlmodel import Session
-from db import get_session
+from db import get_session, engine
 from auth import get_user_business_context
 
 logger = logging.getLogger("booking_api")
@@ -32,10 +32,9 @@ async def list_google_calendars(
 ):
     """List available Google Calendars for the authenticated user."""
     import httpx
-    from assistant_tools import _get_google_calendar_token, _get_engine, _refresh_google_token
+    from assistant_tools import _get_google_calendar_token, _refresh_google_token
 
     business_id = str(auth_ctx["business_id"])
-    engine = _get_engine()
     access_token, account_id, refresh_ciphertext = _get_google_calendar_token(engine, business_id)
 
     if not access_token:

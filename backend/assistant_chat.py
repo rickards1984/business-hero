@@ -7,7 +7,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional, Tuple
 from openai import OpenAI
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+from db import engine
 
 from supabase_auth import verify_supabase_token, SupabaseUser
 from assistant_tools import TOOL_DEFINITIONS, execute_tool
@@ -93,9 +94,8 @@ async def _execute_tool_async(tool_name: str, arguments: dict, business_id: str,
 
     elif tool_name == "list_google_calendars":
         import httpx
-        from assistant_tools import _get_google_calendar_token, _get_engine, _refresh_google_token
+        from assistant_tools import _get_google_calendar_token, _refresh_google_token
 
-        engine = _get_engine()
         access_token, account_id, refresh_ciphertext = _get_google_calendar_token(engine, business_id)
         if not access_token:
             return {"error": "Google Calendar not connected"}
@@ -391,22 +391,8 @@ IMPORTANT: The user is in voice conversation mode. Keep responses extra concise 
     return base_prompt
 
 
-_engine = None
-
-
-def _get_engine():
-    """Get cached SQLAlchemy engine for Supabase."""
-    global _engine
-    if _engine is None:
-        if not SUPABASE_DATABASE_URL:
-            raise RuntimeError("SUPABASE_DATABASE_URL not configured")
-        _engine = create_engine(SUPABASE_DATABASE_URL, pool_pre_ping=True, pool_size=5)
-    return _engine
-
-
 def get_user_display_name(user_id: str) -> Optional[str]:
     """Get user's display name from profiles table or business_members."""
-    engine = _get_engine()
     with engine.connect() as conn:
         # Try to get from profiles table if it exists
         try:
@@ -442,7 +428,6 @@ def get_user_display_name(user_id: str) -> Optional[str]:
 
 def is_platform_admin(user_id: str) -> bool:
     """Check if user is a platform admin."""
-    engine = _get_engine()
     with engine.connect() as conn:
         result = conn.execute(text("""
             SELECT 1 FROM platform_admins WHERE user_id = :user_id LIMIT 1
@@ -452,7 +437,6 @@ def is_platform_admin(user_id: str) -> bool:
 
 def get_business_by_id(business_id: str) -> Optional[BusinessContext]:
     """Fetch business by ID."""
-    engine = _get_engine()
     with engine.connect() as conn:
         result = conn.execute(text("""
             SELECT id, name, timezone, logo_url FROM businesses WHERE id = :business_id LIMIT 1
@@ -476,7 +460,6 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
     Raises:
         ValueError: If no business found, access denied, or business not found
     """
-    engine = _get_engine()
     is_admin = is_platform_admin(user_id)
     
     if requested_business_id:
@@ -549,7 +532,6 @@ def is_valid_uuid(value: str) -> bool:
 
 def get_conversation(conversation_id: str) -> Optional[ConversationContext]:
     """Fetch conversation by ID."""
-    engine = _get_engine()
     with engine.connect() as conn:
         result = conn.execute(text("""
             SELECT id, user_id, business_id 
@@ -565,7 +547,6 @@ def get_conversation(conversation_id: str) -> Optional[ConversationContext]:
 
 def create_conversation(user_id: str, business_id: str) -> str:
     """Create a new conversation and return its ID."""
-    engine = _get_engine()
     new_id = str(uuid.uuid4())
     with engine.connect() as conn:
         conn.execute(text("""
@@ -579,7 +560,6 @@ def create_conversation(user_id: str, business_id: str) -> str:
 
 def save_message(conversation_id: str, business_id: str, user_id: str, role: str, content: str) -> str:
     """Save a message to assistant_messages table."""
-    engine = _get_engine()
     msg_id = str(uuid.uuid4())
     with engine.connect() as conn:
         conn.execute(text("""
@@ -609,7 +589,6 @@ def load_conversation_history(conversation_id: str, user_id: str, is_admin: bool
     Returns:
         List of dicts with role and content, ordered oldest first
     """
-    engine = _get_engine()
     with engine.connect() as conn:
         if is_admin:
             result = conn.execute(text("""

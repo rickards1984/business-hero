@@ -9,7 +9,8 @@ from uuid import UUID
 import pytz
 import httpx
 from cryptography.fernet import Fernet
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+from db import engine
 
 
 def extract_email_address(from_header: str) -> str:
@@ -519,12 +520,6 @@ TOOL_DEFINITIONS = [
 ]
 
 
-def _get_engine():
-    """Get SQLAlchemy engine for Supabase."""
-    if not SUPABASE_DATABASE_URL:
-        raise RuntimeError("SUPABASE_DATABASE_URL not configured")
-    return create_engine(SUPABASE_DATABASE_URL, pool_pre_ping=True)
-
 
 def _decrypt_token(ciphertext: str) -> str:
     """Decrypt an encrypted token."""
@@ -547,8 +542,6 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
     Returns:
         dict with tool result
     """
-    engine = _get_engine()
-    
     if tool_name == "list_tasks":
         return _list_tasks(engine, business_id, arguments)
     elif tool_name == "create_task":
@@ -1847,7 +1840,6 @@ async def check_calendar_availability(
     """Check available time slots on a given date using Google Calendar FreeBusy API."""
     from datetime import datetime as _dt, timedelta as _td
 
-    engine = _get_engine()
     access_token, account_id, refresh_ciphertext = _get_google_calendar_token(engine, business_id)
 
     if not access_token:
@@ -1924,7 +1916,6 @@ async def create_calendar_event(
     calendar_id: str = "primary",
 ) -> dict:
     """Create a Google Calendar event (book an appointment)."""
-    engine = _get_engine()
     access_token, account_id, refresh_ciphertext = _get_google_calendar_token(engine, business_id)
 
     if not access_token:
