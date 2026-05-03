@@ -53,3 +53,39 @@ def get_session_context():
     """Context manager for database session."""
     with Session(engine) as session:
         yield session
+
+
+_safety_logger = logging.getLogger("db.transactional")
+
+
+@contextmanager
+def get_session_transactional():
+    """
+    Context manager for a database session with explicit commit/rollback.
+
+    On clean exit: commits the transaction.
+    On exception: rolls back, logs the function name and exception, re-raises.
+
+    Use this for any code path that performs writes. Reads can use
+    get_session_context() — auto-commit is harmless for read-only queries
+    but explicit transactional intent is preferred for writes.
+    """
+    session = Session(engine)
+    try:
+        yield session
+        session.commit()
+    except Exception as exc:
+        try:
+            session.rollback()
+        except Exception as rollback_exc:
+            _safety_logger.error(
+                "Rollback itself failed: %s (original: %s)",
+                rollback_exc, exc
+            )
+        _safety_logger.warning(
+            "Transaction rolled back: %s",
+            exc, exc_info=True
+        )
+        raise
+    finally:
+        session.close()
