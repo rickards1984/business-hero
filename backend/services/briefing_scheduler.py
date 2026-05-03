@@ -11,7 +11,7 @@ from datetime import datetime, timezone, date, timedelta
 import pytz
 from sqlalchemy import text
 
-from db import get_session_context
+from db import get_session_context, get_session_transactional
 
 logger = logging.getLogger(__name__)
 
@@ -354,7 +354,7 @@ async def _sync_accounting_for_pulse(business_id: str):
 
     from providers.accounting_service import AccountingService
 
-    with get_session_context() as session:
+    with get_session_transactional() as session:
         svc = AccountingService(business_id, session)
         connection = svc.get_connection()
         if not connection:
@@ -501,7 +501,6 @@ async def _sync_accounting_for_pulse(business_id: str):
                 text("UPDATE accounting_connections SET last_sync_at = NOW() WHERE id = :cid"),
                 {"cid": connection["id"]},
             )
-            session.commit()
         except Exception as e:
             logger.warning(f"[Scheduler] Failed to update last_sync_at: {e}")
 
@@ -576,7 +575,7 @@ async def _send_daily_pulse(
 
     # Save snapshot
     try:
-        with get_session_context() as session:
+        with get_session_transactional() as session:
             financial = data.get("financial", {})
             calls = data.get("calls", {})
             emails = data.get("emails", {})
@@ -613,7 +612,6 @@ async def _send_daily_pulse(
                     "full_data": json.dumps(data, default=str) if data else None,
                 },
             )
-            session.commit()
     except Exception as e:
         logger.warning(f"[Scheduler] Failed to save daily snapshot: {e}")
 
@@ -780,7 +778,7 @@ async def _send_weekly_briefing(
     # Store action options for two-way interaction
     if action_options and msg_sid:
         try:
-            with get_session_context() as session:
+            with get_session_transactional() as session:
                 msg_row = session.execute(
                     text("""
                         SELECT id FROM whatsapp_messages
@@ -807,7 +805,6 @@ async def _send_weekly_briefing(
                             "action_config": json.dumps(option.get("config") or {}),
                         },
                     )
-                session.commit()
         except Exception as e:
             logger.warning(f"[Scheduler] Failed to save pending action: {e}")
 
@@ -821,7 +818,7 @@ async def _send_weekly_briefing(
         tasks = data.get("tasks", {})
         invoices = data.get("invoices", {})
 
-        with get_session_context() as session:
+        with get_session_transactional() as session:
             session.execute(
                 text("""
                     INSERT INTO briefing_snapshots
@@ -857,6 +854,5 @@ async def _send_weekly_briefing(
                     "full_data": json.dumps(data, default=str) if data else None,
                 },
             )
-            session.commit()
     except Exception as e:
         logger.warning(f"[Scheduler] Failed to save weekly snapshot: {e}")
