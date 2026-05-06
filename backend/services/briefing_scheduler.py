@@ -10,6 +10,7 @@ from datetime import datetime, timezone, date, timedelta
 
 import pytz
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from db import get_session_context, get_session_transactional
 
@@ -45,10 +46,25 @@ async def start_briefing_scheduler():
 async def _scheduler_loop():
     """Main scheduler loop — runs every 60 seconds"""
     while True:
+        sleep_seconds = 60
         try:
             await _check_and_send_scheduled_messages()
+        except (OperationalError, DBAPIError) as db_err:
+            logger.warning(
+                f"[Scheduler] Database connection error, will retry: {db_err}"
+            )
+            try:
+                from db import engine
+                engine.dispose()
+            except Exception as dispose_err:
+                logger.error(
+                    f"[Scheduler] Failed to dispose engine: {dispose_err}"
+                )
+            sleep_seconds = 30
         except Exception as e:
-            logger.error(f"[Scheduler] Error in scheduler loop: {e}")
+            logger.error(
+                f"[Scheduler] Error in scheduler loop: {e}", exc_info=True
+            )
 
         # Background sync jobs (fire-and-forget so they don't block the loop)
         try:
@@ -56,7 +72,7 @@ async def _scheduler_loop():
         except Exception as e:
             logger.error(f"[Scheduler] Error scheduling background sync: {e}")
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(sleep_seconds)
 
 
 def _run_background_sync_jobs_nonblocking():

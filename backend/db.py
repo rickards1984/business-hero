@@ -23,7 +23,12 @@ if DATABASE_URL:
     logger.info(f"Connecting to PostgreSQL database at host: {parsed.hostname}")
     
     try:
-        engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
+        engine = create_engine(
+            DATABASE_URL,
+            echo=False,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+        )
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         logger.info(f"Successfully connected to PostgreSQL at {parsed.hostname}")

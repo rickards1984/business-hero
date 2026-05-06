@@ -163,9 +163,17 @@ async def _execute_automation_rule(rule: dict, business_id: str) -> None:
         if cfg:
             from services.whatsapp_service import send_whatsapp_message
 
+            rule_name = (rule.get("name") or "").strip() or "Unknown automation"
+            rule_desc = (rule.get("description") or "").strip() or "No description provided"
+            body_text = (
+                f"🤖 Automation: {rule_name}\n\n"
+                f"{rule_desc}\n\n"
+                "Reply 1️⃣ to approve or 2️⃣ to skip"
+            )
+
             await send_whatsapp_message(
                 to_number=cfg[0],
-                body=f"🤖 Automation: {rule.get('name', 'Unknown')}\n\n{rule.get('description', '')}\n\nReply 1️⃣ to approve or 2️⃣ to skip",
+                body=body_text,
                 business_id=business_id,
                 message_type="automation_report",
             )

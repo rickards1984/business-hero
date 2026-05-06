@@ -41,6 +41,36 @@ def get_twilio_client():
         _twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     return _twilio_client
 
+def _validate_content_variables(content_variables: dict, template_name: str) -> tuple[bool, str]:
+    """
+    Validate template content variables before sending to Twilio.
+
+    Twilio error 21656 = 'Content Variables parameter is invalid'.
+    Common causes: None values, missing required keys, empty strings.
+
+    Returns (is_valid, error_message).
+    """
+    if content_variables is None:
+        return False, f"content_variables is None for template '{template_name}'"
+
+    if not isinstance(content_variables, dict):
+        return False, (
+            f"content_variables must be a dict, got "
+            f"{type(content_variables).__name__} for template '{template_name}'"
+        )
+
+    if not content_variables:
+        return False, f"content_variables is empty for template '{template_name}'"
+
+    for key, value in content_variables.items():
+        if value is None:
+            return False, f"variable '{key}' is None for template '{template_name}'"
+        if isinstance(value, str) and not value.strip():
+            return False, f"variable '{key}' is empty string for template '{template_name}'"
+
+    return True, ""
+
+
 def _sanitize_template_vars(variables: dict) -> dict:
     """Ensure all template variables are non-null, non-empty strings within Twilio limits."""
     sanitized = {}
@@ -186,6 +216,30 @@ async def send_whatsapp_message(
                 variables = json.loads(body) if body.startswith("{") else {"1": body[:4000]}
             except (json.JSONDecodeError, AttributeError):
                 variables = {"1": (body or "")[:4000]}
+
+            logger.info(
+                f"[WhatsApp] Attempting send to {to_number}: "
+                f"template={message_type}, "
+                f"variable_keys={list(variables.keys()) if isinstance(variables, dict) else None}"
+            )
+
+            is_valid, error_msg = _validate_content_variables(variables, message_type)
+            if not is_valid:
+                logger.error(
+                    f"[WhatsApp] BLOCKED send to {to_number}: {error_msg}. "
+                    f"template={message_type}, variables={variables}"
+                )
+                _log_whatsapp_message(
+                    business_id=business_id,
+                    direction="outbound",
+                    message_type=message_type,
+                    phone_number=phone_clean,
+                    content=body,
+                    twilio_status="blocked_invalid_vars",
+                    related_entity_type=related_entity_type,
+                    related_entity_id=related_entity_id,
+                )
+                return None
 
             variables = _sanitize_template_vars(variables)
 
