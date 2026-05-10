@@ -634,3 +634,143 @@ def _calculate_next_meeting_time(settings: dict) -> Optional[datetime]:
         )
 
     return None
+
+
+# ============================================================================
+# Prompt 2 — Prep service endpoints
+#
+# Append-only: these endpoints integrate the prep orchestrator. Nothing above
+# this line is modified.
+# ============================================================================
+
+@router.post("/prep-now")
+async def trigger_prep_now(
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """
+    Run the prep service for the current business right now and return the
+    PrepData JSON. Does NOT persist a meeting record — for testing/preview.
+
+    Tier-gated: pro/business/beta.
+    """
+    business_id = str(auth_ctx["business_id"])
+    require_tier_feature(business_id, "executive_board_meeting", session)
+
+    from services.executive_meeting_prep import generate_prep_data
+
+    prep = generate_prep_data(business_id=business_id, db_session=session)
+    return prep
+
+
+@router.post("/start-now")
+async def start_meeting_now(
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """
+    Create an ad-hoc executive meeting record (scheduled_for=NOW), run prep,
+    and store the prep_data on the row. Returns {meeting_id, status}.
+
+    Prompt 3 will pick this row up and start the actual conversation.
+    """
+    business_id = str(auth_ctx["business_id"])
+    require_tier_feature(business_id, "executive_board_meeting", session)
+
+    from services.executive_meeting_prep import generate_prep_data
+
+    now = datetime.utcnow()
+
+    # Insert the meeting row in 'scheduled' state first
+    inserted = session.execute(
+        text(
+            """
+            INSERT INTO executive_meetings
+                (business_id, status, scheduled_for, prep_started_at)
+            VALUES (:business_id, 'scheduled', :scheduled_for, NOW())
+            RETURNING id
+            """
+        ),
+        {"business_id": business_id, "scheduled_for": now.isoformat()},
+    ).fetchone()
+    if not inserted:
+        raise HTTPException(status_code=500, detail="Failed to create meeting record")
+    meeting_id = str(inserted[0])
+    session.commit()
+
+    # Run prep on the same business with scheduled_for=now
+    prep = generate_prep_data(
+        business_id=business_id,
+        db_session=session,
+        scheduled_for=now,
+    )
+
+    # Persist prep_data and flip status
+    session.execute(
+        text(
+            """
+            UPDATE executive_meetings
+            SET prep_data = CAST(:prep_data AS jsonb),
+                status = 'prep_ready',
+                ai_model = :ai_model,
+                updated_at = NOW()
+            WHERE id = :meeting_id
+            """
+        ),
+        {
+            "meeting_id": meeting_id,
+            "prep_data": json.dumps(prep, default=str),
+            "ai_model": prep.get("ai_model"),
+        },
+    )
+    session.commit()
+
+    return {
+        "meeting_id": meeting_id,
+        "status": "prep_ready",
+        "scheduled_for": now.isoformat() + "Z",
+        "completeness_score": (prep.get("data_quality") or {}).get("completeness_score"),
+    }
+
+
+@router.get("/{meeting_id}/prep-data")
+async def get_meeting_prep_data(
+    meeting_id: str,
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Fetch the prep_data JSONB for a specific meeting (own-business only)."""
+    business_id = str(auth_ctx["business_id"])
+    require_tier_feature(business_id, "executive_board_meeting", session)
+
+    row = session.execute(
+        text(
+            """
+            SELECT id, business_id, status, scheduled_for, prep_data,
+                   ai_model, prep_started_at
+            FROM executive_meetings
+            WHERE id = :meeting_id AND business_id = :business_id
+            LIMIT 1
+            """
+        ),
+        {"meeting_id": meeting_id, "business_id": business_id},
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    prep_raw = row[4]
+    if isinstance(prep_raw, str):
+        try:
+            prep_raw = json.loads(prep_raw)
+        except Exception:
+            prep_raw = None
+
+    return {
+        "meeting_id": str(row[0]),
+        "business_id": str(row[1]),
+        "status": row[2],
+        "scheduled_for": row[3].isoformat() if row[3] else None,
+        "prep_started_at": row[6].isoformat() if row[6] else None,
+        "ai_model": row[5],
+        "prep_data": prep_raw,
+    }

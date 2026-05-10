@@ -72,6 +72,15 @@ async def _scheduler_loop():
         except Exception as e:
             logger.error(f"[Scheduler] Error scheduling background sync: {e}")
 
+        # Executive Board Meeting prep (Prompt 2). Wrapped in its own try/except
+        # so a failure here can never break the existing scheduler.
+        try:
+            await _check_and_prep_executive_meetings()
+        except Exception as e:
+            logger.error(
+                f"[Scheduler] Executive meeting prep failed: {e}", exc_info=True
+            )
+
         await asyncio.sleep(sleep_seconds)
 
 
@@ -872,3 +881,175 @@ async def _send_weekly_briefing(
             )
     except Exception as e:
         logger.warning(f"[Scheduler] Failed to save weekly snapshot: {e}")
+
+
+# ============================================================================
+# Executive Board Meeting prep tick (Prompt 2)
+# ============================================================================
+
+# Window before scheduled_for during which we run prep. 35 minutes gives a
+# 30-min prep target plus 5-min scheduler-tick granularity.
+_EXEC_PREP_WINDOW_MINUTES = 35
+
+
+async def _check_and_prep_executive_meetings() -> None:
+    """
+    Find businesses with executive meetings due in the next ~35 minutes,
+    create the meeting record if it doesn't exist yet, and run prep.
+
+    Pattern:
+    - SELECT settings rows where enabled AND next_meeting_at <= now() + 35m
+    - For each, ensure an executive_meetings row exists with scheduled_for=next_meeting_at
+    - If meeting still status='scheduled', run prep, store prep_data, set status='prep_ready'
+
+    Failures in any single business's prep are logged and do not affect others.
+    """
+    try:
+        with get_session_context() as session:
+            due_rows = session.execute(
+                text(
+                    """
+                    SELECT business_id, next_meeting_at, frequency, timezone,
+                           focus_areas, custom_agenda_items, attendees,
+                           directness_level, include_disclaimers
+                    FROM executive_meeting_settings
+                    WHERE enabled = true
+                      AND next_meeting_at IS NOT NULL
+                      AND next_meeting_at <= NOW() + (:window_minutes * INTERVAL '1 minute')
+                      AND next_meeting_at >= NOW() - INTERVAL '5 minutes'
+                    """
+                ),
+                {"window_minutes": _EXEC_PREP_WINDOW_MINUTES},
+            ).fetchall()
+    except Exception as e:
+        logger.error(f"[Scheduler] Failed to query exec meeting settings: {e}")
+        return
+
+    if not due_rows:
+        return
+
+    for row in due_rows:
+        business_id = str(row[0])
+        next_meeting_at = row[1]
+        try:
+            await _prep_one_executive_meeting(business_id, next_meeting_at)
+        except Exception as e:
+            logger.error(
+                f"[Scheduler] Exec meeting prep failed for business {business_id}: {e}",
+                exc_info=True,
+            )
+
+
+async def _prep_one_executive_meeting(business_id: str, scheduled_for) -> None:
+    """Create-if-missing the meeting row, then run prep if it's still 'scheduled'."""
+    import time as _time
+
+    # Step 1: ensure a meeting row exists for this scheduled_for
+    meeting_id = None
+    current_status = None
+    try:
+        with get_session_transactional() as session:
+            existing = session.execute(
+                text(
+                    """
+                    SELECT id, status
+                    FROM executive_meetings
+                    WHERE business_id = :business_id
+                      AND scheduled_for = :scheduled_for
+                    LIMIT 1
+                    """
+                ),
+                {"business_id": business_id, "scheduled_for": scheduled_for},
+            ).fetchone()
+
+            if existing:
+                meeting_id = str(existing[0])
+                current_status = existing[1]
+            else:
+                inserted = session.execute(
+                    text(
+                        """
+                        INSERT INTO executive_meetings
+                            (business_id, status, scheduled_for)
+                        VALUES (:business_id, 'scheduled', :scheduled_for)
+                        RETURNING id
+                        """
+                    ),
+                    {"business_id": business_id, "scheduled_for": scheduled_for},
+                ).fetchone()
+                if inserted:
+                    meeting_id = str(inserted[0])
+                    current_status = "scheduled"
+                    logger.info(
+                        "[Scheduler] Created exec meeting row for business=%s scheduled=%s",
+                        business_id, scheduled_for,
+                    )
+    except Exception as e:
+        logger.error(f"[Scheduler] Failed to ensure exec meeting row: {e}")
+        return
+
+    if not meeting_id:
+        return
+    if current_status != "scheduled":
+        # Already prepped (prep_ready), running, completed, etc — nothing to do.
+        return
+
+    # Step 2: run prep with a fresh read-only session
+    started = _time.monotonic()
+    try:
+        from services.executive_meeting_prep import generate_prep_data
+
+        with get_session_context() as session:
+            prep_data = generate_prep_data(
+                business_id=business_id,
+                db_session=session,
+                scheduled_for=scheduled_for,
+            )
+    except Exception as e:
+        logger.error(f"[Scheduler] generate_prep_data failed for business {business_id}: {e}", exc_info=True)
+        # Mark the meeting as failed so we don't keep re-trying every tick.
+        try:
+            with get_session_transactional() as session:
+                session.execute(
+                    text(
+                        """
+                        UPDATE executive_meetings
+                        SET status = 'failed', updated_at = NOW()
+                        WHERE id = :meeting_id
+                        """
+                    ),
+                    {"meeting_id": meeting_id},
+                )
+        except Exception:
+            logger.exception("[Scheduler] Failed to mark exec meeting as failed")
+        return
+
+    # Step 3: store prep_data + flip status to prep_ready
+    duration_ms = int((_time.monotonic() - started) * 1000)
+    try:
+        with get_session_transactional() as session:
+            session.execute(
+                text(
+                    """
+                    UPDATE executive_meetings
+                    SET prep_data = CAST(:prep_data AS jsonb),
+                        prep_started_at = COALESCE(prep_started_at, NOW()),
+                        status = 'prep_ready',
+                        ai_model = :ai_model,
+                        updated_at = NOW()
+                    WHERE id = :meeting_id
+                      AND status = 'scheduled'
+                    """
+                ),
+                {
+                    "meeting_id": meeting_id,
+                    "prep_data": json.dumps(prep_data, default=str),
+                    "ai_model": prep_data.get("ai_model"),
+                },
+            )
+        logger.info(
+            "[Scheduler] Exec meeting prep complete: business=%s meeting=%s in %dms",
+            business_id, meeting_id, duration_ms,
+        )
+    except Exception as e:
+        logger.error(f"[Scheduler] Failed to persist prep_data: {e}", exc_info=True)
