@@ -30,6 +30,7 @@ import { supabase, type Business, type BusinessMember } from '@/lib/supabase';
 import { apiRequest } from '@/lib/queryClient';
 import AdminReceptionistSection from '@/components/AdminReceptionistSection';
 import AdminWhatsAppSection from '@/components/AdminWhatsAppSection';
+import AdminBoardMeetingBusinessSection from '@/components/board-meeting/AdminBoardMeetingBusinessSection';
 
 const FEATURE_TOGGLE_LIST = [
   { key: 'quoting_enabled', label: 'Quoting & Quantity Surveying', description: 'AI-powered quotes, quantity surveying, PDF generation, quote-to-invoice', icon: '📋', defaultEnabled: false },
@@ -688,6 +689,7 @@ export default function AdminBusinessDetail() {
                         onFeatureFlagChange={() => { loadBusiness(); loadHealth(); }}
                       />
                       <AdminWhatsAppSection businessId={id} />
+                      <AdminBoardMeetingBusinessSection businessId={id} />
                     </Box>
                   )}
                 </Box>

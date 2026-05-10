@@ -29,6 +29,8 @@ import CommsPage from '@/pages/CommsPage';
 import FinancePage from '@/pages/FinancePage';
 import AIHubPage from '@/pages/AIHubPage';
 import QuotesPage from '@/pages/QuotesPage';
+import BoardMeeting from '@/pages/BoardMeeting';
+import MeetingDetailView from '@/components/board-meeting/MeetingDetailView';
 
 const SHARED_TYPOGRAPHY = {
   fontFamily: "'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
@@ -544,6 +546,8 @@ function App() {
                   <Route path="briefings" element={<Briefings />} />
                   <Route path="email/outbox" element={<EmailOutbox />} />
                   <Route path="accounting" element={<Accounting />} />
+                  <Route path="board-meeting" element={<BoardMeeting />} />
+                  <Route path="board-meeting/meeting/:meetingId" element={<MeetingDetailView />} />
                 </Route>
                 <Route path="/dashboard" element={<Navigate to="/app/dashboard" replace />} />
                 <Route path="/settings/email" element={<Navigate to="/app/settings/email" replace />} />
