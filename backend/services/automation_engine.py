@@ -161,21 +161,30 @@ async def _execute_automation_rule(rule: dict, business_id: str) -> None:
             ).fetchone()
 
         if cfg:
-            from services.whatsapp_service import send_whatsapp_message
+            from services.whatsapp_service import (
+                send_whatsapp_message,
+                get_business_name,
+            )
 
             rule_name = (rule.get("name") or "").strip() or "Unknown automation"
             rule_desc = (rule.get("description") or "").strip() or "No description provided"
-            body_text = (
-                f"🤖 Automation: {rule_name}\n\n"
-                f"{rule_desc}\n\n"
-                "Reply 1️⃣ to approve or 2️⃣ to skip"
-            )
+
+            # Send as `alert` (3-variable template), not `automation_report`
+            # (4-variable summary template). For per-rule approval requests,
+            # the alert template is the semantically correct choice.
+            business_name = get_business_name(business_id)
+            alert_content = f"🤖 Automation: {rule_name}\n\n{rule_desc}"
+            action_options = "Reply 1️⃣ to approve or 2️⃣ to skip"
 
             await send_whatsapp_message(
                 to_number=cfg[0],
-                body=body_text,
+                body=json.dumps({
+                    "1": business_name,
+                    "2": alert_content,
+                    "3": action_options,
+                }),
                 business_id=business_id,
-                message_type="automation_report",
+                message_type="alert",
             )
 
             if execution_id:

@@ -174,7 +174,13 @@ def generate_alert_message(
     business_name: str,
     alert_data: Dict[str, Any],
 ) -> str:
-    """Generate a contextual alert message."""
+    """Generate a contextual alert message.
+
+    NOTE: This produces only the {{2}} alert content for the WhatsApp
+    `alert` template. The {{3}} action options block (e.g. "Reply 1 to
+    chase…") is built separately by the caller from
+    `alert_data["action_option"]` so it doesn't render twice.
+    """
     templates = {
         "call_transferred": (
             "📞 Call transferred from your AI receptionist\n\n"
@@ -200,22 +206,19 @@ def generate_alert_message(
             "📋 Invoice now overdue\n\n"
             "{contact_name} — £{amount:.2f}\n"
             "Invoice: {invoice_number}\n"
-            "Due date: {due_date} ({days_overdue} days ago)\n\n"
-            "Reply 1️⃣ to send a friendly chase reminder"
+            "Due date: {due_date} ({days_overdue} days ago)"
         ),
         "urgent_email": (
             "📧 Urgent email received\n\n"
             "From: {sender}\n"
             "Subject: {subject}\n"
-            "Category: {category}\n\n"
-            "Reply 1️⃣ to see the full email"
+            "Category: {category}"
         ),
         "kb_gap": (
             "🤖 Knowledge base gap detected\n\n"
             "Your AI receptionist has been asked about a topic {count} times "
             "this week that isn't covered in the knowledge base.\n\n"
-            "Common query: \"{topic}\"\n\n"
-            "Reply 1️⃣ to add this to the knowledge base"
+            "Common query: \"{topic}\""
         ),
     }
 

@@ -78,14 +78,30 @@ async def dispatch_alert(
         return False
 
     from services.briefing_generator import generate_alert_message
+    from services.whatsapp_service import send_whatsapp_message, get_business_name
 
-    message = generate_alert_message(alert_type, "", alert_data)
+    alert_content = generate_alert_message(alert_type, "", alert_data)
 
-    from services.whatsapp_service import send_whatsapp_message
+    # Build the 3-variable structure for the `alert` template.
+    # {{1}} business name, {{2}} alert content, {{3}} action options.
+    business_name = get_business_name(business_id)
+    action_option = alert_data.get("action_option") or {}
+    action_label = action_option.get("label") if isinstance(action_option, dict) else None
+    if action_label:
+        action_options = f"Reply 1️⃣ to {action_label}"
+    else:
+        # Template requires a non-empty {{3}} — provide a generic fallback so
+        # the variable validator doesn't block legitimate informational alerts.
+        action_options = "View details in your Business Hero dashboard"
 
+    import json as _json
     sid = await send_whatsapp_message(
         to_number=phone,
-        body=message,
+        body=_json.dumps({
+            "1": business_name,
+            "2": alert_content,
+            "3": action_options,
+        }),
         business_id=business_id,
         message_type="alert",
         related_entity_type=alert_data.get("entity_type"),

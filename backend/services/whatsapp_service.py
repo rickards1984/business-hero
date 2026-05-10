@@ -32,6 +32,42 @@ TEMPLATE_SID_MAP = {
     "task_reminder": TWILIO_TASK_REMINDER_CONTENT_SID,
 }
 
+# Verified against the Twilio Console on 2026-05-10. The keys MUST match
+# message_type values; the values MUST match the variable count placeholders
+# defined inside the corresponding Twilio Content Template body. If you add
+# a new template, register it here AND in TEMPLATE_SID_MAP above.
+TEMPLATE_VARIABLE_COUNTS = {
+    "task_reminder": 4,
+    "automation_report": 4,
+    "daily_pulse": 5,
+    "weekly_briefing": 7,
+    "action_confirmation": 2,
+    "alert": 3,
+}
+
+
+def get_business_name(business_id: str) -> str:
+    """Look up the business name for `business_id`, defaulting to 'Your business'.
+
+    Used to inject {{1}} business name into 2-variable templates when a caller
+    sends a free-form text body (auto-wrap pattern in send_whatsapp_message).
+    """
+    if not business_id:
+        return "Your business"
+    try:
+        from sqlalchemy import text
+        from db import get_session_context
+        with get_session_context() as session:
+            row = session.execute(
+                text("SELECT name FROM businesses WHERE id = :bid LIMIT 1"),
+                {"bid": business_id},
+            ).fetchone()
+        if row and row[0]:
+            return str(row[0])
+    except Exception as exc:
+        logger.warning(f"[WhatsApp] get_business_name failed for {business_id}: {exc}")
+    return "Your business"
+
 # Initialize Twilio client
 _twilio_client = None
 
@@ -211,11 +247,53 @@ async def send_whatsapp_message(
         content_sid = TEMPLATE_SID_MAP.get(message_type, "")
 
         if content_sid:
-            # Template-based send — parse variables from body
+            expected_count = TEMPLATE_VARIABLE_COUNTS.get(message_type)
+
+            # Step 1: parse the body into a `variables` dict.
+            # If body looks like JSON, trust the caller. Otherwise it's
+            # free-form and we may need to auto-wrap it.
+            parsed_variables = None
             try:
-                variables = json.loads(body) if body.startswith("{") else {"1": body[:4000]}
+                if isinstance(body, str) and body.startswith("{"):
+                    parsed_variables = json.loads(body)
+                    if not isinstance(parsed_variables, dict):
+                        parsed_variables = None
             except (json.JSONDecodeError, AttributeError):
-                variables = {"1": (body or "")[:4000]}
+                parsed_variables = None
+
+            if parsed_variables is not None:
+                variables = parsed_variables
+            else:
+                # Free-form body. Auto-wrap based on the template's
+                # expected variable count.
+                if expected_count is None or expected_count == 1:
+                    variables = {"1": (body or "")[:4000]}
+                elif expected_count == 2:
+                    biz_name = get_business_name(business_id)
+                    variables = {
+                        "1": biz_name,
+                        "2": (body or "")[:4000],
+                    }
+                else:
+                    # 3+ variable templates have ambiguous structure for a
+                    # free-form body. The caller MUST send explicit JSON.
+                    error_msg = (
+                        f"Free-form body sent to template '{message_type}' "
+                        f"which expects {expected_count} variables. Caller "
+                        f"must build a JSON body with explicit variable keys."
+                    )
+                    logger.error(f"[WhatsApp] BLOCKED send to {to_number}: {error_msg}")
+                    _log_whatsapp_message(
+                        business_id=business_id,
+                        direction="outbound",
+                        message_type=message_type,
+                        phone_number=phone_clean,
+                        content=body,
+                        twilio_status="blocked_freeform_for_multivar_template",
+                        related_entity_type=related_entity_type,
+                        related_entity_id=related_entity_id,
+                    )
+                    return None
 
             logger.info(
                 f"[WhatsApp] Attempting send to {to_number}: "
@@ -223,6 +301,32 @@ async def send_whatsapp_message(
                 f"variable_keys={list(variables.keys()) if isinstance(variables, dict) else None}"
             )
 
+            # Step 2: variable-count sanity check against the verified template
+            # spec. Catches caller drift before the API call.
+            if (
+                expected_count is not None
+                and isinstance(variables, dict)
+                and len(variables) != expected_count
+            ):
+                error_msg = (
+                    f"Template '{message_type}' expects {expected_count} "
+                    f"variables, got {len(variables)}. "
+                    f"Variable keys: {list(variables.keys())}"
+                )
+                logger.error(f"[WhatsApp] BLOCKED send to {to_number}: {error_msg}")
+                _log_whatsapp_message(
+                    business_id=business_id,
+                    direction="outbound",
+                    message_type=message_type,
+                    phone_number=phone_clean,
+                    content=body,
+                    twilio_status="blocked_template_variable_count_mismatch",
+                    related_entity_type=related_entity_type,
+                    related_entity_id=related_entity_id,
+                )
+                return None
+
+            # Step 3: per-variable validity (None / empty / wrong type)
             is_valid, error_msg = _validate_content_variables(variables, message_type)
             if not is_valid:
                 logger.error(
