@@ -774,3 +774,200 @@ async def get_meeting_prep_data(
         "ai_model": row[5],
         "prep_data": prep_raw,
     }
+
+
+# ============================================================================
+# Prompt 3 — Conversational meeting endpoints
+#
+# Append-only. Prompt 1 endpoints and Prompt 2 endpoints above are untouched.
+# Tier gating applies to every endpoint (pro / business / beta only).
+# All ownership checks confirm the meeting belongs to the caller's business.
+# ============================================================================
+
+def _verify_meeting_ownership(
+    meeting_id: str, business_id: str, session: Session
+) -> dict:
+    """Look up a meeting and confirm it belongs to the requesting business.
+
+    Raises HTTPException(404) if not found; 403 is intentionally avoided so
+    we don't leak meeting-ID existence across tenants.
+    """
+    row = session.execute(
+        text(
+            """
+            SELECT id, business_id, status
+            FROM executive_meetings
+            WHERE id = :meeting_id AND business_id = :business_id
+            LIMIT 1
+            """
+        ),
+        {"meeting_id": meeting_id, "business_id": business_id},
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return {"id": str(row[0]), "business_id": str(row[1]), "status": row[2]}
+
+
+@router.post("/{meeting_id}/start")
+async def start_meeting_endpoint(
+    meeting_id: str,
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Generate Aria's opening turn for a meeting in 'prep_ready' state."""
+    business_id = str(auth_ctx["business_id"])
+    require_tier_feature(business_id, "executive_board_meeting", session)
+    _verify_meeting_ownership(meeting_id, business_id, session)
+
+    from services.executive_meeting_orchestrator import start_meeting
+
+    try:
+        result = await start_meeting(meeting_id, session)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception(
+            "[ExecMeetingAPI] start failed for meeting %s", meeting_id
+        )
+        raise HTTPException(status_code=500, detail="Failed to start meeting")
+
+    return {
+        "meeting_id": meeting_id,
+        "opening_message": result["opening_message"],
+        "tokens_used": result.get("tokens_used", 0),
+        "agenda_section": result.get("agenda_section", "opening"),
+    }
+
+
+@router.post("/{meeting_id}/message")
+async def send_owner_message(
+    meeting_id: str,
+    body: dict,
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Owner sends a message; Aria responds. Both are persisted.
+
+    Request body: {"content": "owner's message text"}
+    """
+    business_id = str(auth_ctx["business_id"])
+    require_tier_feature(business_id, "executive_board_meeting", session)
+    _verify_meeting_ownership(meeting_id, business_id, session)
+
+    content = str((body or {}).get("content") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Message content required")
+
+    from services.executive_meeting_orchestrator import handle_turn
+
+    try:
+        result = await handle_turn(meeting_id, content, session)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception(
+            "[ExecMeetingAPI] turn failed for meeting %s", meeting_id
+        )
+        raise HTTPException(status_code=500, detail="Failed to process message")
+
+    return {
+        "meeting_id": meeting_id,
+        "role": result["role"],
+        "content": result["content"],
+        "tokens_used": result.get("tokens_used", 0),
+        "soft_cap_warning": result.get("soft_cap_warning", False),
+    }
+
+
+@router.post("/{meeting_id}/end")
+async def end_meeting_endpoint(
+    meeting_id: str,
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Close a meeting: extract actions/goals, summarise, update record."""
+    business_id = str(auth_ctx["business_id"])
+    require_tier_feature(business_id, "executive_board_meeting", session)
+    _verify_meeting_ownership(meeting_id, business_id, session)
+
+    from services.executive_meeting_orchestrator import end_meeting
+
+    try:
+        result = await end_meeting(meeting_id, session)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception(
+            "[ExecMeetingAPI] end failed for meeting %s", meeting_id
+        )
+        raise HTTPException(status_code=500, detail="Failed to end meeting")
+
+    return result
+
+
+@router.get("/{meeting_id}/messages")
+async def list_meeting_messages(
+    meeting_id: str,
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Return the full ordered conversation log for a meeting."""
+    business_id = str(auth_ctx["business_id"])
+    require_tier_feature(business_id, "executive_board_meeting", session)
+    _verify_meeting_ownership(meeting_id, business_id, session)
+
+    rows = session.execute(
+        text(
+            """
+            SELECT id, role, content, agenda_section, tokens_used,
+                   speaker_name, created_at
+            FROM executive_meeting_messages
+            WHERE meeting_id = :meeting_id
+            ORDER BY created_at ASC, id ASC
+            """
+        ),
+        {"meeting_id": meeting_id},
+    ).fetchall()
+
+    return [
+        {
+            "id": str(r[0]),
+            "role": r[1],
+            "content": r[2],
+            "agenda_section": r[3],
+            "tokens_used": r[4] or 0,
+            "speaker_name": r[5],
+            "created_at": r[6].isoformat() if r[6] else None,
+        }
+        for r in rows
+    ]
+
+
+@router.post("/{meeting_id}/extract-actions")
+async def extract_actions_endpoint(
+    meeting_id: str,
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Run extraction over the transcript and persist action items / goals /
+    decisions. Intended for debugging or re-extraction; /end already runs this
+    internally. Calling this on an already-extracted meeting will create
+    duplicate rows — use with care.
+    """
+    business_id = str(auth_ctx["business_id"])
+    require_tier_feature(business_id, "executive_board_meeting", session)
+    _verify_meeting_ownership(meeting_id, business_id, session)
+
+    from services.executive_meeting_orchestrator import extract_actions_and_goals
+
+    try:
+        result = await extract_actions_and_goals(meeting_id, session)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception(
+            "[ExecMeetingAPI] extract-actions failed for meeting %s", meeting_id
+        )
+        raise HTTPException(status_code=500, detail="Failed to extract actions")
+
+    return {"meeting_id": meeting_id, **result}
