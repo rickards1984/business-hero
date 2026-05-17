@@ -39,7 +39,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 
-OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+# Realtime model is env-var driven so we can roll forward/back without a deploy.
+# Default is gpt-realtime-2 (released May 2026) — first voice model with
+# GPT-5-class reasoning and reliable accent stability across long sessions.
+RECEPTIONIST_REALTIME_MODEL = os.getenv("RECEPTIONIST_REALTIME_MODEL", "gpt-realtime-2")
+OPENAI_REALTIME_URL = (
+    f"wss://api.openai.com/v1/realtime?model={RECEPTIONIST_REALTIME_MODEL}"
+)
 OPENAI_AUDIO_FORMAT = "g711_ulaw"
 
 if not OPENAI_API_KEY:
@@ -574,8 +580,29 @@ async def receptionist_media_stream(ws: WebSocket):
         voice = prompt_data["voice"]
         greeting = prompt_data["greeting"]
         config_data = prompt_data["config"]
+        preset_id = prompt_data.get("voice_preset_id")
+        accent_name = prompt_data.get("accent")
+        preset_verified = prompt_data.get("preset_verified", True)
 
-        logger.info(f"[Receptionist WS] System prompt built (voice={voice}, {len(system_prompt)} chars)")
+        if not preset_verified:
+            logger.warning(
+                "[Receptionist WS] Using EXPERIMENTAL voice '%s' (preset=%s) — "
+                "not yet validated end-to-end on %s. If the call fails to start, "
+                "switch to a verified preset (e.g. shimmer_british, echo_british).",
+                voice,
+                preset_id,
+                RECEPTIONIST_REALTIME_MODEL,
+            )
+
+        logger.info(
+            "[Receptionist WS] System prompt built "
+            "(model=%s, preset=%s, voice=%s, accent=%s, %d chars)",
+            RECEPTIONIST_REALTIME_MODEL,
+            preset_id,
+            voice,
+            accent_name,
+            len(system_prompt),
+        )
 
         if not OPENAI_API_KEY:
             logger.error("[Receptionist WS] OPENAI_API_KEY not set — cannot connect to OpenAI")

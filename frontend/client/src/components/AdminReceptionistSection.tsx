@@ -48,6 +48,7 @@ interface ReceptionistConfig {
   twilio_phone_number: string | null;
   twilio_phone_sid: string | null;
   voice: string;
+  voice_preset_id: string | null;
   language: string;
   personality_prompt: string | null;
   greeting_message: string;
@@ -117,6 +118,15 @@ export default function AdminReceptionistSection({ businessId, featureFlags, onF
   const [kbItems, setKbItems] = useState<KBItem[]>([]);
   const [calls, setCalls] = useState<ReceptionistCall[]>([]);
   const [voices, setVoices] = useState<{ id: string; name: string; description: string }[]>([]);
+  const [presets, setPresets] = useState<Array<{
+    id: string;
+    label: string;
+    description?: string;
+    base_voice: string;
+    accent_group: string;
+    verified?: boolean;
+    recommended?: boolean;
+  }>>([]);
   const [kbCategories, setKbCategories] = useState<string[]>([]);
 
   const [phoneDialogOpen, setPhoneDialogOpen] = useState(false);
@@ -188,6 +198,11 @@ export default function AdminReceptionistSection({ businessId, featureFlags, onF
     try {
       const res = await apiRequest('GET', '/v1/receptionist/voices');
       setVoices(await res.json());
+    } catch { /* non-critical */ }
+    try {
+      const r = await apiRequest('GET', '/v1/receptionist/voice-presets');
+      const data = await r.json();
+      if (Array.isArray(data)) setPresets(data);
     } catch { /* ignore */ }
   }, []);
 
@@ -250,7 +265,12 @@ export default function AdminReceptionistSection({ businessId, featureFlags, onF
   // ---- Config edit ----
   const openConfigDialog = () => {
     if (config) {
-      setFormVoice(config.voice || 'shimmer');
+      // Prefer voice_preset_id (canonical). Fall back to legacy voice column
+      // mapped to its British-Standard variant to mirror migration 027.
+      const presetFromConfig =
+        (config.voice_preset_id && String(config.voice_preset_id)) ||
+        (config.voice ? `${config.voice}_british` : 'shimmer_british');
+      setFormVoice(presetFromConfig);
       setFormTone(config.tone || 'professional');
       setFormSpeed(config.speaking_speed || 'normal');
       setFormHumor(config.humor_enabled || false);
@@ -269,8 +289,11 @@ export default function AdminReceptionistSection({ businessId, featureFlags, onF
   const handleSaveConfig = async () => {
     setConfigSaving(true);
     try {
+      const presetMeta = presets.find((p) => p.id === formVoice);
+      const baseVoice = presetMeta?.base_voice || formVoice.split('_')[0] || 'shimmer';
       await apiRequest('PUT', `/v1/admin/receptionist/${businessId}/config`, {
-        voice: formVoice,
+        voice: baseVoice,
+        voice_preset_id: formVoice,
         tone: formTone,
         speaking_speed: formSpeed,
         humor_enabled: formHumor,
@@ -454,10 +477,42 @@ export default function AdminReceptionistSection({ businessId, featureFlags, onF
           <FormControl size="small" fullWidth>
             <InputLabel>Voice</InputLabel>
             <Select value={formVoice} label="Voice" onChange={(e) => setFormVoice(e.target.value)}>
-              {voices.length > 0
-                ? voices.map((v) => (
-                    <MenuItem key={v.id} value={v.id}>{v.name} — {v.description}</MenuItem>
-                  ))
+              {presets.length > 0
+                ? (() => {
+                    // Grouped by accent_group with subheaders.
+                    const order = ['British', 'British RP', 'American'];
+                    const groups = new Map<string, typeof presets>();
+                    for (const p of presets) {
+                      const g = p.accent_group || 'Other';
+                      if (!groups.has(g)) groups.set(g, [] as any);
+                      groups.get(g)!.push(p as any);
+                    }
+                    const ordered = [
+                      ...order.filter((g) => groups.has(g)),
+                      ...Array.from(groups.keys()).filter((g) => !order.includes(g)),
+                    ];
+                    const items: React.ReactNode[] = [];
+                    for (const g of ordered) {
+                      items.push(
+                        // @ts-expect-error MUI Select accepts ListSubheader as child
+                        <MenuItem key={`__g_${g}`} disabled sx={{ opacity: 1, fontWeight: 700 }}>
+                          {g}
+                        </MenuItem>,
+                      );
+                      for (const p of groups.get(g)!) {
+                        const tag: string[] = [];
+                        if (p.recommended) tag.push('Recommended');
+                        if (p.verified === false) tag.push('Experimental');
+                        const suffix = tag.length ? `  \u2014 ${tag.join(' \u00b7 ')}` : '';
+                        items.push(
+                          <MenuItem key={p.id} value={p.id}>
+                            {p.label}{suffix}
+                          </MenuItem>,
+                        );
+                      }
+                    }
+                    return items;
+                  })()
                 : <MenuItem value={formVoice}>{formVoice}</MenuItem>}
             </Select>
           </FormControl>

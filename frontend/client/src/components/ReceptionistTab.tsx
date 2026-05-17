@@ -19,6 +19,7 @@ import {
   InputLabel,
   Select,
   MenuItem,
+  ListSubheader,
   Switch,
   FormControlLabel,
   Divider,
@@ -55,6 +56,7 @@ interface ReceptionistConfig {
   enabled: boolean;
   twilio_phone_number: string | null;
   voice: string;
+  voice_preset_id: string | null;
   language: string;
   personality_prompt: string | null;
   greeting_message: string;
@@ -91,6 +93,19 @@ interface VoiceOption {
   recommended?: boolean;
 }
 
+interface VoicePreset {
+  id: string;             // e.g. "shimmer_british"
+  label: string;          // user-facing
+  description?: string;
+  base_voice: string;     // shimmer, echo, etc.
+  accent: string;         // british_standard, american, british_rp
+  accent_group: string;   // "British", "American", "British RP"
+  gender?: string;
+  verified?: boolean;
+  recommended?: boolean;
+  default_for_uk?: boolean;
+}
+
 interface KBItem {
   id: string;
   business_id: string;
@@ -122,6 +137,58 @@ function formatDuration(seconds: number | null): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
+/**
+ * Render the voice presets as MenuItem children grouped by accent_group, with
+ * ListSubheader section labels. If the presets list hasn't loaded yet, fall
+ * back to a single MenuItem matching the currently-selected preset id so the
+ * Select doesn't show an empty selection.
+ */
+function renderPresetMenuItems(
+  presets: VoicePreset[],
+  currentValue: string,
+): React.ReactNode[] {
+  if (!presets || presets.length === 0) {
+    return [
+      <MenuItem key={currentValue} value={currentValue}>
+        {currentValue}
+      </MenuItem>,
+    ];
+  }
+  // Stable accent-group order: British first, British RP, American, then any
+  // other groups that exist.
+  const groupOrder = ['British', 'British RP', 'American'];
+  const byGroup = new Map<string, VoicePreset[]>();
+  for (const p of presets) {
+    const g = p.accent_group || 'Other';
+    if (!byGroup.has(g)) byGroup.set(g, []);
+    byGroup.get(g)!.push(p);
+  }
+  const orderedGroups = [
+    ...groupOrder.filter((g) => byGroup.has(g)),
+    ...Array.from(byGroup.keys()).filter((g) => !groupOrder.includes(g)),
+  ];
+  const items: React.ReactNode[] = [];
+  for (const group of orderedGroups) {
+    items.push(
+      <ListSubheader key={`__group_${group}`} sx={{ fontWeight: 700 }}>
+        {group}
+      </ListSubheader>,
+    );
+    for (const p of byGroup.get(group)!) {
+      const suffix: string[] = [];
+      if (p.recommended) suffix.push('Recommended');
+      if (p.verified === false) suffix.push('Experimental');
+      const tag = suffix.length ? `  \u2014 ${suffix.join(' \u00b7 ')}` : '';
+      items.push(
+        <MenuItem key={p.id} value={p.id}>
+          {p.label}{tag}
+        </MenuItem>,
+      );
+    }
+  }
+  return items;
+}
+
 export default function ReceptionistTab({ businessId, onViewCalls }: ReceptionistTabProps) {
   // ---- State ----
   const [loading, setLoading] = useState(true);
@@ -130,12 +197,19 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
   const [configExists, setConfigExists] = useState(true);
   const [stats, setStats] = useState<ReceptionistStats | null>(null);
   const [voices, setVoices] = useState<VoiceOption[]>([]);
+  // Accent-aware presets — these are the user-facing voice options now.
+  // The plain `voices` list above is kept for backwards compatibility
+  // (some older form code references it for display metadata).
+  const [presets, setPresets] = useState<VoicePreset[]>([]);
   const [kbItems, setKbItems] = useState<KBItem[]>([]);
   const [kbCategories, setKbCategories] = useState<string[]>([]);
   const [featureEnabled, setFeatureEnabled] = useState(true);
 
-  // Form state (mirrors config for editing)
-  const [formVoice, setFormVoice] = useState('shimmer');
+  // Form state (mirrors config for editing).
+  // formVoice now holds a VOICE PRESET ID (e.g. "shimmer_british"), not a
+  // raw base voice. Kept the variable name to minimise churn through the
+  // rest of the component; the value namespace has changed.
+  const [formVoice, setFormVoice] = useState('shimmer_british');
   const [formTone, setFormTone] = useState('professional');
   const [formSpeed, setFormSpeed] = useState('normal');
   const [formHumor, setFormHumor] = useState(false);
@@ -161,9 +235,10 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
   const [kbDeleteConfirm, setKbDeleteConfirm] = useState<string | null>(null);
   const [configExpanded, setConfigExpanded] = useState(true);
 
-  // Setup wizard state (Option B — guided setup card)
+  // Setup wizard state (Option B — guided setup card).
+  // setupVoice now holds a VOICE PRESET ID, same convention as formVoice.
   const [setupStep, setSetupStep] = useState(0);
-  const [setupVoice, setSetupVoice] = useState('shimmer');
+  const [setupVoice, setSetupVoice] = useState('shimmer_british');
   const [setupGreeting, setSetupGreeting] = useState('Hello, thank you for calling {business_name}. How can I help you today?');
   const [setupFaq1, setSetupFaq1] = useState('');
   const [setupFaq2, setSetupFaq2] = useState('');
@@ -172,6 +247,8 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
   const [setupDismissed, setSetupDismissed] = useState(false);
 
   // Voice preview
+  // `previewVoiceId` historically tracked the base-voice id being previewed;
+  // it now tracks the PRESET ID (e.g. "shimmer_british") for the same purpose.
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewVoiceId, setPreviewVoiceId] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -180,26 +257,52 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
     setSnackbar({ open: true, message, severity });
   }, []);
 
-  const playPreview = useCallback(async (voiceId: string) => {
+  /**
+   * Play an accent-aware preview for a given voice preset.
+   *
+   * Uses the new POST /v1/receptionist/voice-preview endpoint which feeds the
+   * SAME accent instruction block to gpt-4o-mini-tts as live calls feed to
+   * the Realtime API — so the preview is a faithful preview, not a generic
+   * voice sample.
+   *
+   * Passes `sampleText` (the business's current greeting if known) so the
+   * owner hears what callers will actually hear.
+   */
+  const playPreview = useCallback(async (presetId: string, sampleText?: string) => {
+    // Stop any previous playback BEFORE issuing a new request so we don't
+    // accidentally pile up audio elements.
     if (audioRef.current) {
-      audioRef.current.pause();
+      try { audioRef.current.pause(); } catch { /* noop */ }
       audioRef.current = null;
     }
-    if (previewVoiceId === voiceId && previewPlaying) {
+    if (previewVoiceId === presetId && previewPlaying) {
+      // Toggle off — user clicked the playing button again.
       setPreviewPlaying(false);
       setPreviewVoiceId(null);
       return;
     }
     setPreviewPlaying(true);
-    setPreviewVoiceId(voiceId);
+    setPreviewVoiceId(presetId);
     try {
-      const res = await apiRequest('GET', `/v1/receptionist/voices/${voiceId}/preview`);
+      const res = await apiRequest('POST', '/v1/receptionist/voice-preview', {
+        voice_preset_id: presetId,
+        sample_text: sampleText && sampleText.trim() ? sampleText.trim() : undefined,
+      });
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       audioRef.current = audio;
-      audio.onended = () => { setPreviewPlaying(false); setPreviewVoiceId(null); };
-      audio.onerror = () => { setPreviewPlaying(false); setPreviewVoiceId(null); showSnack('Voice preview not available. Please try another voice.', 'error'); };
+      audio.onended = () => {
+        setPreviewPlaying(false);
+        setPreviewVoiceId(null);
+        URL.revokeObjectURL(url);
+      };
+      audio.onerror = () => {
+        setPreviewPlaying(false);
+        setPreviewVoiceId(null);
+        URL.revokeObjectURL(url);
+        showSnack('Voice preview not available. Please try another voice.', 'error');
+      };
       await audio.play();
     } catch {
       setPreviewPlaying(false);
@@ -219,8 +322,14 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
       const data = await res.json();
       setConfig(data);
       setConfigExists(true);
-      // Sync form state
-      setFormVoice(data.voice || 'shimmer');
+      // Sync form state.
+      // `voice_preset_id` is the canonical going-forward field. If absent,
+      // map the legacy `voice` value to its British-Standard variant (matches
+      // the backfill in migration 027 and the resolver in voice_presets.py).
+      const presetFromConfig: string =
+        (data.voice_preset_id && String(data.voice_preset_id)) ||
+        (data.voice ? `${data.voice}_british` : 'shimmer_british');
+      setFormVoice(presetFromConfig);
       setFormTone(data.tone || 'professional');
       setFormSpeed(data.speaking_speed || 'normal');
       setFormHumor(data.humor_enabled || false);
@@ -257,6 +366,14 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
     } catch { /* non-critical */ }
   }, []);
 
+  const fetchPresets = useCallback(async () => {
+    try {
+      const res = await apiRequest('GET', '/v1/receptionist/voice-presets');
+      const data = await res.json();
+      if (Array.isArray(data)) setPresets(data);
+    } catch { /* non-critical — picker falls back to the flat voices list */ }
+  }, []);
+
   const fetchKB = useCallback(async () => {
     try {
       const res = await apiRequest('GET', '/v1/receptionist/knowledge-base');
@@ -276,11 +393,18 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
     let mounted = true;
     (async () => {
       setLoading(true);
-      await Promise.all([fetchConfig(), fetchStats(), fetchVoices(), fetchKB(), fetchKBCategories()]);
+      await Promise.all([
+        fetchConfig(),
+        fetchStats(),
+        fetchVoices(),
+        fetchPresets(),
+        fetchKB(),
+        fetchKBCategories(),
+      ]);
       if (mounted) setLoading(false);
     })();
     return () => { mounted = false; };
-  }, [fetchConfig, fetchStats, fetchVoices, fetchKB, fetchKBCategories]);
+  }, [fetchConfig, fetchStats, fetchVoices, fetchPresets, fetchKB, fetchKBCategories]);
 
   // ---- Toggle enabled ----
   const handleToggleEnabled = async () => {
@@ -299,8 +423,14 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
   const handleSaveConfig = async () => {
     setSaving(true);
     try {
+      // Send the preset as `voice_preset_id` (canonical) AND the resolved
+      // base voice as `voice` (legacy column) so old code paths still work.
+      // The backend resolver in voice_presets.py will prefer voice_preset_id.
+      const presetMeta = presets.find((p) => p.id === formVoice);
+      const baseVoice = presetMeta?.base_voice || formVoice.split('_')[0] || 'shimmer';
       const payload = {
-        voice: formVoice,
+        voice: baseVoice,
+        voice_preset_id: formVoice,
         tone: formTone,
         speaking_speed: formSpeed,
         humor_enabled: formHumor,
@@ -379,8 +509,11 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
   const handleCompleteSetup = async () => {
     setSetupSaving(true);
     try {
+      const presetMeta = presets.find((p) => p.id === setupVoice);
+      const baseVoice = presetMeta?.base_voice || setupVoice.split('_')[0] || 'shimmer';
       await apiRequest('PUT', '/v1/receptionist/config', {
-        voice: setupVoice,
+        voice: baseVoice,
+        voice_preset_id: setupVoice,
         greeting_message: setupGreeting,
       });
 
@@ -447,7 +580,7 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
 
   // ---- Setup wizard card (Option B) ----
   if (!configExists && !setupDismissed) {
-    const selectedVoice = voices.find((v) => v.id === setupVoice);
+    const selectedPreset = presets.find((p) => p.id === setupVoice);
     return (
       <Box>
         <Card sx={{ p: 4, mb: 3 }}>
@@ -474,25 +607,25 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
               <Box sx={{ display: 'flex', gap: 1, mb: 2, alignItems: 'flex-start' }}>
                 <FormControl size="small" sx={{ flex: 1 }}>
                   <InputLabel>Voice</InputLabel>
-                  <Select value={setupVoice} label="Voice" onChange={(e) => setSetupVoice(e.target.value)}>
-                    {voices.length > 0
-                      ? voices.map((v) => (
-                          <MenuItem key={v.id} value={v.id}>{v.name} — {v.description}{v.recommended ? ' ⭐ Recommended' : ''}</MenuItem>
-                        ))
-                      : <MenuItem value="shimmer">Shimmer</MenuItem>}
+                  <Select
+                    value={setupVoice}
+                    label="Voice"
+                    onChange={(e) => setSetupVoice(e.target.value)}
+                  >
+                    {renderPresetMenuItems(presets, setupVoice)}
                   </Select>
                 </FormControl>
                 <button
                   className={`voice-preview-btn${previewPlaying && previewVoiceId === setupVoice ? ' voice-preview-btn--playing' : ''}`}
-                  onClick={() => playPreview(setupVoice)}
+                  onClick={() => playPreview(setupVoice, setupGreeting)}
                   style={{ marginTop: 2 }}
                 >
-                  {previewPlaying && previewVoiceId === setupVoice ? '■ Stop' : '▶ Preview'}
+                  {previewPlaying && previewVoiceId === setupVoice ? '\u25a0 Stop' : '\u25b6 Preview'}
                 </button>
               </Box>
-              {selectedVoice && (
+              {selectedPreset && (
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                  {selectedVoice.name} — {selectedVoice.description}
+                  {selectedPreset.label}{selectedPreset.description ? ` \u2014 ${selectedPreset.description}` : ''}
                 </Typography>
               )}
               <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
@@ -747,23 +880,21 @@ export default function ReceptionistTab({ businessId, onViewCalls }: Receptionis
               </Box>
 
               <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap' }}>
-                <FormControl size="small" sx={{ minWidth: 200 }}>
+                <FormControl size="small" sx={{ minWidth: 260 }}>
                   <InputLabel>Voice</InputLabel>
-                  <Select value={formVoice} label="Voice" onChange={(e) => setFormVoice(e.target.value)}>
-                    {voices.length > 0
-                      ? voices.map((v) => (
-                          <MenuItem key={v.id} value={v.id}>
-                            {v.name} — {v.description}{v.recommended ? ' ⭐ Recommended' : ''}
-                          </MenuItem>
-                        ))
-                      : <MenuItem value={formVoice}>{formVoice}</MenuItem>}
+                  <Select
+                    value={formVoice}
+                    label="Voice"
+                    onChange={(e) => setFormVoice(e.target.value)}
+                  >
+                    {renderPresetMenuItems(presets, formVoice)}
                   </Select>
                 </FormControl>
                 <button
                   className={`voice-preview-btn${previewPlaying && previewVoiceId === formVoice ? ' voice-preview-btn--playing' : ''}`}
-                  onClick={() => playPreview(formVoice)}
+                  onClick={() => playPreview(formVoice, formGreeting)}
                 >
-                  {previewPlaying && previewVoiceId === formVoice ? '■ Stop' : '▶ Preview'}
+                  {previewPlaying && previewVoiceId === formVoice ? '\u25a0 Stop' : '\u25b6 Preview'}
                 </button>
               </Box>
 

@@ -18,6 +18,18 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 
 from db import get_session
 from models import Business, Call
+from services.voice_instructions import (
+    build_full_instructions,
+    get_accent_instructions,
+)
+from services.voice_presets import (
+    DEFAULT_FALLBACK_VOICE,
+    DEFAULT_PRESET_ID,
+    KNOWN_STABLE_REALTIME_VOICES,
+    VOICE_PRESETS,
+    get_preset_by_id,
+    resolve_preset,
+)
 from auth import (
     get_user_business_context,
     get_platform_admin_context,
@@ -52,7 +64,10 @@ class ReceptionistConfig(SQLModel, table=True):
     enabled: bool = SQLField(default=False)
     twilio_phone_number: Optional[str] = None
     twilio_phone_sid: Optional[str] = None
+    # Legacy single-voice field (kept for backwards compatibility / fallback).
+    # Going forward, voice_preset_id is the canonical user-facing setting.
     voice: str = SQLField(default="shimmer")
+    voice_preset_id: Optional[str] = SQLField(default="shimmer_british")
     language: str = SQLField(default="en-GB")
     personality_prompt: Optional[str] = None
     greeting_message: str = SQLField(
@@ -100,6 +115,7 @@ class KnowledgeBaseItem(SQLModel, table=True):
 class ReceptionistConfigCreateUpdate(BaseModel):
     enabled: Optional[bool] = None
     voice: Optional[str] = None
+    voice_preset_id: Optional[str] = None
     language: Optional[str] = None
     personality_prompt: Optional[str] = None
     greeting_message: Optional[str] = None
@@ -220,6 +236,43 @@ VOICE_PREVIEW_TEXT = {
 }
 
 _voice_preview_cache: dict = {}
+
+# Bounded LRU-ish cache for accent-aware previews. Keyed by
+# (voice_preset_id, sha256(sample_text)). Capped to avoid unbounded growth
+# as more presets ship and businesses use custom greetings.
+_PREVIEW_CACHE_MAX_ENTRIES = 100
+_preset_preview_cache: "OrderedDict[tuple, bytes]" = None  # initialised below
+
+
+def _get_preset_preview_cache():
+    """Lazy-initialise to avoid OrderedDict import cost at module load."""
+    global _preset_preview_cache
+    if _preset_preview_cache is None:
+        from collections import OrderedDict as _OD
+        _preset_preview_cache = _OD()
+    return _preset_preview_cache
+
+
+def _preview_cache_key(voice_preset_id: str, sample_text: str) -> tuple:
+    import hashlib
+    digest = hashlib.sha256((sample_text or "").encode("utf-8")).hexdigest()
+    return (voice_preset_id, digest)
+
+
+def _preview_cache_get(key: tuple) -> Optional[bytes]:
+    cache = _get_preset_preview_cache()
+    if key in cache:
+        cache.move_to_end(key)
+        return cache[key]
+    return None
+
+
+def _preview_cache_put(key: tuple, audio_bytes: bytes) -> None:
+    cache = _get_preset_preview_cache()
+    cache[key] = audio_bytes
+    cache.move_to_end(key)
+    while len(cache) > _PREVIEW_CACHE_MAX_ENTRIES:
+        cache.popitem(last=False)
 
 KNOWLEDGE_BASE_CATEGORIES = [
     {"id": "services", "label": "Services", "description": "What your business offers", "icon": "Briefcase"},
@@ -582,6 +635,133 @@ async def preview_voice(voice_id: str):
         raise HTTPException(status_code=500, detail="Failed to generate voice preview")
 
 
+# ---------------------------------------------------------------------------
+# Voice presets — accent-aware listing for the picker
+# ---------------------------------------------------------------------------
+
+@router.get("/voice-presets")
+async def list_voice_presets():
+    """
+    Return the available voice presets for the picker UI. Each entry pairs
+    a base voice with an accent and includes the metadata the frontend uses
+    to render grouped dropdowns (accent_group, gender, recommended, verified).
+    """
+    # Return a shallow copy so the frontend can't accidentally mutate our
+    # canonical list across requests.
+    return [dict(p) for p in VOICE_PRESETS]
+
+
+class VoicePreviewRequest(BaseModel):
+    voice_preset_id: str
+    sample_text: Optional[str] = None
+
+
+@router.post("/voice-preview")
+async def preview_voice_preset(body: VoicePreviewRequest):
+    """
+    Generate an accent-aware preview audio clip for a voice preset.
+
+    Uses the SAME accent instruction block as live calls (via
+    services.voice_instructions.get_accent_instructions) so what the owner
+    hears in the picker matches what callers will hear on the phone.
+
+    Frontend should pass the business's currently-configured greeting as
+    `sample_text` so the preview reflects the real greeting. Falls back to a
+    generic line if not provided.
+    """
+    import io
+    import openai as _openai
+    from fastapi.responses import StreamingResponse
+
+    preset = get_preset_by_id(body.voice_preset_id)
+    if not preset:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown voice preset: {body.voice_preset_id}",
+        )
+
+    base_voice = preset.get("base_voice", DEFAULT_FALLBACK_VOICE)
+    accent_name = preset.get("accent", "british_standard")
+    sample_text = (body.sample_text or "").strip() or (
+        "Hello, you've reached your business. I'm the AI receptionist. "
+        "How can I help you today?"
+    )
+    # Trim huge sample texts so we don't pay for absurd TTS calls
+    sample_text = sample_text[:600]
+
+    cache_key = _preview_cache_key(body.voice_preset_id, sample_text)
+    cached = _preview_cache_get(cache_key)
+    if cached is not None:
+        return StreamingResponse(
+            io.BytesIO(cached),
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": f"inline; filename=preview-{body.voice_preset_id}.mp3",
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
+
+    accent_instructions = get_accent_instructions(accent_name)
+
+    try:
+        client = _openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+        # `gpt-4o-mini-tts` accepts an `instructions` parameter that steers
+        # delivery — accent, tone, pace — without changing the text. This is
+        # the same accent block we feed the Realtime API for live calls.
+        common_kwargs: Dict[str, Any] = {
+            "voice": base_voice,
+            "input": sample_text,
+            "response_format": "mp3",
+            "speed": 1.0,
+        }
+        try:
+            response = client.audio.speech.create(
+                model="gpt-4o-mini-tts",
+                instructions=accent_instructions or None,
+                **common_kwargs,
+            )
+        except Exception as _e1:
+            _logger.warning(
+                "[Voice Preview] gpt-4o-mini-tts failed for preset=%s (voice=%s, accent=%s): %s — falling back to tts-1-hd",
+                body.voice_preset_id, base_voice, accent_name, _e1,
+            )
+            try:
+                # tts-1-hd doesn't support `instructions`; we lose accent
+                # steering on the preview but the call itself will still
+                # use accent instructions via the Realtime API.
+                response = client.audio.speech.create(
+                    model="tts-1-hd",
+                    **common_kwargs,
+                )
+            except Exception as _e2:
+                _logger.warning(
+                    "[Voice Preview] tts-1-hd failed for preset=%s: %s — falling back to tts-1",
+                    body.voice_preset_id, _e2,
+                )
+                response = client.audio.speech.create(
+                    model="tts-1",
+                    **common_kwargs,
+                )
+
+        audio_bytes = response.content
+        _preview_cache_put(cache_key, audio_bytes)
+
+        return StreamingResponse(
+            io.BytesIO(audio_bytes),
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": f"inline; filename=preview-{body.voice_preset_id}.mp3",
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
+    except Exception as exc:
+        _logger.error(
+            "[Voice Preview] Failed for preset=%s (voice=%s): %s",
+            body.voice_preset_id, base_voice, exc,
+        )
+        raise HTTPException(status_code=500, detail="Failed to generate voice preview")
+
+
 # ======================== Call history & stats ========================
 
 @router.get("/calls")
@@ -896,32 +1076,15 @@ async def build_receptionist_system_prompt(business_id: str, session: Session) -
         else "Stay focused and professional. Avoid jokes or humour."
     )
 
-    lang = cfg.language or "en-GB"
-    accent_instruction = ""
-    if lang == "en-GB":
-        accent_instruction = """ACCENT AND SPEECH STYLE — THIS IS CRITICAL:
-You MUST speak with a clear, natural Southern English accent (similar to a well-spoken London or Home Counties accent). Think of how a friendly, professional receptionist in Surrey or Kent would speak.
+    # Resolve the active voice preset. Falls back through legacy `voice`
+    # column → product default if voice_preset_id is missing or unknown.
+    preset = resolve_preset(cfg.voice_preset_id, legacy_voice=cfg.voice)
+    base_voice = preset.get("base_voice", DEFAULT_FALLBACK_VOICE)
+    accent_name = preset.get("accent", "british_standard")
 
-Specific requirements:
-- Use British pronunciation throughout: "schedule" as "SHED-yool", "can't" as "cahnt", "bath" as "bahth", "glass" as "glahss"
-- Say "whilst" not "while", "amongst" not "among", "towards" not "toward"
-- Say "straightaway" not "right away", "ring us" not "call us", "pop in" not "stop by"
-- Say "lovely" and "brilliant" as positive affirmations naturally
-- Say "sorry" as "soh-ree" not "sah-ree"
-- Use "mobile" not "cell phone", "post" not "mail", "holiday" not "vacation"
-- Use "enquiry" not "inquiry", "colour" not "color", "favourite" not "favorite"
-- Say "Monday to Friday" not "Monday through Friday"
-- Use "£" and "pence" for currency references, never "$" or "cents"
-- Say "half past" not "thirty", e.g., "half past nine" not "nine thirty"
-- Use "fortnight" for two weeks where natural
-- Never use American expressions like "awesome", "you guys", "gotten", "I guess", or "no problem"
-- Instead use: "wonderful", "everyone", "received", "I think", "not at all" or "you're welcome"
-- Maintain a warm, professional, and approachable tone throughout — never stiff or overly formal"""
-    elif lang == "en-US":
-        accent_instruction = "Speak with a natural American English accent and use American English vocabulary and spelling."
-    elif lang == "en-AU":
-        accent_instruction = "Speak with a natural Australian English accent and use Australian English vocabulary."
-
+    # The accent block is injected by build_full_instructions() AFTER the
+    # full base prompt has been composed. We do NOT include legacy inline
+    # accent prose anymore — voice_instructions.py owns this.
     tz = pytz.timezone(cfg.timezone or "Europe/London")
     now = datetime.now(tz)
     day_name = now.strftime("%A").lower()
@@ -949,9 +1112,7 @@ CALL TRANSFER RULES:
         else ""
     )
 
-    system_prompt = f"""You are the AI receptionist for {business_name}. You are answering a phone call.
-
-{accent_instruction}
+    base_prompt = f"""You are the AI receptionist for {business_name}. You are answering a phone call.
 
 CORE IDENTITY:
 - You represent {business_name} and should speak as a member of the team, using "we" and "our" when referring to the business.
@@ -1013,9 +1174,16 @@ If appointment booking is not available or not enabled, offer to take their deta
 
 END OF INSTRUCTIONS. Begin the conversation by answering the phone with your greeting."""
 
+    # Inject the accent block at the top so it acts as a high-level constraint
+    # over everything else in the prompt.
+    system_prompt = build_full_instructions(base_prompt.strip(), accent_name)
+
     return {
-        "system_prompt": system_prompt.strip(),
-        "voice": cfg.voice or "shimmer",
+        "system_prompt": system_prompt,
+        "voice": base_voice,
         "greeting": cfg.greeting_message or "Hello, thank you for calling. How can I help you today?",
         "config": _config_to_dict(cfg),
+        "voice_preset_id": preset.get("id"),
+        "accent": accent_name,
+        "preset_verified": bool(preset.get("verified", True)),
     }
