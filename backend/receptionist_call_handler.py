@@ -52,7 +52,18 @@ RECEPTIONIST_REALTIME_MODEL = os.getenv("RECEPTIONIST_REALTIME_MODEL", "gpt-real
 OPENAI_REALTIME_URL = (
     f"wss://api.openai.com/v1/realtime?model={RECEPTIONIST_REALTIME_MODEL}"
 )
-OPENAI_AUDIO_FORMAT = "g711_ulaw"
+# Twilio Media Streams sends G.711 μ-law audio at 8 kHz. In OpenAI's GA
+# Realtime schema, the audio format is a discriminated-union OBJECT — the
+# Beta-shape string `"g711_ulaw"` was rejected with "Invalid type for
+# 'session.audio.input.format': expected an object, but got a string instead."
+#
+# Confirmed against OpenAI's GA sessions reference (RealtimeAudioFormats):
+# https://developers.openai.com/api/reference/resources/realtime/subresources/sessions/
+#   - PCMU (G.711 μ-law): {"type": "audio/pcmu"}     ← what Twilio sends/expects
+#   - PCMA (G.711 A-law): {"type": "audio/pcma"}
+#   - PCM 24 kHz:         {"type": "audio/pcm", "rate": 24000}
+# PCMU/PCMA take ONLY the `type` field — no `rate`.
+OPENAI_AUDIO_FORMAT = {"type": "audio/pcmu"}
 
 logger.info(
     "[Receptionist] Realtime API mode: GA, model=%s, endpoint=%s",
