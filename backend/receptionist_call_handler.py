@@ -42,11 +42,23 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 # Realtime model is env-var driven so we can roll forward/back without a deploy.
 # Default is gpt-realtime-2 (released May 2026) — first voice model with
 # GPT-5-class reasoning and reliable accent stability across long sessions.
+#
+# OpenAI permanently removed the Realtime API Beta interface on 12 May 2026
+# (4000-code close with `beta_api_shape_disabled`). This module uses the GA
+# shape ONLY. See the session.update payload below for the canonical schema.
 RECEPTIONIST_REALTIME_MODEL = os.getenv("RECEPTIONIST_REALTIME_MODEL", "gpt-realtime-2")
+# Belt-and-braces: we set model in BOTH the URL query string AND inside the
+# session.update payload. GA accepts either route as the canonical source.
 OPENAI_REALTIME_URL = (
     f"wss://api.openai.com/v1/realtime?model={RECEPTIONIST_REALTIME_MODEL}"
 )
 OPENAI_AUDIO_FORMAT = "g711_ulaw"
+
+logger.info(
+    "[Receptionist] Realtime API mode: GA, model=%s, endpoint=%s",
+    RECEPTIONIST_REALTIME_MODEL,
+    OPENAI_REALTIME_URL,
+)
 
 if not OPENAI_API_KEY:
     logger.warning("[Receptionist] OPENAI_API_KEY not set — receptionist calls will fail")
@@ -609,9 +621,10 @@ async def receptionist_media_stream(ws: WebSocket):
             await ws.close()
             return
 
+        # OpenAI-Beta header REMOVED — GA does not accept it; sending it
+        # historically caused 4000-code closes with `beta_api_shape_disabled`.
         openai_headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "OpenAI-Beta": "realtime=v1",
         }
 
         try:
@@ -627,22 +640,41 @@ async def receptionist_media_stream(ws: WebSocket):
             await ws.close()
             return
 
-        # ---- PHASE 3: Configure the OpenAI session ----
+        # ---- PHASE 3: Configure the OpenAI session (GA shape) ----
+        #
+        # OpenAI GA realtime schema:
+        #   - session.type = "realtime"  (REQUIRED in GA)
+        #   - session.model = <model>   (REQUIRED in GA — was URL param in Beta)
+        #   - session.audio.input.{format, transcription, turn_detection}
+        #   - session.audio.output.{format, voice}
+        #   - session.output_modalities = ["audio"]  (replaces deprecated `modalities`)
+        #   - `temperature` is NOT accepted in GA realtime (fixed at 0.8 internally)
+        #
+        # Reference: https://platform.openai.com/docs/guides/realtime
         session_config = {
             "type": "session.update",
             "session": {
-                "modalities": ["text", "audio"],
+                "type": "realtime",
+                "model": RECEPTIONIST_REALTIME_MODEL,
+                "output_modalities": ["audio"],
                 "instructions": system_prompt,
-                "voice": voice,
-                "input_audio_format": OPENAI_AUDIO_FORMAT,
-                "output_audio_format": OPENAI_AUDIO_FORMAT,
-                "input_audio_transcription": {"model": "whisper-1"},
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 500,
+                "audio": {
+                    "input": {
+                        "format": OPENAI_AUDIO_FORMAT,
+                        "transcription": {"model": "whisper-1"},
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.5,
+                            "prefix_padding_ms": 300,
+                            "silence_duration_ms": 500,
+                        },
+                    },
+                    "output": {
+                        "format": OPENAI_AUDIO_FORMAT,
+                        "voice": voice,
+                    },
                 },
+                "tool_choice": "auto",
                 "tools": [
                     {
                         "type": "function",
@@ -789,8 +821,30 @@ async def receptionist_media_stream(ws: WebSocket):
             },
         }
 
-        await openai_ws.send(json.dumps(session_config))
-        logger.info("[Receptionist WS] OpenAI session configured")
+        # Defensive: log the full outgoing session payload at DEBUG so that if
+        # OpenAI rejects any field we can diff exactly what was sent vs the
+        # GA schema. If `session.update` fails, the subsequent error event
+        # from OpenAI will be caught and logged verbatim in the receive loop.
+        try:
+            await openai_ws.send(json.dumps(session_config))
+            logger.info(
+                "[Receptionist WS] Session configured (GA shape, model=%s, voice=%s)",
+                RECEPTIONIST_REALTIME_MODEL,
+                voice,
+            )
+            logger.debug(
+                "[Receptionist WS] Outgoing session.update payload: %s",
+                json.dumps(session_config, default=str)[:2000],
+            )
+        except Exception as send_err:
+            logger.error(
+                "[Receptionist WS] Failed to send session.update (GA shape): %s. "
+                "Outgoing payload: %s",
+                send_err,
+                json.dumps(session_config, default=str)[:2000],
+                exc_info=True,
+            )
+            raise
 
         # ---- PHASE 4: Trigger the opening greeting ----
         greeting_event = {
@@ -847,12 +901,39 @@ async def receptionist_media_stream(ws: WebSocket):
             """Read events from OpenAI, forward audio to Twilio, handle function calls."""
             nonlocal caller_name, call_outcome
 
+            # GA event-name routing.
+            #
+            # The Beta interface emitted `response.audio.*` and
+            # `response.audio_transcript.*`. GA renames these to
+            # `response.output_audio.*` and `response.output_audio_transcript.*`.
+            #
+            # We accept BOTH names defensively so a stray Beta event during a
+            # cutover window can't silently drop audio. Beta-shaped events
+            # log a warning so we'd notice if any environment is still
+            # emitting them. After ~1 week of clean GA-only logs the Beta
+            # branches can be removed.
+            GA_AUDIO_DELTA_EVENTS = {
+                "response.output_audio.delta",  # GA
+                "response.audio.delta",         # Beta (defensive)
+            }
+            GA_TRANSCRIPT_DONE_EVENTS = {
+                "response.output_audio_transcript.done",  # GA
+                "response.audio_transcript.done",         # Beta (defensive)
+            }
+
             try:
                 async for message in openai_ws:
                     event = json.loads(message)
                     event_type = event.get("type", "")
 
-                    if event_type == "response.audio.delta":
+                    if event_type in GA_AUDIO_DELTA_EVENTS:
+                        if event_type == "response.audio.delta":
+                            logger.warning(
+                                "[Receptionist WS] Received Beta-shaped event "
+                                "'response.audio.delta' — expected GA "
+                                "'response.output_audio.delta'. This should not "
+                                "happen on gpt-realtime-2; investigate."
+                            )
                         audio_delta = event.get("delta", "")
                         if audio_delta and stream_sid:
                             twilio_msg = {
@@ -872,7 +953,13 @@ async def receptionist_media_stream(ws: WebSocket):
                             transcript_parts.append({"role": "caller", "text": user_text})
                             logger.info(f"[Receptionist WS] Caller said: {user_text[:100]}")
 
-                    elif event_type == "response.audio_transcript.done":
+                    elif event_type in GA_TRANSCRIPT_DONE_EVENTS:
+                        if event_type == "response.audio_transcript.done":
+                            logger.warning(
+                                "[Receptionist WS] Received Beta-shaped event "
+                                "'response.audio_transcript.done' — expected GA "
+                                "'response.output_audio_transcript.done'."
+                            )
                         ai_text = event.get("transcript", "").strip()
                         if ai_text:
                             transcript_parts.append({"role": "receptionist", "text": ai_text})
@@ -928,8 +1015,15 @@ async def receptionist_media_stream(ws: WebSocket):
                             break
 
                     elif event_type == "error":
+                        # Log the FULL error payload verbatim — during the GA
+                        # cutover we need every field (code, message, param,
+                        # event_id) to diagnose any session-config rejection
+                        # like the previous `beta_api_shape_disabled` close.
                         error_data = event.get("error", {})
-                        logger.error(f"[Receptionist WS] OpenAI error: {error_data}")
+                        logger.error(
+                            "[Receptionist WS] OpenAI error event: %s",
+                            json.dumps(error_data, default=str)[:2000],
+                        )
                         if error_data.get("type") in ("server_error", "invalid_request_error"):
                             logger.error("[Receptionist WS] Fatal OpenAI error — closing call")
                             call_outcome = "error"
@@ -939,6 +1033,19 @@ async def receptionist_media_stream(ws: WebSocket):
                         logger.info("[Receptionist WS] OpenAI session created")
                     elif event_type == "session.updated":
                         logger.info("[Receptionist WS] OpenAI session updated")
+
+                    else:
+                        # Unknown event type — log at INFO and continue. We
+                        # explicitly do NOT crash the call handler on
+                        # unrecognised events, so any GA event we haven't yet
+                        # enumerated (e.g. response.done, conversation.item.added)
+                        # is safe to ignore. Logs let us spot anything common
+                        # we should start handling.
+                        if event_type:
+                            logger.info(
+                                "[Receptionist WS] Unhandled event type: %s",
+                                event_type,
+                            )
 
             except websockets.exceptions.ConnectionClosed:
                 logger.info("[Receptionist WS] OpenAI WebSocket closed")

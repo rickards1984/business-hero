@@ -5,7 +5,7 @@ Handles config, knowledge base, voice options, call history, stats, and admin op
 
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 
@@ -820,6 +820,22 @@ async def list_receptionist_calls(
     ]
 
 
+def _ensure_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """
+    Normalise a datetime to timezone-aware UTC.
+
+    Postgres returns TIMESTAMP WITH TIME ZONE columns as tz-aware datetimes,
+    but legacy rows or driver edge cases can occasionally surface as naive.
+    We assume any naive value is UTC (which matches how we historically
+    stored it via `datetime.utcnow()`).
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 @router.get("/stats")
 async def receptionist_stats(
     business: Business = Depends(get_current_user_business),
@@ -832,16 +848,25 @@ async def receptionist_stats(
         select(Call).where(Call.business_id == business.id, Call.source == "receptionist")
     ).all()
 
-    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    # Use tz-AWARE bounds. `Call.created_at` comes from a TIMESTAMP WITH TIME
+    # ZONE column and is tz-aware; comparing against a naive datetime raises
+    # TypeError ("can't compare offset-naive and offset-aware datetimes").
+    now_utc = datetime.now(timezone.utc)
+    today = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today - timedelta(days=today.weekday())
 
     durations = [getattr(c, "duration_seconds", None) for c in calls if getattr(c, "duration_seconds", None)]
     avg_dur = sum(durations) / len(durations) if durations else 0
 
+    def _ts(c) -> Optional[datetime]:
+        # Always returns a tz-aware datetime (or None) so all comparisons in
+        # the summations below are safe.
+        return _ensure_aware(c.created_at) if c.created_at else None
+
     return {
         "total_receptionist_calls": len(calls),
-        "today_calls": sum(1 for c in calls if c.created_at and c.created_at >= today),
-        "this_week_calls": sum(1 for c in calls if c.created_at and c.created_at >= week_start),
+        "today_calls": sum(1 for c in calls if (_ts(c) is not None) and _ts(c) >= today),
+        "this_week_calls": sum(1 for c in calls if (_ts(c) is not None) and _ts(c) >= week_start),
         "handled_calls": sum(1 for c in calls if getattr(c, "outcome", None) == "handled"),
         "transferred_calls": sum(1 for c in calls if getattr(c, "outcome", None) == "transferred"),
         "voicemail_calls": sum(1 for c in calls if getattr(c, "outcome", None) == "voicemail"),
