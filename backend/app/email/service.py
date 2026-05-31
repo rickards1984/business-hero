@@ -169,9 +169,6 @@ class SupabaseAdminClient:
             on_conflict="email_account_id,provider_message_id",
         )
 
-    async def upsert_email_sync_state(self, payload: Any) -> Any:
-        return await self._upsert("email_sync_state", payload, on_conflict="email_account_id")
-
     async def insert_email_briefings(self, payload: Any) -> Any:
         return await self._insert("email_briefings", payload)
 

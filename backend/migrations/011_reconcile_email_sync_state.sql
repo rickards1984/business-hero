@@ -1,0 +1,12 @@
+-- 011_reconcile_email_sync_state.sql
+-- Reconciles the email_sync_state (singular) / email_sync_states (plural) split.
+--
+-- Background: migration 007 created `email_sync_state` (singular) via raw SQL,
+-- but the ORM model EmailSyncState (__tablename__ = "email_sync_states") caused
+-- SQLModel.create_all() to create the plural table, which is the one the app
+-- actually reads/writes. The singular table was orphaned (0 rows, never synced).
+-- Verified Scenario A on 2026-05-31. All code references repointed to the plural
+-- table in the same change set.
+--
+-- Idempotent: safe to run on environments where the singular table never existed.
+DROP TABLE IF EXISTS email_sync_state;

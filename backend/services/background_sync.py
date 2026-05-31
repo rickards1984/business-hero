@@ -158,23 +158,6 @@ def _sync_email_for_business(business_id: str):
                 except Exception:
                     pass
 
-            # Update last_background_sync_at
-            try:
-                session.execute(
-                    text("""
-                        UPDATE email_sync_state
-                        SET last_background_sync_at = NOW()
-                        WHERE email_account_id = :account_id
-                    """),
-                    {"account_id": str(account.id)},
-                )
-                session.commit()
-            except Exception:
-                try:
-                    session.rollback()
-                except Exception:
-                    pass
-
             if msg_count > 0:
                 logger.info(f"[BackgroundSync] {msg_count} new/updated emails for {account.email_address}")
             else:

@@ -591,7 +591,7 @@ async def get_business_health(
             ) AS calendar_connected,
             (
                 SELECT MAX(es.last_synced_at)
-                FROM email_sync_state es
+                FROM email_sync_states es
                 JOIN email_accounts ea ON ea.id = es.email_account_id
                 WHERE ea.business_id = b.id
             ) AS last_email_sync_at,
@@ -738,7 +738,7 @@ async def list_businesses_summary(
             ) AS last_task_at,
             (
                 SELECT MAX(es.last_synced_at)
-                FROM email_sync_state es
+                FROM email_sync_states es
                 JOIN email_accounts ea ON ea.id = es.email_account_id
                 WHERE ea.business_id = b.id
             ) AS last_email_sync_at,

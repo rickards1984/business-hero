@@ -82,6 +82,10 @@ CREATE INDEX idx_email_messages_business_unread ON email_messages(business_id, i
 -- ============================================================================
 -- EMAIL_SYNC_STATE
 -- ============================================================================
+-- NOTE (2026-05-31): This table name is SINGULAR but the ORM model resolves to
+-- the PLURAL "email_sync_states" (see models.py:366), which is the live table.
+-- This singular table was orphaned and is dropped in migration 011. Do not
+-- reintroduce reads/writes against "email_sync_state".
 CREATE TABLE email_sync_state (
     email_account_id UUID PRIMARY KEY REFERENCES email_accounts(id) ON DELETE CASCADE,
     cursor JSONB NOT NULL DEFAULT '{}'::jsonb,
