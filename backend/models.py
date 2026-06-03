@@ -367,8 +367,12 @@ class EmailSyncState(SQLModel, table=True):
     id: UUID = Field(default_factory=generate_uuid, sa_column=Column(PG_UUID(as_uuid=True), primary_key=True, default=generate_uuid))
     email_account_id: UUID = Field(foreign_key="email_accounts.id", unique=True, index=True)
     cursor: Dict[str, Any] = Field(default={}, sa_column=Column(JSONB, nullable=False, server_default="{}"))
+    last_sync_token: Optional[str] = None
+    last_history_id: Optional[str] = None
     last_synced_at: Optional[datetime] = None
+    sync_status: Optional[str] = None
     last_error: Optional[str] = None
+    error_message: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
