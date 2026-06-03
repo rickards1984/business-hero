@@ -33,10 +33,10 @@ import {
 } from '@mui/icons-material';
 import {
   fetchEmailMessages,
-  runEmailSync,
   analyzeEmails,
   type EmailMessageItem,
 } from '@/lib/emailApi';
+import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
 import { TASK_CATEGORIES, TASK_PRIORITIES, getCategoryColor } from '@/lib/taskConstants';
 
@@ -55,6 +55,11 @@ const TIME_RANGES = [
   { key: 'month', label: 'This Month' },
   { key: 'all', label: 'All Time' },
 ];
+
+// Cache-first sync: while a background sync is in flight, re-read the
+// DB-backed list a few times so new mail appears without blocking the page.
+const POLL_INTERVAL_MS = 6000;
+const MAX_POLL_ATTEMPTS = 5;
 
 const PRIORITY_BORDERS: Record<string, string> = {
   action_required: '#d32f2f',
@@ -143,7 +148,13 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
   const [hasEmailAccount, setHasEmailAccount] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncPeriod, setSyncPeriod] = useState<'today' | 'week' | 'month' | 'all'>('today');
-  const [hasAutoSynced, setHasAutoSynced] = useState(false);
+
+  // Cache-first sync lifecycle (refs — no re-render, safe to read in timers)
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollAttemptsRef = useRef(0);
+  const isMountedRef = useRef(true);
+  const ensureFiredRef = useRef(false);
+  const emailsCountRef = useRef(emails.length);
 
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [taskSaving, setTaskSaving] = useState(false);
@@ -157,7 +168,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
     source_id: '',
   });
 
-  const loadEmails = useCallback(async () => {
+  const loadEmails = useCallback(async (): Promise<number> => {
     try {
       if (!hasDataRef.current) setLoading(true);
       const params: { limit?: number; category?: string; sortBy?: string } = {
@@ -173,47 +184,108 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
       hasDataRef.current = true;
       setHasEmailAccount(true);
       try { sessionStorage.setItem(`bh_emails_${businessId}`, JSON.stringify(result)); } catch {}
+      return result.length;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes('No email account') || message.includes('404') || message.includes('email feature')) {
         setHasEmailAccount(false);
       }
       setEmails([]);
+      return 0;
     } finally {
       setLoading(false);
     }
   }, [categoryFilter, businessId]);
 
+  // Keep a ref of the current email count so timers can read it without
+  // re-subscribing on every change.
+  useEffect(() => {
+    emailsCountRef.current = emails.length;
+  }, [emails]);
+
   useEffect(() => {
     loadEmails();
   }, [loadEmails]);
 
-  const handleSyncWithPeriod = useCallback(async (period: 'today' | 'week' | 'month' | 'all' = 'today', isAuto = false) => {
-    setIsSyncing(true);
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    pollAttemptsRef.current = 0;
+  }, []);
+
+  // Poll the DB-backed list while a background sync is in flight. Stops when
+  // new mail appears, max attempts are reached, or the tab unmounts.
+  const startPolling = useCallback(() => {
+    if (pollTimerRef.current) return; // already polling — don't stack intervals
+    pollAttemptsRef.current = 0;
+    let lastCount = emailsCountRef.current;
+    pollTimerRef.current = setInterval(async () => {
+      pollAttemptsRef.current += 1;
+      const count = await loadEmails();
+      if (count > lastCount || pollAttemptsRef.current >= MAX_POLL_ATTEMPTS) {
+        stopPolling();
+        if (isMountedRef.current) setIsSyncing(false);
+      } else {
+        lastCount = Math.max(lastCount, count);
+      }
+    }, POLL_INTERVAL_MS);
+  }, [loadEmails, stopPolling]);
+
+  // Non-blocking sync trigger: ask the server to sync only if stale/empty.
+  // Never blocks render; on failure we just keep showing the cached emails.
+  const triggerEnsure = useCallback(async (opts?: { showToast?: boolean }) => {
+    try {
+      const res = await apiRequest('POST', '/v1/email/sync/ensure');
+      const data = await res.json().catch(() => ({}));
+      if (data?.scheduled) {
+        // 'syncing' (stale) or 'empty' (initial setup) — background sync queued.
+        setIsSyncing(true);
+        startPolling();
+        if (opts?.showToast) {
+          setSnackbar({ open: true, message: 'Checking for new mail…', severity: 'info' });
+        }
+      } else {
+        // 'fresh' (cache current) or no account connected — nothing scheduled.
+        setIsSyncing(false);
+        if (opts?.showToast) {
+          loadEmails();
+          setSnackbar({ open: true, message: 'Your inbox is up to date', severity: 'success' });
+        }
+      }
+    } catch (e) {
+      // Network/other failure — keep the cached emails on screen, no error spew.
+      console.warn('[EmailsTab] sync ensure failed:', e);
+      setIsSyncing(false);
+      if (opts?.showToast) {
+        setSnackbar({ open: true, message: 'Could not check for new mail', severity: 'error' });
+      }
+    }
+  }, [startPolling, loadEmails]);
+
+  const handleSyncWithPeriod = useCallback((period: 'today' | 'week' | 'month' | 'all' = 'today') => {
     setSyncPeriod(period);
     setTimeRange(period);
-    try {
-      const result = await runEmailSync();
-      await loadEmails();
-      if (!isAuto) {
-        setSnackbar({ open: true, message: `Synced ${result.message_count} emails`, severity: 'success' });
-      }
-      setHasAutoSynced(true);
-    } catch {
-      if (!isAuto) {
-        setSnackbar({ open: true, message: 'Sync failed — check email connection', severity: 'error' });
-      }
-      setHasAutoSynced(true);
-    } finally {
-      setIsSyncing(false);
-    }
-  }, [loadEmails]);
+    triggerEnsure({ showToast: true });
+  }, [triggerEnsure]);
 
+  // On mount: cached emails are already shown (from sessionStorage + loadEmails).
+  // Fire one non-blocking /sync/ensure to refresh in the background if stale.
   useEffect(() => {
-    if (!hasAutoSynced && businessId && hasEmailAccount) {
-      handleSyncWithPeriod('today', true);
-    }
-  }, [businessId, hasAutoSynced, hasEmailAccount, handleSyncWithPeriod]);
+    if (!businessId || ensureFiredRef.current) return;
+    ensureFiredRef.current = true;
+    triggerEnsure();
+  }, [businessId, triggerEnsure]);
+
+  // Track mount state and clean up any polling timer on unmount (no leaks).
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      stopPolling();
+    };
+  }, [stopPolling]);
 
   const handleAnalyze = async () => {
     setAnalyzing(true);
@@ -483,14 +555,9 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
           color: '#a78bfa',
         }}>
           <CircularProgress size={16} sx={{ color: '#a78bfa' }} />
-          {syncPeriod === 'today'
-            ? "Fetching today's emails..."
-            : syncPeriod === 'week'
-            ? "Fetching this week's emails \u2014 this may take a moment..."
-            : syncPeriod === 'month'
-            ? "Fetching the past month's emails \u2014 this will take a little while..."
-            : "Fetching all emails \u2014 this may take several minutes..."
-          }
+          {emails.length === 0
+            ? 'Setting up your inbox\u2026'
+            : 'Checking for new mail\u2026'}
         </div>
       )}
 
