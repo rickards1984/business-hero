@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 from types import SimpleNamespace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
 import hmac
@@ -11,9 +11,10 @@ import os
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Query, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from auth import get_user_business_context, require_feature
@@ -900,6 +901,102 @@ async def run_email_sync(
         synced=True,
         message_count=message_count,
         cursor=sync_state.cursor,
+    )
+
+
+# How recently emails must have been synced before we consider the cache
+# "fresh" and skip scheduling a background sync. Tunable.
+EMAIL_SYNC_FRESHNESS_MINUTES = 15
+
+
+class EmailSyncEnsureResponse(BaseModel):
+    """Live-computed sync status for the cache-first email load path.
+
+    `sync_status` is derived on every request from row_count + last_synced_at;
+    it is NEVER read from or written to the email_sync_states.sync_status column.
+    """
+    sync_status: str  # 'empty' | 'fresh' | 'syncing'
+    last_synced_at: Optional[str] = None
+    scheduled: bool
+
+
+@router.post("/sync/ensure", response_model=EmailSyncEnsureResponse)
+async def ensure_email_sync(
+    background_tasks: BackgroundTasks,
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """Cache-first trigger: schedule a background email sync only when the
+    locally-cached emails are missing or stale. Returns instantly; the actual
+    sync runs off-request so a page load never blocks on Gmail/OpenAI.
+
+    Status is computed live, never persisted:
+      - 'empty'   : no email account connected (nothing to sync)
+      - 'fresh'   : cached emails exist and were synced within the threshold
+      - 'syncing' : a background sync was just scheduled (cache empty or stale)
+    """
+    business = get_business_by_id(session, auth_ctx["business_id"])
+
+    # 1. Resolve the default email account. If none is connected, there is
+    #    nothing to sync — report 'empty' rather than raising.
+    try:
+        account = get_default_email_account(session, business)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_404_NOT_FOUND:
+            return EmailSyncEnsureResponse(
+                sync_status="empty",
+                last_synced_at=None,
+                scheduled=False,
+            )
+        raise
+
+    # 2. Count locally-cached messages for this business.
+    row_count = session.exec(
+        select(func.count()).select_from(EmailMessage).where(
+            EmailMessage.business_id == business.id
+        )
+    ).one()
+
+    # 3. Read last_synced_at for the default account.
+    sync_state = session.exec(
+        select(EmailSyncState).where(EmailSyncState.email_account_id == account.id)
+    ).first()
+    last_synced_at = sync_state.last_synced_at if sync_state else None
+
+    # Freshness check — normalise naive timestamps to UTC for a safe compare.
+    is_fresh = False
+    if last_synced_at is not None:
+        ls = last_synced_at
+        if ls.tzinfo is None:
+            ls = ls.replace(tzinfo=timezone.utc)
+        is_fresh = (datetime.now(timezone.utc) - ls) <= timedelta(
+            minutes=EMAIL_SYNC_FRESHNESS_MINUTES
+        )
+
+    last_synced_iso = last_synced_at.isoformat() if last_synced_at else None
+
+    # 4. Decide: fresh cache with rows → do nothing; otherwise schedule a
+    #    background sync. We return 'syncing' in the same response that
+    #    schedules the task so the frontend can begin polling.
+    if row_count > 0 and is_fresh:
+        return EmailSyncEnsureResponse(
+            sync_status="fresh",
+            last_synced_at=last_synced_iso,
+            scheduled=False,
+        )
+
+    # _sync_email_for_business is a SYNCHRONOUS callable that opens its own
+    # isolated DB session; scheduling it via BackgroundTasks runs it in
+    # Starlette's threadpool (off the event loop), so its blocking provider
+    # client cannot stall other requests.
+    from services.background_sync import _sync_email_for_business
+
+    background_tasks.add_task(_sync_email_for_business, str(business.id))
+
+    return EmailSyncEnsureResponse(
+        sync_status="syncing",
+        last_synced_at=last_synced_iso,
+        scheduled=True,
     )
 
 
