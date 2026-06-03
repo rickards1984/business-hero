@@ -361,7 +361,16 @@ Each object must have: message_id, category, priority, summary, suggested_action
 
 
 def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
-    """Analyze a batch of emails using gpt-4o-mini for categorisation."""
+    """Analyze a batch of emails using gpt-4o-mini for categorisation.
+
+    Failure contract: on a HARD failure (OpenAI 429/timeout/exception, or an
+    unparseable response) this returns an EMPTY list rather than fabricated
+    fallback categories. Callers must stamp ai_analyzed_at only for the
+    message_ids actually present in the returned list — so a hard failure
+    stamps nothing and those rows are retried on the next pass (instead of
+    being permanently frozen as 'fyi'). An empty return for a non-empty input
+    batch therefore means "analysis failed, retry later".
+    """
     import logging
     _logger = logging.getLogger("email_analysis")
 
@@ -425,18 +434,12 @@ def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
             )
         return results
     except Exception as e:
-        _logger.error(f"Email analysis failed: {e}")
-        from schemas import EmailAnalysis
-        return [
-            EmailAnalysis(
-                message_id=str(m.id),
-                category="fyi",
-                priority=2,
-                summary=m.subject or "No subject",
-                suggested_action=None,
-            )
-            for m in messages
-        ]
+        # Hard failure (e.g. OpenAI 429/timeout, or an unparseable response).
+        # Return an empty list — do NOT fabricate fallback 'fyi' categories.
+        # Callers stamp ai_analyzed_at only for returned message_ids, so these
+        # rows stay un-analysed (ai_analyzed_at = NULL) and get retried next pass.
+        _logger.warning(f"Email analysis failed; leaving messages un-analysed for retry: {e}")
+        return []
 
 
 def generate_email_briefing_markdown(

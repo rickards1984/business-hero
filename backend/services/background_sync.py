@@ -170,6 +170,93 @@ def _sync_email_for_business(business_id: str):
             except Exception:
                 pass
 
+    # Categorise newly-fetched (and any backlog of) un-analysed messages.
+    # Runs in its own isolated session and must NEVER raise — a categorisation
+    # failure cannot be allowed to affect the sync that just completed.
+    try:
+        _analyze_uncategorised_for_business(business_id)
+    except Exception as e:
+        logger.warning(
+            f"[BackgroundSync] Post-sync categorisation failed for business {business_id}: {e}"
+        )
+
+
+def _analyze_uncategorised_for_business(business_id: str):
+    """Categorise un-analysed emails for a business using its own session.
+
+    Reuses analyze_email_batch (the existing analyzer). Cost-capped at 30 rows
+    per run, in batches of 10 (so <= 3 OpenAI calls/run). Stamps ai_analyzed_at
+    only for message_ids actually returned by the analyzer — so on a hard
+    failure (analyze_email_batch returns an empty list, e.g. OpenAI 429/timeout)
+    nothing is stamped and those rows stay NULL to be retried on the next pass.
+    """
+    from db import get_session_context
+    from app.email.service import analyze_email_batch
+    from models import EmailMessage
+
+    with get_session_context() as session:
+        try:
+            unanalyzed = session.exec(
+                select(EmailMessage)
+                .where(
+                    EmailMessage.business_id == business_id,
+                    EmailMessage.ai_analyzed_at == None,  # noqa: E711 (SQL NULL test)
+                )
+                .order_by(EmailMessage.received_at.desc())
+                .limit(30)
+            ).all()
+            if not unanalyzed:
+                return
+
+            batch_size = 10
+            analyzed = 0
+            for i in range(0, len(unanalyzed), batch_size):
+                batch = unanalyzed[i : i + batch_size]
+                analyses = analyze_email_batch(batch)
+                if not analyses:
+                    # Hard failure for this batch — do NOT stamp; leave rows
+                    # NULL for the next pass. Stop early to avoid burning
+                    # further OpenAI calls on a likely-persistent failure.
+                    logger.warning(
+                        f"[BackgroundSync] Analysis returned no results for business "
+                        f"{business_id} (batch {i // batch_size + 1}); leaving "
+                        f"{len(batch)} message(s) un-analysed for retry"
+                    )
+                    break
+                for analysis in analyses:
+                    session.execute(
+                        text("""
+                            UPDATE email_messages
+                            SET ai_category = :category, ai_priority = :priority,
+                                ai_summary = :summary, ai_suggested_action = :action,
+                                ai_analyzed_at = NOW()
+                            WHERE id = :id AND business_id = :business_id
+                        """),
+                        {
+                            "category": analysis.category,
+                            "priority": analysis.priority,
+                            "summary": analysis.summary,
+                            "action": analysis.suggested_action,
+                            "id": analysis.message_id,
+                            "business_id": str(business_id),
+                        },
+                    )
+                    analyzed += 1
+                session.commit()
+
+            if analyzed:
+                logger.info(
+                    f"[BackgroundSync] Categorised {analyzed} email(s) for business {business_id}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"[BackgroundSync] Email analysis failed for business {business_id}: {e}"
+            )
+            try:
+                session.rollback()
+            except Exception:
+                pass
+
 
 async def background_financial_sync_all():
     """
