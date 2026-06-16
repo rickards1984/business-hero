@@ -5,7 +5,6 @@ import { useMe } from '@/hooks/useMe';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
-import { runEmailSync } from '@/lib/emailApi';
 import TasksPanel from '@/components/TasksPanel';
 
 function getGreeting(): string {
@@ -121,10 +120,13 @@ export default function DashboardPage() {
     staleTime: 3 * 60 * 1000,
   });
 
-  // Background email sync — fire and forget, NEVER blocks UI
+  // Warm the email cache in the background, non-blocking. /sync/ensure returns
+  // instantly and only schedules a background sync if the cache is stale — it
+  // never runs Gmail/OpenAI on the request path (unlike /sync/run). The count
+  // box reads whatever GET /v1/email/messages returns; we do not poll here.
   useEffect(() => {
     if (businessId) {
-      runEmailSync().catch(() => {});
+      apiRequest('POST', '/v1/email/sync/ensure').catch(() => {});
     }
   }, [businessId]);
 
