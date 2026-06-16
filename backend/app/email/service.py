@@ -402,7 +402,7 @@ def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
         )
 
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -486,7 +486,7 @@ def generate_email_briefing_markdown(
             fyi_items.append(msg)
 
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
         items = []
         for msg in messages[:50]:
             items.append(
@@ -552,7 +552,7 @@ def generate_email_reply_draft(message: EmailMessageModel, business: Business) -
         return {"subject": reply_subject, "body_text": fallback_body, "body_html": _text_to_html(fallback_body)}
 
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
         prompt = (
             f"From: {message.from_email or 'Unknown'}\n"
             f"Subject: {message.subject or '(no subject)'}\n"
@@ -621,7 +621,7 @@ def generate_email_reply_drafts(
         return [fallback]
 
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
         email_context = (
             f"From: {message.from_email or 'Unknown'}\n"
             f"From Name: {message.from_name or 'Unknown'}\n"

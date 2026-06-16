@@ -13,12 +13,13 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Query, status
 from fastapi.responses import RedirectResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlmodel import Session, select
 
 from auth import get_user_business_context, require_feature
-from db import get_session
+from db import get_session, get_session_context
 from models import EmailAccount, EmailBriefing, EmailConnection, EmailDraft, EmailMessage, EmailOutbox, EmailSyncState
 from schemas import (
     EmailConnectionPublic,
@@ -779,129 +780,121 @@ async def list_email_messages(
     return EmailMessageListResponse(messages=items, total=len(items))
 
 
+def _run_inbox_sync(business_id: str) -> EmailSyncRunResponse:
+    """Synchronous inbox sync for one business — safe to run OFF the event loop.
+
+    Opens its own session, fetches + upserts inbox messages, advances the sync
+    cursor, then runs background categorisation. Returns the real message_count
+    and cursor so the HTTP response contract is preserved.
+
+    Replaces the old inline OpenAI analyze (now redundant — background
+    categorisation covers it) which used to block the request and drag on 429s.
+
+    # TODO: converge with _sync_email_for_business / _run_email_sync_for_business
+    #       (three near-identical inbox-sync implementations — post-launch debt).
+    """
+    with get_session_context() as session:
+        business = get_business_by_id(session, business_id)
+        account = get_default_email_account(session, business)
+        provider = get_provider_for_account(account)
+
+        sync_state = session.exec(
+            select(EmailSyncState).where(EmailSyncState.email_account_id == account.id)
+        ).first()
+        if not sync_state:
+            sync_state = EmailSyncState(email_account_id=account.id, cursor={})
+            session.add(sync_state)
+            session.commit()
+            session.refresh(sync_state)
+
+        result = provider.sync_inbox_changes(account=account, cursor=sync_state.cursor or {})
+        message_count = 0
+
+        for msg in result.messages:
+            existing = session.exec(
+                select(EmailMessage).where(
+                    EmailMessage.email_account_id == account.id,
+                    EmailMessage.provider_message_id == msg.provider_message_id,
+                )
+            ).first()
+            if existing:
+                existing.provider_thread_id = msg.provider_thread_id
+                existing.folder = msg.folder
+                existing.from_email = msg.from_email
+                existing.from_name = msg.from_name
+                existing.to_emails = msg.to_emails
+                existing.cc_emails = msg.cc_emails
+                existing.subject = msg.subject
+                existing.snippet = msg.snippet
+                existing.received_at = msg.received_at
+                existing.is_unread = msg.is_unread
+                existing.has_attachments = msg.has_attachments
+                existing.labels = msg.labels
+                existing.body_text = msg.body_text
+                existing.body_html = msg.body_html
+                existing.raw_headers = msg.raw_headers or {}
+                existing.updated_at = datetime.utcnow()
+                session.add(existing)
+            else:
+                record = EmailMessage(
+                    business_id=business.id,
+                    email_account_id=account.id,
+                    provider_message_id=msg.provider_message_id,
+                    provider_thread_id=msg.provider_thread_id,
+                    folder=msg.folder,
+                    from_email=msg.from_email,
+                    from_name=msg.from_name,
+                    to_emails=msg.to_emails,
+                    cc_emails=msg.cc_emails,
+                    subject=msg.subject,
+                    snippet=msg.snippet,
+                    received_at=msg.received_at,
+                    is_unread=msg.is_unread,
+                    has_attachments=msg.has_attachments,
+                    labels=msg.labels,
+                    body_text=msg.body_text,
+                    body_html=msg.body_html,
+                    raw_headers=msg.raw_headers or {},
+                )
+                session.add(record)
+            message_count += 1
+
+        sync_state.cursor = result.cursor or {}
+        sync_state.last_synced_at = datetime.utcnow()
+        sync_state.last_error = None
+        session.add(sync_state)
+        session.commit()
+
+        response = EmailSyncRunResponse(
+            email_account_id=str(account.id),
+            synced=True,
+            message_count=message_count,
+            cursor=sync_state.cursor,
+        )
+
+    # Categorise newly-fetched / backlog messages out-of-band (reuses the
+    # background analyzer). Uses its own session and never raises into the
+    # sync response — a categorisation failure must not fail the sync.
+    try:
+        from services.background_sync import _analyze_uncategorised_for_business
+        _analyze_uncategorised_for_business(business_id)
+    except Exception:
+        pass
+
+    return response
+
+
 @router.post("/sync/run", response_model=EmailSyncRunResponse)
 async def run_email_sync(
     auth_ctx=Depends(get_user_business_context),
-    session: Session = Depends(get_session),
 ):
-    """Run inbox sync for the default email account."""
-    business = get_business_by_id(session, auth_ctx["business_id"])
-    account = get_default_email_account(session, business)
-    provider = get_provider_for_account(account)
+    """Run inbox sync for the default email account.
 
-    sync_state = session.exec(
-        select(EmailSyncState).where(EmailSyncState.email_account_id == account.id)
-    ).first()
-    if not sync_state:
-        sync_state = EmailSyncState(email_account_id=account.id, cursor={})
-        session.add(sync_state)
-        session.commit()
-        session.refresh(sync_state)
-
-    result = provider.sync_inbox_changes(account=account, cursor=sync_state.cursor or {})
-    message_count = 0
-
-    for msg in result.messages:
-        existing = session.exec(
-            select(EmailMessage).where(
-                EmailMessage.email_account_id == account.id,
-                EmailMessage.provider_message_id == msg.provider_message_id,
-            )
-        ).first()
-        if existing:
-            existing.provider_thread_id = msg.provider_thread_id
-            existing.folder = msg.folder
-            existing.from_email = msg.from_email
-            existing.from_name = msg.from_name
-            existing.to_emails = msg.to_emails
-            existing.cc_emails = msg.cc_emails
-            existing.subject = msg.subject
-            existing.snippet = msg.snippet
-            existing.received_at = msg.received_at
-            existing.is_unread = msg.is_unread
-            existing.has_attachments = msg.has_attachments
-            existing.labels = msg.labels
-            existing.body_text = msg.body_text
-            existing.body_html = msg.body_html
-            existing.raw_headers = msg.raw_headers or {}
-            existing.updated_at = datetime.utcnow()
-            session.add(existing)
-        else:
-            record = EmailMessage(
-                business_id=business.id,
-                email_account_id=account.id,
-                provider_message_id=msg.provider_message_id,
-                provider_thread_id=msg.provider_thread_id,
-                folder=msg.folder,
-                from_email=msg.from_email,
-                from_name=msg.from_name,
-                to_emails=msg.to_emails,
-                cc_emails=msg.cc_emails,
-                subject=msg.subject,
-                snippet=msg.snippet,
-                received_at=msg.received_at,
-                is_unread=msg.is_unread,
-                has_attachments=msg.has_attachments,
-                labels=msg.labels,
-                body_text=msg.body_text,
-                body_html=msg.body_html,
-                raw_headers=msg.raw_headers or {},
-            )
-            session.add(record)
-        message_count += 1
-
-    sync_state.cursor = result.cursor or {}
-    sync_state.last_synced_at = datetime.utcnow()
-    sync_state.last_error = None
-    session.add(sync_state)
-    session.commit()
-
-    # Auto-analyze un-analyzed messages (limit 30 per sync)
-    if message_count > 0:
-        try:
-            unanalyzed = session.exec(
-                select(EmailMessage)
-                .where(
-                    EmailMessage.business_id == business.id,
-                    EmailMessage.ai_analyzed_at == None,
-                )
-                .order_by(EmailMessage.received_at.desc())
-                .limit(30)
-            ).all()
-            if unanalyzed:
-                from sqlalchemy import text as sa_text
-                batch_size = 10
-                for i in range(0, len(unanalyzed), batch_size):
-                    batch = unanalyzed[i : i + batch_size]
-                    analyses = analyze_email_batch(batch)
-                    for analysis in analyses:
-                        session.execute(
-                            sa_text("""
-                                UPDATE email_messages
-                                SET ai_category = :category, ai_priority = :priority,
-                                    ai_summary = :summary, ai_suggested_action = :action,
-                                    ai_analyzed_at = NOW()
-                                WHERE id = :id AND business_id = :business_id
-                            """),
-                            {
-                                "category": analysis.category,
-                                "priority": analysis.priority,
-                                "summary": analysis.summary,
-                                "action": analysis.suggested_action,
-                                "id": analysis.message_id,
-                                "business_id": str(business.id),
-                            },
-                        )
-                session.commit()
-        except Exception:
-            pass  # Don't fail sync if analysis fails
-
-    return EmailSyncRunResponse(
-        email_account_id=str(account.id),
-        synced=True,
-        message_count=message_count,
-        cursor=sync_state.cursor,
-    )
+    All heavy/blocking work (sync Session, Gmail fetch, upserts, background
+    categorisation) runs in a worker thread via run_in_threadpool, so it never
+    blocks the event loop. The response contract is unchanged.
+    """
+    return await run_in_threadpool(_run_inbox_sync, auth_ctx["business_id"])
 
 
 # How recently emails must have been synced before we consider the cache
