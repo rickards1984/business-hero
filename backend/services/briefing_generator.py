@@ -35,7 +35,7 @@ async def generate_weekly_briefing(
     Returns:
         (briefing_text, action_options, ai_analysis)
     """
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1) if OPENAI_API_KEY else None
 
     system_prompt = f"""You are the AI business intelligence analyst for "{business_name}". You produce a concise, actionable weekly CEO briefing for {owner_name or 'the owner'}.
 
@@ -134,7 +134,7 @@ async def generate_daily_pulse(
     data: Dict[str, Any],
 ) -> str:
     """Generate a short daily morning pulse."""
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1) if OPENAI_API_KEY else None
 
     if client:
         try:

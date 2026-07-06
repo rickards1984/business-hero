@@ -28,6 +28,8 @@ from sqlalchemy import text as sa_text
 from db import engine
 from models import Task
 from receptionist_api import ReceptionistConfig, build_receptionist_system_prompt
+from twilio_security import require_valid_twilio_signature, make_stream_token, verify_stream_token
+from rate_limiting import limiter, LIMIT_WEBHOOK_IP, ip_key
 
 logger = logging.getLogger("receptionist_call")
 
@@ -464,6 +466,7 @@ async def handle_receptionist_function_call(
 # ---------------------------------------------------------------------------
 
 @router.post("/incoming-call")
+@limiter.limit(LIMIT_WEBHOOK_IP, key_func=ip_key)
 async def receptionist_incoming_call(request: Request):
     """
     Twilio webhook: receives incoming phone calls.
@@ -471,6 +474,9 @@ async def receptionist_incoming_call(request: Request):
     opens a bidirectional Media Stream WebSocket.
     """
     form_data = await request.form()
+    # Reject forged webhooks up front; 403s are logged with source IP.
+    await require_valid_twilio_signature(request, form_data)
+
     to_number = form_data.get("To", "").replace(" ", "").strip()
     from_number = form_data.get("From", "").replace(" ", "").strip()
     call_sid = form_data.get("CallSid", "")
@@ -510,8 +516,11 @@ async def receptionist_incoming_call(request: Request):
     if not host:
         host = str(request.base_url).replace("http://", "").replace("https://", "").rstrip("/")
 
-    ws_url = f"wss://{host}/v1/receptionist/media-stream"
-    logger.info(f"[Receptionist] Media stream WebSocket URL: {ws_url}")
+    # Twilio can't sign WebSocket handshakes, so the stream URL carries a
+    # short-lived token bound to this CallSid (verified in /media-stream).
+    stream_token = make_stream_token(call_sid)
+    ws_url = f"wss://{host}/v1/receptionist/media-stream?token={stream_token}"
+    logger.info(f"[Receptionist] Media stream WebSocket URL: wss://{host}/v1/receptionist/media-stream?token=<redacted>")
 
     vr = VoiceResponse()
     connect = Connect()
@@ -574,6 +583,14 @@ async def receptionist_media_stream(ws: WebSocket):
         else:
             logger.error(f"[Receptionist WS] Expected 'start' event, got: {data.get('event')}")
             await ws.close()
+            return
+
+        # Only streams initiated by our own (signature-validated) /incoming-call
+        # may proceed: the token in the wss URL must be valid, unexpired, and
+        # minted for this exact CallSid. Blocks strangers from claiming an
+        # arbitrary business_id and burning Realtime minutes as that business.
+        if not verify_stream_token(ws.query_params.get("token"), call_sid, ws):
+            await ws.close(code=1008, reason="Invalid stream token")
             return
 
         if not business_id:

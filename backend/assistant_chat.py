@@ -743,7 +743,7 @@ async def process_chat_message(
     system_prompt = build_system_prompt(business, voice_mode=voice_mode, user_name=user_name, user_email=user_email)
     logger.info(f"[DEBUG] System prompt built for {business.name} (voice_mode={voice_mode}, user_name={user_name}). History has {len(history)} messages.")
     
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
     
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)

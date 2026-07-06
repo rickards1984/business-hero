@@ -13,3 +13,5 @@ android/.gradle/
 android/build/
 ios/App/Pods/
 ios/DerivedData/
+current_live_schema.sql
+live_state/

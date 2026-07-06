@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Query, status
+from rate_limiting import limiter, LIMIT_AI_HEAVY, LIMIT_SYNC
 from fastapi.responses import RedirectResponse
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
@@ -885,7 +886,9 @@ def _run_inbox_sync(business_id: str) -> EmailSyncRunResponse:
 
 
 @router.post("/sync/run", response_model=EmailSyncRunResponse)
+@limiter.limit(LIMIT_SYNC)
 async def run_email_sync(
+    request: Request,
     auth_ctx=Depends(get_user_business_context),
 ):
     """Run inbox sync for the default email account.
@@ -914,7 +917,9 @@ class EmailSyncEnsureResponse(BaseModel):
 
 
 @router.post("/sync/ensure", response_model=EmailSyncEnsureResponse)
+@limiter.limit(LIMIT_SYNC)
 async def ensure_email_sync(
+    request: Request,
     background_tasks: BackgroundTasks,
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -994,7 +999,9 @@ async def ensure_email_sync(
 
 
 @router.post("/sync/inbox", response_model=EmailSyncRunResponse)
+@limiter.limit(LIMIT_SYNC)
 async def sync_email_inbox(
+    request: Request,
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
@@ -1085,7 +1092,9 @@ async def sync_email_inbox(
 
 
 @router.post("/briefings/generate", response_model=EmailBriefingResponse)
+@limiter.limit(LIMIT_AI_HEAVY)
 async def generate_email_briefing(
+    request: Request,
     data: Optional[EmailBriefingRequest] = None,
     hours: int = Query(default=24, ge=1, le=168),
     email_account_id: Optional[str] = Query(default=None),
@@ -1185,7 +1194,9 @@ class EmailAnalyzeRequest(BaseModel):
 
 
 @router.post("/analyze", response_model=EmailAnalyzeResponse)
+@limiter.limit(LIMIT_AI_HEAVY)
 async def analyze_emails(
+    request: Request,
     data: EmailAnalyzeRequest,
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -1246,7 +1257,9 @@ async def analyze_emails(
 
 
 @router.post("/drafts/generate-options", response_model=EmailDraftOptionsResponse)
+@limiter.limit(LIMIT_AI_HEAVY)
 async def generate_email_draft_options(
+    request: Request,
     data: EmailDraftRequest,
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -1317,7 +1330,9 @@ async def generate_email_draft_options(
 
 
 @router.post("/drafts/generate", response_model=EmailDraftResponse)
+@limiter.limit(LIMIT_AI_HEAVY)
 async def generate_email_draft(
+    request: Request,
     data: EmailDraftRequest,
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),

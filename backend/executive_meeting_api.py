@@ -15,7 +15,8 @@ from datetime import datetime, time, timedelta
 from typing import Optional
 
 import pytz
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from rate_limiting import limiter, LIMIT_AI_CHAT, LIMIT_AI_HEAVY
 from sqlalchemy import text
 from sqlmodel import Session
 
@@ -644,7 +645,9 @@ def _calculate_next_meeting_time(settings: dict) -> Optional[datetime]:
 # ============================================================================
 
 @router.post("/prep-now")
+@limiter.limit(LIMIT_AI_HEAVY)
 async def trigger_prep_now(
+    request: Request,
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
@@ -664,7 +667,9 @@ async def trigger_prep_now(
 
 
 @router.post("/start-now")
+@limiter.limit(LIMIT_AI_HEAVY)
 async def start_meeting_now(
+    request: Request,
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
@@ -809,7 +814,9 @@ def _verify_meeting_ownership(
 
 
 @router.post("/{meeting_id}/start")
+@limiter.limit(LIMIT_AI_HEAVY)
 async def start_meeting_endpoint(
+    request: Request,
     meeting_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -840,7 +847,9 @@ async def start_meeting_endpoint(
 
 
 @router.post("/{meeting_id}/message")
+@limiter.limit(LIMIT_AI_CHAT)
 async def send_owner_message(
+    request: Request,
     meeting_id: str,
     body: dict,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -944,7 +953,9 @@ async def list_meeting_messages(
 
 
 @router.post("/{meeting_id}/extract-actions")
+@limiter.limit(LIMIT_AI_HEAVY)
 async def extract_actions_endpoint(
+    request: Request,
     meeting_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),

@@ -19,6 +19,8 @@ from auth import get_user_business_context, get_platform_admin_context
 from services.briefing_data import gather_business_data
 from services.briefing_generator import generate_daily_pulse, generate_weekly_briefing
 from services.whatsapp_service import send_whatsapp_message
+from twilio_security import require_valid_twilio_signature
+from rate_limiting import limiter, LIMIT_WEBHOOK_IP, ip_key
 
 _logger = logging.getLogger("whatsapp_briefing")
 
@@ -441,18 +443,23 @@ async def get_whatsapp_messages(
 
 
 # ---------------------------------------------------------------------------
-# Inbound WhatsApp webhook (Twilio – no auth)
+# Inbound WhatsApp webhook (Twilio — authenticated via X-Twilio-Signature)
 # ---------------------------------------------------------------------------
 
 
 @router.post("/webhook")
+@limiter.limit(LIMIT_WEBHOOK_IP, key_func=ip_key)
 async def whatsapp_webhook(request: Request):
     """
     Twilio webhook for incoming WhatsApp messages.
     Handles numbered replies to take action from briefings/alerts.
     """
+    form_data = await request.form()
+    # Reject forged webhooks before doing anything with the payload.
+    # 403s are logged with source IP by twilio_security.
+    await require_valid_twilio_signature(request, form_data)
+
     try:
-        form_data = await request.form()
         from_number = form_data.get("From", "").replace("whatsapp:", "").strip()
         body = form_data.get("Body", "").strip()
         message_sid = form_data.get("MessageSid", "")

@@ -406,7 +406,7 @@ def _get_async_client() -> Optional[AsyncOpenAI]:
     """Lazy AsyncOpenAI client. Returns None if no API key configured."""
     if not OPENAI_API_KEY:
         return None
-    return AsyncOpenAI(api_key=OPENAI_API_KEY)
+    return AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
 
 
 async def _gpt_chat_completion(

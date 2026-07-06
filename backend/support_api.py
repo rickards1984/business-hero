@@ -12,7 +12,8 @@ import re
 from datetime import datetime
 from typing import Optional, List, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from rate_limiting import limiter, LIMIT_AI_CHAT
 from pydantic import BaseModel
 from sqlmodel import Session
 from sqlalchemy import text
@@ -139,7 +140,7 @@ Confidence: 0.0 to 1.0 (how confident you are that you've fully resolved their q
 
     try:
         import openai
-        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
 
         resp = await client.chat.completions.create(
             model="gpt-4o",
@@ -207,7 +208,9 @@ def _fetch_kb_articles(session: Session) -> List[dict]:
 # ---------------------------------------------------------------------------
 
 @router.post("/chat")
+@limiter.limit(LIMIT_AI_CHAT)
 async def support_chat(
+    request: Request,
     message: SupportMessageCreate,
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -655,7 +658,7 @@ async def admin_ai_draft_response(
 
     try:
         import openai
-        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
 
         resp = await client.chat.completions.create(
             model="gpt-4o",

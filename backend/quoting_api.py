@@ -3,11 +3,13 @@ Quoting System API — CRUD for quotes, line items, and settings.
 """
 import json
 import logging
+import os
 from datetime import date, datetime, timedelta
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from rate_limiting import limiter, LIMIT_AI_HEAVY
 from sqlalchemy import text
 from sqlmodel import Session
 
@@ -17,6 +19,9 @@ from auth import get_user_business_context
 logger = logging.getLogger("quoting_api")
 router = APIRouter(prefix="/v1/quotes", tags=["Quotes"])
 
+
+# AI quote generation model — env-configurable, default preserves behaviour.
+QUOTE_AI_MODEL = os.getenv("QUOTE_AI_MODEL", "gpt-5.4")
 
 # ── Helpers ──────────────────────────────────────────────
 
@@ -947,7 +952,9 @@ async def update_quote_settings(
 # ── AI Quote Generation ──────────────────────────────────
 
 @router.post("/ai/generate")
+@limiter.limit(LIMIT_AI_HEAVY)
 async def generate_ai_quote(
+    request: Request,
     data: dict,
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -1058,7 +1065,7 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "gpt-5.4",
+                    "model": QUOTE_AI_MODEL,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_content},
@@ -1094,7 +1101,7 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
             "subtotal": round(subtotal, 2),
             "estimated_duration": quote_data.get("estimated_duration", ""),
             "notes": quote_data.get("notes", ""),
-            "ai_model": "gpt-5.4",
+            "ai_model": QUOTE_AI_MODEL,
             "ai_prompt": job_description,
             "images_analysed": len(images[:5]),
         }

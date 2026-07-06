@@ -15,7 +15,10 @@ router = APIRouter()
 _logger = logging.getLogger("realtime_voice")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+# Model and voice are env-configurable; defaults preserve existing behaviour.
+ARIA_REALTIME_MODEL = os.getenv("ARIA_REALTIME_MODEL", "gpt-realtime")
+ARIA_REALTIME_VOICE = os.getenv("ARIA_REALTIME_VOICE", "shimmer")
+OPENAI_REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={ARIA_REALTIME_MODEL}"
 
 # Tool definitions for the Realtime API
 # NOTE: Realtime API format is different from Chat Completions API
@@ -724,7 +727,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             "session": {
                 "modalities": ["text", "audio"],
                 "instructions": build_system_instructions(business_name, user_name),
-                "voice": "shimmer",
+                "voice": ARIA_REALTIME_VOICE,
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm16",
                 "input_audio_transcription": {

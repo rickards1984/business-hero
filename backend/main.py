@@ -70,6 +70,8 @@ from schemas import (
 from auth import verify_master_key, get_current_business, get_access_token, get_user_auth_context, get_user_business_context, get_platform_admin_context, is_platform_admin_user
 from openai_utils import generate_call_summary
 from supabase_auth import verify_supabase_token
+from slowapi.errors import RateLimitExceeded
+from rate_limiting import limiter, LIMIT_AI_CHAT, LIMIT_TTS, LIMIT_SYNC, RATE_LIMIT_MESSAGE
 from assistant_chat import process_chat_message, get_business_for_user
 from app.email.service import (
     get_or_create_smtp_account,
@@ -283,6 +285,20 @@ app = FastAPI(
     lifespan=lifespan,
     swagger_ui_parameters={"persistAuthorization": True}
 )
+
+# Rate limiting (slowapi). Policy and key functions live in rate_limiting.py.
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    # Retry-After is a static 60s: every limit class has a per-minute window,
+    # so "wait a minute" is always an honest answer.
+    return JSONResponse(
+        status_code=429,
+        content={"detail": RATE_LIMIT_MESSAGE},
+        headers={"Retry-After": "60"},
+    )
 
 
 @app.exception_handler(Exception)
@@ -667,7 +683,9 @@ async def admin_test_awaz(
 
 
 @app.post("/v1/admin/businesses/{business_id}/email/sync", response_model=EmailSyncRunResponse, tags=["Admin"])
+@limiter.limit(LIMIT_SYNC)
 async def admin_email_sync(
+    request: Request,
     business_id: str,
     auth_ctx=Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
@@ -678,7 +696,9 @@ async def admin_email_sync(
 
 
 @app.post("/v1/admin/businesses/{business_id}/calendar/sync", tags=["Admin"])
+@limiter.limit(LIMIT_SYNC)
 async def admin_calendar_sync(
+    request: Request,
     business_id: str,
     auth_ctx=Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
@@ -2009,7 +2029,9 @@ async def get_today_briefing(
 
 
 @app.post("/v1/assistant/chat", response_model=ChatResponse, tags=["Assistant"])
+@limiter.limit(LIMIT_AI_CHAT)
 async def assistant_chat(
+    request: Request,
     data: ChatRequest,
     token: str = Depends(get_access_token)
 ):
@@ -2047,6 +2069,7 @@ async def assistant_chat(
 
 
 @app.post("/v1/tts", tags=["Assistant"])
+@limiter.limit(LIMIT_TTS)
 async def text_to_speech(
     request: Request,
     token: str = Depends(get_access_token)
@@ -2082,7 +2105,7 @@ async def text_to_speech(
         if not openai_api_key:
             raise HTTPException(status_code=500, detail="OpenAI API key not configured")
         
-        client = OpenAI(api_key=openai_api_key)
+        client = OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=1)
         
         response = client.audio.speech.create(
             model="tts-1",  # Use tts-1-hd for higher quality but more cost
@@ -3614,7 +3637,9 @@ async def _refresh_xero_token_and_retry(
 
 
 @app.post("/v1/accounting/xero/sync")
+@limiter.limit(LIMIT_SYNC)
 async def sync_xero_transactions(
+    request: Request,
     user_business=Depends(get_current_user_and_business),
     session: Session = Depends(get_session),
 ):
@@ -3970,7 +3995,9 @@ async def sync_xero_transactions(
 
 
 @app.post("/v1/invoices/xero/sync", tags=["Invoices"])
+@limiter.limit(LIMIT_SYNC)
 async def sync_xero_invoices(
+    request: Request,
     user_business=Depends(get_current_user_and_business),
     session: Session = Depends(get_session),
 ):
@@ -4180,7 +4207,9 @@ async def sync_xero_invoices(
 
 
 @app.post("/v1/accounting/sync-all")
+@limiter.limit(LIMIT_SYNC)
 async def sync_all_accounting(
+    request: Request,
     user_business=Depends(get_current_user_and_business),
     session: Session = Depends(get_session),
 ):

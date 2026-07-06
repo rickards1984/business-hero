@@ -23,7 +23,7 @@ async def generate_call_summary(transcript: str) -> Optional[str]:
     try:
         from openai import OpenAI
         
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0, max_retries=1)
         
         response = client.chat.completions.create(
             model="gpt-4o-mini",

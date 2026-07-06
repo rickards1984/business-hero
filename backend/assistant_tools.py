@@ -2647,7 +2647,7 @@ def _draft_email_reply(engine, business_id: str, args: dict) -> dict:
 
     try:
         import openai
-        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0, max_retries=1)
 
         response = client.chat.completions.create(
             model="gpt-5",

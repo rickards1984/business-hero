@@ -10,7 +10,8 @@ from typing import Optional, Dict, Any, List
 from uuid import UUID
 
 import pytz
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from rate_limiting import limiter, LIMIT_TTS
 from pydantic import BaseModel, Field
 from sqlmodel import Session, SQLModel, Field as SQLField, select
 from sqlalchemy import Column, text
@@ -566,8 +567,14 @@ async def list_voices():
 
 
 @router.get("/voices/{voice_id}/preview")
-async def preview_voice(voice_id: str):
-    """Generate a voice preview audio clip using OpenAI TTS."""
+@limiter.limit(LIMIT_TTS)
+async def preview_voice(
+    request: Request,
+    voice_id: str,
+    business: Business = Depends(get_current_user_business),
+):
+    """Generate a voice preview audio clip using OpenAI TTS. Auth required —
+    this endpoint spends OpenAI credit and was previously open to anyone."""
     import io
     import openai as _openai
     from fastapi.responses import StreamingResponse
@@ -591,7 +598,7 @@ async def preview_voice(voice_id: str):
     )
 
     try:
-        client = _openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+        client = _openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""), timeout=30.0, max_retries=1)
         try:
             response = client.audio.speech.create(
                 model="gpt-4o-mini-tts",
@@ -657,7 +664,12 @@ class VoicePreviewRequest(BaseModel):
 
 
 @router.post("/voice-preview")
-async def preview_voice_preset(body: VoicePreviewRequest):
+@limiter.limit(LIMIT_TTS)
+async def preview_voice_preset(
+    request: Request,
+    body: VoicePreviewRequest,
+    business: Business = Depends(get_current_user_business),
+):
     """
     Generate an accent-aware preview audio clip for a voice preset.
 
@@ -704,7 +716,7 @@ async def preview_voice_preset(body: VoicePreviewRequest):
     accent_instructions = get_accent_instructions(accent_name)
 
     try:
-        client = _openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+        client = _openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""), timeout=30.0, max_retries=1)
         # `gpt-4o-mini-tts` accepts an `instructions` parameter that steers
         # delivery — accent, tone, pace — without changing the text. This is
         # the same accent block we feed the Realtime API for live calls.

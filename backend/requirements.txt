@@ -21,3 +21,5 @@ websockets>=12.0
 twilio>=9.0.0
 # PDF generation for quotes
 reportlab>=4.0
+# Rate limiting on cost-attack endpoints
+slowapi>=0.1.9
