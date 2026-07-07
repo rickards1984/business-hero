@@ -107,6 +107,20 @@ const UNIT_OPTIONS = ['each', 'hours', 'days', 'sqm', 'lm', 'kg', 'cubic_m', 'li
 const CATEGORY_OPTIONS = ['labour', 'materials', 'equipment', 'subcontractor', 'other'];
 const INDUSTRY_OPTIONS = ['general', 'construction', 'plumbing', 'electrical', 'landscaping', 'cleaning', 'fitness', 'other'];
 
+// apiRequest throws "<status>: <json body>" — extract the backend's
+// human-readable `detail` field, or return null if there isn't one.
+function apiErrorDetail(err: any): string | null {
+  const raw: string = err?.message || '';
+  const jsonStart = raw.indexOf('{');
+  if (jsonStart !== -1) {
+    try {
+      const detail = JSON.parse(raw.slice(jsonStart))?.detail;
+      if (typeof detail === 'string' && detail) return detail;
+    } catch {}
+  }
+  return null;
+}
+
 function StatusBadge({ status }: { status: string }) {
   const style = STATUS_COLORS[status] || STATUS_COLORS.draft;
   return (
@@ -326,7 +340,14 @@ export default function QuotesPage() {
       setSnackbar({ open: true, message: `AI generated ${items.length} line items — review and edit below`, severity: 'success' });
     } catch (err: any) {
       console.error('AI generation failed:', err);
-      setSnackbar({ open: true, message: err.message || 'Failed to generate quote. Try simplifying the description.', severity: 'error' });
+      const detail = apiErrorDetail(err);
+      setSnackbar({
+        open: true,
+        message: detail
+          ? `Quote generation failed: ${detail}. Please try again.`
+          : 'AI quote generation failed. Please try again, or simplify the description.',
+        severity: 'error',
+      });
     } finally { setAiGenerating(false); }
   };
 
@@ -367,13 +388,30 @@ export default function QuotesPage() {
 
   const handleStatusAction = async (quoteId: string, action: string, data?: any) => {
     try {
-      await apiRequest('POST', `/v1/quotes/${quoteId}/${action}`, data || {});
+      const res = await apiRequest('POST', `/v1/quotes/${quoteId}/${action}`, data || {});
+      const result = await res.json().catch(() => ({}));
+      const successMessages: Record<string, string> = {
+        'accept': 'Quote marked as accepted',
+        'decline': 'Quote marked as declined',
+        'convert-to-invoice': result.invoice_number
+          ? `Invoice ${result.invoice_number} created — see Finance → Invoices`
+          : 'Invoice created — see Finance → Invoices',
+      };
+      setSnackbar({ open: true, message: successMessages[action] || 'Done', severity: 'success' });
       fetchQuotes();
       if (selectedQuote?.id === quoteId) {
-        const res = await apiRequest('GET', `/v1/quotes/${quoteId}`);
-        setSelectedQuote(await res.json());
+        const refreshed = await apiRequest('GET', `/v1/quotes/${quoteId}`);
+        setSelectedQuote(await refreshed.json());
       }
-    } catch {}
+    } catch (err: any) {
+      console.error(`Quote action '${action}' failed:`, err);
+      const detail = apiErrorDetail(err);
+      setSnackbar({
+        open: true,
+        message: detail ? `Action failed: ${detail}` : 'Action failed. Please try again.',
+        severity: 'error',
+      });
+    }
   };
 
   const openDetail = async (quoteId: string) => {
@@ -1079,6 +1117,7 @@ export default function QuotesPage() {
                 <>
                   <Button size="small" variant="contained" onClick={() => openEdit(selectedQuote.id)} startIcon={<EditIcon />} sx={{ background: 'rgba(255,255,255,0.08)' }}>Edit</Button>
                   <Button size="small" variant="contained" onClick={() => openSendDialog(selectedQuote)} startIcon={<SendIcon />} sx={{ background: '#7c5cfc', '&:hover': { background: '#6a4de0' } }}>Send Quote</Button>
+                  <Button size="small" variant="contained" onClick={() => handleStatusAction(selectedQuote.id, 'convert-to-invoice')} sx={{ background: 'rgba(45,212,196,0.15)', color: '#2dd4c4' }}>Convert to Invoice</Button>
                   <Button size="small" color="error" onClick={() => handleDeleteQuote(selectedQuote.id)} startIcon={<DeleteIcon />}>Delete</Button>
                 </>
               )}
@@ -1088,6 +1127,7 @@ export default function QuotesPage() {
                   <Button size="small" variant="contained" onClick={() => handleStatusAction(selectedQuote.id, 'decline')} sx={{ background: 'rgba(248,113,113,0.15)', color: '#f87171' }}>Mark Declined</Button>
                   <Button size="small" onClick={() => openEdit(selectedQuote.id)} startIcon={<EditIcon />}>Edit</Button>
                   <Button size="small" onClick={() => openSendDialog(selectedQuote)} startIcon={<SendIcon />}>Resend</Button>
+                  <Button size="small" variant="contained" onClick={() => handleStatusAction(selectedQuote.id, 'convert-to-invoice')} sx={{ background: 'rgba(45,212,196,0.15)', color: '#2dd4c4' }}>Convert to Invoice</Button>
                 </>
               )}
               {selectedQuote.status === 'accepted' && (

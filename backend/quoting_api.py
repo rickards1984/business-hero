@@ -1064,14 +1064,17 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
                     "Authorization": f"Bearer {openai_key}",
                     "Content-Type": "application/json",
                 },
+                # GPT-5-family models reject `temperature` (only the default is
+                # supported) and `max_tokens` (renamed `max_completion_tokens`).
+                # `max_completion_tokens` is also accepted by GPT-4o-family, so
+                # this payload is safe for any QUOTE_AI_MODEL setting.
                 json={
                     "model": QUOTE_AI_MODEL,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_content},
                     ],
-                    "temperature": 0.3,
-                    "max_tokens": 4096,
+                    "max_completion_tokens": 4096,
                     "response_format": {"type": "json_object"},
                 },
             )
