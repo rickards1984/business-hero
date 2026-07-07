@@ -516,11 +516,13 @@ async def receptionist_incoming_call(request: Request):
     if not host:
         host = str(request.base_url).replace("http://", "").replace("https://", "").rstrip("/")
 
-    # Twilio can't sign WebSocket handshakes, so the stream URL carries a
+    # Twilio can't sign WebSocket handshakes, so the stream carries a
     # short-lived token bound to this CallSid (verified in /media-stream).
+    # NB: Twilio drops query strings on <Stream> URLs, so the token must
+    # travel as a <Parameter> (arrives in the start event's customParameters).
     stream_token = make_stream_token(call_sid)
-    ws_url = f"wss://{host}/v1/receptionist/media-stream?token={stream_token}"
-    logger.info(f"[Receptionist] Media stream WebSocket URL: wss://{host}/v1/receptionist/media-stream?token=<redacted>")
+    ws_url = f"wss://{host}/v1/receptionist/media-stream"
+    logger.info(f"[Receptionist] Media stream WebSocket URL: {ws_url}")
 
     vr = VoiceResponse()
     connect = Connect()
@@ -528,6 +530,7 @@ async def receptionist_incoming_call(request: Request):
     stream.parameter(name="business_id", value=business_id)
     stream.parameter(name="caller_number", value=from_number)
     stream.parameter(name="call_sid", value=call_sid)
+    stream.parameter(name="token", value=stream_token)
     vr.append(connect)
 
     logger.info(f"[Receptionist] TwiML response sent for CallSid: {call_sid}")
@@ -576,6 +579,9 @@ async def receptionist_media_stream(ws: WebSocket):
             business_id = custom_params.get("business_id")
             caller_number = custom_params.get("caller_number", "Unknown")
             call_sid = custom_params.get("call_sid", "")
+            # Twilio delivers <Parameter> values here; the query-param
+            # fallback keeps the endpoint testable locally without Twilio.
+            stream_token = custom_params.get("token") or ws.query_params.get("token")
             logger.info(
                 f"[Receptionist WS] Stream started — business={business_id}, "
                 f"caller={caller_number}, callSid={call_sid}, streamSid={stream_sid}"
@@ -586,10 +592,11 @@ async def receptionist_media_stream(ws: WebSocket):
             return
 
         # Only streams initiated by our own (signature-validated) /incoming-call
-        # may proceed: the token in the wss URL must be valid, unexpired, and
-        # minted for this exact CallSid. Blocks strangers from claiming an
-        # arbitrary business_id and burning Realtime minutes as that business.
-        if not verify_stream_token(ws.query_params.get("token"), call_sid, ws):
+        # may proceed: the stream token from customParameters must be valid,
+        # unexpired, and minted for this exact CallSid. Blocks strangers from
+        # claiming an arbitrary business_id and burning Realtime minutes as
+        # that business.
+        if not verify_stream_token(stream_token, call_sid, ws):
             await ws.close(code=1008, reason="Invalid stream token")
             return
 
