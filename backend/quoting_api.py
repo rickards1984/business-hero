@@ -593,6 +593,13 @@ def _get_quote_pdf_data(session, quote_id: str, business_id: str):
     ).fetchone()
 
     quote_dict = _row_to_quote(quote_row)
+    # The PDF header falls back to quote["business_name"] when quote_settings
+    # has no company_name — populate it from the business record.
+    biz_row = session.execute(
+        text("SELECT name FROM businesses WHERE id = :bid"),
+        {"bid": business_id},
+    ).fetchone()
+    quote_dict["business_name"] = biz_row[0] if biz_row else None
     items_list = [
         {
             "description": i.description,
