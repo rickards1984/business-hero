@@ -15,3 +15,4 @@ ios/App/Pods/
 ios/DerivedData/
 current_live_schema.sql
 live_state/
+.venv/

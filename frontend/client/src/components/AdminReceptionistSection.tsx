@@ -25,7 +25,6 @@ import {
 } from '@mui/material';
 import {
   SmartToy as SmartToyIcon,
-  Phone as PhoneIcon,
   Edit as EditIcon,
   Delete as DeleteIcon,
   Add as AddIcon,
@@ -117,7 +116,7 @@ export default function AdminReceptionistSection({ businessId, featureFlags, onF
   const [config, setConfig] = useState<ReceptionistConfig | null>(null);
   const [kbItems, setKbItems] = useState<KBItem[]>([]);
   const [calls, setCalls] = useState<ReceptionistCall[]>([]);
-  const [voices, setVoices] = useState<{ id: string; name: string; description: string }[]>([]);
+  const [, setVoices] = useState<{ id: string; name: string; description: string }[]>([]);
   const [presets, setPresets] = useState<Array<{
     id: string;
     label: string;
@@ -494,7 +493,6 @@ export default function AdminReceptionistSection({ businessId, featureFlags, onF
                     const items: React.ReactNode[] = [];
                     for (const g of ordered) {
                       items.push(
-                        // @ts-expect-error MUI Select accepts ListSubheader as child
                         <MenuItem key={`__g_${g}`} disabled sx={{ opacity: 1, fontWeight: 700 }}>
                           {g}
                         </MenuItem>,

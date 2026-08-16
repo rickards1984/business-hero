@@ -19,7 +19,7 @@ import secrets
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session
 from sqlalchemy import text

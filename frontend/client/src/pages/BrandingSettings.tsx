@@ -208,7 +208,7 @@ export default function BrandingSettings() {
       const logoPath = `${business.id}/logo_${timestamp}.${ext}`;
 
       // Upload to Supabase Storage
-      const { data: uploadData, error: uploadError } = await supabase.storage
+      const { error: uploadError } = await supabase.storage
         .from('logos')
         .upload(logoPath, file, {
           cacheControl: '3600',

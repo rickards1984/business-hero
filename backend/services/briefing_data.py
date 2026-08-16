@@ -409,7 +409,7 @@ async def gather_business_data(
 
         if not cache_used:
             # No cache available — fall back to transaction-based sums
-            logger.info(f"[Briefing Data] No cached financial data, falling back to transaction sums")
+            logger.info("[Briefing Data] No cached financial data, falling back to transaction sums")
             txns_rows = session.execute(
                 text("""
                     SELECT id, amount, type, transaction_date

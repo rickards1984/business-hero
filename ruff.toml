@@ -1,0 +1,7 @@
+# Business Hero — ruff config.
+# Gating on real errors only (unused/undefined names, syntax errors) until
+# after launch. Style/modernization rules (import sorting, Optional -> |None,
+# etc.) are noise right now — widen this once the money-engine work lands.
+[lint]
+select = ["F", "E9"]
+ignore = ["B008"]  # Depends() in argument defaults is the correct FastAPI idiom.

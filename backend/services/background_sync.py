@@ -11,10 +11,10 @@ user-facing API requests.
 
 import json
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 from sqlalchemy import text
-from sqlmodel import Session, select
+from sqlmodel import select
 
 logger = logging.getLogger("background_sync")
 

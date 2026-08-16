@@ -21,7 +21,7 @@ from sqlmodel import Session, select
 
 from auth import get_user_business_context, require_feature
 from db import get_session, get_session_context
-from models import EmailAccount, EmailBriefing, EmailConnection, EmailDraft, EmailMessage, EmailOutbox, EmailSyncState
+from models import EmailAccount, EmailBriefing, EmailDraft, EmailMessage, EmailOutbox, EmailSyncState
 from schemas import (
     EmailConnectionPublic,
     EmailConnectionUpsert,
@@ -46,14 +46,12 @@ from .service import (
     get_supabase_admin_client,
     get_business_by_id,
     ensure_email_manager_role,
-    send_email_smtp,
     get_default_email_account,
     get_provider_for_account,
     generate_email_briefing_markdown,
     generate_email_reply_draft,
     generate_email_reply_drafts,
     analyze_email_batch,
-    get_or_create_smtp_account,
 )
 from providers.google_gmail import GoogleGmailProvider
 from providers.microsoft_graph import MicrosoftGraphProvider
@@ -1539,7 +1537,7 @@ async def google_oauth_callback(
         raise HTTPException(status_code=400, detail="Google profile email missing")
 
     token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in or 0)
-    rows = await admin.upsert_email_accounts(
+    await admin.upsert_email_accounts(
         {
             "provider": "google",
             "business_id": payload["business_id"],
@@ -1613,7 +1611,7 @@ async def microsoft_oauth_callback(
         raise HTTPException(status_code=400, detail="Microsoft profile email missing")
 
     token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in or 0)
-    rows = await admin.upsert_email_accounts(
+    await admin.upsert_email_accounts(
         {
             "provider": "microsoft",
             "business_id": payload["business_id"],

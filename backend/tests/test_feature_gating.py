@@ -22,9 +22,20 @@ class FakeSession:
         self.is_admin = is_admin
 
     def exec(self, statement, params=None):
-        if isinstance(statement, TextClause) and "platform_admins" in statement.text:
-            return FakeResult(1 if self.is_admin else None)
+        # ORM-style path: session.exec(select(Business)...).first()
         return FakeResult(self.business)
+
+    def execute(self, statement, params=None):
+        # Core-style path: is_platform_admin_user() does
+        # session.execute(text("SELECT 1 FROM platform_admins WHERE user_id = :user_id ..."), {"user_id": ...}).first()
+        # Assert the real call shape so this fake can't rubber-stamp a query
+        # it was never actually given.
+        assert isinstance(statement, TextClause), f"expected TextClause, got {type(statement)}"
+        assert "platform_admins" in statement.text
+        assert params is not None and params.get("user_id"), "user_id must be bound as a param"
+        # Row(1) for a match, None for no row — the same shape
+        # `.first()` returns on a real SQLAlchemy CursorResult.
+        return FakeResult((1,) if self.is_admin else None)
 
 
 class TestFeatureGating(unittest.TestCase):

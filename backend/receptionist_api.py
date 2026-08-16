@@ -6,15 +6,18 @@ Handles config, knowledge base, voice options, call history, stats, and admin op
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from collections import OrderedDict
 
 import pytz
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from rate_limiting import limiter, LIMIT_TTS
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlmodel import Session, SQLModel, Field as SQLField, select
-from sqlalchemy import Column, text
+from sqlalchemy import Column
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 
 from db import get_session
@@ -25,14 +28,11 @@ from services.voice_instructions import (
 )
 from services.voice_presets import (
     DEFAULT_FALLBACK_VOICE,
-    DEFAULT_PRESET_ID,
-    KNOWN_STABLE_REALTIME_VOICES,
     VOICE_PRESETS,
     get_preset_by_id,
     resolve_preset,
 )
 from auth import (
-    get_user_business_context,
     get_platform_admin_context,
     is_platform_admin_user,
 )

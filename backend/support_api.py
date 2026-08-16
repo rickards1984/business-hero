@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 from typing import Optional, List, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from rate_limiting import limiter, LIMIT_AI_CHAT
 from pydantic import BaseModel
 from sqlmodel import Session

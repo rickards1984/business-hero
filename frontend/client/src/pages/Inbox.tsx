@@ -24,7 +24,6 @@ import {
   Sync as SyncIcon,
   AutoAwesome as AnalyzeIcon,
   Reply as ReplyIcon,
-  Archive as ArchiveIcon,
   AttachFile as AttachmentIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';

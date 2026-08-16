@@ -80,6 +80,7 @@ interface BusinessSummary {
   plan_tier: string | null;
   is_active: boolean | null;
   subscription_status: string | null;
+  feature_flags?: Record<string, any>;
   awaz_connected: boolean;
   email_connected: boolean;
   calendar_connected: boolean;

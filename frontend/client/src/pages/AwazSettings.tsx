@@ -146,7 +146,7 @@ export default function AwazSettings() {
           variant="outlined"
           startIcon={<ArrowBackIcon />}
           onClick={() => navigate('/app')}
-          fullWidth={{ xs: true, sm: false }}
+          sx={{ width: { xs: '100%', sm: 'auto' } }}
         >
           Back to Dashboard
         </Button>

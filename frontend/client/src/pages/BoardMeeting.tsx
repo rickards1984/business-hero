@@ -4,8 +4,8 @@
  * Tab strip with: Overview (default), Settings, History, Goals, Action Items.
  * Tier-gated: starter/paused see UpgradePrompt; pro/business/beta see the hub.
  */
-import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Alert,
   Box,
@@ -49,7 +49,6 @@ interface BoardMeetingProps {
 
 export default function BoardMeeting({ embedded = false }: BoardMeetingProps) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
 
   const initialTab = (searchParams.get('tab') as TabKey) || 'overview';
   const [tab, setTab] = useState<TabKey>(

@@ -27,12 +27,12 @@ async def generate_quote_pdf(
     """
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
-    from reportlab.lib.colors import HexColor, black, white
+    from reportlab.lib.colors import HexColor, white
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
     )
-    from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
+    from reportlab.lib.enums import TA_RIGHT, TA_CENTER
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -46,7 +46,7 @@ async def generate_quote_pdf(
 
     primary = HexColor('#7c5cfc')
     dark_bg = HexColor('#1a1c22')
-    light_text = HexColor('#e8e6e1')
+    light_text = HexColor('#e8e6e1')  # noqa: F841  # TODO(day2): defined but never applied to a style; header-on-dark_bg already uses `white` so no readability bug today, but this looks like unfinished palette wiring — confirm whether it's needed before deleting.
     muted = HexColor('#6b7280')
     border_color = HexColor('#e5e7eb')
     section_bg = HexColor('#f9fafb')

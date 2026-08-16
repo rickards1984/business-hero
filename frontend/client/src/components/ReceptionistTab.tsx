@@ -23,7 +23,6 @@ import {
   Switch,
   FormControlLabel,
   Divider,
-  Tooltip,
   Collapse,
 } from '@mui/material';
 import {
@@ -38,7 +37,6 @@ import {
   Save as SaveIcon,
   CheckCircle as CheckCircleIcon,
   SwapHoriz as SwapHorizIcon,
-  MicNone as MicNoneIcon,
   RecordVoiceOver as RecordVoiceOverIcon,
   AccessTime as AccessTimeIcon,
   MenuBook as MenuBookIcon,
@@ -189,14 +187,14 @@ function renderPresetMenuItems(
   return items;
 }
 
-export default function ReceptionistTab({ businessId, onViewCalls }: ReceptionistTabProps) {
+export default function ReceptionistTab({ onViewCalls }: ReceptionistTabProps) {
   // ---- State ----
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [config, setConfig] = useState<ReceptionistConfig | null>(null);
   const [configExists, setConfigExists] = useState(true);
   const [stats, setStats] = useState<ReceptionistStats | null>(null);
-  const [voices, setVoices] = useState<VoiceOption[]>([]);
+  const [, setVoices] = useState<VoiceOption[]>([]);
   // Accent-aware presets — these are the user-facing voice options now.
   // The plain `voices` list above is kept for backwards compatibility
   // (some older form code references it for display metadata).

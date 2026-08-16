@@ -7,9 +7,8 @@ import logging
 from datetime import date as date_cls, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
-from pydantic import BaseModel
 from sqlalchemy import text
 from sqlmodel import Session
 
@@ -17,7 +16,6 @@ from db import get_session
 from auth import get_user_business_context, get_platform_admin_context
 
 from services.briefing_data import gather_business_data
-from services.briefing_generator import generate_daily_pulse, generate_weekly_briefing
 from services.whatsapp_service import send_whatsapp_message
 from twilio_security import require_valid_twilio_signature
 from rate_limiting import limiter, LIMIT_WEBHOOK_IP, ip_key
@@ -576,7 +574,7 @@ async def whatsapp_webhook(request: Request):
 
         return Response(content="", status_code=200)
 
-    except Exception as exc:
+    except Exception:
         _logger.exception(
             "[WhatsApp Webhook] Unhandled exception — returning 200 "
             "to Twilio to prevent retry. Investigate immediately."

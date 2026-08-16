@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import time as _time_module
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text

@@ -4,7 +4,7 @@ Called by other parts of the app when alert-worthy events happen.
 """
 
 import logging
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 from sqlalchemy import text
 

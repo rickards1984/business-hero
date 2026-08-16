@@ -413,7 +413,7 @@ async def handle_receptionist_function_call(
             start_dt = _datetime.fromisoformat(f"{date_str}T{time_str}:00")
             end_dt = start_dt + _timedelta(minutes=duration)
 
-            desc_parts = [f"Booked by AI receptionist.", f"Caller: {caller_name}"]
+            desc_parts = ["Booked by AI receptionist.", f"Caller: {caller_name}"]
             if caller_email:
                 desc_parts.append(f"Email: {caller_email}")
             if notes:

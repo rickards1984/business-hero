@@ -7,7 +7,7 @@ as oauth_utils.py (used for Google/Microsoft email OAuth).
 import os
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
+from typing import Tuple
 
 import httpx
 

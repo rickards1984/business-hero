@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import LoadingMessage from '@/components/LoadingMessage';
 import {
   Box,
@@ -34,12 +34,6 @@ import {
   Step,
   StepLabel,
   Grid,
-  Divider,
-  LinearProgress,
-  Tooltip,
-  Menu,
-  ListItemIcon,
-  ListItemText,
   Checkbox,
   Snackbar,
 } from '@mui/material';
@@ -52,13 +46,9 @@ import {
   Clear as ClearIcon,
   Upload as UploadIcon,
   Add as AddIcon,
-  Edit as EditIcon,
   Delete as DeleteIcon,
-  MoreVert as MoreVertIcon,
   CheckCircle as CheckCircleIcon,
-  Category as CategoryIcon,
   Receipt as ReceiptIcon,
-  FilterList as FilterListIcon,
   FileDownload as FileDownloadIcon,
   Refresh as RefreshIcon,
   Close as CloseIcon,
@@ -690,8 +680,6 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
     }
   };
 
-  const connectXero = () => connectProvider('xero');
-
   const syncXeroNow = async () => {
     if (xeroSyncing) return;
     const providerLabel = accountingProvider === 'freeagent' ? 'FreeAgent'
@@ -1043,7 +1031,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
         {financialSummary && (xeroStatus?.connected || financialSummary.invoices.total_outstanding > 0) && (
           <Grid container spacing={2} sx={{ mb: 3 }}>
             {/* Bank Balance Card */}
-            <Grid item xs={12} sm={6} lg={3}>
+            <Grid size={{ xs: 12, sm: 6, lg: 3 }}>
               <Card sx={{ height: '100%' }}>
                 <CardContent>
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
@@ -1088,7 +1076,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
             </Grid>
 
             {/* Monthly P&L Card */}
-            <Grid item xs={12} sm={6} lg={3}>
+            <Grid size={{ xs: 12, sm: 6, lg: 3 }}>
               <Card sx={{ height: '100%' }}>
                 <CardContent>
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
@@ -1126,7 +1114,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
             </Grid>
 
             {/* Cash Flow Card */}
-            <Grid item xs={12} sm={6} lg={3}>
+            <Grid size={{ xs: 12, sm: 6, lg: 3 }}>
               <Card sx={{ height: '100%' }}>
                 <CardContent>
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
@@ -1169,7 +1157,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
             </Grid>
 
             {/* Outstanding Invoices Card — clickable, navigates to Invoices tab */}
-            <Grid item xs={12} sm={6} lg={3}>
+            <Grid size={{ xs: 12, sm: 6, lg: 3 }}>
               <Card
                 sx={{
                   height: '100%',
@@ -1236,7 +1224,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
             const net = pnl?.net_profit ?? summary?.totals.net ?? (income - expenses);
             return (
               <>
-                <Grid item xs={12} md={4}>
+                <Grid size={{ xs: 12, md: 4 }}>
                   <Card sx={{ height: '100%' }}>
                     <CardContent>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
@@ -1251,7 +1239,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                     </CardContent>
                   </Card>
                 </Grid>
-                <Grid item xs={12} md={4}>
+                <Grid size={{ xs: 12, md: 4 }}>
                   <Card sx={{ height: '100%' }}>
                     <CardContent>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
@@ -1266,7 +1254,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                     </CardContent>
                   </Card>
                 </Grid>
-                <Grid item xs={12} md={4}>
+                <Grid size={{ xs: 12, md: 4 }}>
                   <Card sx={{ height: '100%' }}>
                     <CardContent>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
@@ -1444,7 +1432,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                     {/* Structured Sections */}
                     <Grid container spacing={2}>
                       {/* Financial Overview */}
-                      <Grid item xs={12} md={6}>
+                      <Grid size={{ xs: 12, md: 6 }}>
                         <Paper sx={{ p: 2, height: '100%' }}>
                           <Typography variant="subtitle1" fontWeight={600} gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                             📊 Financial Overview
@@ -1458,7 +1446,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                       </Grid>
                       
                       {/* Spending Analysis */}
-                      <Grid item xs={12} md={6}>
+                      <Grid size={{ xs: 12, md: 6 }}>
                         <Paper sx={{ p: 2, height: '100%' }}>
                           <Typography variant="subtitle1" fontWeight={600} gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                             💸 Spending Analysis
@@ -1472,7 +1460,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                       </Grid>
                       
                       {/* Suggestions */}
-                      <Grid item xs={12} md={6}>
+                      <Grid size={{ xs: 12, md: 6 }}>
                         <Paper sx={{ p: 2, height: '100%', borderLeft: '3px solid #10B981' }}>
                           <Typography variant="subtitle1" fontWeight={600} gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                             💡 Suggestions
@@ -1486,7 +1474,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                       </Grid>
                       
                       {/* Data Quality */}
-                      <Grid item xs={12} md={6}>
+                      <Grid size={{ xs: 12, md: 6 }}>
                         <Paper sx={{ p: 2, height: '100%', borderLeft: '3px solid #F59E0B' }}>
                           <Typography variant="subtitle1" fontWeight={600} gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                             ⚠️ Data Quality
@@ -1660,7 +1648,7 @@ const OverviewTab: React.FC<{ summary: Summary | null }> = ({ summary }) => {
       {/* Row 1: Bar Chart + Line Chart (side by side) */}
       
       {/* Income vs Expenses Trend Bar Chart */}
-      <Grid item xs={12} md={6}>
+      <Grid size={{ xs: 12, md: 6 }}>
         <Paper sx={{ p: 3 }}>
           <Typography variant="h6" gutterBottom>
             Income vs Expenses Trend
@@ -1703,7 +1691,7 @@ const OverviewTab: React.FC<{ summary: Summary | null }> = ({ summary }) => {
       </Grid>
 
       {/* Net Profit/Loss Trend Line Chart */}
-      <Grid item xs={12} md={6}>
+      <Grid size={{ xs: 12, md: 6 }}>
         <Paper sx={{ p: 3 }}>
           <Typography variant="h6" gutterBottom>
             Net Profit/Loss Trend
@@ -1760,7 +1748,7 @@ const OverviewTab: React.FC<{ summary: Summary | null }> = ({ summary }) => {
       {/* Row 2: Pie Charts with side legends */}
       
       {/* Income by Category */}
-      <Grid item xs={12} md={6}>
+      <Grid size={{ xs: 12, md: 6 }}>
         <Paper sx={{ p: 3 }}>
           <Typography variant="h6" gutterBottom>
             Income by Category
@@ -1819,7 +1807,7 @@ const OverviewTab: React.FC<{ summary: Summary | null }> = ({ summary }) => {
       </Grid>
 
       {/* Expenses by Category */}
-      <Grid item xs={12} md={6}>
+      <Grid size={{ xs: 12, md: 6 }}>
         <Paper sx={{ p: 3 }}>
           <Typography variant="h6" gutterBottom>
             Expenses by Category
@@ -2386,7 +2374,7 @@ const CategoriesTab: React.FC<{ categories: Category[]; onRefresh: () => void }>
   onRefresh,
 }) => {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
-  const [newCategory, setNewCategory] = useState({ name: '', type: 'expense' as const, color: '#6B7280' });
+  const [newCategory, setNewCategory] = useState<{ name: string; type: 'income' | 'expense'; color: string }>({ name: '', type: 'expense', color: '#6B7280' });
   const [saving, setSaving] = useState(false);
 
   const incomeCategories = categories.filter((c) => c.type === 'income');
@@ -2423,7 +2411,7 @@ const CategoriesTab: React.FC<{ categories: Category[]; onRefresh: () => void }>
       </Box>
 
       <Grid container spacing={3}>
-        <Grid item xs={12} md={6}>
+        <Grid size={{ xs: 12, md: 6 }}>
           <Card>
             <CardContent>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
@@ -2456,7 +2444,7 @@ const CategoriesTab: React.FC<{ categories: Category[]; onRefresh: () => void }>
           </Card>
         </Grid>
 
-        <Grid item xs={12} md={6}>
+        <Grid size={{ xs: 12, md: 6 }}>
           <Card>
             <CardContent>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
@@ -2704,7 +2692,7 @@ const UploadDialog: React.FC<{
             </Alert>
 
             <Grid container spacing={2} sx={{ mb: 3 }}>
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel>Date Column *</InputLabel>
                   <Select
@@ -2719,7 +2707,7 @@ const UploadDialog: React.FC<{
                   </Select>
                 </FormControl>
               </Grid>
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel>Description Column *</InputLabel>
                   <Select
@@ -2734,7 +2722,7 @@ const UploadDialog: React.FC<{
                   </Select>
                 </FormControl>
               </Grid>
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel>Amount Column</InputLabel>
                   <Select
@@ -2749,7 +2737,7 @@ const UploadDialog: React.FC<{
                   </Select>
                 </FormControl>
               </Grid>
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel>Income Column (Credit)</InputLabel>
                   <Select
@@ -2764,7 +2752,7 @@ const UploadDialog: React.FC<{
                   </Select>
                 </FormControl>
               </Grid>
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel>Expense Column (Debit)</InputLabel>
                   <Select
@@ -2779,7 +2767,7 @@ const UploadDialog: React.FC<{
                   </Select>
                 </FormControl>
               </Grid>
-              <Grid item xs={12} sm={6}>
+              <Grid size={{ xs: 12, sm: 6 }}>
                 <FormControl fullWidth size="small">
                   <InputLabel>Reference Column</InputLabel>
                   <Select

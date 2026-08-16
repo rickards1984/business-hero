@@ -254,6 +254,7 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
 
   const handleMarkChased = async () => {
     if (!selectedInvoice) return;
+    setInvoiceActionLoading('chased');
     try {
       const response = await apiRequest('POST', `/v1/invoices/${selectedInvoice.id}/mark-chased`);
       const data = await response.json();
@@ -262,6 +263,8 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
       setSuccessMessage('Invoice marked as chased');
     } catch (err: any) {
       setError(err.message || 'Failed to mark invoice as chased');
+    } finally {
+      setInvoiceActionLoading(null);
     }
   };
 
@@ -346,7 +349,7 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
       if (response.ok) {
         await fetchInvoices();
         setSuccessMessage('Invoice marked as unpaid');
-        const data = await response.json();
+        await response.json();
         if (selectedInvoice && selectedInvoice.id === invoiceId) {
           setSelectedInvoice({ ...selectedInvoice, status: 'unpaid', paid_amount: null, paid_at: null });
         }
@@ -997,6 +1000,7 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
                       variant="outlined"
                       startIcon={<PreviewIcon />}
                       onClick={handleGetChaseDraft}
+                      disabled={invoiceActionLoading !== null}
                       sx={{ flex: 1 }}
                     >
                       Preview
@@ -1005,11 +1009,21 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
                       variant="contained"
                       startIcon={<SendIcon />}
                       onClick={handleSendChaseEmail}
+                      disabled={invoiceActionLoading !== null}
                       sx={{ flex: 1 }}
                     >
                       Send
                     </Button>
                   </Box>
+                  <Button
+                    variant="outlined"
+                    color="inherit"
+                    startIcon={invoiceActionLoading === 'chased' ? <CircularProgress size={20} /> : <CheckCircleIcon />}
+                    onClick={handleMarkChased}
+                    disabled={invoiceActionLoading !== null}
+                  >
+                    Mark Chased
+                  </Button>
                 </>
               )}
 

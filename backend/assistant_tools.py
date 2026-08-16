@@ -4,8 +4,7 @@ import os
 import re
 import concurrent.futures
 from datetime import datetime, timedelta
-from typing import Optional, List, Any
-from uuid import UUID
+from typing import Optional
 import pytz
 import httpx
 from cryptography.fernet import Fernet
@@ -969,7 +968,7 @@ def _extract_gmail_body(payload: dict) -> str:
     
     def get_body_from_part(part: dict) -> str:
         """Recursively extract body from message parts."""
-        mime_type = part.get("mimeType", "")
+        mime_type = part.get("mimeType", "")  # noqa: F841  # TODO(day2): unused — decode below doesn't gate on mime_type, so non-text parts (attachments) get base64-decoded and treated as UTF-8 body text. Confirm intended filter (text/plain, text/html) before wiring this back in.
         body = part.get("body", {})
         
         # If this part has data, decode it
@@ -1278,8 +1277,7 @@ def _get_email_detail(engine, business_id: str, args: dict) -> dict:
 
 def _fetch_gmail_single(engine, account_id: str, access_token: str, refresh_token_ciphertext: str, email_id: str) -> dict:
     """Fetch a single Gmail message in full."""
-    import base64
-    
+
     def make_request(token: str):
         return httpx.get(
             f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{email_id}",
@@ -2498,12 +2496,12 @@ def _send_invoice_chase(engine, business_id: str, args: dict) -> dict:
         access_token = _decrypt_token(token_ciphertext)
 
         if provider == "google":
-            send_result = _send_gmail_message(
+            _send_gmail_message(
                 engine, str(account_id), access_token, refresh_token_ciphertext,
                 customer_email, template["subject"], template["body"]
             )
         elif provider == "microsoft":
-            send_result = _send_microsoft_message(
+            _send_microsoft_message(
                 engine, str(account_id), access_token, refresh_token_ciphertext,
                 customer_email, template["subject"], template["body"]
             )

@@ -550,7 +550,7 @@ async def _send_daily_pulse(
 
     with get_session_context() as session:
         data = await gather_business_data(session, business_id, period="yesterday")
-    pulse_text = await generate_daily_pulse(business_name, owner_name, data)
+    pulse_text = await generate_daily_pulse(business_name, owner_name, data)  # noqa: F841  # TODO(day2): pulse_text generated then discarded; daily should mirror _send_weekly_briefing, which uses its generate_weekly_briefing() output. Live OpenAI cost per run with no output used.
 
     # Build structured variables for WhatsApp template
     calls = data.get("calls", {})

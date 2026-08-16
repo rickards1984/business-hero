@@ -8,7 +8,7 @@ import logging
 from typing import Optional
 
 from sqlalchemy import text
-from sqlmodel import Session, select
+from sqlmodel import select
 
 from db import get_session_transactional
 
@@ -46,14 +46,8 @@ def send_chase_for_invoice(
             if not inv_row[2]:  # customer_email
                 return (False, "Customer email not set")
 
-            biz_row = session.execute(
-                text("SELECT name FROM businesses WHERE id = :bid"),
-                {"bid": business_id},
-            ).fetchone()
-            business_name = biz_row[0] if biz_row else "Your Business"
-
             # Lazy imports to avoid circular dependency with main
-            from models import Invoice, Business, EmailAccount, EmailConnection, EmailOutbox
+            from models import Invoice, Business, EmailOutbox
             from main import (
                 get_email_account_for_sending,
                 generate_chase_email,

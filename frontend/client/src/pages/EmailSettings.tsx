@@ -13,7 +13,6 @@ import {
   Container,
   Snackbar,
   Chip,
-  Divider,
   Collapse,
   Dialog,
   DialogActions,
@@ -79,7 +78,7 @@ export default function EmailSettings() {
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [hasAccess, setHasAccess] = useState(false);
-  const [accounts, setAccounts] = useState<ConnectedAccount[]>([]);
+  const [, setAccounts] = useState<ConnectedAccount[]>([]);
   const [awazIntegration, setAwazIntegration] = useState<AwazIntegration | null>(null);
   const [awazLoading, setAwazLoading] = useState(false);
   const [awazError, setAwazError] = useState('');
@@ -146,7 +145,7 @@ export default function EmailSettings() {
         memberRows?.[0] ??
         null;
       if (!memberData) {
-        const { data: adminData, error: adminError } = await supabase
+        const { error: adminError } = await supabase
           .from('platform_admins')
           .select('user_id')
           .eq('user_id', user?.id)

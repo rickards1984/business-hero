@@ -20,7 +20,6 @@ import {
   DialogTitle,
   FormControl,
   IconButton,
-  InputLabel,
   MenuItem,
   Select,
   Snackbar,

@@ -9,7 +9,7 @@ import {
 import {
   Add as AddIcon, Search as SearchIcon, Clear as ClearIcon,
   Edit as EditIcon, Delete as DeleteIcon, ContentCopy as DuplicateIcon,
-  AutoAwesome as AIIcon, ChevronRight as ChevronRightIcon,
+  AutoAwesome as AIIcon,
   Close as CloseIcon, ExpandMore as ExpandMoreIcon, ExpandLess as ExpandLessIcon,
   Send as SendIcon, PictureAsPdf as PdfIcon, Visibility as PreviewIcon,
   WhatsApp as WhatsAppIcon, Email as EmailIcon, Download as DownloadIcon,
@@ -104,7 +104,8 @@ const STATUS_COLORS: Record<string, { bg: string; color: string }> = {
 };
 
 const UNIT_OPTIONS = ['each', 'hours', 'days', 'sqm', 'lm', 'kg', 'cubic_m', 'litres', 'tonnes'];
-const CATEGORY_OPTIONS = ['labour', 'materials', 'equipment', 'subcontractor', 'other'];
+// TODO(day2-vat): wire category picker — needed for CIS labour/materials split.
+// const CATEGORY_OPTIONS = ['labour', 'materials', 'equipment', 'subcontractor', 'other'];
 const INDUSTRY_OPTIONS = ['general', 'construction', 'plumbing', 'electrical', 'landscaping', 'cleaning', 'fitness', 'other'];
 
 // apiRequest throws "<status>: <json body>" — extract the backend's
@@ -141,14 +142,14 @@ function StatusBadge({ status }: { status: string }) {
 
 export default function QuotesPage() {
   const { data: me } = useMe();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
   const businessId = me?.id;
 
   const [view, setView] = useState<'list' | 'create' | 'edit' | 'detail' | 'settings'>(
     (searchParams.get('view') as any) || 'list'
   );
   const [quotes, setQuotes] = useState<Quote[]>([]);
-  const [statusCounts, setStatusCounts] = useState<Record<string, number>>({});
+  const [, setStatusCounts] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('');
   const [search, setSearch] = useState('');

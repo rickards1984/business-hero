@@ -15,7 +15,7 @@ from typing import Tuple
 
 import httpx
 
-from email_utils import encrypt_str, decrypt_str
+from email_utils import encrypt_str
 
 _logger = logging.getLogger("quickbooks_oauth")
 

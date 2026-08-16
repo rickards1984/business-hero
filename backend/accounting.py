@@ -9,20 +9,14 @@ import json
 import logging
 import math
 from datetime import datetime, date
-from decimal import Decimal
-from typing import Optional, List, Dict, Any
-from uuid import UUID
+from typing import Optional, List
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
-from sqlmodel import Session, select, func, or_, and_
+from sqlmodel import Session
 from pydantic import BaseModel
 
-from models import Business
 from db import get_session
 from dependencies import get_current_user_and_business
-
-import os
 
 _logger = logging.getLogger("accounting")
 
@@ -392,8 +386,7 @@ async def bulk_delete_transactions(
 ):
     """Soft delete multiple transactions at once."""
     _, business = user_business
-    business_id = str(business.id)
-    
+
     from sqlalchemy import text
     
     result = session.execute(
@@ -756,8 +749,8 @@ async def get_accounting_summary(
     _, business = user_business
     
     from sqlalchemy import text
-    from datetime import datetime, timedelta
-    
+    from datetime import timedelta
+
     # Determine date range
     today = date.today()
     
@@ -902,7 +895,6 @@ async def get_ai_insights(
     business_id = str(business.id)
     
     from sqlalchemy import text
-    from datetime import datetime, timedelta
     
     # Determine date range based on period
     today = date.today()

@@ -103,9 +103,9 @@ function TabPanel(props: TabPanelProps) {
 
 export default function BusinessDashboard() {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
   const { user, signOut, loading: authLoading } = useAuth();
-  const { data: businessProfile, isLoading: profileLoading } = useMe();
+  const { data: businessProfile } = useMe();
 
   useEffect(() => {
     if (businessProfile?.brand_color) {
@@ -229,21 +229,6 @@ export default function BusinessDashboard() {
     setCalls(data || []);
   };
 
-  // Helper function to format relative time
-  const formatRelativeTime = (dateString: string) => {
-    const date = new Date(dateString);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
-    
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    if (diffDays < 7) return `${diffDays}d ago`;
-    return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
-  };
 
   // Handler to archive/unarchive a call
   const handleArchiveCall = async (callId: string) => {

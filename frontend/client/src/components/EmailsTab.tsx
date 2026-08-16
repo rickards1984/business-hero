@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import LoadingMessage from '@/components/LoadingMessage';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -11,7 +11,6 @@ import {
   Button,
   InputAdornment,
   Tooltip,
-  IconButton,
   Snackbar,
   Alert,
   Dialog,
@@ -38,7 +37,7 @@ import {
 } from '@/lib/emailApi';
 import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
-import { TASK_CATEGORIES, TASK_PRIORITIES, getCategoryColor } from '@/lib/taskConstants';
+import { TASK_CATEGORIES, TASK_PRIORITIES } from '@/lib/taskConstants';
 
 const CATEGORIES = [
   { key: 'all', label: 'All' },

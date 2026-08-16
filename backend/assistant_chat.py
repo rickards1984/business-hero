@@ -10,7 +10,7 @@ from openai import OpenAI
 from sqlalchemy import text
 from db import engine
 
-from supabase_auth import verify_supabase_token, SupabaseUser
+from supabase_auth import SupabaseUser
 from assistant_tools import TOOL_DEFINITIONS, execute_tool
 
 logger = logging.getLogger(__name__)

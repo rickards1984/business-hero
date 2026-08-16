@@ -23,7 +23,6 @@ import {
   Snackbar,
   Alert,
   Chip,
-  Divider,
 } from '@mui/material';
 import PhoneInput from './PhoneInput';
 import {
@@ -53,7 +52,7 @@ function TestButton({
   onSend,
 }: {
   label: string;
-  onSend: () => Promise<void>;
+  onSend: () => Promise<unknown>;
 }) {
   const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
 
@@ -85,7 +84,8 @@ function TestButton({
   );
 }
 
-function formatMessageTime(createdAt: string): string {
+function formatMessageTime(createdAt: string | null): string {
+  if (!createdAt) return '';
   try {
     const d = new Date(createdAt);
     const now = new Date();

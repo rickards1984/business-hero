@@ -8,7 +8,6 @@ import json
 import asyncio
 import logging
 import base64
-from typing import Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 router = APIRouter()

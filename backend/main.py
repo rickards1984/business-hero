@@ -15,10 +15,10 @@ from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 from cryptography.fernet import Fernet
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel as PydanticBaseModel, ValidationError
 from sqlmodel import Session, select
 from sqlalchemy import text, func, or_
@@ -42,11 +42,8 @@ from models import (
     EmailAccount,
     EmailMessage,
     EmailSyncState,
-    EmailBriefing,
-    EmailDraft,
     SupportTicket,
     StripeEvent,
-    XeroConnection,
 )
 from schemas import (
     BusinessCreate, BusinessResponse, BusinessListItem, BusinessProfile,
@@ -58,23 +55,18 @@ from schemas import (
     IntegrationResponse, IntegrationListResponse, IntegrationUpdate,
     LogoUploadResponse, LogoUpdateRequest,
     Invoice as InvoiceSchema, InvoiceListResponse, ImportResponse, ChaseDraftResponse,
-    EmailConnectionPublic, EmailConnectionUpsert, EmailTestResponse,
     SendChaseRequest, SendChaseResponse, BulkSendRequest, BulkSendResponse,
-    EmailOutboxItem, EmailOutboxListResponse,
-    EmailMessageItem, EmailMessageListResponse, EmailSyncRunResponse,
-    EmailBriefingRequest, EmailBriefingResponse,
-    EmailDraftRequest, EmailDraftResponse, EmailDraftSendResponse,
+    EmailSyncRunResponse,
     SupportTicketCreateAdmin, SupportTicketUpdateAdmin,
     BillingCheckoutRequest, BillingSessionResponse, BillingPortalResponse,
 )
-from auth import verify_master_key, get_current_business, get_access_token, get_user_auth_context, get_user_business_context, get_platform_admin_context, is_platform_admin_user
+from auth import verify_master_key, get_access_token, get_user_auth_context, get_user_business_context, get_platform_admin_context, is_platform_admin_user
 from openai_utils import generate_call_summary
 from supabase_auth import verify_supabase_token
 from slowapi.errors import RateLimitExceeded
 from rate_limiting import limiter, LIMIT_AI_CHAT, LIMIT_TTS, LIMIT_SYNC, RATE_LIMIT_MESSAGE
 from assistant_chat import process_chat_message, get_business_for_user
 from app.email.service import (
-    get_or_create_smtp_account,
     send_email_smtp,
     get_business_by_id,
     get_default_email_account,
@@ -94,7 +86,7 @@ from providers.xero import (
     XeroProvider, get_tenant_connections, map_xero_transaction_to_business_hero,
     map_xero_invoice_to_business_hero, XeroAuthError,
 )
-from providers.xero_oauth import get_xero_auth_url, exchange_code_for_tokens, get_valid_xero_access_token
+from providers.xero_oauth import get_xero_auth_url, exchange_code_for_tokens
 from email_utils import encrypt_str, decrypt_str
 
 
@@ -1317,7 +1309,6 @@ async def get_logo_upload_url(
     This endpoint returns the path where the logo should be uploaded.
     The actual upload should be done via Supabase Storage client in the frontend.
     """
-    import uuid
     from datetime import datetime, timedelta
     
     # Generate unique filename: {business_id}/logo_{timestamp}.{ext}
@@ -3682,14 +3673,12 @@ async def sync_xero_transactions(
     tenant_id = row[1]
     tenant_name = row[2]
     token_ciphertext = row[3]
-    refresh_token_ciphertext = row[4]
     token_expires_at = row[5]
     last_sync_at = row[6]
 
     # 2. Get valid access token (refresh if expired)
     try:
         access_token = decrypt_str(token_ciphertext)
-        refresh_token = decrypt_str(refresh_token_ciphertext)
 
         now = datetime.now(timezone.utc)
         expires_at = token_expires_at
@@ -4033,12 +4022,10 @@ async def sync_xero_invoices(
     tenant_id = row[1]
     tenant_name = row[2]
     token_ciphertext = row[3]
-    refresh_token_ciphertext = row[4]
     token_expires_at = row[5]
 
     try:
         access_token = decrypt_str(token_ciphertext)
-        refresh_token = decrypt_str(refresh_token_ciphertext)
 
         now = datetime.now(timezone.utc)
         expires_at = token_expires_at
@@ -4396,7 +4383,6 @@ async def xero_financial_summary(
         connection_id = str(row[0])
         tenant_id = row[1]
         token_ciphertext = row[2]
-        refresh_token_ciphertext = row[3]
         token_expires_at = row[4]
 
         # Get valid access token (refresh if needed via coordinator)

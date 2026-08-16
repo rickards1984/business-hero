@@ -24,7 +24,7 @@ interface WhoAmIResult {
 }
 
 export default function DebugPanel() {
-  const { user, session } = useAuth();
+  const { user } = useAuth();
   const [whoami, setWhoami] = useState<WhoAmIResult | null>(null);
   const [whoamiError, setWhoamiError] = useState<string | null>(null);
   const [whoamiLoading, setWhoamiLoading] = useState(true);

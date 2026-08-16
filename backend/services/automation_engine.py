@@ -6,7 +6,6 @@ Evaluates trigger conditions and executes configured actions.
 import json
 import logging
 from datetime import datetime, timezone, date, timedelta
-from typing import List, Dict, Any
 
 from sqlalchemy import text
 
