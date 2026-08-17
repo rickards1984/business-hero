@@ -179,3 +179,73 @@ matters for chase-email tracking, but whatever was supposed to call this
 during SMTP account setup doesn't. Worth checking whether SMTP-connected
 businesses are actually missing outbox linkage today, or whether this was
 superseded by something else and is just dead.
+
+---
+
+# Findings — migration 030a staging rehearsal (2026-08-17)
+
+`backend/migrations/030a_pre_billing_security.sql` was rehearsed against
+`business-hero-staging` (`gzcrsrqmygublveuzqyg`) only, never prod. Full
+before-state captured at `audits/030a-staging-before.txt`. Sections 1–5
+applied and verified one at a time, then all five ROLLBACK blocks were
+tested (rolled back, diffed against the before-state, re-applied forward).
+
+## Bugs found in the ROLLBACK blocks, fixed in the migration file
+
+Three of the five `ROLLBACK` blocks did not reconstruct the true original
+state. All three are now fixed in `030a_pre_billing_security.sql`; re-run
+on staging afterward with zero remaining functional drift.
+
+1. **`ROLLBACK 4` — grants incomplete.** `stripe_events` originally held 7
+   privileges each for `anon` and `authenticated` (SELECT/INSERT/UPDATE/
+   DELETE/TRUNCATE/REFERENCES/TRIGGER). The rollback only restored 4 of
+   `authenticated`'s and none of `anon`'s. Fixed: restores all 7 to both
+   roles.
+2. **`ROLLBACK 4` — policy predicate incomplete.** The original
+   `stripe_events_member_access` policy was
+   `is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid())`
+   in both USING and WITH CHECK (copied verbatim from
+   `030a-staging-before.txt`). The rollback recreated it with only the
+   `is_business_member` half — a rolled-back migration would have quietly
+   revoked platform admins' access to the webhook audit table. Fixed:
+   predicate matches the original exactly.
+3. **`ROLLBACK 5` — spurious WITH CHECK.** The original `"Platform admins
+   full access to businesses"` policy had `with_check = null` (an ALL
+   policy with only USING; Postgres reuses USING for the write-check
+   implicitly). The rollback explicitly wrote a WITH CHECK clause
+   duplicating USING — behaviourally identical at runtime, but not a true
+   reconstruction of the original policy definition. Fixed: WITH CHECK
+   removed, matching the original's implicit form.
+
+Audited and confirmed already correct, no change: `ROLLBACK 1` (only ever
+needed to restore the 5 privileges Section 1 actually revoked — SELECT/
+TRIGGER on `businesses`/`business_members` were never touched by any
+section) and `ROLLBACK 2` (table-wide `UPDATE` grant restore matches the
+original's unrestricted column set exactly).
+
+`ROLLBACK 3`'s logic was always correct (same predicate, no `is_active`
+check) — only the function body's internal whitespace differed from the
+original's exact formatting. Reformatted to match byte-for-byte; no
+behavioural change.
+
+## Seed data used for the Section 3 behavioural proof — created and removed
+
+Staging's `business_members` table was empty (0 rows), so `VERIFY 3c`
+(smoke-test `is_business_member()` against a real member) had nothing to
+test against. Seeded one `businesses` row and three `business_members`
+rows, staging only, fabricated UUIDs, all text fields `rehearsal-`
+prefixed:
+
+- 1 business: `rehearsal-business-030a`
+- (a) active member, `user_id` set, `role='owner'`
+- (b) inactive member, `user_id` set, `is_active=false`
+- (c) pending invite, `user_id` NULL, `invited_email` set
+
+Used to prove: `is_business_member(active, biz) → true`,
+`is_business_member(inactive, biz) → false`, and the is_active flip
+(`true → false → true`) tracks live. All confirmed.
+
+**Removed after use** — `DELETE FROM business_members WHERE business_id = '<seed id>'`
+(3 rows) then `DELETE FROM businesses WHERE id = '<seed id>'` (1 row).
+Confirmed staging back to 0 rows in both tables post-cleanup. No rehearsal
+data remains on staging.
