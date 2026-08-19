@@ -107,16 +107,44 @@ parties unless permission is on file.
 
 > Keep this section current. It is the first thing a fresh session reads.
 
-**Now:** migration `030` — pre-billing security batch. Blocks Stripe.
-- Pin `business_id`, `role`, `user_id` in the `business_members.users_link_self`
-  WITH CHECK (currently only constrains email → cross-tenant pivot)
-- Add `is_active` to `is_business_member()` (deactivation currently revokes
-  nothing across 55 tables)
-- Revoke write grants on `businesses` / `business_members` / `stripe_events`
-  from `anon`; move the four admin `businesses` writes to backend endpoints
-- Lock `businesses.api_key` to owner
-- Tighten `stripe_events` to service-role
+**Applied to prod:** migration `030a` (pre-billing security) and `031`
+(money engine schema). Both rehearsed on staging first. Runbooks in
+`audits/030a-PROD-RUNBOOK.md` and `audits/031-PROD-RUNBOOK.md`.
 
-**Then:** money engine (Decimal, per-line VAT built jurisdiction-pluggable from
-the start, collision-safe invoice numbering) → manual invoices → branding and
-invoice PDF → Stripe with server-side enforcement → UI batch → final walkthrough.
+`031` added: `invoice_line_items`, `unit_cost` widened to `numeric(14,4)` on
+both line-item tables, per-line discount/apportionment/tax columns,
+`invoices.subtotal` / `tax_amount` / `related_invoice_id`,
+`businesses.region` / `tax_registered` / `tax_number`,
+`quote_settings.next_invoice_number` / `invoice_prefix`, and the partial
+unique index `UNIQUE (business_id, invoice_number) WHERE external_source IS
+NULL`. MSC's counter is seeded to 2.
+
+**Now:** money engine implementation — DONE, `./check.sh full` green,
+181 tests passing. New modules: `backend/services/money.py`,
+`invoice_numbering.py`, `region.py`. `parse_amount` fixed (was a stub that
+returned None for every input, so CSV invoice import had never worked).
+`quoting_api` create/update/convert now use Decimal throughout and honour
+the business's own tax rate.
+
+**The implementation requires 031.** It writes columns that do not exist
+before it. Do not run this code against a pre-031 database.
+
+**Next — needs a live walkthrough before anything else ships:**
+1. Convert a quote on New Body Gym and confirm the invoice number, the
+   stored line items and the VAT split
+2. Xero sync on New Body Gym — the one 031 change still unproven live, and
+   the partial unique index sits on the table the sync upserts into
+3. Chase email on an email-connected account — a chase sent from an account
+   with no email connection produced no error and no email, which looks like
+   a silent failure worth confirming
+
+**Then:** manual invoices → invoice PDF and branding (there is no invoice
+PDF at all today; `quote_pdf.py` has no sibling, and invoices have no
+preview or edit UI) → Stripe with server-side enforcement → the frontend
+batch: 108 hardcoded `£`, `assistant_chat.py`'s hardcoded 20% VAT, and
+wiring the region resolver into the PDFs.
+
+**Deliberately still open** (recorded in the spec's out-of-scope list):
+the seven independent total calculations are not yet consolidated, the
+`float` → `Decimal` conversion covers new and touched code only, and
+`markup_percentage` is stored but never totalled.

@@ -1,0 +1,191 @@
+state
+------------------------------------------------------------
+col   businesses.api_key text null=NO def=-
+col   businesses.brand_color text null=YES def='#3B82F6'::text
+col   businesses.cancel_at_period_end boolean null=NO def=false
+col   businesses.ceo_briefing_enabled boolean null=YES def=false
+col   businesses.created_at timestamp with time zone null=NO def=now()
+col   businesses.current_period_end timestamp with time zone null=YES def=-
+col   businesses.feature_flags jsonb null=NO def='{}'::jsonb
+col   businesses.id uuid null=NO def=gen_random_uuid()
+col   businesses.is_active boolean null=NO def=true
+col   businesses.last_stripe_event_at timestamp with time zone null=YES def=-
+col   businesses.limits jsonb null=NO def='{}'::jsonb
+col   businesses.logo_url text null=YES def=-
+col   businesses.name text null=NO def=-
+col   businesses.onboarded_by uuid null=YES def=-
+col   businesses.onboarding_completed boolean null=YES def=false
+col   businesses.onboarding_completed_at timestamp with time zone null=YES def=-
+col   businesses.owner_whatsapp text null=YES def=-
+col   businesses.plan_tier text null=NO def='starter'::text
+col   businesses.stripe_customer_id text null=YES def=-
+col   businesses.stripe_subscription_id text null=YES def=-
+col   businesses.subscription_status text null=YES def=-
+col   businesses.timezone text null=NO def='Europe/London'::text
+col   businesses.trial_ends_at timestamp with time zone null=YES def=-
+col   invoices.amount numeric(12,2) null=NO def=-
+col   invoices.amount_due numeric(12,2) null=YES def=NULL::numeric
+col   invoices.amount_paid numeric(12,2) null=YES def=0
+col   invoices.archived boolean null=YES def=false
+col   invoices.business_id uuid null=NO def=-
+col   invoices.chase_stage integer(32,0) null=NO def=0
+col   invoices.created_at timestamp with time zone null=NO def=now()
+col   invoices.currency text null=NO def='GBP'::text
+col   invoices.customer_email text null=YES def=-
+col   invoices.customer_name text null=NO def=-
+col   invoices.due_date date null=NO def=-
+col   invoices.external_id text null=YES def=-
+col   invoices.external_source text null=YES def=-
+col   invoices.id uuid null=NO def=gen_random_uuid()
+col   invoices.invoice_date date null=YES def=-
+col   invoices.invoice_number text null=NO def=-
+col   invoices.invoice_type text null=YES def='ACCREC'::text
+col   invoices.issue_date date null=YES def=-
+col   invoices.last_chased_at timestamp with time zone null=YES def=-
+col   invoices.paid_amount numeric(10,2) null=YES def=-
+col   invoices.paid_at timestamp with time zone null=YES def=-
+col   invoices.paid_date date null=YES def=-
+col   invoices.provider text null=YES def='xero'::text
+col   invoices.source text null=NO def='csv'::text
+col   invoices.source_ref text null=YES def=-
+col   invoices.status text null=NO def='unpaid'::text
+col   invoices.updated_at timestamp with time zone null=NO def=now()
+col   quote_line_items.category text null=NO def='general'::text
+col   quote_line_items.created_at timestamp with time zone null=NO def=now()
+col   quote_line_items.description text null=NO def=-
+col   quote_line_items.group_name text null=YES def=-
+col   quote_line_items.id uuid null=NO def=gen_random_uuid()
+col   quote_line_items.line_total numeric(12,2) null=NO def=0
+col   quote_line_items.markup_amount numeric(12,2) null=YES def=0
+col   quote_line_items.markup_percentage numeric(5,2) null=YES def=0
+col   quote_line_items.quantity numeric(12,3) null=NO def=1
+col   quote_line_items.quote_id uuid null=NO def=-
+col   quote_line_items.sort_order integer(32,0) null=YES def=0
+col   quote_line_items.unit text null=YES def='each'::text
+col   quote_line_items.unit_cost numeric(12,2) null=NO def=0
+col   quote_settings.business_id uuid null=NO def=-
+col   quote_settings.company_address text null=YES def=-
+col   quote_settings.company_email text null=YES def=-
+col   quote_settings.company_logo_url text null=YES def=-
+col   quote_settings.company_name text null=YES def=-
+col   quote_settings.company_phone text null=YES def=-
+col   quote_settings.company_registration text null=YES def=-
+col   quote_settings.created_at timestamp with time zone null=NO def=now()
+col   quote_settings.default_markup numeric(5,2) null=YES def=0
+col   quote_settings.default_tax_rate numeric(5,2) null=YES def=20.00
+col   quote_settings.default_terms text null=YES def='This quote is valid for 30 days from the date of issue. Payment terms: 50% deposit on acceptance, balance on completion.'::text
+col   quote_settings.default_valid_days integer(32,0) null=YES def=30
+col   quote_settings.id uuid null=NO def=gen_random_uuid()
+col   quote_settings.include_tax boolean null=YES def=true
+col   quote_settings.industry text null=YES def='general'::text
+col   quote_settings.labour_rates jsonb null=YES def='[]'::jsonb
+col   quote_settings.next_quote_number integer(32,0) null=YES def=1
+col   quote_settings.quote_prefix text null=YES def='QTE-'::text
+col   quote_settings.updated_at timestamp with time zone null=NO def=now()
+col   quote_settings.vat_number text null=YES def=-
+data  invoice INV-0001 src=quote ext=- amt=1860.60
+data  invoice INV-0001 src=xero ext=xero amt=1.05
+data  invoice INV-1001 src=csv ext=- amt=120.00
+data  invoice INV-1002 src=csv ext=- amt=560.00
+data  invoice INV-1003 src=csv ext=- amt=89.99
+data  qs 11111111-1111-1111-1111-111111111111 nextq=4
+data  qs 22222222-2222-2222-2222-222222222222 nextq=1
+data  unit_cost 3a25e428-e840-4bad-a2a9-1419a234e521 = 295.00
+data  unit_cost 46dba9a5-8bd4-4f3b-aa8f-b56cdfba6c93 = 99999999.99
+data  unit_cost 8fd5c338-89df-440e-b960-56d1c9656008 = 3.33
+data  unit_cost b0ed853e-f1fd-415c-b2ce-5c905ba7b260 = 3.50
+data  unit_cost cd80664f-8a6b-4da2-a421-a509f92894fe = 0.01
+grant businesses anon SELECT
+grant businesses anon TRIGGER
+grant businesses authenticated DELETE
+grant businesses authenticated INSERT
+grant businesses authenticated REFERENCES
+grant businesses authenticated SELECT
+grant businesses authenticated TRIGGER
+grant businesses authenticated TRUNCATE
+grant businesses authenticated UPDATE
+grant businesses service_role DELETE
+grant businesses service_role INSERT
+grant businesses service_role REFERENCES
+grant businesses service_role SELECT
+grant businesses service_role TRIGGER
+grant businesses service_role TRUNCATE
+grant businesses service_role UPDATE
+grant invoices anon DELETE
+grant invoices anon INSERT
+grant invoices anon REFERENCES
+grant invoices anon SELECT
+grant invoices anon TRIGGER
+grant invoices anon TRUNCATE
+grant invoices anon UPDATE
+grant invoices authenticated DELETE
+grant invoices authenticated INSERT
+grant invoices authenticated REFERENCES
+grant invoices authenticated SELECT
+grant invoices authenticated TRIGGER
+grant invoices authenticated TRUNCATE
+grant invoices authenticated UPDATE
+grant invoices service_role DELETE
+grant invoices service_role INSERT
+grant invoices service_role REFERENCES
+grant invoices service_role SELECT
+grant invoices service_role TRIGGER
+grant invoices service_role TRUNCATE
+grant invoices service_role UPDATE
+grant quote_line_items anon DELETE
+grant quote_line_items anon INSERT
+grant quote_line_items anon REFERENCES
+grant quote_line_items anon SELECT
+grant quote_line_items anon TRIGGER
+grant quote_line_items anon TRUNCATE
+grant quote_line_items anon UPDATE
+grant quote_line_items authenticated DELETE
+grant quote_line_items authenticated INSERT
+grant quote_line_items authenticated REFERENCES
+grant quote_line_items authenticated SELECT
+grant quote_line_items authenticated TRIGGER
+grant quote_line_items authenticated TRUNCATE
+grant quote_line_items authenticated UPDATE
+grant quote_line_items service_role DELETE
+grant quote_line_items service_role INSERT
+grant quote_line_items service_role REFERENCES
+grant quote_line_items service_role SELECT
+grant quote_line_items service_role TRIGGER
+grant quote_line_items service_role TRUNCATE
+grant quote_line_items service_role UPDATE
+grant quote_settings anon DELETE
+grant quote_settings anon INSERT
+grant quote_settings anon REFERENCES
+grant quote_settings anon SELECT
+grant quote_settings anon TRIGGER
+grant quote_settings anon TRUNCATE
+grant quote_settings anon UPDATE
+grant quote_settings authenticated DELETE
+grant quote_settings authenticated INSERT
+grant quote_settings authenticated REFERENCES
+grant quote_settings authenticated SELECT
+grant quote_settings authenticated TRIGGER
+grant quote_settings authenticated TRUNCATE
+grant quote_settings authenticated UPDATE
+grant quote_settings service_role DELETE
+grant quote_settings service_role INSERT
+grant quote_settings service_role REFERENCES
+grant quote_settings service_role SELECT
+grant quote_settings service_role TRIGGER
+grant quote_settings service_role TRUNCATE
+grant quote_settings service_role UPDATE
+pol   businesses.Platform admins can manage all businesses ALL {authenticated}
+pol   businesses.biz_select_if_member SELECT {authenticated}
+pol   businesses.biz_update_if_owner UPDATE {authenticated}
+pol   invoices.business_members_delete_invoices DELETE {authenticated}
+pol   invoices.business_members_insert_invoices INSERT {authenticated}
+pol   invoices.business_members_read_invoices SELECT {authenticated}
+pol   invoices.business_members_update_invoices UPDATE {authenticated}
+pol   invoices.platform_admins_full_access_invoices ALL {authenticated}
+pol   quote_line_items.quote_line_items_member_access ALL {authenticated}
+pol   quote_settings.quote_settings_member_access ALL {authenticated}
+rls   businesses true
+rls   invoices true
+rls   quote_line_items true
+rls   quote_settings true
+OK

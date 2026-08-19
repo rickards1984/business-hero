@@ -27,7 +27,7 @@ import pytz
 import csv
 import io
 from datetime import date as date_type
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from db import init_db, get_session
 from models import (
@@ -2140,9 +2140,45 @@ def parse_date(value: str) -> Optional[date_type]:
     return None
 
 
-def parse_amount(value: str) -> Optional[float]:
-    """Parse amount from string, removing currency symbols."""
-    if not value or not value.strip():
+def parse_amount(value) -> Optional[Decimal]:
+    """Parse a money amount from CSV input.
+
+    Returns Decimal or None. NEVER 0.0 — a silent zero on a money import is
+    worse than a rejection, because nothing downstream can tell the difference
+    between "this invoice was for nothing" and "we could not read the amount".
+
+    This function was a two-line stub returning None for every input from the
+    original invoice commit, which is why CSV invoice import has never worked.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        # Via str(), never Decimal(float) — see spec D4.
+        return Decimal(str(value))
+    if not isinstance(value, str):
+        return None
+
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    for symbol in ("\u00a3", "$", "\u20ac"):
+        cleaned = cleaned.replace(symbol, "")
+    cleaned = cleaned.replace(",", "").replace(" ", "")
+    if not cleaned:
+        return None
+    # Anchor the whole string: "12.34.56" and "--5" must be rejected, not
+    # partially parsed.
+    if not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", cleaned):
+        return None
+    try:
+        return Decimal(cleaned)
+    except InvalidOperation:
         return None
 
 

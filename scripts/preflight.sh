@@ -88,6 +88,11 @@ CHANGED=$(git diff --name-only origin/main...HEAD 2>/dev/null; git diff --name-o
 if [ -n "$CHANGED" ]; then
   HITS=$(printf '%s\n' "$CHANGED" | sort -u | while read -r f; do
     [ -f "$f" ] || continue
+    # This script's own source contains the detection patterns below (e.g.
+    # the literal string "sk-ant-"), so it always matches its own scan.
+    # Skip it — scanning the scanner for its own signatures is a false
+    # positive, not a secret.
+    [ "$f" = "scripts/preflight.sh" ] && continue
     grep -lEi 'sk-ant-[a-z0-9]|sk-proj-[a-z0-9]|xai-[a-z0-9]{20}|SUPABASE_SERVICE_ROLE|service_role.*ey[A-Za-z0-9]' "$f" 2>/dev/null
   done)
   if [ -n "$HITS" ]; then

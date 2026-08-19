@@ -249,3 +249,172 @@ Used to prove: `is_business_member(active, biz) → true`,
 (3 rows) then `DELETE FROM businesses WHERE id = '<seed id>'` (1 row).
 Confirmed staging back to 0 rows in both tables post-cleanup. No rehearsal
 data remains on staging.
+
+---
+
+# Findings — migration 031 staging rehearsal (2026-08-18)
+
+## The staging build script omits every constraint and index
+
+**Severity: this invalidates past and future staging rehearsals.**
+
+Migration 031 Section 3 failed on first apply against staging:
+
+```
+InvalidForeignKey: there is no unique constraint matching given keys
+for referenced table "invoices"
+```
+
+The migration is correct. Staging is not. `public.invoices` on staging had
+**no primary key**, so a foreign key referencing `invoices(id)` could not
+be created — while prod has `invoices_pkey PRIMARY KEY (id)` and has all
+along.
+
+It is not limited to that one table. Comparing prod against staging across
+the five tables 031 touches, **thirteen constraints exist in prod and none
+of them existed in staging**:
+
+| Table | Missing on staging |
+|---|---|
+| `businesses` | `businesses_pkey`, `businesses_api_key_key` (UNIQUE), `businesses_plan_tier_check` (CHECK) |
+| `invoices` | `invoices_pkey`, `invoices_business_id_fkey` |
+| `quotes` | `quotes_pkey`, `quotes_business_id_fkey`, `quotes_business_id_quote_number_key` (UNIQUE) |
+| `quote_line_items` | `quote_line_items_pkey`, `quote_line_items_quote_id_fkey` |
+| `quote_settings` | `quote_settings_pkey`, `quote_settings_business_id_fkey`, `quote_settings_business_id_key` (UNIQUE) |
+
+The associated unique indexes were absent too. Staging had the columns and
+the RLS policies, but none of the structural integrity.
+
+**Why it matters beyond 031.** Staging is the rehearsal target for every
+RED-tier migration. Anything whose behaviour depends on a primary key,
+foreign key, unique constraint or check constraint has been rehearsing
+against a database that cannot enforce any of them:
+
+- A `FOREIGN KEY` referencing any of these tables fails on staging and
+  succeeds on prod — 031 hit this exactly.
+- An `ON CONFLICT` clause needs a unique index. On staging it raises; on
+  prod it works. The invoice sync upserts this way.
+- A unique-violation test passes vacuously on staging: the duplicate
+  simply inserts.
+- `ON DELETE CASCADE` does nothing on staging, so a rehearsal cannot show
+  what a delete actually removes in prod.
+- 030a was rehearsed on this same database. Its sections were grants,
+  policies and a function body, none of which depend on constraints, so
+  its conclusions still stand — but that was luck, not design.
+
+**Cause.** Not yet identified. The shape — tables, columns, defaults and
+RLS present; every PK/FK/UNIQUE/CHECK and its index absent — is what you
+get from a schema copy that captures `CREATE TABLE` and policies but drops
+the `ALTER TABLE ... ADD CONSTRAINT` and `CREATE INDEX` statements that a
+`pg_dump` emits in its trailing section. A truncated dump, or a
+table-by-table copy, would both produce it.
+
+**Fix belongs with the 012–029 squash.** The squash has to reproduce prod's
+schema exactly, and that means the constraint and index section, not just
+the table definitions. Two things to build into it:
+
+1. The squashed baseline emits every `ADD CONSTRAINT` and `CREATE INDEX`
+   that prod holds — diff the result against prod's `pg_constraint` and
+   `pg_indexes` and require zero rows out.
+2. A standing check that fails loudly when staging and prod diverge
+   structurally, run before any rehearsal rather than discovered during
+   one. The comparison used here is enough:
+
+   ```sql
+   SELECT c.relname, con.conname, pg_get_constraintdef(con.oid)
+     FROM pg_constraint con
+     JOIN pg_class c ON c.oid = con.conrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+    ORDER BY 1, 2;
+   ```
+
+   Run it against both, diff, expect empty.
+
+**What was done for the 031 rehearsal.** Staging was repaired by adding
+prod's thirteen constraints, as a separate step clearly outside migration
+031. The migration was not weakened to accommodate the drift — the
+foreign key in Section 3 is correct and stays. After the repair, all nine
+sections applied, all nine rollbacks reversed cleanly against the
+before-snapshot (`audits/031-staging-before.txt`), and all nine re-applied.
+
+**Staging still differs from prod in one respect:** it holds fixture rows
+created for this rehearsal (3 businesses, 5 invoices, 6 quote line items,
+prefixed `FIXTURE`), because staging had zero rows in every table and an
+empty table cannot demonstrate that a widening preserves values or that a
+counter seeds correctly. These were left in place — staging has no real
+data to protect and the fixtures make it a usable rehearsal target. Remove
+them if the squash rebuilds staging from scratch.
+
+---
+
+# Findings — money engine implementation (2026-08-19)
+
+## Conversion recomputes per-line tax from the quote-level rate
+
+**Not a bug today. Becomes one the moment mixed per-line rates exist.**
+
+`convert_to_invoice` (`backend/quoting_api.py`) does not copy the per-line
+`tax_rate` and `tax_amount` stored on `quote_line_items`. It reads the
+quote-level `quotes.tax_rate` and recomputes every line from it:
+
+```python
+totals = calculate_totals(
+    source_lines,
+    tax_rate=to_decimal(quote_row.tax_rate) or Decimal("0"),
+    ...
+)
+```
+
+**Why it is written that way.** Migration 031 added `tax_rate`, `tax_amount`
+and `tax_treatment` to `quote_line_items` with a default of 0. Every quote
+raised before 031 — all three in prod — therefore has per-line tax columns
+full of zeros while its quote-level `tax_rate` is correct. Copying the stored
+per-line values would convert those quotes into invoices showing no VAT at
+all. Recomputing from the quote-level rate is right for every quote that
+exists today, and it is right for every quote raised since, because the app
+writes one rate to every line.
+
+**Why it will break.** The spec stores tax per line "even though every line
+shares a rate today" precisely so mixed rates become possible — UK reduced
+rate on some lines and standard on others, zero-rated materials alongside
+standard-rated labour, and the CIS labour/materials split the `category` and
+`tax_treatment` columns were added to enable. The first quote carrying two
+different per-line rates will convert into an invoice with **one** rate
+applied to every line: the quote-level one. Silently. The invoice will still
+add up — `subtotal + tax_amount = amount` holds — so no invariant catches it.
+It will simply charge the wrong VAT, and the PDF will look entirely correct.
+
+**The eventual rule**, to be implemented when per-line rates are introduced:
+
+1. Use the stored per-line `tax_rate` when the line has one, falling back to
+   the quote-level rate only when it is NULL — not when it is zero. Zero is a
+   legitimate rate (a zero-rated line) and must not be treated as absent, the
+   same trap as `default_tax_rate` in Item 3.
+2. That requires the per-line columns to become **nullable**, so "no rate
+   recorded" is distinguishable from "rate is 0". They are currently
+   `NOT NULL DEFAULT 0`, which makes the two indistinguishable. Changing
+   this is a migration, and it is cheaper now than after the columns hold
+   real data.
+3. Backfill pre-031 quote lines from their quote-level rate at that point, so
+   the fallback can be removed rather than carried forever.
+4. Add a test that a quote with two different per-line rates converts with
+   both rates intact. No current test would catch this regression: every
+   conversion fixture uses a uniform 20%.
+
+**Until then**, treat "all lines on a quote share one tax rate" as a load-
+bearing assumption of the conversion path, not an incidental property of the
+current data.
+
+## Quote discount is rejected above the net, at the API boundary only
+
+`create_quote` and `update_quote` reject a quote-level discount larger than
+the post-line-discount net with a 400 naming both figures. Equal to the net is
+allowed and yields a zero total.
+
+`services.money.calculate_totals` deliberately does **not** enforce this. It
+stays lenient so that a quote already stored with an over-large discount — one
+raised before this rule, or edited directly in the database — still converts
+and still renders, rather than raising in the middle of producing an invoice.
+The consequence worth knowing: the guarantee holds for anything created
+through the API, and not for anything that reaches the database another way.

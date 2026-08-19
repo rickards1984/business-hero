@@ -15,6 +15,17 @@ from sqlmodel import Session
 
 from db import get_session
 from auth import get_user_business_context
+from decimal import Decimal
+from services import region as region_module
+from services.money import (
+    calculate_totals,
+    net_of_lines,
+    q2 as _q2,
+    quote_discount_for,
+    resolve_tax_rate,
+    to_decimal,
+)
+from services.invoice_numbering import allocate
 
 logger = logging.getLogger("quoting_api")
 router = APIRouter(prefix="/v1/quotes", tags=["Quotes"])
@@ -53,28 +64,132 @@ def _get_next_quote_number(session: Session, business_id: str) -> str:
     return f"{prefix}{num:04d}"
 
 
-def _calculate_totals(line_items: list, tax_rate: float = 20.0, discount_amount: float = 0, discount_type: str = "fixed") -> dict:
-    """Calculate subtotal, tax, and total from line items."""
-    subtotal = sum(
-        float(item.get("quantity", 1)) * float(item.get("unit_cost", 0))
-        for item in line_items
-    )
+def _write_quote_line_items(session: Session, quote_id: str, line_items: list, totals: dict) -> None:
+    """Persist line items using the values the calculator actually produced.
 
-    if discount_type == "percentage" and discount_amount > 0:
-        actual_discount = subtotal * (discount_amount / 100)
+    The per-line figures are taken from `totals["lines"]`, not recomputed here.
+    Two derivations of the same number are two chances to disagree, and the
+    stored subtotal has to equal the sum of the stored line_totals exactly.
+    """
+    for i, (item, computed) in enumerate(zip(line_items, totals["lines"])):
+        markup_pct = to_decimal(item.get("markup_percentage", 0)) or Decimal("0")
+        markup_amt = (computed["line_total"] * markup_pct / Decimal("100")) if markup_pct > 0 else Decimal("0")
+        session.execute(
+            text("""
+                INSERT INTO quote_line_items
+                (quote_id, category, description, quantity, unit, unit_cost,
+                 line_total, markup_percentage, markup_amount, sort_order, group_name,
+                 discount_amount, discount_type, apportioned_discount, taxable,
+                 tax_rate, tax_amount, tax_treatment)
+                VALUES
+                (:qid, :cat, :desc, :qty, :unit, :ucost, :ltotal,
+                 :markup_pct, :markup_amt, :sort, :group_name,
+                 :disc_amt, :disc_type, :apportioned, :taxable,
+                 :tax_rate, :tax_amt, :tax_treatment)
+            """),
+            {
+                "qid": quote_id,
+                "cat": item.get("category", "general"),
+                "desc": item.get("description", ""),
+                "qty": to_decimal(item.get("quantity", 1)) or Decimal("0"),
+                "unit": item.get("unit", "each"),
+                "ucost": to_decimal(item.get("unit_cost", 0)) or Decimal("0"),
+                "ltotal": computed["line_total"],
+                "markup_pct": markup_pct,
+                "markup_amt": _q2(markup_amt),
+                "sort": i,
+                "group_name": item.get("group_name"),
+                "disc_amt": to_decimal(item.get("discount_amount", 0)) or Decimal("0"),
+                "disc_type": item.get("discount_type", "fixed"),
+                "apportioned": computed["apportioned_discount"],
+                "taxable": computed["taxable"],
+                "tax_rate": computed["tax_rate"],
+                "tax_amt": computed["tax_amount"],
+                "tax_treatment": computed["tax_treatment"],
+            },
+        )
+
+
+def _reject_excessive_discount(decimal_line_items: list, discount_amount, discount_type: str) -> None:
+    """Refuse a quote discount larger than there is quote to discount.
+
+    Allowing it produces a negative taxable and a negative total — a document
+    that says the business owes the customer money. Silently capping it is
+    worse: the user sees a number they did not type and a total that does not
+    follow from it.
+
+    A discount EXACTLY equal to the net is legitimate (a job written off, or
+    one fully covered by a deposit) and yields a zero total.
+    """
+    net = net_of_lines(decimal_line_items)
+    requested = quote_discount_for(net, discount_amount, discount_type)
+    if requested > net:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Discount of {requested} is greater than the quote net of {net}. "
+                f"The most that can be discounted is {net}."
+            ),
+        )
+
+
+def _decimal_line_items(line_items: list) -> list:
+    """Convert JSON line items to Decimal at the API boundary.
+
+    FastAPI hands `data: dict` straight from json.loads, so every quantity and
+    unit_cost in here is a genuine Python float. They go through to_decimal
+    (which uses str()), never Decimal(x) — see spec D4.
+    """
+    converted = []
+    for item in line_items:
+        row = dict(item)
+        row["quantity"] = to_decimal(item.get("quantity", 1)) or Decimal("0")
+        row["unit_cost"] = to_decimal(item.get("unit_cost", 0)) or Decimal("0")
+        row["discount_amount"] = to_decimal(item.get("discount_amount", 0)) or Decimal("0")
+        row["discount_type"] = item.get("discount_type", "fixed")
+        row["tax_treatment"] = item.get("tax_treatment", "standard")
+        converted.append(row)
+    return converted
+
+
+def _quote_tax_context(session: Session, business_id: str) -> tuple:
+    """Read the business's own tax settings. Never assume 20%.
+
+    Returns (default_tax_rate, tax_registered, fallback_rate). A stored rate of
+    0 comes back as Decimal("0"), NOT None — turning it into a fallback is the
+    bug this whole item exists to remove.
+    """
+    settings_row = session.execute(
+        text("SELECT default_tax_rate FROM quote_settings WHERE business_id = :bid"),
+        {"bid": business_id},
+    ).fetchone()
+    default_rate = to_decimal(settings_row[0]) if settings_row is not None else None
+
+    business_row = session.execute(
+        text("SELECT tax_registered, region FROM businesses WHERE id = :bid"),
+        {"bid": business_id},
+    ).fetchone()
+    if business_row is not None:
+        tax_registered = business_row[0] if business_row[0] is not None else True
+        region = business_row[1]
     else:
-        actual_discount = float(discount_amount)
+        tax_registered = True
+        region = None
 
-    taxable = subtotal - actual_discount
-    tax_amount = taxable * (tax_rate / 100) if tax_rate > 0 else 0
-    total = taxable + tax_amount
+    fallback = region_module.resolve(region)["default_tax_rate"]
+    return default_rate, bool(tax_registered), fallback
 
-    return {
-        "subtotal": round(subtotal, 2),
-        "tax_amount": round(tax_amount, 2),
-        "total": round(total, 2),
-        "discount_applied": round(actual_discount, 2),
-    }
+
+def _calculate_totals(line_items: list, tax_rate, discount_amount=Decimal("0"),
+                      discount_type: str = "fixed", tax_registered: bool = True) -> dict:
+    """Thin wrapper over services.money — the one implementation of D5."""
+    return calculate_totals(
+        _decimal_line_items(line_items),
+        tax_rate=to_decimal(tax_rate) or Decimal("0"),
+        discount_amount=to_decimal(discount_amount) or Decimal("0"),
+        discount_type=discount_type,
+        tax_registered=tax_registered,
+    )
 
 
 def _row_to_quote(row) -> dict:
@@ -92,7 +207,7 @@ def _row_to_quote(row) -> dict:
         "job_description": row.job_description,
         "job_location": row.job_location,
         "subtotal": float(row.subtotal) if row.subtotal else 0,
-        "tax_rate": float(row.tax_rate) if row.tax_rate else 20,
+        "tax_rate": float(row.tax_rate) if row.tax_rate is not None else 0,
         "tax_amount": float(row.tax_amount) if row.tax_amount else 0,
         "discount_amount": float(row.discount_amount) if row.discount_amount else 0,
         "discount_type": row.discount_type or "fixed",
@@ -226,11 +341,24 @@ async def create_quote(
     quote_number = _get_next_quote_number(session, business_id)
     line_items = data.get("line_items", [])
 
+    default_rate, tax_registered, fallback_rate = _quote_tax_context(session, business_id)
+    tax_rate = resolve_tax_rate(
+        quote_tax_rate=to_decimal(data.get("tax_rate")),
+        default_tax_rate=default_rate,
+        tax_registered=tax_registered,
+        fallback_rate=fallback_rate,
+    )
+    discount_amount = to_decimal(data.get("discount_amount", 0)) or Decimal("0")
+    discount_type = data.get("discount_type", "fixed")
+
+    _reject_excessive_discount(_decimal_line_items(line_items), discount_amount, discount_type)
+
     totals = _calculate_totals(
         line_items,
-        tax_rate=float(data.get("tax_rate", 20)),
-        discount_amount=float(data.get("discount_amount", 0)),
-        discount_type=data.get("discount_type", "fixed"),
+        tax_rate=tax_rate,
+        discount_amount=discount_amount,
+        discount_type=discount_type,
+        tax_registered=tax_registered,
     )
 
     valid_days = data.get("valid_days", 30)
@@ -276,13 +404,13 @@ async def create_quote(
             "jdesc": data.get("job_description"),
             "jloc": data.get("job_location"),
             "subtotal": totals["subtotal"],
-            "tax_rate": float(data.get("tax_rate", 20)),
+            "tax_rate": tax_rate,
             "tax_amount": totals["tax_amount"],
-            "discount_amount": float(data.get("discount_amount", 0)),
-            "discount_type": data.get("discount_type", "fixed"),
+            "discount_amount": discount_amount,
+            "discount_type": discount_type,
             "total": totals["total"],
             "currency": data.get("currency", "GBP"),
-            "markup": float(data.get("markup_percentage", 0)),
+            "markup": to_decimal(data.get("markup_percentage", 0)) or Decimal("0"),
             "issue_date": issue_date.isoformat(),
             "valid_until": valid_until.isoformat(),
             "terms": terms,
@@ -296,36 +424,7 @@ async def create_quote(
         },
     )
 
-    for i, item in enumerate(line_items):
-        qty = float(item.get("quantity", 1))
-        unit_cost = float(item.get("unit_cost", 0))
-        markup_pct = float(item.get("markup_percentage", 0))
-        line_total = qty * unit_cost
-        markup_amt = line_total * (markup_pct / 100) if markup_pct > 0 else 0
-
-        session.execute(
-            text("""
-                INSERT INTO quote_line_items
-                (quote_id, category, description, quantity, unit, unit_cost,
-                 line_total, markup_percentage, markup_amount, sort_order, group_name)
-                VALUES
-                (:qid, :cat, :desc, :qty, :unit, :ucost, :ltotal,
-                 :markup_pct, :markup_amt, :sort, :group_name)
-            """),
-            {
-                "qid": quote_id,
-                "cat": item.get("category", "general"),
-                "desc": item.get("description", ""),
-                "qty": qty,
-                "unit": item.get("unit", "each"),
-                "ucost": unit_cost,
-                "ltotal": round(line_total, 2),
-                "markup_pct": markup_pct,
-                "markup_amt": round(markup_amt, 2),
-                "sort": i,
-                "group_name": item.get("group_name"),
-            },
-        )
+    _write_quote_line_items(session, quote_id, line_items, totals)
 
     session.commit()
 
@@ -343,7 +442,8 @@ async def update_quote(
     business_id = str(auth_ctx["business_id"])
 
     existing = session.execute(
-        text("SELECT id, status FROM quotes WHERE id = :qid AND business_id = :bid"),
+        text("SELECT id, status, tax_rate, discount_amount, discount_type "
+             "FROM quotes WHERE id = :qid AND business_id = :bid"),
         {"qid": quote_id, "bid": business_id},
     ).fetchone()
 
@@ -351,11 +451,31 @@ async def update_quote(
         raise HTTPException(status_code=404, detail="Quote not found")
 
     line_items = data.get("line_items", [])
+
+    # The rate the quote was RAISED at wins. A business that later changes its
+    # default must not silently reprice quotes already sent to customers, so
+    # the stored rate is only replaced when the caller explicitly sends one.
+    _, tax_registered, fallback_rate = _quote_tax_context(session, business_id)
+    tax_rate = resolve_tax_rate(
+        quote_tax_rate=to_decimal(data.get("tax_rate")),
+        default_tax_rate=to_decimal(existing.tax_rate),
+        tax_registered=tax_registered,
+        fallback_rate=fallback_rate,
+    )
+    if data.get("discount_amount") is not None:
+        discount_amount = to_decimal(data.get("discount_amount")) or Decimal("0")
+    else:
+        discount_amount = to_decimal(existing.discount_amount) or Decimal("0")
+    discount_type = data.get("discount_type") or existing.discount_type or "fixed"
+
+    _reject_excessive_discount(_decimal_line_items(line_items), discount_amount, discount_type)
+
     totals = _calculate_totals(
         line_items,
-        tax_rate=float(data.get("tax_rate", 20)),
-        discount_amount=float(data.get("discount_amount", 0)),
-        discount_type=data.get("discount_type", "fixed"),
+        tax_rate=tax_rate,
+        discount_amount=discount_amount,
+        discount_type=discount_type,
+        tax_registered=tax_registered,
     )
 
     session.execute(
@@ -383,12 +503,12 @@ async def update_quote(
             "jdesc": data.get("job_description"),
             "jloc": data.get("job_location"),
             "subtotal": totals["subtotal"],
-            "tax_rate": float(data.get("tax_rate", 20)),
+            "tax_rate": tax_rate,
             "tax_amount": totals["tax_amount"],
-            "discount_amount": float(data.get("discount_amount", 0)),
-            "discount_type": data.get("discount_type", "fixed"),
+            "discount_amount": discount_amount,
+            "discount_type": discount_type,
             "total": totals["total"],
-            "markup": float(data.get("markup_percentage", 0)),
+            "markup": to_decimal(data.get("markup_percentage", 0)) or Decimal("0"),
             "terms": data.get("terms"),
             "notes": data.get("notes"),
             "cnotes": data.get("customer_notes"),
@@ -402,35 +522,7 @@ async def update_quote(
         {"qid": quote_id},
     )
 
-    for i, item in enumerate(line_items):
-        qty = float(item.get("quantity", 1))
-        unit_cost = float(item.get("unit_cost", 0))
-        markup_pct = float(item.get("markup_percentage", 0))
-        line_total = qty * unit_cost
-        markup_amt = line_total * (markup_pct / 100) if markup_pct > 0 else 0
-
-        session.execute(
-            text("""
-                INSERT INTO quote_line_items
-                (quote_id, category, description, quantity, unit, unit_cost,
-                 line_total, markup_percentage, markup_amount, sort_order, group_name)
-                VALUES (:qid, :cat, :desc, :qty, :unit, :ucost, :ltotal,
-                        :markup_pct, :markup_amt, :sort, :group_name)
-            """),
-            {
-                "qid": quote_id,
-                "cat": item.get("category", "general"),
-                "desc": item.get("description", ""),
-                "qty": qty,
-                "unit": item.get("unit", "each"),
-                "ucost": unit_cost,
-                "ltotal": round(line_total, 2),
-                "markup_pct": markup_pct,
-                "markup_amt": round(markup_amt, 2),
-                "sort": i,
-                "group_name": item.get("group_name"),
-            },
-        )
+    _write_quote_line_items(session, quote_id, line_items, totals)
 
     session.commit()
     return {"status": "updated", "total": totals["total"]}
@@ -533,34 +625,100 @@ async def convert_to_invoice(
     today = date.today()
     due_date = today + timedelta(days=30)
 
-    inv_count = session.execute(
-        text("SELECT COUNT(*) FROM invoices WHERE business_id = :bid"),
-        {"bid": business_id},
-    ).fetchone()
-    inv_number = f"INV-{(inv_count[0] or 0) + 1:04d}"
+    # The invoice must reproduce the quote AS ISSUED. Everything below comes
+    # from the quote's own stored figures, not from the business's current
+    # settings — changing the default tax rate tomorrow must not restate an
+    # invoice raised today.
+    item_rows = session.execute(
+        text("SELECT * FROM quote_line_items WHERE quote_id = :qid ORDER BY sort_order"),
+        {"qid": quote_id},
+    ).fetchall()
 
-    session.execute(
-        text("""
-            INSERT INTO invoices
-            (id, business_id, invoice_number, customer_name, customer_email,
-             due_date, amount, amount_due, currency, status, source, source_ref, created_at)
-            VALUES
-            (:id, :bid, :inum, :cname, :cemail, :due, :amount, :amount_due,
-             :currency, 'unpaid', 'quote', :qnum, now())
-        """),
+    source_lines = [
         {
-            "id": invoice_id,
-            "bid": business_id,
-            "inum": inv_number,
-            "cname": quote_row.customer_name,
-            "cemail": quote_row.customer_email,
-            "due": due_date.isoformat(),
-            "amount": float(quote_row.total),
-            "amount_due": float(quote_row.total),
-            "currency": quote_row.currency or "GBP",
-            "qnum": quote_row.quote_number,
-        },
+            "quantity": to_decimal(getattr(row, "quantity", 1)) or Decimal("0"),
+            "unit_cost": to_decimal(getattr(row, "unit_cost", 0)) or Decimal("0"),
+            "discount_amount": to_decimal(getattr(row, "discount_amount", 0)) or Decimal("0"),
+            "discount_type": getattr(row, "discount_type", None) or "fixed",
+            "tax_treatment": getattr(row, "tax_treatment", None) or "standard",
+            "sort_order": getattr(row, "sort_order", index),
+            "description": getattr(row, "description", "") or "",
+            "category": getattr(row, "category", None) or "general",
+            "unit": getattr(row, "unit", None) or "each",
+            "group_name": getattr(row, "group_name", None),
+        }
+        for index, row in enumerate(item_rows)
+    ]
+
+    totals = calculate_totals(
+        source_lines,
+        tax_rate=to_decimal(quote_row.tax_rate) or Decimal("0"),
+        discount_amount=to_decimal(getattr(quote_row, "discount_amount", 0)) or Decimal("0"),
+        discount_type=getattr(quote_row, "discount_type", None) or "fixed",
     )
+
+    def _insert_invoice(inv_number: str) -> None:
+        session.execute(
+            text("""
+                INSERT INTO invoices
+                (id, business_id, invoice_number, customer_name, customer_email,
+                 due_date, subtotal, tax_amount, amount, amount_due, currency,
+                 status, source, source_ref, created_at)
+                VALUES
+                (:id, :bid, :inum, :cname, :cemail, :due, :subtotal, :tax_amount,
+                 :amount, :amount_due, :currency, 'unpaid', 'quote', :qnum, now())
+            """),
+            {
+                "id": invoice_id,
+                "bid": business_id,
+                "inum": inv_number,
+                "cname": quote_row.customer_name,
+                "cemail": quote_row.customer_email,
+                "due": due_date.isoformat(),
+                "subtotal": totals["subtotal"],
+                "tax_amount": totals["tax_amount"],
+                # `amount` keeps its current meaning — the GROSS total. Xero
+                # sync, briefings, accounting and the chase emails all read it.
+                "amount": totals["total"],
+                "amount_due": totals["total"],
+                "currency": quote_row.currency or "GBP",
+                "qnum": quote_row.quote_number,
+            },
+        )
+
+    inv_number = allocate(session, business_id, _insert_invoice)
+
+    for source, computed in zip(source_lines, totals["lines"]):
+        session.execute(
+            text("""
+                INSERT INTO invoice_line_items
+                (invoice_id, category, description, quantity, unit, unit_cost,
+                 line_total, discount_amount, discount_type, apportioned_discount,
+                 taxable, tax_rate, tax_amount, tax_treatment, sort_order, group_name)
+                VALUES
+                (:invoice_id, :category, :description, :quantity, :unit, :unit_cost,
+                 :line_total, :discount_amount, :discount_type, :apportioned_discount,
+                 :taxable, :tax_rate, :tax_amount, :tax_treatment, :sort_order, :group_name)
+            """),
+            {
+                "invoice_id": invoice_id,
+                "category": source["category"],
+                "description": source["description"],
+                "quantity": source["quantity"],
+                "unit": source["unit"],
+                "unit_cost": source["unit_cost"],
+                "line_total": computed["line_total"],
+                "discount_amount": source["discount_amount"],
+                "discount_type": source["discount_type"],
+                "apportioned_discount": computed["apportioned_discount"],
+                "taxable": computed["taxable"],
+                "tax_rate": computed["tax_rate"],
+                "tax_amount": computed["tax_amount"],
+                "tax_treatment": computed["tax_treatment"],
+                "sort_order": source["sort_order"],
+                "group_name": source["group_name"],
+            },
+        )
 
     session.execute(
         text("UPDATE quotes SET status = 'invoiced', invoice_id = :iid, updated_at = now() WHERE id = :qid"),
