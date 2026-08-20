@@ -338,26 +338,20 @@ export default function AdminDashboard() {
     if (!toggleTarget) return;
     setError('');
     try {
-      const { error: updateError } = await supabase
-        .from('businesses')
-        .update({ is_active: !toggleTarget.is_active })
-        .eq('id', toggleTarget.id);
-      if (updateError) throw updateError;
+      // Explicit state, not a toggle — see the endpoint's contract.
+      const response = await apiRequest('PUT', `/v1/admin/businesses/${toggleTarget.id}/active`, {
+        is_active: !toggleTarget.is_active,
+      });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail.detail || 'Failed to update business');
+      }
       setToggleDialogOpen(false);
       setToggleTarget(null);
       fetchData();
     } catch (err: any) {
       setError(err.message || 'Failed to update business');
     }
-  };
-
-  const generateApiKey = () => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let key = 'bh_';
-    for (let i = 0; i < 32; i++) {
-      key += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return key;
   };
 
   const handleFeaturePresetChange = (preset: string) => {
@@ -376,20 +370,21 @@ export default function AdminDashboard() {
     setError('');
 
     try {
-      const { error: insertError } = await supabase
-        .from('businesses')
-        .insert({
-          name: businessName.trim(),
-          timezone: businessTimezone,
-          api_key: generateApiKey(),
-          plan_tier: businessPlanTier,
-          is_active: businessIsActive,
-          trial_ends_at: businessTrialEndsAt ? new Date(businessTrialEndsAt).toISOString() : null,
-          feature_flags: featureFlags,
-          limits,
-        });
+      // api_key is generated server-side and is never sent from here.
+      const response = await apiRequest('POST', '/v1/admin/businesses', {
+        name: businessName.trim(),
+        timezone: businessTimezone,
+        plan_tier: businessPlanTier,
+        is_active: businessIsActive,
+        trial_ends_at: businessTrialEndsAt ? new Date(businessTrialEndsAt).toISOString() : null,
+        feature_flags: featureFlags,
+        limits,
+      });
 
-      if (insertError) throw insertError;
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail.detail || 'Failed to create business');
+      }
 
       setBusinessDialogOpen(false);
       setBusinessName('');

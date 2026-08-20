@@ -101,7 +101,10 @@ export default function BrandingSettings() {
   const navigate = useNavigate();
   const { user, loading: authLoading } = useAuth();
   const queryClient = useQueryClient();
-  const [business, setBusiness] = useState<Business | null>(null);
+  // Only the columns this page selects. Narrowing the type as well as the
+  // query means api_key cannot be read here even by accident.
+  type BrandingBusiness = Pick<Business, 'id' | 'logo_url' | 'feature_flags'>;
+  const [business, setBusiness] = useState<BrandingBusiness | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
@@ -158,7 +161,7 @@ export default function BrandingSettings() {
 
       const { data: businessData, error: businessError } = await supabase
         .from('businesses')
-        .select('*')
+        .select('id,logo_url,feature_flags')
         .eq('id', memberData.business_id)
         .single();
       if (businessError) throw businessError;

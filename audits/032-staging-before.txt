@@ -1,0 +1,20 @@
+state
+------------------------------------------------------------
+col   invoice_line_items.tax_amount null=NO def=0
+col   invoice_line_items.tax_rate null=NO def=0
+col   invoice_line_items.tax_treatment null=NO def='standard'::text
+col   quote_line_items.tax_amount null=NO def=0
+col   quote_line_items.tax_rate null=NO def=0
+col   quote_line_items.tax_treatment null=NO def='standard'::text
+count qli=10 ili=0
+data  qli 3a25e428-e840-4bad-a2a9-1419a234e521 rate=0.00 amt=0.00 treat=standard | quote_rate=20.00
+data  qli 3a86d73c-b345-4004-b10f-19d195d65842 rate=0.00 amt=0.00 treat=standard | quote_rate=0.00
+data  qli 46dba9a5-8bd4-4f3b-aa8f-b56cdfba6c93 rate=0.00 amt=0.00 treat=standard | quote_rate=20.00
+data  qli 5ae4ae1d-9d23-4df8-86a3-a1106bd31e16 rate=0.00 amt=0.00 treat=standard | quote_rate=20.00
+data  qli 663bc970-67ec-4285-a2b3-b4392c3f4b50 rate=0.00 amt=0.00 treat=standard | quote_rate=NULL
+data  qli 7a7beff3-725a-4940-8fa4-f4550e1db74b rate=5.00 amt=5.00 treat=reduced | quote_rate=20.00
+data  qli 8fd5c338-89df-440e-b960-56d1c9656008 rate=0.00 amt=0.00 treat=standard | quote_rate=20.00
+data  qli b0ed853e-f1fd-415c-b2ce-5c905ba7b260 rate=0.00 amt=0.00 treat=standard | quote_rate=20.00
+data  qli cd80664f-8a6b-4da2-a421-a509f92894fe rate=0.00 amt=0.00 treat=standard | quote_rate=20.00
+data  qli f50b1ae8-bf1f-4686-a28e-09dd29fb46d4 rate=0.00 amt=0.00 treat=standard | quote_rate=0.00
+OK

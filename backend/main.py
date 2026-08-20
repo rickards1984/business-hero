@@ -46,7 +46,7 @@ from models import (
     StripeEvent,
 )
 from schemas import (
-    BusinessCreate, BusinessResponse, BusinessListItem, BusinessProfile,
+    BusinessListItem, BusinessProfile,
     TaskCreate, TaskUpdate, TaskResponse, SnoozeRequest,
     CallCreate, CallResponse,
     BriefingResponse, HealthResponse,
@@ -60,7 +60,7 @@ from schemas import (
     SupportTicketCreateAdmin, SupportTicketUpdateAdmin,
     BillingCheckoutRequest, BillingSessionResponse, BillingPortalResponse,
 )
-from auth import verify_master_key, get_access_token, get_user_auth_context, get_user_business_context, get_platform_admin_context, is_platform_admin_user
+from auth import get_access_token, get_user_auth_context, get_user_business_context, get_platform_admin_context, is_platform_admin_user
 from openai_utils import generate_call_summary
 from supabase_auth import verify_supabase_token
 from slowapi.errors import RateLimitExceeded
@@ -365,6 +365,9 @@ app.include_router(quoting_router)
 from executive_meeting_api import router as executive_meeting_router
 app.include_router(executive_meeting_router)
 
+from admin_business_api import router as admin_business_router
+app.include_router(admin_business_router)
+
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
@@ -496,37 +499,23 @@ async def get_openapi_action_schema(request: Request):
     return JSONResponse(content=action_schema)
 
 
-@app.post(
-    "/v1/admin/businesses",
-    response_model=BusinessResponse,
-    tags=["Admin"],
-    dependencies=[Depends(verify_master_key)]
-)
-async def create_business(
-    data: BusinessCreate,
-    session: Session = Depends(get_session)
-):
-    """Create a new business (admin only)."""
-    business = Business(name=data.name, timezone=data.timezone)
-    session.add(business)
-    session.commit()
-    session.refresh(business)
-    
-    return BusinessResponse(
-        id=str(business.id),
-        name=business.name,
-        timezone=business.timezone,
-        api_key=business.api_key
-    )
+# NOTE: POST /v1/admin/businesses was retired in 030b. It wrote only `name`
+# and `timezone` — five of the seven fields the admin UI sets were missing —
+# and it was gated by the master key rather than the platform-admin scheme the
+# rest of the admin surface uses. `admin_business_api.create_business`
+# supersedes it. Leaving a second, weaker create path in place was the thing
+# the spec explicitly ruled against.
 
 
 @app.get(
     "/v1/admin/businesses",
     response_model=List[BusinessListItem],
     tags=["Admin"],
-    dependencies=[Depends(verify_master_key)]
 )
-async def list_businesses(session: Session = Depends(get_session)):
+async def list_businesses(
+    auth_ctx=Depends(get_platform_admin_context),
+    session: Session = Depends(get_session),
+):
     """List all businesses (admin only). Does not expose API keys."""
     statement = select(Business).order_by(Business.created_at.desc())
     businesses = session.exec(statement).all()
@@ -832,13 +821,17 @@ async def create_checkout_session(
         session.add(business)
         session.commit()
 
-    plan_tier = payload.plan_tier.lower()
-    if plan_tier in ("premium", "elite"):
-        plan_tier = "business"
+    # No silent remap. Two legacy aliases used to be rewritten to the top tier
+    # without telling the caller, so a typo and a real tier were
+    # indistinguishable in the response. An unknown tier is now a 400.
+    plan_tier = payload.plan_tier.strip().lower()
     prices = config.get("prices", {})
     price_id = prices.get(plan_tier)
     if not price_id:
-        raise HTTPException(status_code=400, detail="Unknown or unmapped plan tier")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown or unmapped plan tier {payload.plan_tier!r}",
+        )
     base_url = _get_frontend_base_url(request)
     checkout = stripe.checkout.Session.create(
         mode="subscription",

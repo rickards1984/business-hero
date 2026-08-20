@@ -120,7 +120,11 @@ export default function AdminBusinessDetail() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [tab, setTab] = useState<TabKey>('overview');
-  const [business, setBusiness] = useState<Business | null>(null);
+  // Only the columns this page selects — api_key is deliberately absent.
+  type AdminBusiness = Pick<Business,
+    'id' | 'name' | 'timezone' | 'plan_tier' | 'is_active' | 'trial_ends_at'
+    | 'feature_flags' | 'limits' | 'subscription_status' | 'current_period_end'>;
+  const [business, setBusiness] = useState<AdminBusiness | null>(null);
   const [planTier, setPlanTier] = useState('starter');
   const [isActive, setIsActive] = useState(true);
   const [trialEndsAt, setTrialEndsAt] = useState('');
@@ -182,7 +186,7 @@ export default function AdminBusinessDetail() {
     try {
       const { data, error: fetchError } = await supabase
         .from('businesses')
-        .select('*')
+        .select('id,name,timezone,plan_tier,is_active,trial_ends_at,feature_flags,limits,subscription_status,current_period_end')
         .eq('id', id)
         .single();
       if (fetchError) throw fetchError;
@@ -449,11 +453,11 @@ export default function AdminBusinessDetail() {
         limits: limits,
       };
 
-      const { error: updateError } = await supabase
-        .from('businesses')
-        .update(payload)
-        .eq('id', business.id);
-      if (updateError) throw updateError;
+      const response = await apiRequest('PUT', `/v1/admin/businesses/${business.id}/overview`, payload);
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail.detail || 'Failed to save business');
+      }
       await loadBusiness();
     } catch (err: any) {
       setError(err.message || 'Failed to save business');
@@ -547,11 +551,15 @@ export default function AdminBusinessDetail() {
     if (!business) return;
     setError('');
     try {
-      const { error: updateError } = await supabase
-        .from('businesses')
-        .update({ is_active: !business.is_active })
-        .eq('id', business.id);
-      if (updateError) throw updateError;
+      // Send the state we want, not an inversion of what this tab happens to
+      // be holding — a stale view must not flip the wrong way.
+      const response = await apiRequest('PUT', `/v1/admin/businesses/${business.id}/active`, {
+        is_active: !business.is_active,
+      });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail.detail || 'Failed to update status');
+      }
       await loadBusiness();
     } catch (err: any) {
       setError(err.message || 'Failed to update status');

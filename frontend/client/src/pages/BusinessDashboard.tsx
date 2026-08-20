@@ -123,7 +123,9 @@ export default function BusinessDashboard() {
     return 0;
   });
   const [membership, setMembership] = useState<BusinessMember | null>(null);
-  const [business, setBusiness] = useState<Business | null>(null);
+  // Only the columns this page selects — api_key is deliberately absent.
+  type DashboardBusiness = Pick<Business, 'id' | 'name' | 'timezone' | 'logo_url'>;
+  const [business, setBusiness] = useState<DashboardBusiness | null>(null);
   const [calls, setCalls] = useState<Call[]>([]);
   const [callSearch, setCallSearch] = useState('');
   const [callDateFilter, setCallDateFilter] = useState<'all' | 'today' | 'week' | 'month'>('all');
@@ -203,7 +205,7 @@ export default function BusinessDashboard() {
       setMembership(memberData as BusinessMember);
       const { data: businessData, error: businessError } = await supabase
         .from('businesses')
-        .select('*')
+        .select('id,name,timezone,logo_url')
         .eq('id', memberData.business_id)
         .single();
       if (businessError) throw businessError;

@@ -418,3 +418,203 @@ raised before this rule, or edited directly in the database — still converts
 and still renders, rather than raising in the middle of producing an invoice.
 The consequence worth knowing: the guarantee holds for anything created
 through the API, and not for anything that reaches the database another way.
+
+---
+
+# Findings — entitlement and UI review (2026-08-20)
+
+## Entitlement: the spec supersedes the feature_flags assumption
+
+`audits/ENTITLEMENT-SPEC.md` and `audits/PRICING-MODEL.md` are now in the
+repo. **The entitlement spec supersedes every earlier assumption in this file
+and in the code that `feature_flags` is the entitlement mechanism.**
+
+What was assumed, and is now wrong:
+
+- That `feature_flags` decides what a business may use. `_is_feature_enabled`
+  (`backend/auth.py:260`) checks the flags dict FIRST and returns immediately,
+  so `plan_tier` is only consulted for keys absent from the flags. In prod both
+  real businesses are entitled almost entirely by flags — MSC is on `pro`,
+  whose only default is `{"email": True}`, and carries eleven flag keys.
+- That `_merge_feature_flags` (`backend/main.py:2366`) applies a plan on
+  upgrade or downgrade. It is `{**defaults, **existing}` — existing wins — so
+  once a flag is set, no plan change can remove it.
+
+**The rule going forward, per the spec:**
+
+- **`plan_tier` is the source of truth.** What a plan includes is defined in
+  one place and derived from the tier.
+- **`feature_flags` becomes deliberate per-business exceptions only** — a
+  named override for a specific business, not the mechanism. Empty is the
+  normal state.
+
+Two consequences that are not yet resolved and should not be forgotten when
+the work starts:
+
+1. **`brand_color` is currently a string living in `feature_flags`** alongside
+   the booleans (both real businesses). Under the new model it is not an
+   entitlement at all and needs somewhere else to live, or `_is_feature_enabled`
+   will keep reading `bool("#3B82F6")` as an enabled feature.
+2. **`accounting` and `accounting_enabled` both exist** as separate keys. The
+   canonical vocabulary in the spec has to pick one, and the migration has to
+   say what happens to the other.
+
+Nothing in `PRICING-MODEL.md` is enforceable until PART D of the entitlement
+spec is built: `require_feature` gates exactly one endpoint today
+(`backend/app/email/router.py:64`, `"email"`), and that is the only non-test
+usage in the backend.
+
+---
+
+## UI findings — 2026-08-20
+
+Seven, from live use. Ordered by consequence, not by effort.
+
+### 1. Dark mode — invoice row hover destroys text contrast (Finance)
+
+**`frontend/client/src/styles/design-system.css:456`**
+
+```css
+.MuiTableBody-root .MuiTableRow-root:hover .MuiTableCell-root {
+  background: var(--color-neutral-50) !important;
+}
+```
+
+Not cosmetic — **unreadable financial data**, and an accessibility flag at App
+Store review.
+
+Root cause found. That rule is **not scoped to light mode** and paints a light
+neutral onto the *cell*. The dark-mode rule at
+**`design-system.css:2337`** paints the *row*:
+
+```css
+.dark .MuiTableBody-root .MuiTableRow-root:hover {
+  background-color: rgba(255, 255, 255, 0.04) !important;
+}
+```
+
+The cell sits above the row, so in dark mode the near-white cell background
+wins and light text lands on it. Both carry `!important`, so specificity is
+decided by which element is painted, not by the cascade. The affected table is
+the invoice list at
+**`frontend/client/src/components/InvoicesPanel.tsx:726`** (`<TableRow hover>`),
+but the rule is global — every MUI table in the app has the same defect in
+dark mode.
+
+Fix direction: scope line 456 to light, or set the cell background in the dark
+rule too. One change, not per-table.
+
+### 2. Dark mode — board meeting page font oversized; correct in light mode
+
+**`frontend/client/src/pages/BoardMeeting.tsx:182`**
+
+```tsx
+<Typography variant="h1" sx={{ fontSize: { xs: '1.5rem', md: '1.875rem' } }}>
+```
+
+**Root cause NOT found — reported as unresolved rather than guessed.** I
+scanned all 119 `.dark`-scoped rules in `design-system.css` and none sets
+`font-size`, and `index.css` has no dark-scoped typography either. So the
+theory that this shares a root cause with finding 1 is **not confirmed by the
+stylesheets**. It may still be true — both are theme-definition problems — but
+the mechanism is different and I could not locate it statically.
+
+Worth doing the single theme pass regardless, and treating this as the case
+that proves whether the pass was thorough. It needs reproducing in the browser
+with devtools on the heading to identify the winning rule.
+
+### 3. Dashboard invoice tile truncates money
+
+**`frontend/client/src/pages/DashboardPage.tsx:192`**
+
+```tsx
+£{(invoicesData?.unpaidAmount ?? 0).toLocaleString('en-GB',
+   { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+```
+
+Money display, not cosmetic. £1.05 renders as **£1**; £1,299.99 renders as
+**£1,299**, understating by a pound on a figure a business owner reads as
+exact.
+
+`InvoicesPanel.tsx:768` formats the same class of value correctly:
+
+```tsx
+invoice.amount.toLocaleString('en-GB', { style: 'currency', currency: invoice.currency || 'GBP' })
+```
+
+So the app already contains the right formatter; the dashboard tile does not
+use it. Related: `InvoicesPanel.tsx:553` hardcodes `currency: 'GBP'` on the
+KPI total while lines 768/862/866 correctly read `invoice.currency`.
+
+### 4. Stale business context in the header after switching accounts
+
+**`frontend/client/src/hooks/useMe.ts:17`**
+
+```tsx
+queryKey: ['v1', 'me'],
+staleTime: 5 * 60 * 1000,
+```
+
+The header reads `me?.name` and `me?.logo_url`
+(**`frontend/client/src/components/AppShell.tsx:60-61`**).
+
+Root cause found, and it explains "until a hard reload" exactly. The query key
+is a **constant** with no user or business identifier in it, so switching
+accounts does not change the cache key. Combined with the global defaults at
+**`frontend/client/src/lib/queryClient.ts:118-121`**:
+
+```
+staleTime: 5 * 60 * 1000,
+refetchOnWindowFocus: false,
+refetchOnMount: false,
+```
+
+nothing triggers a refetch — not remounting, not refocusing — so the previous
+business's name and logo persist for up to five minutes.
+
+Confirmed **cosmetic, not a data leak**: the stale values are display-only and
+every API call is scoped server-side by the auth context, not by this cache.
+But it is visible on every switch, and it is the kind of thing that reads as a
+tenancy bug to anyone watching a demo.
+
+### 5. Two quote buttons, same apparent intent, different destinations
+
+- **`frontend/client/src/pages/QuotesPage.tsx:990`** — "New Quote", top right:
+  `onClick={() => { resetForm(); setView('create'); }}`
+  `resetForm()` sets `setFormMode('ai')` (**`QuotesPage.tsx:478`**), so this
+  lands on **AI generation**.
+- **`frontend/client/src/pages/QuotesPage.tsx:1035`** — "Create Quote", centre:
+  `onClick={() => { resetForm(); setFormMode('manual'); setView('create'); }}`
+  — explicitly **manual entry**.
+
+Neither label says which. The distinction is real and useful; it is only the
+naming that hides it.
+
+### 6. Chase-send error renders where the user is not looking
+
+**`frontend/client/src/components/InvoicesPanel.tsx:480`**
+
+The error `<Alert>` renders at the **top of the panel**. The chase is sent from
+inside the drawer that opens at **`InvoicesPanel.tsx:793`**, and
+`handleSendChaseEmail` sets the error at **`InvoicesPanel.tsx:251`**.
+
+So the failure message appears on the page behind the open drawer, out of
+view. Worse, it is asymmetric: **success** goes to a `<Snackbar>` at
+**`InvoicesPanel.tsx:1174`**, which floats above everything. The user reliably
+sees "sent" and reliably misses "failed to send" — the exact wrong way round
+for an action that contacts a customer about money.
+
+### 7. "Analyse All" in Emails does nothing
+
+**`frontend/client/src/components/EmailsTab.tsx:415`** (button),
+**`:412`** (`onClick={handleAnalyze}`), **`:289`** (`handleAnalyze`).
+Second instance at **`frontend/client/src/pages/Inbox.tsx:249`**.
+
+Feature gap, not cosmetic. It should either summarise in place or route into
+Aria's email view.
+
+**This is the only discoverable path to the feature Starter is sold on.** Per
+`PRICING-MODEL.md` §1, Starter's pitch rests on Aria chat and email triage; if
+the one visible entry point to email analysis is inert, the tier does not
+demonstrate its own value on first use. That makes it a conversion problem
+rather than a bug backlog item.
