@@ -365,8 +365,6 @@ app.include_router(quoting_router)
 from executive_meeting_api import router as executive_meeting_router
 app.include_router(executive_meeting_router)
 
-from admin_business_api import router as admin_business_router
-app.include_router(admin_business_router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
@@ -5206,6 +5204,23 @@ async def disconnect_xero(
         "success": True,
         "message": f"Disconnected from Xero ({row[1]}). Previously synced transactions are preserved.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Router registration — LAST, deliberately.
+#
+# FastAPI matches routes in registration order, so a parameterised route
+# registered before a literal one swallows it: `/v1/admin/businesses/{business_id}`
+# registered ahead of `/v1/admin/businesses/summary` matches "summary" as an id.
+# That is exactly what happened when this include sat near the top of the file
+# — the summary endpoint 500'd in prod.
+#
+# Every `@app.<method>` decorator above has already run by this point, so
+# including the router here guarantees the literal paths win. Keep it last, and
+# add new routers here rather than beside their imports.
+# ---------------------------------------------------------------------------
+from admin_business_api import router as admin_business_router  # noqa: E402
+app.include_router(admin_business_router)
 
 
 if __name__ == "__main__":

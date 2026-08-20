@@ -16,7 +16,7 @@ settles on this one scheme (Part C).
 import logging
 import secrets
 from typing import Any, Optional
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import bindparam, text
@@ -26,6 +26,10 @@ from sqlmodel import Session
 from auth import get_platform_admin_context
 from db import get_session
 
+# `business_id` is typed UUID on every route so a non-UUID path segment is
+# rejected by FastAPI as a 422 before it reaches a query. That is defence in
+# depth, not the fix for route shadowing — the fix is registration order, and
+# it lives at the bottom of main.py.
 logger = logging.getLogger("admin_business_api")
 router = APIRouter(prefix="/v1/admin/businesses", tags=["Admin"])
 
@@ -261,19 +265,19 @@ async def create_business(
 
 @router.get("/{business_id}")
 async def get_business_admin(
-    business_id: str,
+    business_id: UUID,
     auth_ctx: dict = Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
 ):
     """The ten columns the admin detail page reads. Never `api_key`."""
-    return _read_admin_row(session, business_id)
+    return _read_admin_row(session, str(business_id))
 
 
 # ── A1 — update overview ─────────────────────────────────────────────────────
 
 @router.put("/{business_id}/overview")
 async def update_business_overview(
-    business_id: str,
+    business_id: UUID,
     data: dict,
     auth_ctx: dict = Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
@@ -285,7 +289,7 @@ async def update_business_overview(
     """
     fields = _validate_body(data, OVERVIEW_FIELDS)
 
-    current = _read_admin_row(session, business_id)
+    current = _read_admin_row(session, str(business_id))
     if not fields:
         return current
 
@@ -295,7 +299,7 @@ async def update_business_overview(
             f"UPDATE businesses SET {assignments}, updated_at = now() WHERE id = :bid",
             fields.keys(),
         ),
-        {**fields, "bid": business_id},
+        {**fields, "bid": str(business_id)},
     )
     session.commit()
 
@@ -312,7 +316,7 @@ async def update_business_overview(
 
 @router.put("/{business_id}/active")
 async def set_business_active(
-    business_id: str,
+    business_id: UUID,
     data: dict,
     auth_ctx: dict = Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
@@ -340,7 +344,7 @@ async def set_business_active(
     session.execute(
         text("UPDATE businesses SET is_active = :is_active, updated_at = now() "
              "WHERE id = :bid"),
-        {"is_active": is_active, "bid": business_id},
+        {"is_active": is_active, "bid": str(business_id)},
     )
     session.commit()
 
@@ -348,4 +352,4 @@ async def set_business_active(
         "business %s is_active set to %s by admin %s",
         business_id, is_active, auth_ctx.get("user_id"),
     )
-    return {"id": business_id, "is_active": is_active}
+    return {"id": str(business_id), "is_active": is_active}
