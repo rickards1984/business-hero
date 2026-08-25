@@ -32,6 +32,11 @@ class Business(SQLModel, table=True):
     timezone: str = Field(default="Europe/London")
     api_key: str = Field(default_factory=generate_api_key, unique=True, index=True)
     logo_url: Optional[str] = None
+    # The column has existed since the 028 baseline but was never mapped, so
+    # brand_color lived in feature_flags instead. Migration 033 SECTION 6 moves
+    # it to this column, which is what /v1/me and the brand-color endpoint now
+    # read and write. Not a new column: create_all() adds tables, never columns.
+    brand_color: Optional[str] = Field(default="#3B82F6")
     plan_tier: str = Field(default="starter")
     is_active: bool = Field(default=True)
     trial_ends_at: Optional[datetime] = None

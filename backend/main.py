@@ -22,7 +22,6 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel as PydanticBaseModel, ValidationError
 from sqlmodel import Session, select
 from sqlalchemy import text, func, or_
-from sqlalchemy.orm.attributes import flag_modified
 import pytz
 import csv
 import io
@@ -1060,7 +1059,10 @@ async def get_my_profile(
             "timezone": business.timezone,
             "logo_url": getattr(business, "logo_url", None),
             "plan_tier": getattr(business, "plan_tier", "starter"),
-            "brand_color": flags.get("brand_color", None),
+            # Reads the COLUMN. Migration 033 SECTION 6 moved brand_color
+            # out of feature_flags; reading the flag here returned null for
+            # every business the moment that section ran.
+            "brand_color": getattr(business, "brand_color", None),
             "feature_flags": flags,
         })
     
@@ -1349,18 +1351,18 @@ async def update_brand_color(
     business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session),
 ):
-    """Save the selected brand colour to feature_flags."""
-    flags = dict(business.feature_flags or {})
-    if data.brand_color:
-        flags["brand_color"] = data.brand_color
-    else:
-        flags.pop("brand_color", None)
-    business.feature_flags = flags
-    flag_modified(business, "feature_flags")
+    """Save the selected brand colour to businesses.brand_color.
+
+    Writes the COLUMN, not feature_flags. brand_color is not an entitlement —
+    bool("#3B82F6") is True, so while it lived in the flags dict it read as an
+    enabled feature. Migration 033 SECTION 6 moved it out; this endpoint was
+    the thing putting it back on every save.
+    """
+    business.brand_color = data.brand_color or None
     session.add(business)
     session.commit()
     session.refresh(business)
-    return {"ok": True, "brand_color": flags.get("brand_color")}
+    return {"ok": True, "brand_color": business.brand_color}
 
 
 def _task_response(task: Task) -> TaskResponse:

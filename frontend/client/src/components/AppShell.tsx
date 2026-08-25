@@ -6,6 +6,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useMe } from '@/hooks/useMe';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { resolveLogoSrc } from '@/lib/supabase';
+import { isFeatureEnabled } from '@/lib/entitlements';
 import Sidebar from './Sidebar';
 import MobileBottomNav from './MobileBottomNav';
 import SupportHelpButton from './SupportHelpButton';
@@ -23,7 +24,10 @@ export default function AppShell() {
   const isMobile = useIsMobile();
   const [supportPanelOpen, setSupportPanelOpen] = useState(false);
 
-  const showQuotes = me?.feature_flags?.quoting_enabled !== false;
+  // Canonical key, resolved through the plan. `quoting_enabled` was renamed
+  // by migration 033 SECTION 6. Presentation only — PART D's server-side gate
+  // is the enforcement; hiding a nav item is not refusing a request.
+  const showQuotes = isFeatureEnabled(me?.plan_tier, me?.feature_flags, 'quoting');
 
   const activeSection: Section = useMemo(() => {
     const path = location.pathname;

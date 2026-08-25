@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { PLAN_TIERS as CANONICAL_PLAN_TIERS, isFeatureEnabled } from '@/lib/entitlements';
 import ThemeToggle from '@/components/ThemeToggle';
 import {
   Box,
@@ -70,7 +71,7 @@ const TIMEZONES = [
 ];
 
 const ROLES = ['owner', 'admin', 'member'];
-const PLAN_TIERS = ['starter', 'pro', 'business', 'beta'];
+const PLAN_TIERS = CANONICAL_PLAN_TIERS;
 const SUBSCRIPTION_STATUSES = ['active', 'past_due', 'canceled'];
 
 interface BusinessSummary {
@@ -750,13 +751,16 @@ export default function AdminDashboard() {
                           </TableCell>
                           <TableCell>
                             <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-                              {business.feature_flags?.quoting_enabled && (
+                              {/* Canonical keys, resolved through the plan.
+                                  Raw lookups on the pre-033 names showed every
+                                  badge as absent once the keys were renamed. */}
+                              {isFeatureEnabled(business.plan_tier, business.feature_flags, 'quoting') && (
                                 <Chip label="QTE" size="small" sx={{ fontSize: 10, height: 20, bgcolor: 'rgba(124,92,252,0.1)', color: '#7c5cfc' }} />
                               )}
-                              {business.feature_flags?.calendar_booking_enabled && (
+                              {isFeatureEnabled(business.plan_tier, business.feature_flags, 'calendar_booking') && (
                                 <Chip label="CAL" size="small" sx={{ fontSize: 10, height: 20, bgcolor: 'rgba(45,212,140,0.1)', color: '#2dd48c' }} />
                               )}
-                              {business.feature_flags?.whatsapp_enabled && (
+                              {isFeatureEnabled(business.plan_tier, business.feature_flags, 'whatsapp') && (
                                 <Chip label="WA" size="small" sx={{ fontSize: 10, height: 20, bgcolor: 'rgba(96,165,250,0.1)', color: '#60a5fa' }} />
                               )}
                             </Box>

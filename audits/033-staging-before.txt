@@ -1,0 +1,57 @@
+state
+----------------------------------------------------------------------
+col   businesses.api_key text null=NO def=-
+col   businesses.brand_color text null=YES def='#3B82F6'::text
+col   businesses.cancel_at_period_end boolean null=NO def=false
+col   businesses.ceo_briefing_enabled boolean null=YES def=false
+col   businesses.created_at timestamp with time zone null=NO def=now()
+col   businesses.current_period_end timestamp with time zone null=YES def=-
+col   businesses.feature_flags jsonb null=NO def='{}'::jsonb
+col   businesses.id uuid null=NO def=gen_random_uuid()
+col   businesses.is_active boolean null=NO def=true
+col   businesses.last_stripe_event_at timestamp with time zone null=YES def=-
+col   businesses.limits jsonb null=NO def='{}'::jsonb
+col   businesses.logo_url text null=YES def=-
+col   businesses.name text null=NO def=-
+col   businesses.onboarded_by uuid null=YES def=-
+col   businesses.onboarding_completed boolean null=YES def=false
+col   businesses.onboarding_completed_at timestamp with time zone null=YES def=-
+col   businesses.owner_whatsapp text null=YES def=-
+col   businesses.plan_tier text null=NO def='starter'::text
+col   businesses.region text null=NO def='UK'::text
+col   businesses.stripe_customer_id text null=YES def=-
+col   businesses.stripe_subscription_id text null=YES def=-
+col   businesses.subscription_status text null=YES def=-
+col   businesses.tax_number text null=YES def=-
+col   businesses.tax_registered boolean null=NO def=true
+col   businesses.timezone text null=NO def='Europe/London'::text
+col   businesses.trial_ends_at timestamp with time zone null=YES def=-
+col   plan_definitions.created_at timestamp with time zone null=NO def=now()
+col   plan_definitions.description text null=YES def=-
+col   plan_definitions.features jsonb null=NO def='{}'::jsonb
+col   plan_definitions.id text null=NO def=-
+col   plan_definitions.is_active boolean null=NO def=true
+col   plan_definitions.limits jsonb null=NO def='{}'::jsonb
+col   plan_definitions.monthly_price_gbp numeric null=YES def=-
+col   plan_definitions.name text null=NO def=-
+col   plan_definitions.sort_order integer null=NO def=0
+col   plan_definitions.updated_at timestamp with time zone null=NO def=now()
+con   businesses.businesses_api_key_key = UNIQUE (api_key)
+con   businesses.businesses_pkey = PRIMARY KEY (id)
+con   businesses.businesses_plan_tier_check = CHECK ((plan_tier = ANY (ARRAY['starter'::text, 'pro'::text, 'elite'::text, 'beta'::text, 'paused'::text])))
+con   businesses.businesses_region_chk = CHECK ((region = ANY (ARRAY['UK'::text, 'US'::text])))
+idx   businesses.businesses_api_key_key = CREATE UNIQUE INDEX businesses_api_key_key ON public.businesses USING btree (api_key)
+idx   businesses.businesses_pkey = CREATE UNIQUE INDEX businesses_pkey ON public.businesses USING btree (id)
+rls   businesses enabled=true
+rls   plan_definitions enabled=true
+pol   businesses.Platform admins can manage all businesses cmd=ALL roles={authenticated}
+pol   businesses.biz_select_if_member cmd=SELECT roles={authenticated}
+pol   businesses.biz_update_if_owner cmd=UPDATE roles={authenticated}
+pol   plan_definitions.plan_definitions_admin_write cmd=ALL roles={authenticated}
+pol   plan_definitions.plan_definitions_public_read cmd=SELECT roles={anon,authenticated}
+acl   businesses = postgres=arwdDxtm/postgres ; anon=rtm/postgres ; authenticated=arwdDxtm/postgres ; service_role=arwdDxtm/postgres
+acl   plan_definitions = postgres=arwdDxtm/postgres ; anon=arwdDxtm/postgres ; authenticated=arwdDxtm/postgres ; service_role=arwdDxtm/postgres
+data  businesses plan_tier=starter n=3
+data  plan_definitions rows=0
+data  businesses.feature_flags keys = (none) n=3
+(54 rows)

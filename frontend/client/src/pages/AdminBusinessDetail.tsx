@@ -28,32 +28,47 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import Switch from '@mui/material/Switch';
 import { supabase, type Business, type BusinessMember } from '@/lib/supabase';
 import { apiRequest } from '@/lib/queryClient';
+import {
+  PLAN_TIERS as CANONICAL_PLAN_TIERS,
+  planDefaults,
+  setFeatureFlag,
+  isFeatureEnabled,
+  type CanonicalFeature,
+} from '@/lib/entitlements';
 import AdminReceptionistSection from '@/components/AdminReceptionistSection';
 import AdminWhatsAppSection from '@/components/AdminWhatsAppSection';
 import AdminBoardMeetingBusinessSection from '@/components/board-meeting/AdminBoardMeetingBusinessSection';
 
-const FEATURE_TOGGLE_LIST = [
-  { key: 'quoting_enabled', label: 'Quoting & Quantity Surveying', description: 'AI-powered quotes, quantity surveying, PDF generation, quote-to-invoice', icon: '📋', defaultEnabled: false },
-  { key: 'calendar_booking_enabled', label: 'Calendar Booking', description: 'AI receptionist can check availability and book appointments', icon: '📅', defaultEnabled: false },
-  { key: 'whatsapp_enabled', label: 'WhatsApp CEO Briefing', description: 'Daily pulse, weekly briefing, and real-time alerts via WhatsApp', icon: '💬', defaultEnabled: false },
-  { key: 'ai_receptionist_enabled', label: 'AI Receptionist', description: 'AI-powered phone receptionist with call handling', icon: '🤖', defaultEnabled: true },
-  { key: 'email_management_enabled', label: 'Email Management', description: 'Gmail sync, AI categorisation, and email management', icon: '📧', defaultEnabled: true },
-  { key: 'invoice_chasing_enabled', label: 'Invoice Chasing', description: 'Automated invoice reminders and chase management', icon: '📄', defaultEnabled: true },
-  { key: 'accounting_enabled', label: 'Accounting Integration', description: 'Connect to Xero, FreeAgent, or QuickBooks', icon: '💷', defaultEnabled: false },
+const FEATURE_TOGGLE_LIST: { key: CanonicalFeature; label: string; description: string; icon: string }[] = [
+  { key: 'quoting', label: 'Quoting & Quantity Surveying', description: 'AI-powered quotes, quantity surveying, PDF generation, quote-to-invoice', icon: '\u{1F4CB}' },
+  { key: 'invoicing', label: 'Invoicing & Chasing', description: 'Invoice creation, automated reminders and chase management', icon: '\u{1F4C4}' },
+  { key: 'accounting', label: 'Accounting Integration', description: 'Connect to Xero, FreeAgent, or QuickBooks', icon: '\u{1F4B7}' },
+  { key: 'email', label: 'Email Management', description: 'Gmail sync, AI categorisation, and email management', icon: '\u{1F4E7}' },
+  { key: 'aria_chat', label: 'Aria Chat', description: 'Aria assistant, text conversations and email summarisation', icon: '\u{1F4AC}' },
+  { key: 'aria_voice', label: 'Aria Voice', description: 'Aria assistant over voice, including realtime speech', icon: '\u{1F3A4}' },
+  { key: 'whatsapp', label: 'WhatsApp CEO Briefing', description: 'Daily pulse, weekly briefing, and real-time alerts via WhatsApp', icon: '\u{1F4F2}' },
+  { key: 'board_meetings', label: 'Executive Board Meetings', description: 'AI executive board meeting sessions and reports', icon: '\u{1F4CA}' },
+  { key: 'calendar_booking', label: 'Calendar Booking', description: 'AI receptionist can check availability and book appointments', icon: '\u{1F4C5}' },
+  { key: 'receptionist', label: 'AI Receptionist', description: 'AI-powered phone receptionist with call handling', icon: '\u{1F916}' },
+  { key: 'outreach', label: 'Outreach', description: 'Prospect research and outbound outreach campaigns', icon: '\u{1F4E3}' },
 ];
 
-const INDUSTRY_PRESETS: Record<string, string[]> = {
-  general: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled'],
-  construction: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'quoting_enabled', 'calendar_booking_enabled', 'accounting_enabled'],
-  plumbing: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'quoting_enabled', 'calendar_booking_enabled'],
-  electrical: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'quoting_enabled', 'calendar_booking_enabled'],
-  fitness: ['email_management_enabled', 'ai_receptionist_enabled', 'calendar_booking_enabled', 'whatsapp_enabled'],
-  cleaning: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'quoting_enabled'],
-  landscaping: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'quoting_enabled'],
-  consulting: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'calendar_booking_enabled', 'accounting_enabled'],
-  automotive: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'quoting_enabled'],
-  property: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled', 'accounting_enabled'],
-  other: ['email_management_enabled', 'ai_receptionist_enabled', 'invoice_chasing_enabled'],
+// Industry presets name the features a business in that trade typically WANTS
+// ON. They are matched against the plan default at apply time, so a preset
+// only ever writes a key that genuinely differs from the plan — see the
+// Industry onChange handler. Keys are canonical (PART B).
+const INDUSTRY_PRESETS: Record<string, CanonicalFeature[]> = {
+  general: ['email', 'receptionist', 'invoicing'],
+  construction: ['email', 'receptionist', 'invoicing', 'quoting', 'calendar_booking', 'accounting'],
+  plumbing: ['email', 'receptionist', 'invoicing', 'quoting', 'calendar_booking'],
+  electrical: ['email', 'receptionist', 'invoicing', 'quoting', 'calendar_booking'],
+  fitness: ['email', 'receptionist', 'calendar_booking', 'whatsapp'],
+  cleaning: ['email', 'receptionist', 'invoicing', 'quoting'],
+  landscaping: ['email', 'receptionist', 'invoicing', 'quoting'],
+  consulting: ['email', 'receptionist', 'invoicing', 'calendar_booking', 'accounting'],
+  automotive: ['email', 'receptionist', 'invoicing', 'quoting'],
+  property: ['email', 'receptionist', 'invoicing', 'accounting'],
+  other: ['email', 'receptionist', 'invoicing'],
 };
 
 interface AwazIntegration {
@@ -109,7 +124,9 @@ interface BusinessHealth {
 
 type TabKey = 'overview' | 'members' | 'integrations' | 'activity' | 'support';
 
-const PLAN_TIERS = ['starter', 'pro', 'business', 'beta', 'paused'];
+// PART A / DECISION 3: `paused` is gone. Payment state lives in
+// subscription_status, never in plan_tier.
+const PLAN_TIERS = CANONICAL_PLAN_TIERS;
 const ROLES = ['owner', 'admin', 'member'];
 const SUPPORT_PRIORITIES = ['low', 'normal', 'high', 'urgent'];
 
@@ -655,9 +672,13 @@ export default function AdminBusinessDetail() {
 
                 <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
                   <Chip label={`Email: ${health.business.feature_flags?.email ? 'On' : 'Off'}`} size="small" />
-                  <Chip label={`Calendar: ${health.business.feature_flags?.calendar ? 'On' : 'Off'}`} size="small" />
-                  <Chip label={`Voice: ${health.business.feature_flags?.voice ? 'On' : 'Off'}`} size="small" />
-                  <Chip label={`Receptionist: ${health.business.feature_flags?.receptionist ? 'On' : 'Off'}`} size="small" />
+                  {/* Resolved through plan defaults, not raw flag lookups. The
+                      old keys (`calendar`, `voice`) were renamed by migration
+                      033 SECTION 6, and a raw lookup on a stripped key reads
+                      Off for a feature the plan grants. */}
+                  <Chip label={`Calendar: ${isFeatureEnabled(health.business.plan_tier, health.business.feature_flags, 'calendar_booking') ? 'On' : 'Off'}`} size="small" />
+                  <Chip label={`Voice: ${isFeatureEnabled(health.business.plan_tier, health.business.feature_flags, 'aria_voice') ? 'On' : 'Off'}`} size="small" />
+                  <Chip label={`Receptionist: ${isFeatureEnabled(health.business.plan_tier, health.business.feature_flags, 'receptionist') ? 'On' : 'Off'}`} size="small" />
                 </Box>
 
                 <Divider />
@@ -832,9 +853,17 @@ export default function AdminBusinessDetail() {
                 onChange={(e) => {
                   const industry = e.target.value as string;
                   const presets = INDUSTRY_PRESETS[industry] || [];
-                  const updatedFlags: Record<string, any> = { ...(business?.feature_flags || {}), industry };
+                  // Only store what DIFFERS from the plan. The old code wrote
+                  // every catalog key explicitly, which put plan defaults into
+                  // feature_flags and pinned an explicit `false` on everything
+                  // the preset omitted — undoing migration 033 SECTION 7 on the
+                  // first save. setFeatureFlag drops any key that matches the
+                  // plan default, so the business keeps following its plan.
+                  let updatedFlags: Record<string, any> = { ...(business?.feature_flags || {}), industry };
                   FEATURE_TOGGLE_LIST.forEach(f => {
-                    updatedFlags[f.key] = presets.includes(f.key);
+                    updatedFlags = setFeatureFlag(
+                      business?.plan_tier, updatedFlags, f.key, presets.includes(f.key),
+                    );
                   });
                   setBusiness((prev: any) => prev ? { ...prev, feature_flags: updatedFlags } : prev);
                   setFeatureFlagsText(JSON.stringify(updatedFlags, null, 2));
@@ -864,9 +893,18 @@ export default function AdminBusinessDetail() {
                   </Box>
                 </Box>
                 <Switch
-                  checked={business?.feature_flags?.[feature.key] ?? feature.defaultEnabled}
+                  // PART C resolution: an explicit flag wins, otherwise the
+                  // plan default for this business's tier. Previously this fell
+                  // back to a hardcoded per-feature default that had nothing to
+                  // do with what the customer had bought.
+                  checked={
+                    business?.feature_flags?.[feature.key]
+                      ?? planDefaults(business?.plan_tier)[feature.key]
+                  }
                   onChange={(e) => {
-                    const updatedFlags = { ...(business?.feature_flags || {}), [feature.key]: e.target.checked };
+                    const updatedFlags = setFeatureFlag(
+                      business?.plan_tier, business?.feature_flags, feature.key, e.target.checked,
+                    );
                     setBusiness((prev: any) => prev ? { ...prev, feature_flags: updatedFlags } : prev);
                     setFeatureFlagsText(JSON.stringify(updatedFlags, null, 2));
                   }}
