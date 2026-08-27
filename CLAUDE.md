@@ -119,24 +119,43 @@ both line-item tables, per-line discount/apportionment/tax columns,
 unique index `UNIQUE (business_id, invoice_number) WHERE external_source IS
 NULL`. MSC's counter is seeded to 2.
 
-**Now:** money engine implementation — DONE, `./check.sh full` green,
-181 tests passing. New modules: `backend/services/money.py`,
-`invoice_numbering.py`, `region.py`. `parse_amount` fixed (was a stub that
-returned None for every input, so CSV invoice import had never worked).
-`quoting_api` create/update/convert now use Decimal throughout and honour
-the business's own tax rate.
+**Now:** ENTITLEMENT-SPEC PART C — plan is the source of truth. DONE,
+`./check.sh full` green, 326 tests passing (53 new in
+`backend/tests/test_entitlement_defaults.py`).
 
-**The implementation requires 031.** It writes columns that do not exist
-before it. Do not run this code against a pre-031 database.
+The sweep found FIVE plan->feature tables in three vocabularies. Two were
+Python (`auth.py` and `main.py`, the same non-canonical dict twice, inventing
+`calendar`/`voice` and giving `starter` nothing). Now ONE, in
+`auth.PLAN_FEATURE_DEFAULTS`, canonical. The test PARSES the two copies that
+cannot be deduplicated — `entitlements.ts` and 033 SECTION 7's CTE — and
+compares, so drift fails the build.
 
-**Next — needs a live walkthrough before anything else ships:**
-1. Convert a quote on New Body Gym and confirm the invoice number, the
-   stored line items and the VAT split
-2. Xero sync on New Body Gym — the one 031 change still unproven live, and
-   the partial unique index sits on the table the sync upserts into
-3. Chase email on an email-connected account — a chase sent from an account
-   with no email connection produced no error and no email, which looks like
-   a silent failure worth confirming
+`auth.strip_plan_defaults()` is the write-path rule: drop a key only when it
+is canonical AND boolean AND equals the tier default. Applied at all three
+creation paths — onboarding business_details (feature_flags now OMITTED from
+the INSERT; the column default '{}' applies), onboarding plan_features,
+`admin_business_api.create_business` — and at the Stripe webhook, which
+replaced `_merge_feature_flags` (deleted; it wrote defaults in by
+construction, and against the canonical table would have written eleven).
+
+`AdminOnboardingWizard.tsx` now holds exceptions, not a copy of the plan:
+canonical keys, `planDefaults()`/`setFeatureFlag`, matching
+`AdminBusinessDetail.tsx`. `plan_definitions` still prices plans; it no
+longer decides entitlement.
+
+**THIS UNBLOCKS 033 SECTION 7** — and SECTION 7 must now RUN. Two reasons.
+(1) Its ordering rule is satisfied only once this deploys. (2) The strip
+cannot tell a stale merged default from a goodwill grant, so a business
+carrying legacy flags keeps them through a downgrade; SECTION 7 strips
+against the CURRENT tier while both live businesses are still `pro`,
+reducing them to `{}` and making later downgrades work.
+
+**Deliberately out of scope, still open:** `limits` untouched on every path
+(nothing reads it for enforcement). `AdminDashboard.tsx`'s `FEATURE_PRESETS`
+still holds a fourth vocabulary (`ai_briefings`, `premium_support`) — now
+harmless, because the server strips what it submits, but it is a stale table.
+`plan_definitions` remains runtime-editable via
+`PUT /v1/admin/onboarding/plans`.
 
 **Then:** manual invoices → invoice PDF and branding (there is no invoice
 PDF at all today; `quote_pdf.py` has no sibling, and invoices have no

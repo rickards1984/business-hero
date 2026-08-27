@@ -34,6 +34,12 @@ import { useAuth } from '@/contexts/AuthContext';
 import { apiRequest } from '@/lib/queryClient';
 import { updateAdminWhatsAppConfig } from '@/lib/whatsappApi';
 import PhoneInput from '@/components/PhoneInput';
+import {
+  isFeatureEnabled,
+  planDefaults,
+  setFeatureFlag,
+  type CanonicalFeature,
+} from '@/lib/entitlements';
 
 const TIMEZONES = [
   'Europe/London',
@@ -49,31 +55,41 @@ const TIMEZONES = [
   'Australia/Sydney',
 ];
 
-const ALL_FEATURE_KEYS = [
+// The canonical PART B vocabulary, matching FEATURE_TOGGLE_LIST in
+// AdminBusinessDetail.tsx. This list used to carry three keys of its own —
+// `calendar`, `whatsapp_briefing`, `invoice_chasing` — which no plan table
+// anywhere recognised, so no plan default could ever be matched against them
+// and every one was written into feature_flags as an explicit value.
+const ALL_FEATURE_KEYS: { key: CanonicalFeature; label: string }[] = [
   { key: 'email', label: 'Email Integration' },
-  { key: 'calendar', label: 'Calendar Sync' },
   { key: 'aria_chat', label: 'AI Assistant (Chat)' },
   { key: 'aria_voice', label: 'AI Assistant (Voice)' },
   { key: 'receptionist', label: 'AI Receptionist' },
   { key: 'accounting', label: 'Accounting' },
   { key: 'quoting', label: 'Quoting & Quantity Surveying' },
+  { key: 'invoicing', label: 'Invoicing & Chasing' },
   { key: 'calendar_booking', label: 'Calendar Booking' },
-  { key: 'whatsapp_briefing', label: 'WhatsApp Briefing' },
-  { key: 'invoice_chasing', label: 'Invoice Chasing' },
+  { key: 'whatsapp', label: 'WhatsApp CEO Briefing' },
+  { key: 'board_meetings', label: 'Executive Board Meetings' },
+  { key: 'outreach', label: 'Outreach' },
 ];
 
-const ONBOARDING_INDUSTRY_PRESETS: Record<string, string[]> = {
-  general: ['email', 'receptionist', 'invoice_chasing'],
-  construction: ['email', 'receptionist', 'invoice_chasing', 'quoting', 'calendar_booking', 'accounting'],
-  plumbing: ['email', 'receptionist', 'invoice_chasing', 'quoting', 'calendar_booking'],
-  electrical: ['email', 'receptionist', 'invoice_chasing', 'quoting', 'calendar_booking'],
-  fitness: ['email', 'receptionist', 'calendar_booking', 'whatsapp_briefing'],
-  cleaning: ['email', 'receptionist', 'invoice_chasing', 'quoting'],
-  landscaping: ['email', 'receptionist', 'invoice_chasing', 'quoting'],
-  consulting: ['email', 'receptionist', 'invoice_chasing', 'calendar_booking', 'accounting'],
-  automotive: ['email', 'receptionist', 'invoice_chasing', 'quoting'],
-  property: ['email', 'receptionist', 'invoice_chasing', 'accounting'],
-  other: ['email', 'receptionist', 'invoice_chasing'],
+// Kept identical to INDUSTRY_PRESETS in AdminBusinessDetail.tsx. A preset
+// names the features that trade typically wants ON; it is matched against the
+// plan default at apply time, so it only ever writes a key that genuinely
+// differs from the plan.
+const ONBOARDING_INDUSTRY_PRESETS: Record<string, CanonicalFeature[]> = {
+  general: ['email', 'receptionist', 'invoicing'],
+  construction: ['email', 'receptionist', 'invoicing', 'quoting', 'calendar_booking', 'accounting'],
+  plumbing: ['email', 'receptionist', 'invoicing', 'quoting', 'calendar_booking'],
+  electrical: ['email', 'receptionist', 'invoicing', 'quoting', 'calendar_booking'],
+  fitness: ['email', 'receptionist', 'calendar_booking', 'whatsapp'],
+  cleaning: ['email', 'receptionist', 'invoicing', 'quoting'],
+  landscaping: ['email', 'receptionist', 'invoicing', 'quoting'],
+  consulting: ['email', 'receptionist', 'invoicing', 'calendar_booking', 'accounting'],
+  automotive: ['email', 'receptionist', 'invoicing', 'quoting'],
+  property: ['email', 'receptionist', 'invoicing', 'accounting'],
+  other: ['email', 'receptionist', 'invoicing'],
 };
 
 interface PlanDef {
@@ -172,8 +188,11 @@ export default function AdminOnboardingWizard() {
   const [sendInvite, setSendInvite] = useState(true);
 
   // Step 3
-  const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
-  const [planFeatureDefaults, setPlanFeatureDefaults] = useState<Record<string, boolean>>({});
+  // EXCEPTIONS ONLY — the same contract as `businesses.feature_flags`
+  // itself. Effective access is isFeatureEnabled(bizPlan, featureFlags, k);
+  // the plan supplies everything this dict does not mention. It used to
+  // hold a full copy of the plan's features, which is what got written.
+  const [featureFlags, setFeatureFlags] = useState<Record<string, any>>({});
   const [industry, setIndustry] = useState('general');
 
   // Step 4
@@ -234,13 +253,18 @@ export default function AdminOnboardingWizard() {
   useEffect(() => { return () => { if (vpAudioRef.current) vpAudioRef.current.pause(); }; }, []);
 
   const selectedPlan = useMemo(() => plans.find((p) => p.id === bizPlan), [plans, bizPlan]);
+  // `plan_definitions` prices a plan and names it. It does NOT decide
+  // entitlement: it is a sixth plan -> feature authority, editable at
+  // runtime via PUT /v1/admin/onboarding/plans and kept in step with
+  // nothing. Defaults come from the canonical table, same as the backend.
+  const planFeatureDefaults = useMemo(() => planDefaults(bizPlan), [bizPlan]);
 
   const skippedSteps = useMemo(() => {
     const skip: Record<string, boolean> = {};
-    if (!featureFlags.receptionist) skip.receptionist_setup = true;
-    if (!featureFlags.accounting) skip.accounting_setup = true;
+    if (!isFeatureEnabled(bizPlan, featureFlags, 'receptionist')) skip.receptionist_setup = true;
+    if (!isFeatureEnabled(bizPlan, featureFlags, 'accounting')) skip.accounting_setup = true;
     return skip;
-  }, [featureFlags]);
+  }, [featureFlags, bizPlan]);
 
   const visibleStepIndices = useMemo(() => {
     return STEP_ORDER.map((_, i) => i).filter((i) => !skippedSteps[STEP_ORDER[i]]);
@@ -267,11 +291,8 @@ export default function AdminOnboardingWizard() {
       setPlans(planData);
       setVoices(voiceData);
 
-      const defaultPlan = planData.find((p) => p.id === 'starter');
-      if (defaultPlan) {
-        setFeatureFlags({ ...defaultPlan.features });
-        setPlanFeatureDefaults({ ...defaultPlan.features });
-      }
+      // No seeding. A new business starts with NO exceptions; its access
+      // is whatever its plan grants, resolved live.
 
       if (resumeBusinessId) {
         await resumeSession(resumeBusinessId);
@@ -314,14 +335,6 @@ export default function AdminOnboardingWizard() {
         }
       }
 
-      const planId = wd.business_details?.plan_tier || 'starter';
-      const matchedPlan = plans.find((p) => p.id === planId);
-      if (matchedPlan) {
-        setPlanFeatureDefaults({ ...matchedPlan.features });
-        if (!wd.plan_features) {
-          setFeatureFlags({ ...matchedPlan.features });
-        }
-      }
       if (wd.email_setup) {
         setEmailNotes(wd.email_setup.notes || '');
       }
@@ -381,12 +394,6 @@ export default function AdminOnboardingWizard() {
         const newBizId = data.business.id;
         setBusinessId(newBizId);
         setSession(data.session);
-
-        const plan = plans.find((p) => p.id === bizPlan);
-        if (plan) {
-          setFeatureFlags({ ...plan.features });
-          setPlanFeatureDefaults({ ...plan.features });
-        }
 
         setRecGreeting(`Hello, thank you for calling ${bizName.trim()}. How can I help you today?`);
 
@@ -672,11 +679,11 @@ export default function AdminOnboardingWizard() {
                       borderWidth: bizPlan === plan.id ? 2 : 1,
                       bgcolor: bizPlan === plan.id ? 'primary.light' : 'background.paper',
                     }}
-                    onClick={() => {
-                      setBizPlan(plan.id);
-                      setFeatureFlags({ ...plan.features });
-                      setPlanFeatureDefaults({ ...plan.features });
-                    }}
+                    // Choosing a plan changes the defaults everything
+                    // resolves against. Any exception already set stays an
+                    // exception, and is re-tested against the new tier by
+                    // setFeatureFlag the next time it is touched.
+                    onClick={() => setBizPlan(plan.id)}
                   >
                     <CardContent>
                       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
@@ -702,8 +709,8 @@ export default function AdminOnboardingWizard() {
                             label={f.label}
                             size="small"
                             variant="outlined"
-                            color={plan.features[f.key] ? 'success' : 'default'}
-                            sx={!plan.features[f.key] ? { textDecoration: 'line-through', opacity: 0.5 } : undefined}
+                            color={planDefaults(plan.id)[f.key] ? 'success' : 'default'}
+                            sx={!planDefaults(plan.id)[f.key] ? { textDecoration: 'line-through', opacity: 0.5 } : undefined}
                           />
                         ))}
                       </Box>
@@ -765,8 +772,17 @@ export default function AdminOnboardingWizard() {
                     const ind = e.target.value as string;
                     setIndustry(ind);
                     const presets = ONBOARDING_INDUSTRY_PRESETS[ind] || [];
-                    const updated: Record<string, boolean> = { ...featureFlags };
-                    ALL_FEATURE_KEYS.forEach(f => { updated[f.key] = presets.includes(f.key); });
+                    // Only store what DIFFERS from the plan. The old code wrote
+                    // every catalog key explicitly, which put plan defaults into
+                    // feature_flags and pinned an explicit `false` on everything
+                    // the preset omitted — so a brand-new business was created
+                    // already denying features its plan grants, and migration
+                    // 033 SECTION 7 could never clean it. setFeatureFlag drops
+                    // any key that matches the plan default.
+                    let updated: Record<string, any> = { ...featureFlags };
+                    ALL_FEATURE_KEYS.forEach(f => {
+                      updated = setFeatureFlag(bizPlan, updated, f.key, presets.includes(f.key));
+                    });
                     setFeatureFlags(updated);
                   }}
                 >
@@ -790,7 +806,11 @@ export default function AdminOnboardingWizard() {
               <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                 {ALL_FEATURE_KEYS.map((f) => {
                   const planDefault = planFeatureDefaults[f.key] ?? false;
-                  const isOverridden = featureFlags[f.key] !== planDefault;
+                  // An override is a key PRESENT in the exceptions dict, not a
+                  // value that happens to differ. Comparing values called every
+                  // untouched feature an override the moment the dict was a
+                  // full copy of the plan.
+                  const isOverridden = Object.prototype.hasOwnProperty.call(featureFlags, f.key);
                   return (
                     <Box
                       key={f.key}
@@ -809,8 +829,9 @@ export default function AdminOnboardingWizard() {
                         <FormControlLabel
                           control={
                             <Checkbox
-                              checked={!!featureFlags[f.key]}
-                              onChange={(e) => setFeatureFlags((prev) => ({ ...prev, [f.key]: e.target.checked }))}
+                              checked={isFeatureEnabled(bizPlan, featureFlags, f.key)}
+                              onChange={(e) => setFeatureFlags((prev) =>
+                                setFeatureFlag(bizPlan, prev, f.key, e.target.checked))}
                             />
                           }
                           label={f.label}
@@ -824,7 +845,8 @@ export default function AdminOnboardingWizard() {
                   );
                 })}
               </Box>
-              {Object.entries(featureFlags).some(([k, v]) => v && !planFeatureDefaults[k]) && (
+              {ALL_FEATURE_KEYS.some((f) =>
+                featureFlags[f.key] === true && !planFeatureDefaults[f.key]) && (
                 <Alert severity="warning" sx={{ mt: 2 }}>
                   You've enabled features not included in the {selectedPlan?.name} plan. These are custom overrides.
                 </Alert>
@@ -1040,10 +1062,13 @@ export default function AdminOnboardingWizard() {
               <Typography variant="subtitle2" gutterBottom>Features Enabled</Typography>
               <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, mb: 3 }}>
                 {ALL_FEATURE_KEYS.map((f) => {
-                  const enabled = featureFlags[f.key];
+                  const enabled = isFeatureEnabled(bizPlan, featureFlags, f.key);
                   let statusLabel = 'Ready';
                   let statusColor: 'success' | 'warning' | 'default' = 'success';
-                  if (['email', 'calendar', 'accounting'].includes(f.key) && enabled) {
+                  // These three wait on an OAuth the owner completes later.
+                  // `calendar` used to head this list; it was never a real
+                  // feature key, so the branch never fired for it.
+                  if (['email', 'calendar_booking', 'accounting'].includes(f.key) && enabled) {
                     statusLabel = 'Pending owner OAuth';
                     statusColor = 'warning';
                   }

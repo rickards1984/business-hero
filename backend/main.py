@@ -59,7 +59,14 @@ from schemas import (
     SupportTicketCreateAdmin, SupportTicketUpdateAdmin,
     BillingCheckoutRequest, BillingSessionResponse, BillingPortalResponse,
 )
-from auth import get_access_token, get_user_auth_context, get_user_business_context, get_platform_admin_context, is_platform_admin_user
+from auth import (
+    get_access_token, get_user_auth_context, get_user_business_context,
+    get_platform_admin_context, is_platform_admin_user,
+    # ENTITLEMENT-SPEC PART B: main.py used to declare its own copy of the
+    # plan -> feature table. auth.py now owns the only one, and main.py
+    # no longer needs to read it at all — it needs the rule, not the table.
+    strip_plan_defaults,
+)
 from openai_utils import generate_call_summary
 from supabase_auth import verify_supabase_token
 from slowapi.errors import RateLimitExceeded
@@ -937,7 +944,14 @@ async def stripe_webhook(
             business.last_stripe_event_at = datetime.utcnow()
             if plan_tier:
                 business.plan_tier = plan_tier
-                business.feature_flags = _merge_feature_flags(business.feature_flags or {}, plan_tier)
+                # PART C: the webhook sets `plan_tier`; it does NOT write the
+                # plan's grants into `feature_flags`. The old _merge_feature_flags
+                # did `{**defaults, **existing}` and stored the result, so a
+                # downgrade could never take anything away. Strip instead: keep
+                # the genuine exceptions, drop what the new plan already grants.
+                business.feature_flags = strip_plan_defaults(
+                    business.feature_flags or {}, plan_tier
+                )
             business.is_active = status in ("active", "trialing")
             session.add(business)
             session.commit()
@@ -2343,23 +2357,6 @@ def _get_frontend_base_url(request: Request) -> str:
     if base_url:
         return str(base_url).rstrip("/")
     return str(request.base_url).rstrip("/")
-
-
-def _plan_feature_defaults(plan_tier: str) -> Dict[str, bool]:
-    defaults = {
-        "starter": {},
-        "pro": {"email": True},
-        "business": {"email": True, "calendar": True, "voice": True},
-        "beta": {"email": True, "calendar": True, "voice": True},
-        "paused": {},
-    }
-    return defaults.get(plan_tier, {})
-
-
-def _merge_feature_flags(existing: Dict[str, Any], plan_tier: str) -> Dict[str, Any]:
-    defaults = _plan_feature_defaults(plan_tier)
-    merged = {**defaults, **(existing or {})}
-    return merged
 
 
 def _resolve_plan_from_price(price_id: str) -> Optional[str]:

@@ -25,7 +25,7 @@ from sqlmodel import Session
 from sqlalchemy import text
 
 from db import get_session
-from auth import get_platform_admin_context, is_platform_admin_user
+from auth import get_platform_admin_context, is_platform_admin_user, strip_plan_defaults
 
 _logger = logging.getLogger("onboarding")
 
@@ -205,18 +205,32 @@ async def start_onboarding(
     admin_user_id = auth_ctx["user_id"]
 
     plan_row = session.execute(
-        text("SELECT features, limits FROM plan_definitions WHERE id = :plan_id"),
+        text("SELECT limits FROM plan_definitions WHERE id = :plan_id"),
         {"plan_id": step.plan_tier},
     ).fetchone()
 
     import json
-    plan_features = json.loads(plan_row.features) if plan_row and isinstance(plan_row.features, str) else (plan_row.features if plan_row else {})
+    # `plan_row.features` is deliberately NOT read. `plan_definitions` is a
+    # sixth plan -> feature authority, editable at runtime through
+    # PUT /v1/admin/onboarding/plans and kept in step with nothing. It may
+    # price a plan; it may not decide entitlement. See auth.PLAN_FEATURE_DEFAULTS.
     plan_limits = json.loads(plan_row.limits) if plan_row and isinstance(plan_row.limits, str) else (plan_row.limits if plan_row else {})
 
+    # ENTITLEMENT-SPEC PART C — `feature_flags` is OMITTED, not set to '{}'.
+    # The column is `jsonb NOT NULL DEFAULT '{}'::jsonb` (028 baseline), so the
+    # schema already guarantees the empty object; naming it here would only
+    # restate a default. A new business owns NO exceptions — its access comes
+    # from `plan_tier`, resolved live at read time. Writing the plan's grants
+    # in at creation, which is what this did, pinned them permanently: no later
+    # downgrade could remove a feature the row already claimed explicitly.
+    #
+    # `limits` is deliberately still written from the plan. Nothing reads it
+    # for enforcement, so blanking it would delete a record rather than
+    # relocate one — out of scope here.
     biz_row = session.execute(
         text("""
-            INSERT INTO businesses (name, timezone, plan_tier, is_active, feature_flags, limits, onboarding_completed, api_key)
-            VALUES (:name, :timezone, :plan_tier, FALSE, :feature_flags, :limits, FALSE, :api_key)
+            INSERT INTO businesses (name, timezone, plan_tier, is_active, limits, onboarding_completed, api_key)
+            VALUES (:name, :timezone, :plan_tier, FALSE, :limits, FALSE, :api_key)
             RETURNING *
         """),
         {
@@ -224,7 +238,6 @@ async def start_onboarding(
             "name": step.name,
             "timezone": step.timezone,
             "plan_tier": step.plan_tier,
-            "feature_flags": json.dumps(plan_features),
             "limits": json.dumps(plan_limits),
         },
     ).fetchone()
@@ -368,7 +381,20 @@ async def save_wizard_step(
             )
 
     elif step_name == "plan_features":
-        feature_flags = step_data.get("feature_flags", {})
+        submitted = step_data.get("feature_flags", {})
+        # PART C: store only what DIFFERS from the plan. The wizard sends a
+        # full copy of the tier's features plus whatever the admin toggled;
+        # writing that verbatim put plan defaults into the column and undid
+        # 033 SECTION 7 on the very first save. The strip keeps unknown keys,
+        # non-booleans (`industry`) and any explicit value that contradicts
+        # the plan — see auth.strip_plan_defaults.
+        biz_row = session.execute(
+            text("SELECT plan_tier FROM businesses WHERE id = :biz"),
+            {"biz": business_id},
+        ).fetchone()
+        feature_flags = strip_plan_defaults(
+            submitted, biz_row.plan_tier if biz_row else None
+        )
         session.execute(
             text("UPDATE businesses SET feature_flags = :flags WHERE id = :biz"),
             {"biz": business_id, "flags": json.dumps(feature_flags)},

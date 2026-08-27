@@ -23,7 +23,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Session
 
-from auth import get_platform_admin_context
+from auth import get_platform_admin_context, strip_plan_defaults
 from db import get_session
 
 # `business_id` is typed UUID on every route so a non-UUID path segment is
@@ -229,14 +229,22 @@ async def create_business(
     business_id = str(uuid4())
     api_key = _generate_api_key()
 
+    plan_tier = fields.get("plan_tier") or "starter"
+
     row = {
         "id": business_id,
         "name": name,
         "timezone": fields.get("timezone") or "Europe/London",
-        "plan_tier": fields.get("plan_tier") or "starter",
+        "plan_tier": plan_tier,
         "is_active": fields.get("is_active", False),
         "trial_ends_at": fields.get("trial_ends_at"),
-        "feature_flags": fields.get("feature_flags") or {},
+        # ENTITLEMENT-SPEC PART C. AdminDashboard submits a whole FEATURE_PRESETS
+        # block here, so a business was created already claiming every feature
+        # its plan grants — access no later downgrade could remove. Validation
+        # has already run (_validate_body); this drops only what merely restates
+        # the plan default, keeping genuine exceptions, unknown keys and
+        # `brand_color`. `limits` is deliberately passed through untouched.
+        "feature_flags": strip_plan_defaults(fields.get("feature_flags") or {}, plan_tier),
         "limits": fields.get("limits") or {},
     }
 

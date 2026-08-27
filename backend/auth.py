@@ -1,7 +1,7 @@
 """Authentication dependencies for FastAPI."""
 
 import os
-from typing import Optional, Dict
+from typing import Any, Optional, Dict
 from datetime import datetime, timezone
 from fastapi import Header, HTTPException, Depends, Request, Query, status
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
@@ -246,15 +246,103 @@ def _is_trial_expired(trial_ends_at: Optional[datetime]) -> bool:
     return trial_ends_at < datetime.now(timezone.utc)
 
 
+# ── ENTITLEMENT-SPEC PART B — the canonical plan -> feature table ────────────
+#
+# THE ONLY COPY IN PYTHON. `main.py` imports this; it used to declare its own
+# identical-but-separate dict, which is how the vocabularies drifted.
+#
+# Two further copies exist and cannot be deduplicated away:
+#   * frontend/client/src/lib/entitlements.ts  (PLAN_FEATURE_DEFAULTS)
+#   * backend/migrations/033_entitlement.sql   (the plan_defaults CTE, S7)
+# All three must agree. backend/tests/test_entitlement_defaults.py PARSES the
+# other two and compares against this one, so drift fails the build instead of
+# quietly removing someone's paid access.
+#
+# WHAT THIS REPLACED, and why it matters: the previous table gave `starter`
+# nothing at all, `pro` only {"email": True}, and invented two keys — `calendar`
+# and `voice` — that appear in no plan, no migration and no frontend list.
+# 033 SECTION 7 strips flags that merely restate the plan default; run against
+# that table it measured EIGHT feature losses across the two live businesses on
+# staging. SECTION 7 is safe only once THIS table is the one deployed.
+
+CANONICAL_FEATURES = (
+    "quoting", "invoicing", "accounting", "email", "aria_chat", "aria_voice",
+    "whatsapp", "board_meetings", "calendar_booking", "receptionist", "outreach",
+)
+
+# Every tier names every feature explicitly. A missing key would resolve to
+# False by omission — a denial nobody wrote down.
+PLAN_FEATURE_DEFAULTS: Dict[str, Dict[str, bool]] = {
+    "starter": {
+        "quoting": True, "invoicing": True, "accounting": True, "email": True,
+        "aria_chat": True, "aria_voice": False, "whatsapp": False,
+        "board_meetings": False, "calendar_booking": False,
+        "receptionist": False, "outreach": False,
+    },
+    "pro": {
+        "quoting": True, "invoicing": True, "accounting": True, "email": True,
+        "aria_chat": True, "aria_voice": True, "whatsapp": True,
+        "board_meetings": True, "calendar_booking": True,
+        "receptionist": True, "outreach": False,
+    },
+    "business": {
+        "quoting": True, "invoicing": True, "accounting": True, "email": True,
+        "aria_chat": True, "aria_voice": True, "whatsapp": True,
+        "board_meetings": True, "calendar_booking": True,
+        "receptionist": True, "outreach": True,
+    },
+    # `beta` mirrors `business` for testing parity.
+    "beta": {
+        "quoting": True, "invoicing": True, "accounting": True, "email": True,
+        "aria_chat": True, "aria_voice": True, "whatsapp": True,
+        "board_meetings": True, "calendar_booking": True,
+        "receptionist": True, "outreach": True,
+    },
+}
+
+
 def _plan_feature_defaults(plan_tier: Optional[str]) -> Dict[str, bool]:
-    defaults = {
-        "starter": {},
-        "pro": {"email": True},
-        "business": {"email": True, "calendar": True, "voice": True},
-        "beta": {"email": True, "calendar": True, "voice": True},
-        "paused": {},
+    """The plan's own grants. Fails closed to `starter`, the least-privileged.
+
+    `paused` is deliberately not a tier (DECISION 3; 033 SECTION 1's CHECK
+    dropped it), so it lands on the starter fallback like any other unknown
+    value. Returns a copy — callers have handed this straight into dict
+    merges before, and a mutation would repartition every business on the
+    process.
+    """
+    key = (plan_tier or "starter").lower()
+    return dict(PLAN_FEATURE_DEFAULTS.get(key, PLAN_FEATURE_DEFAULTS["starter"]))
+
+
+def strip_plan_defaults(
+    flags: Optional[Dict[str, Any]], plan_tier: Optional[str]
+) -> Dict[str, Any]:
+    """Reduce `feature_flags` to genuine per-business exceptions.
+
+    PART C: `plan_tier` is the source of truth and `feature_flags` holds ONLY
+    deliberate exceptions — a beta grant, a goodwill grant, a feature switched
+    off for one customer. Empty is the normal state. A default written back
+    into the column pins access that no plan change can then remove.
+
+    A key is dropped ONLY when it is in the canonical vocabulary AND holds a
+    boolean AND that boolean EQUALS this tier's default. Everything else
+    survives:
+      * an unknown key — this code cannot know what it means to someone
+      * a non-boolean (`brand_color`, the wizard's `industry`)
+      * a boolean that CONTRADICTS its default, in either direction. An
+        explicit `false` against a granting plan is a deliberate denial.
+
+    This is the same rule as `setFeatureFlag` in entitlements.ts and as the
+    `redundant` CTE in 033 SECTION 7.
+    """
+    defaults = PLAN_FEATURE_DEFAULTS.get(
+        (plan_tier or "starter").lower(), PLAN_FEATURE_DEFAULTS["starter"]
+    )
+    return {
+        key: value
+        for key, value in (flags or {}).items()
+        if not (isinstance(value, bool) and defaults.get(key) is value)
     }
-    return defaults.get((plan_tier or "starter").lower(), {})
 
 
 def _is_feature_enabled(business: Business, feature_name: str) -> bool:
