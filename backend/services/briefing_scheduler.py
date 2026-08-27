@@ -32,9 +32,17 @@ async def start_briefing_scheduler():
         return
     _scheduler_running = True
 
-    # Pretend the last sync happened recently so the first run is delayed
-    # by _STARTUP_DELAY_MINUTES. This lets the app finish starting and
-    # respond to Railway's healthcheck before any heavy sync work begins.
+    # Pretend the last EMAIL sync happened 115 minutes ago so the first one
+    # fires _STARTUP_DELAY_MINUTES from now rather than immediately, and the
+    # financial sync as if it just ran.
+    #
+    # This delays the two SYNC JOBS ONLY. It does not protect the healthcheck:
+    # `_check_and_send_scheduled_messages` is not governed by these timestamps
+    # and used to run the instant the loop was scheduled — a blocking psycopg2
+    # query on the event loop, roughly one second after startup, while Railway
+    # was still probing /health. The leading `await asyncio.sleep()` in
+    # `_scheduler_loop` is what keeps the first minute clear; see the note
+    # there before shortening either delay.
     now = datetime.now(timezone.utc)
     _last_email_sync = now - timedelta(minutes=120 - _STARTUP_DELAY_MINUTES)
     _last_financial_sync = now
@@ -44,8 +52,21 @@ async def start_briefing_scheduler():
 
 
 async def _scheduler_loop():
-    """Main scheduler loop — runs every 60 seconds"""
+    """Main scheduler loop — runs every 60 seconds.
+
+    THE SLEEP LEADS THE ITERATION, DELIBERATELY. It used to trail it, so the
+    first `_check_and_send_scheduled_messages()` ran the moment the task was
+    scheduled — about a second after startup. That function is `async def` but
+    its body is a synchronous SQLModel session (`get_session_context`), so it
+    blocks the event loop on psycopg2 I/O and the app cannot answer /health
+    while it runs. Sleeping first gives startup a clear minute.
+
+    `sleep_seconds` carries the backoff to the NEXT wait: a database error
+    shortens it to 30s, anything else restores 60s.
+    """
+    sleep_seconds = 60
     while True:
+        await asyncio.sleep(sleep_seconds)
         sleep_seconds = 60
         try:
             await _check_and_send_scheduled_messages()
@@ -80,8 +101,6 @@ async def _scheduler_loop():
             logger.error(
                 f"[Scheduler] Executive meeting prep failed: {e}", exc_info=True
             )
-
-        await asyncio.sleep(sleep_seconds)
 
 
 def _run_background_sync_jobs_nonblocking():
