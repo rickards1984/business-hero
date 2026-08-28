@@ -914,13 +914,19 @@ GRANT UPDATE (
 -- no error raised anywhere.
 --
 -- THIS IS NOT HYPOTHETICAL. It was measured on staging, 25 Aug 2026,
--- against fixtures carrying the eleven prod keys: resolving the
--- post-SECTION-7 state through the DEPLOYED defaults produced EIGHT
--- feature losses across the two businesses —
---   MSC:      accounting, calendar_booking, quoting, receptionist, whatsapp
---   New Body: accounting, calendar_booking, quoting
+-- against SIX fixtures seeded row for row from the exact prod values:
+-- resolving the post-SECTION-7 state through the DEPLOYED defaults
+-- produced TWELVE feature losses across the two live businesses —
+--   MSC (7):      accounting, aria_chat, aria_voice, calendar_booking,
+--                 quoting, receptionist, whatsapp
+--   New Body (5): accounting, calendar_booking, quoting, receptionist,
+--                 whatsapp
 -- Resolving the same state through the CANONICAL defaults produced zero.
 -- The difference is entirely which Python dict is deployed.
+--
+-- (An earlier run of this rehearsal, against RECONSTRUCTED fixtures,
+-- said EIGHT. That number is superseded — see audits/033-STAGING-
+-- REHEARSAL.md D1. The real figure is worse, not better.)
 --
 -- VERIFY 7b exists to catch exactly this and MUST be run before you
 -- walk away. Run it in BOTH forms — the file gives both.
@@ -931,6 +937,13 @@ GRANT UPDATE (
 -- be applied in the SAME deploy that replaces `_plan_feature_defaults`
 -- (backend/auth.py:249 AND backend/main.py:2346, both copies) with the
 -- canonical table below, or after it. Never before.
+--
+-- STATUS, 29 Aug 2026: that deploy has HAPPENED. `auth.py` now holds
+-- the canonical table as `PLAN_FEATURE_DEFAULTS` and `main.py` imports
+-- it rather than declaring its own — commit 776604c. The gate below is
+-- therefore satisfiable; it is NOT thereby waived. Verify it against
+-- the RUNNING backend, not against this repo, before applying SECTION 7.
+-- audits/033-PROD-RUNBOOK.md STEP 20 is that check.
 -- ---------------------------------------------------------------------
 --
 -- THE CANONICAL DEFAULTS BELOW MUST MATCH THE PYTHON CONSTANT EXACTLY.
@@ -949,8 +962,18 @@ GRANT UPDATE (
 --     whatsapp              F      T      T       T
 --     board_meetings        F      T      T       T
 --     calendar_booking      F      T      T       T
+--     calendar_sync         T      T      T       T
 --     receptionist          F      T      T       T
 --     outreach              F      F      T       T
+--
+--   calendar_sync is TRUE on every tier and gates NOTHING. Google issues
+--   Gmail and Calendar under ONE consent, so a business that has
+--   connected email has already granted calendar access; there is no
+--   separate state to check. It is in the vocabulary so the concept has
+--   a word. Separating it would mean splitting the OAuth grant into two
+--   scopes and two consent screens first. Because it is true on every
+--   tier, SECTION 7 strips it from any business that carries it — and no
+--   business carries it today, so it is a no-op on current prod data.
 
 
 -- PRE-FLIGHT 6a — MANDATORY. Every key involved in a rename must hold a
@@ -1191,8 +1214,9 @@ UPDATE public.businesses b
 --
 -- The gate, in one line: SECTION 7 may be applied only once
 -- `_plan_feature_defaults` in backend/auth.py AND backend/main.py both
--- return the canonical table below. VERIFY 7b run in its DEPLOYED form
--- must return 0 rows before you continue.
+-- return the canonical table below — and it must be the DEPLOYED backend
+-- that does so, not merely this checkout. VERIFY 7b run in its DEPLOYED
+-- form must return 0 rows before you continue.
 --
 -- A key is removed ONLY when it is in the canonical vocabulary AND holds
 -- a boolean AND that boolean equals the plan default for this business's
@@ -1215,28 +1239,32 @@ WITH plan_defaults(plan_tier, feature, enabled) AS (
     ('starter','accounting',true),('starter','email',true),
     ('starter','aria_chat',true), ('starter','aria_voice',false),
     ('starter','whatsapp',false), ('starter','board_meetings',false),
-    ('starter','calendar_booking',false),('starter','receptionist',false),
+    ('starter','calendar_booking',false),('starter','calendar_sync',true),
+    ('starter','receptionist',false),
     ('starter','outreach',false),
 
     ('pro','quoting',true),   ('pro','invoicing',true),
     ('pro','accounting',true),('pro','email',true),
     ('pro','aria_chat',true), ('pro','aria_voice',true),
     ('pro','whatsapp',true),  ('pro','board_meetings',true),
-    ('pro','calendar_booking',true),('pro','receptionist',true),
+    ('pro','calendar_booking',true),('pro','calendar_sync',true),
+    ('pro','receptionist',true),
     ('pro','outreach',false),
 
     ('business','quoting',true),   ('business','invoicing',true),
     ('business','accounting',true),('business','email',true),
     ('business','aria_chat',true), ('business','aria_voice',true),
     ('business','whatsapp',true),  ('business','board_meetings',true),
-    ('business','calendar_booking',true),('business','receptionist',true),
+    ('business','calendar_booking',true),('business','calendar_sync',true),
+    ('business','receptionist',true),
     ('business','outreach',true),
 
     ('beta','quoting',true),   ('beta','invoicing',true),
     ('beta','accounting',true),('beta','email',true),
     ('beta','aria_chat',true), ('beta','aria_voice',true),
     ('beta','whatsapp',true),  ('beta','board_meetings',true),
-    ('beta','calendar_booking',true),('beta','receptionist',true),
+    ('beta','calendar_booking',true),('beta','calendar_sync',true),
+    ('beta','receptionist',true),
     ('beta','outreach',true)
 ),
 redundant AS (
@@ -1275,13 +1303,15 @@ UPDATE public.businesses b
 --            ('pro','accounting',true),('pro','email',true),
 --            ('pro','aria_chat',true),('pro','aria_voice',true),
 --            ('pro','whatsapp',true),('pro','board_meetings',true),
---            ('pro','calendar_booking',true),('pro','receptionist',true),
+--            ('pro','calendar_booking',true),('pro','calendar_sync',true),
+--            ('pro','receptionist',true),
 --            ('pro','outreach',false),
 --            ('starter','quoting',true),('starter','invoicing',true),
 --            ('starter','accounting',true),('starter','email',true),
 --            ('starter','aria_chat',true),('starter','aria_voice',false),
 --            ('starter','whatsapp',false),('starter','board_meetings',false),
---            ('starter','calendar_booking',false),('starter','receptionist',false),
+--            ('starter','calendar_booking',false),('starter','calendar_sync',true),
+--            ('starter','receptionist',false),
 --            ('starter','outreach',false)
 --   ),
 --   deployed(plan_tier, feature, enabled) AS (
@@ -1334,7 +1364,7 @@ UPDATE public.businesses b
 --    WHERE k.key NOT IN ('quoting','invoicing','accounting','email',
 --                        'aria_chat','aria_voice','whatsapp',
 --                        'board_meetings','calendar_booking',
---                        'receptionist','outreach')
+--                        'calendar_sync','receptionist','outreach')
 --    ORDER BY b.name, k.key;
 --
 -- VERIFY 7d — the end state, business by business. Compare against

@@ -69,6 +69,7 @@ const ALL_FEATURE_KEYS: { key: CanonicalFeature; label: string }[] = [
   { key: 'quoting', label: 'Quoting & Quantity Surveying' },
   { key: 'invoicing', label: 'Invoicing & Chasing' },
   { key: 'calendar_booking', label: 'Calendar Booking' },
+  { key: 'calendar_sync', label: 'Calendar Sync' },
   { key: 'whatsapp', label: 'WhatsApp CEO Briefing' },
   { key: 'board_meetings', label: 'Executive Board Meetings' },
   { key: 'outreach', label: 'Outreach' },
@@ -1065,10 +1066,20 @@ export default function AdminOnboardingWizard() {
                   const enabled = isFeatureEnabled(bizPlan, featureFlags, f.key);
                   let statusLabel = 'Ready';
                   let statusColor: 'success' | 'warning' | 'default' = 'success';
-                  // These three wait on an OAuth the owner completes later.
+                  // These two wait on an OAuth the owner completes later.
                   // `calendar` used to head this list; it was never a real
                   // feature key, so the branch never fired for it.
-                  if (['email', 'calendar_booking', 'accounting'].includes(f.key) && enabled) {
+                  //
+                  // `calendar_booking` was here and should not have been. It is
+                  // gated by booking_settings.enabled, not by an OAuth grant,
+                  // so the badge claimed a blocker that does not exist.
+                  //
+                  // `calendar_sync` is deliberately NOT here either. Google
+                  // grants Gmail and Calendar under ONE consent, so it is never
+                  // separately pending — the `email` entry already covers that
+                  // action. Badging both would make one owner action look like
+                  // two, which is the same misdirection in a new place.
+                  if (['email', 'accounting'].includes(f.key) && enabled) {
                     statusLabel = 'Pending owner OAuth';
                     statusColor = 'warning';
                   }

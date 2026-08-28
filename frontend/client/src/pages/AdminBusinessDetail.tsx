@@ -676,7 +676,7 @@ export default function AdminBusinessDetail() {
                       old keys (`calendar`, `voice`) were renamed by migration
                       033 SECTION 6, and a raw lookup on a stripped key reads
                       Off for a feature the plan grants. */}
-                  <Chip label={`Calendar: ${isFeatureEnabled(health.business.plan_tier, health.business.feature_flags, 'calendar_booking') ? 'On' : 'Off'}`} size="small" />
+                  <Chip label={`Calendar Booking: ${isFeatureEnabled(health.business.plan_tier, health.business.feature_flags, 'calendar_booking') ? 'On' : 'Off'}`} size="small" />
                   <Chip label={`Voice: ${isFeatureEnabled(health.business.plan_tier, health.business.feature_flags, 'aria_voice') ? 'On' : 'Off'}`} size="small" />
                   <Chip label={`Receptionist: ${isFeatureEnabled(health.business.plan_tier, health.business.feature_flags, 'receptionist') ? 'On' : 'Off'}`} size="small" />
                 </Box>

@@ -265,9 +265,18 @@ def _is_trial_expired(trial_ends_at: Optional[datetime]) -> bool:
 # that table it measured EIGHT feature losses across the two live businesses on
 # staging. SECTION 7 is safe only once THIS table is the one deployed.
 
+# `calendar_sync` is in the vocabulary but gates NOTHING today, deliberately.
+# Google issues Gmail and Calendar under ONE consent, so a business that has
+# connected email has already granted calendar access — there is no separate
+# state to check and no request to refuse. It is named here so the concept has
+# a word and cannot be lost, and it is TRUE on every tier because it rides on
+# `email`, which is also true on every tier. Making it a real gate would mean
+# splitting the OAuth grant into two scopes and two consent screens first; the
+# flag is not the missing piece, the grant is.
 CANONICAL_FEATURES = (
     "quoting", "invoicing", "accounting", "email", "aria_chat", "aria_voice",
-    "whatsapp", "board_meetings", "calendar_booking", "receptionist", "outreach",
+    "whatsapp", "board_meetings", "calendar_booking", "calendar_sync",
+    "receptionist", "outreach",
 )
 
 # Every tier names every feature explicitly. A missing key would resolve to
@@ -277,18 +286,21 @@ PLAN_FEATURE_DEFAULTS: Dict[str, Dict[str, bool]] = {
         "quoting": True, "invoicing": True, "accounting": True, "email": True,
         "aria_chat": True, "aria_voice": False, "whatsapp": False,
         "board_meetings": False, "calendar_booking": False,
+        "calendar_sync": True,
         "receptionist": False, "outreach": False,
     },
     "pro": {
         "quoting": True, "invoicing": True, "accounting": True, "email": True,
         "aria_chat": True, "aria_voice": True, "whatsapp": True,
         "board_meetings": True, "calendar_booking": True,
+        "calendar_sync": True,
         "receptionist": True, "outreach": False,
     },
     "business": {
         "quoting": True, "invoicing": True, "accounting": True, "email": True,
         "aria_chat": True, "aria_voice": True, "whatsapp": True,
         "board_meetings": True, "calendar_booking": True,
+        "calendar_sync": True,
         "receptionist": True, "outreach": True,
     },
     # `beta` mirrors `business` for testing parity.
@@ -296,6 +308,7 @@ PLAN_FEATURE_DEFAULTS: Dict[str, Dict[str, bool]] = {
         "quoting": True, "invoicing": True, "accounting": True, "email": True,
         "aria_chat": True, "aria_voice": True, "whatsapp": True,
         "board_meetings": True, "calendar_booking": True,
+        "calendar_sync": True,
         "receptionist": True, "outreach": True,
     },
 }

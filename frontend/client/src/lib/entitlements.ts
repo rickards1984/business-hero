@@ -26,6 +26,14 @@ export const CANONICAL_FEATURES = [
   'whatsapp',
   'board_meetings',
   'calendar_booking',
+  // Gates NOTHING today, deliberately. Google issues Gmail and Calendar under
+  // ONE consent, so a business that has connected email has already granted
+  // calendar access — there is no separate state to check. It is named so the
+  // concept has a word, and it is true on every tier because it rides on
+  // `email`, which is true on every tier. Making it a real gate would mean
+  // splitting the OAuth grant into two scopes first; the flag is not the
+  // missing piece, the grant is.
+  'calendar_sync',
   'receptionist',
   'outreach',
 ] as const;
@@ -45,22 +53,26 @@ export const PLAN_FEATURE_DEFAULTS: Record<PlanTier, Record<CanonicalFeature, bo
   starter: {
     quoting: true, invoicing: true, accounting: true, email: true,
     aria_chat: true, aria_voice: false, whatsapp: false, board_meetings: false,
-    calendar_booking: false, receptionist: false, outreach: false,
+    calendar_booking: false, calendar_sync: true,
+    receptionist: false, outreach: false,
   },
   pro: {
     quoting: true, invoicing: true, accounting: true, email: true,
     aria_chat: true, aria_voice: true, whatsapp: true, board_meetings: true,
-    calendar_booking: true, receptionist: true, outreach: false,
+    calendar_booking: true, calendar_sync: true,
+    receptionist: true, outreach: false,
   },
   business: {
     quoting: true, invoicing: true, accounting: true, email: true,
     aria_chat: true, aria_voice: true, whatsapp: true, board_meetings: true,
-    calendar_booking: true, receptionist: true, outreach: true,
+    calendar_booking: true, calendar_sync: true,
+    receptionist: true, outreach: true,
   },
   beta: {
     quoting: true, invoicing: true, accounting: true, email: true,
     aria_chat: true, aria_voice: true, whatsapp: true, board_meetings: true,
-    calendar_booking: true, receptionist: true, outreach: true,
+    calendar_booking: true, calendar_sync: true,
+    receptionist: true, outreach: true,
   },
 };
 

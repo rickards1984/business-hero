@@ -111,13 +111,13 @@ class TestOneCanonicalTable(unittest.TestCase):
                 f"them using this dict. A mismatch removes paid access.",
             )
 
-    def test_the_vocabulary_is_the_canonical_eleven(self):
+    def test_the_vocabulary_is_the_canonical_twelve(self):
         import auth
         self.assertEqual(
             set(auth.CANONICAL_FEATURES),
             {"quoting", "invoicing", "accounting", "email", "aria_chat",
              "aria_voice", "whatsapp", "board_meetings", "calendar_booking",
-             "receptionist", "outreach"},
+             "calendar_sync", "receptionist", "outreach"},
         )
         for tier in CANONICAL_TIERS:
             self.assertEqual(
@@ -148,6 +148,30 @@ class TestOneCanonicalTable(unittest.TestCase):
         self.assertTrue(starter["aria_chat"])
         self.assertFalse(starter["outreach"])
         self.assertFalse(starter["receptionist"])
+
+    def test_calendar_sync_is_granted_by_every_tier(self):
+        # It gates nothing today and is true everywhere on purpose: Google
+        # issues Gmail and Calendar under ONE consent, so a business that has
+        # connected email has already granted calendar access. The word exists
+        # so the concept is not lost; separating it would mean splitting the
+        # OAuth grant first. If it ever becomes a real gate, this test is the
+        # thing that should have to change deliberately.
+        import auth
+        for tier in CANONICAL_TIERS:
+            self.assertTrue(
+                auth._plan_feature_defaults(tier)["calendar_sync"],
+                f"{tier} denies calendar_sync, but nothing gates it and it "
+                f"rides on `email`, which {tier} grants.",
+            )
+        self.assertIn("calendar_sync", auth.CANONICAL_FEATURES)
+
+    def test_calendar_sync_and_calendar_booking_are_different_features(self):
+        # calendar_booking is a sold, plan-gated feature (the receptionist
+        # taking a booking). calendar_sync is the Google grant. Collapsing the
+        # two is how `calendar` became a key nobody could explain.
+        import auth
+        self.assertFalse(auth._plan_feature_defaults("starter")["calendar_booking"])
+        self.assertTrue(auth._plan_feature_defaults("starter")["calendar_sync"])
 
     def test_outreach_is_what_separates_business_from_pro(self):
         # The spec's downgrade case: business -> pro loses outreach.
@@ -694,8 +718,9 @@ class TestWizardUsesTheSetFeatureFlagRule(unittest.TestCase):
         keys = set(re.findall(r"key:\s*'([a-z_]+)'", block.group(1)))
         self.assertEqual(
             keys, set(auth.CANONICAL_FEATURES),
-            "the wizard's catalog must be the canonical eleven — it is the "
-            "list the industry handler and the review screen both iterate.",
+            "the wizard's catalog must be the canonical vocabulary — it is "
+            "the list the industry handler and the review screen both "
+            "iterate.",
         )
 
     def test_plan_defaults_come_from_entitlements_not_plan_definitions(self):
@@ -710,3 +735,39 @@ class TestWizardUsesTheSetFeatureFlagRule(unittest.TestCase):
             "the wizard must seed its defaults from planDefaults(tier), not "
             "from whatever plan_definitions currently holds.",
         )
+
+
+class TestWizardReviewScreenBadges(unittest.TestCase):
+    """The 'Pending owner OAuth' badge must name only things an OAuth gates."""
+
+    def branch(self):
+        src = wizard_source()
+        match = re.search(r"\[([^\]]*)\]\.includes\(f\.key\) && enabled", src)
+        assert match, "the pending-OAuth branch has moved"
+        return set(re.findall(r"'([a-z_]+)'", match.group(1)))
+
+    def test_calendar_booking_is_not_badged_pending_oauth(self):
+        # Booking is gated by booking_settings.enabled, not by an OAuth grant.
+        # The badge claimed a blocker that does not exist, and an admin reading
+        # the review screen would have waited for an owner action that was
+        # never coming.
+        self.assertNotIn(
+            "calendar_booking", self.branch(),
+            "calendar_booking does not wait on an OAuth — booking_settings."
+            "enabled gates it.",
+        )
+
+    def test_the_badged_features_are_the_ones_an_oauth_actually_gates(self):
+        self.assertEqual(self.branch(), {"email", "accounting"})
+
+    def test_calendar_sync_is_not_badged_separately(self):
+        # Google grants Gmail and Calendar under ONE consent, so calendar_sync
+        # is never separately pending. The `email` entry already represents
+        # that owner action; badging both would make one action look like two.
+        self.assertNotIn("calendar_sync", self.branch())
+
+    def test_every_badged_key_is_canonical(self):
+        # `calendar` sat in this list for months and never fired, because it
+        # was not a feature key. A non-canonical key here is a dead branch.
+        import auth
+        self.assertEqual(self.branch() - set(auth.CANONICAL_FEATURES), set())
