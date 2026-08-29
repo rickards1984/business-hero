@@ -16,6 +16,23 @@ Read the step, paste the SQL, compare against **EXPECT**, continue only if
 it matches. Three rules:
 
 1. **One step at a time.** Never paste two steps at once.
+
+   **And one QUERY at a time.** This bit twice on the night of 29 Aug
+   2026, so it is a rule, not advice:
+
+   - **The Supabase SQL editor renders only the LAST statement's result
+     grid.** Paste three verification queries together and you see the
+     third. The first two run, but you never see them — so a step reports
+     "passed" on evidence you did not look at. Where a step lists several
+     queries, they are numbered and separated; run each on its own.
+   - **A failed statement poisons the rest of its transaction.**
+     Everything after it returns `current transaction is aborted,
+     commands ignored until end of transaction block`. So every wrapped
+     `BEGIN … ROLLBACK` block that EXPECTS an error must be run alone —
+     pasted together, the later ones return an abort message that looks
+     like the error you wanted and tests nothing.
+   - The flip side is useful: **getting a result grid back at all proves
+     the statement before it did not raise.**
 2. **EXPECT must match.** If it does not, go to that step's **STOP IF**.
    Do not improvise and do not fix it yourself at 1am.
 3. **On a mismatch, stop and report it.** Paste the output to Claude Code
@@ -185,7 +202,9 @@ Report the rows and stop.
 
 ## STEP 3 — Pre-flight 2: what shape is `plan_definitions` in?
 
-Three queries. Run them together and read all three results.
+**Three queries. RUN THEM ONE AT A TIME** — pasted together you will see
+only 2c's result and will not have looked at 2a, which is the one STEP 8
+compares against.
 
 ```sql
 -- 2a: the rows SECTION 2 acts on
@@ -280,7 +299,9 @@ SELECT count(*) AS column_level_acls FROM pg_attribute
 
 ## STEP 5 — Pre-flight 4: the flag data SECTION 6 will transform
 
-Four queries. Run them together; read all four.
+**Five queries. RUN THEM ONE AT A TIME** — pasted together you will see
+only 6e's result. 6d is the one you must save, and 6c is the branding
+decision; neither would appear.
 
 ```sql
 -- 6a: every key involved in a rename must hold a BOOLEAN, or the merge
@@ -667,7 +688,9 @@ key in the browser bundle holding write access to the billing meter — any
 customer could zero their own usage counter. Re-run the REVOKE block from
 STEP 9 immediately and re-check before doing anything else.
 
-Then prove the constraints bite. Each must FAIL:
+Then prove the constraints bite. **Run these three separately** — the
+first error would abort a shared transaction and make the other two look
+like passes without testing anything. Each must FAIL:
 
 ```sql
 BEGIN;
@@ -716,33 +739,55 @@ ALTER TABLE public.businesses
   VALIDATE CONSTRAINT businesses_spend_cap_chk;
 ```
 
-Then:
+Then verify. This was three separate queries and the editor showed only
+the third — it is now ONE statement returning ONE grid, so nothing can be
+silently dropped:
 
 ```sql
-SELECT column_name, data_type, numeric_precision, numeric_scale,
-       is_nullable, coalesce(column_default,'(none)') AS col_default
-  FROM information_schema.columns
- WHERE table_schema='public' AND table_name='businesses'
-   AND column_name IN ('metered_usage_enabled','monthly_spend_cap_gbp')
- ORDER BY column_name;
-
-SELECT count(*) AS total,
-       count(*) FILTER (WHERE metered_usage_enabled) AS metered,
-       count(*) FILTER (WHERE monthly_spend_cap_gbp IS NOT NULL) AS capped
-  FROM public.businesses;
-
-SELECT conname, convalidated FROM pg_constraint
- WHERE conrelid='public.businesses'::regclass
-   AND conname='businesses_spend_cap_chk';
+SELECT 'businesses total' AS check,
+       (SELECT count(*)::text FROM public.businesses) AS value
+UNION ALL SELECT 'metered (must be 0)',
+       (SELECT count(*) FILTER (WHERE metered_usage_enabled)::text FROM public.businesses)
+UNION ALL SELECT 'capped (must be 0)',
+       (SELECT count(*) FILTER (WHERE monthly_spend_cap_gbp IS NOT NULL)::text FROM public.businesses)
+UNION ALL SELECT 'metered_usage_enabled column',
+       (SELECT data_type || ' null=' || is_nullable
+               || ' def=' || coalesce(column_default,'(none)')
+          FROM information_schema.columns
+         WHERE table_schema='public' AND table_name='businesses'
+           AND column_name='metered_usage_enabled')
+UNION ALL SELECT 'monthly_spend_cap_gbp column',
+       (SELECT data_type || ' ' || numeric_precision || ',' || numeric_scale
+               || ' null=' || is_nullable
+               || ' def=' || coalesce(column_default,'(none)')
+          FROM information_schema.columns
+         WHERE table_schema='public' AND table_name='businesses'
+           AND column_name='monthly_spend_cap_gbp')
+UNION ALL SELECT 'spend cap constraint',
+       (SELECT conname || '  convalidated=' || convalidated::text
+          FROM pg_constraint WHERE conrelid='public.businesses'::regclass
+           AND conname='businesses_spend_cap_chk')
+ORDER BY 1;
 ```
 
 **EXPECT:**
-- `metered_usage_enabled | boolean | | | NO | false`
-- `monthly_spend_cap_gbp | numeric | 10 | 2 | YES | (none)`
-- `total` = your STEP 1 business count, `metered = 0`, `capped = 0` —
-  **every existing business is opted out.** Metered overage is opt-in; defaulting it on would bill
-  people who never agreed to be billed.
-- `convalidated = true`.
+
+| check | value |
+|---|---|
+| businesses total | your STEP 1 count |
+| capped (must be 0) | `0` |
+| metered (must be 0) | **`0`** |
+| metered_usage_enabled column | `boolean null=NO def=false` |
+| monthly_spend_cap_gbp column | `numeric 10,2 null=YES def=(none)` |
+| spend cap constraint | `businesses_spend_cap_chk  convalidated=true` |
+
+**every existing business must be opted out.** Metered overage is opt-in;
+defaulting it on would bill people who never agreed to be billed.
+
+`def=(none)` is correct and deliberate. An explicit `DEFAULT NULL` was
+NOT written: it is a no-op that records the string `NULL::numeric` in the
+catalog, and a VERIFY that has to explain why its own expected value looks
+like a mistake is a VERIFY nobody reads.
 
 **STOP IF:** `metered` is not 0 (someone is about to be billed for
 overage they did not choose), or `convalidated = false` (a `NOT VALID`
@@ -755,7 +800,13 @@ that way — re-run the `VALIDATE CONSTRAINT` statement). Otherwise run
 ## STEP 12 — Section 4: prove the paired CHECK bites
 
 This constraint is the point of the section: it makes "metering on with no
-cap" — the unbounded bill — unrepresentable. All four are wrapped.
+cap" — the unbounded bill — unrepresentable.
+
+**RUN THESE FOUR BLOCKS ONE AT A TIME.** Three of them are meant to raise
+`CheckViolation`, and a failed statement aborts the rest of its
+transaction — pasted together, the later blocks return `current
+transaction is aborted` instead of being tested, which reads like the
+error you wanted. All four are wrapped and cannot commit.
 
 ```sql
 -- 4d: metering ON with no cap. Must FAIL.
@@ -1639,6 +1690,9 @@ that is no longer running. Record the rows and move on. Roll back only on
 ---
 
 ## STEP 23 — VERIFY 7c and 7d: read what survived
+
+**Two queries. RUN THEM SEPARATELY** — pasted together you see only 7d,
+and 7c is the list you are required to read.
 
 ```sql
 -- 7c: every surviving key that is NOT in the canonical vocabulary.
