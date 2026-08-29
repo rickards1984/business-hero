@@ -456,7 +456,7 @@ one at a time.
 -- 1c: this must FAIL.
 BEGIN;
   UPDATE public.businesses SET plan_tier='paused'
-   WHERE id = (SELECT id FROM public.businesses LIMIT 1);
+   WHERE id = (SELECT id FROM public.businesses ORDER BY id LIMIT 1);
 ROLLBACK;
 ```
 
@@ -468,13 +468,24 @@ run the `ROLLBACK;` if the editor has not already aborted the transaction.
 -- 1d: this must SUCCEED, then be discarded.
 BEGIN;
   UPDATE public.businesses SET plan_tier='business'
-   WHERE id = (SELECT id FROM public.businesses LIMIT 1);
-  SELECT plan_tier FROM public.businesses
-   WHERE id = (SELECT id FROM public.businesses LIMIT 1);
+   WHERE id = (SELECT id FROM public.businesses ORDER BY id LIMIT 1)
+   RETURNING id, name, plan_tier;
 ROLLBACK;
 ```
 
-**EXPECT:** the SELECT returns `business`, then `ROLLBACK`.
+**EXPECT:** one row, `plan_tier = business`. Then `ROLLBACK`.
+
+> **This used to be an UPDATE followed by a separate SELECT, and it gave a
+> false alarm on prod, 29 Aug 2026.** Both statements ended
+> `WHERE id = (SELECT id FROM public.businesses LIMIT 1)` with no
+> `ORDER BY`. Those are two independent evaluations, and an UPDATE writes
+> a new tuple version at the end of the heap — so the second scan returned
+> a *different* business, still on `starter`, and the check appeared to
+> fail when it had passed. Reproduced on staging: with 3 rows both scans
+> hit the same row and it "passed"; with 9 rows they diverged and it
+> reported `starter`. `RETURNING` removes the second scan entirely and
+> reports the row that was actually written. **Do not simplify this back
+> to a separate SELECT.**
 
 **STOP IF:** 1c **succeeds** (the constraint is not enforcing) or 1d
 **fails** (the top tier is still unstorable, which was the live bug this
@@ -750,36 +761,47 @@ cap" — the unbounded bill — unrepresentable. All four are wrapped.
 -- 4d: metering ON with no cap. Must FAIL.
 BEGIN;
   UPDATE public.businesses SET metered_usage_enabled = true
-   WHERE id = (SELECT id FROM public.businesses LIMIT 1);
+   WHERE id = (SELECT id FROM public.businesses ORDER BY id LIMIT 1);
 ROLLBACK;
 
 -- 4e: metering ON with a cap. Must SUCCEED.
 BEGIN;
   UPDATE public.businesses
      SET metered_usage_enabled = true, monthly_spend_cap_gbp = 100.00
-   WHERE id = (SELECT id FROM public.businesses LIMIT 1);
+   WHERE id = (SELECT id FROM public.businesses ORDER BY id LIMIT 1)
+   RETURNING name, metered_usage_enabled, monthly_spend_cap_gbp;
 ROLLBACK;
 
 -- 4f: a zero cap. Must FAIL.
 BEGIN;
   UPDATE public.businesses
      SET metered_usage_enabled = true, monthly_spend_cap_gbp = 0
-   WHERE id = (SELECT id FROM public.businesses LIMIT 1);
+   WHERE id = (SELECT id FROM public.businesses ORDER BY id LIMIT 1);
 ROLLBACK;
 
 -- 4g: cap NULLed while metering is ON. Must FAIL.
+-- BOTH statements must name the SAME row. Without ORDER BY the second
+-- UPDATE can land on a different business — one whose metering is still
+-- off, where a NULL cap is perfectly legal. That is a FALSE PASS: the
+-- block reports no error and you conclude the constraint bites when it
+-- was never tested. Same root cause as 1d, but silent instead of loud.
 BEGIN;
   UPDATE public.businesses
      SET metered_usage_enabled = true, monthly_spend_cap_gbp = 100.00
-   WHERE id = (SELECT id FROM public.businesses LIMIT 1);
+   WHERE id = (SELECT id FROM public.businesses ORDER BY id LIMIT 1);
   UPDATE public.businesses SET monthly_spend_cap_gbp = NULL
-   WHERE id = (SELECT id FROM public.businesses LIMIT 1);
+   WHERE id = (SELECT id FROM public.businesses ORDER BY id LIMIT 1);
 ROLLBACK;
 ```
 
 **EXPECT:** 4d, 4f and 4g each error with
-`violates check constraint "businesses_spend_cap_chk"`. 4e succeeds.
-**Three errors and one success is the pass.**
+`violates check constraint "businesses_spend_cap_chk"`. 4e returns one
+row showing `true` and `100.00`. **Three errors and one row is the pass.**
+
+Remember that in Postgres a failed statement poisons the rest of the
+transaction — every following statement returns `current transaction is
+aborted`. So in any of these blocks, **getting a result grid back at all
+proves the statement before it did not raise.**
 
 **STOP IF:** 4d succeeds. That is an account that can be metered with no
 ceiling. Run `ROLLBACK 4` and stop — SECTION 4 without a working cap
