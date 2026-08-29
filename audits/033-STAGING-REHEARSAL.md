@@ -377,3 +377,94 @@ Exact prod values, supplied 25 Aug 2026:
 
 Staging was returned to its before-snapshot data afterwards; only 033's schema
 changes remain. Diff against `033-staging-before.txt`: zero unexplained lines.
+
+---
+
+# SECTION 6 RE-REHEARSAL — 29 Aug 2026
+
+**Trigger:** prod PRE-FLIGHT 5 surfaced a merge shape no fixture covered.
+`Business Hero` holds `calendar: true` **and** `calendar_booking: false` —
+source and target present, and disagreeing.
+
+## D6 — CONFIRMED BUG: the OR-merge destroyed deliberate denials
+
+R1 read "where source and target both exist, MERGE by boolean OR, so true
+wins — a rename must never be able to take access away". The rule assumed
+both sides are grants. It has no answer for a target holding a **denial**.
+
+Measured on staging 29 Aug 2026, fixtures seeded then rolled back:
+
+| before | after, OR merge | after, target-wins |
+|---|---|---|
+| `{"calendar": true, "calendar_booking": false, "email": true}` | `{"calendar_booking": true, "email": true}` | `{"calendar_booking": false, "email": true}` |
+| `{"accounting_enabled": true, "accounting": false}` | `{"accounting": true}` | `{"accounting": false}` |
+| `{"whatsapp_enabled": false, "whatsapp": true}` | `{"whatsapp": true}` | `{"whatsapp": true}` |
+
+**Any source/target disagreement flipped a denial into a grant.** Not
+confined to `calendar`; `calendar` is just the pair prod happens to hold.
+
+`calendar_booking: false` is written by the wizard and the admin panel
+through `setFeatureFlag`, in the canonical vocabulary, and it is what the
+**deployed** resolver reads. `calendar` is a legacy alias that gates
+nothing and the resolver cannot see. Ruled: **the target wins.** A rename
+FILLS IN an absent canonical key and never overwrites a present one.
+
+### The structural trap in the obvious fix
+
+Driving the UPDATE off the fill set drops any business whose only source
+has a present target — so its source key survives and VERIFY 6c fails.
+`merged` is therefore driven off "holds any source key" and coalesces
+newkeys to `'{}'`; sources are removed either way. Verified: VERIFY 6c
+returns 0 with the fixed statement.
+
+### Neither existing check would have caught it
+
+- **VERIFY 6d** looks for `source true AND target now false`. Under the OR
+  merge the target was `true`, so 6d returned **0**. Blind to it.
+- **VERIFY 7b** looks only for features that LOST access. This wrongly
+  GRANTED one. Also **0**.
+
+Added **VERIFY 6e**: every canonical key present in the backup still holds
+the same value. Run against the OR merge on staging it returns the two
+wrongly-granted keys; against the fixed merge, 0.
+
+6d also amended with `AND NOT (z.feature_flags ? x.dst)` — without it,
+Business Hero's correctly-discarded `calendar: true` reports as a failure
+and sends the operator into an unwanted rollback.
+
+### PRE-FLIGHT 6e added
+
+Reports every rename whose outcome is not self-evident, in two categories:
+`CONFLICT` (target present and disagreeing — target wins, source
+discarded) and `RESOLUTION CHANGES` (target absent, source disagrees with
+the plan default, so resolved access changes when the rename lands).
+Verified on staging against four conflict shapes plus MSC and New Body;
+it reports the four and stays silent on the two no-ops.
+
+The second category is pre-existing behaviour the OR rule had too — e.g.
+`quoting_enabled: false` with no `quoting` key writes a fresh denial for
+something the plan grants. Not changed here; surfaced for a decision.
+
+## End-to-end, fixed merge through SECTION 7 (staging, rolled back)
+
+| fixture | after 6.2 | after SECTION 7 |
+|---|---|---|
+| Business Hero | `{"calendar_booking": false, "email": true}` | `{"calendar_booking": false}` |
+| MSC | 8 canonical keys | `{}` |
+| New Body | 6 canonical keys | `{}` |
+| denial-only probe | `{"accounting": false}` | `{"accounting": false}` |
+| target-true/src-false | `{"whatsapp": true}` | `{}` |
+
+MSC and New Body land exactly where the 25 Aug rehearsal put them — the
+fix changes nothing for them. Business Hero's denial survives both
+sections, which is the point.
+
+**All staging work was done inside transactions that were rolled back;
+the probe row count was re-checked at 0 afterwards. Prod was not touched.**
+
+## Provenance warning
+
+The 25 Aug fixture set is **stale** — prod has gained at least one
+business since, with a flag shape none of the fixtures had. Every EXPECT
+count in `033-PROD-RUNBOOK.md` PART ONE has been rewritten to derive from
+STEP 5's live output rather than from the 25 Aug numbers.

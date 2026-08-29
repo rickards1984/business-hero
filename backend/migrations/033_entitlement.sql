@@ -853,18 +853,42 @@ GRANT UPDATE (
 -- and everything else they can do today comes from feature_flags.
 --
 -- Rules, as ruled:
---   R1  Five renames:
+--   R1  Six renames:
 --         accounting_enabled       -> accounting
 --         calendar_booking_enabled -> calendar_booking
 --         calendar                 -> calendar_booking
 --         quoting_enabled          -> quoting
 --         whatsapp_enabled         -> whatsapp
 --         voice                    -> aria_voice
---       Where source and target both exist, MERGE. The merge is a
---       boolean OR, so true wins — a rename must never be able to take
---       access away, and OR is the only merge that guarantees it.
---       Note calendar_booking has TWO sources; OR is associative, so
---       the order they are applied in cannot change the result.
+--       *** THE TARGET WINS. *** A rename FILLS IN a canonical key that
+--       is absent; it NEVER overwrites one that is present. Where the
+--       target is absent and several sources map to it, they are OR'd
+--       (calendar_booking has TWO sources; OR is associative, so the
+--       order cannot change the result).
+--
+--       THIS RULE WAS CHANGED, 29 Aug 2026. It read "merge by boolean
+--       OR, so true wins — a rename must never take access away". That
+--       is wrong whenever the target holds a DELIBERATE DENIAL. Prod
+--       carries exactly that: Business Hero holds
+--         calendar: true, calendar_booking: false
+--       and under the OR rule the legacy `calendar` key overwrote the
+--       explicit false and SILENTLY GRANTED the feature. Measured on
+--       staging 29 Aug 2026 — `{"calendar": true, "calendar_booking":
+--       false}` became `{"calendar_booking": true}`.
+--
+--       `calendar_booking: false` is written by the admin panel and the
+--       wizard through setFeatureFlag, in the canonical vocabulary, and
+--       it is what the DEPLOYED code reads. `calendar` is a legacy alias
+--       that gates nothing and is invisible to the running resolver. The
+--       canonical key is the authoritative statement; the alias is not
+--       allowed to overrule it.
+--
+--       The general property this buys: SECTION 6 never changes what a
+--       canonical key resolves to when that key is already present. The
+--       remaining case — target ABSENT, source disagreeing with the plan
+--       default — DOES change resolution, legitimately (that is what a
+--       rename is for), and PRE-FLIGHT 6e lists every instance so it is
+--       a decision rather than a surprise.
 --   R2  brand_color moves to businesses.brand_color. The FLAG WINS
 --       unconditionally — it is what the UI reads, so it is the true
 --       value. New Body's #475569 overwrites the column's #3B82F6.
@@ -1015,6 +1039,73 @@ GRANT UPDATE (
 --     FROM public.businesses ORDER BY name;
 
 
+-- PRE-FLIGHT 6e — MANDATORY, AND THE ONE TO ACTUALLY READ. Every rename
+-- whose outcome is not self-evident. Two categories, both reported:
+--
+--   CONFLICT — the target key is PRESENT and disagrees with its source.
+--     R1's target-wins rule discards the source. This is the Business
+--     Hero case (calendar: true vs calendar_booking: false). Read each
+--     row and confirm the target is the value you want kept.
+--
+--   RESOLUTION CHANGES — the target is ABSENT and the source disagrees
+--     with the plan default, so what the business resolves to today
+--     changes when the rename lands. That is what a rename is FOR, but
+--     it is still a change in a customer's access and it should be a
+--     decision, not a surprise.
+--
+-- Rows here are not a failure. Zero rows means every rename is a no-op
+-- on resolved access. Any row means read it.
+--
+--   WITH pairs(src, dst) AS (
+--     VALUES ('accounting_enabled','accounting'),
+--            ('calendar_booking_enabled','calendar_booking'),
+--            ('calendar','calendar_booking'),
+--            ('quoting_enabled','quoting'),
+--            ('whatsapp_enabled','whatsapp'),
+--            ('voice','aria_voice')
+--   ),
+--   canonical(plan_tier, feature, enabled) AS (
+--     VALUES ('starter','quoting',true),('starter','accounting',true),
+--            ('starter','whatsapp',false),('starter','calendar_booking',false),
+--            ('starter','aria_voice',false),
+--            ('pro','quoting',true),('pro','accounting',true),
+--            ('pro','whatsapp',true),('pro','calendar_booking',true),
+--            ('pro','aria_voice',true),
+--            ('business','quoting',true),('business','accounting',true),
+--            ('business','whatsapp',true),('business','calendar_booking',true),
+--            ('business','aria_voice',true),
+--            ('beta','quoting',true),('beta','accounting',true),
+--            ('beta','whatsapp',true),('beta','calendar_booking',true),
+--            ('beta','aria_voice',true)
+--   ),
+--   agg AS (
+--     SELECT b.id, b.name, b.plan_tier, p.dst,
+--            bool_or(coalesce((b.feature_flags ->> p.src)::boolean, false)) AS src_val,
+--            string_agg(p.src || '=' || (b.feature_flags ->> p.src), ', '
+--                       ORDER BY p.src) AS sources,
+--            (b.feature_flags ? p.dst) AS target_present,
+--            CASE WHEN b.feature_flags ? p.dst
+--                 THEN (b.feature_flags ->> p.dst)::boolean END AS target_val
+--       FROM public.businesses b
+--       JOIN pairs p ON b.feature_flags ? p.src
+--      GROUP BY b.id, p.dst
+--   )
+--   SELECT a.name, a.plan_tier, a.dst AS canonical_key, a.sources,
+--          a.target_val, a.src_val, c.enabled AS plan_default,
+--          CASE
+--            WHEN a.target_present AND a.target_val IS DISTINCT FROM a.src_val
+--              THEN 'CONFLICT — target wins, source discarded'
+--            WHEN NOT a.target_present AND a.src_val IS DISTINCT FROM c.enabled
+--              THEN 'RESOLUTION CHANGES — ' || c.enabled::text
+--                   || ' -> ' || a.src_val::text
+--          END AS effect
+--     FROM agg a
+--     LEFT JOIN canonical c ON c.plan_tier = a.plan_tier AND c.feature = a.dst
+--    WHERE (a.target_present AND a.target_val IS DISTINCT FROM a.src_val)
+--       OR (NOT a.target_present AND a.src_val IS DISTINCT FROM c.enabled)
+--    ORDER BY a.name, a.dst;
+
+
 -- ---------------------------------------------------------------------
 -- 6.0 — Backup table. ROLLBACK 6 restores from this, byte for byte.
 -- ---------------------------------------------------------------------
@@ -1112,15 +1203,22 @@ UPDATE public.businesses
 
 
 -- ---------------------------------------------------------------------
--- 6.2 — R1: the six renames, merging by OR
+-- 6.2 — R1: the six renames. THE TARGET WINS.
 -- ---------------------------------------------------------------------
 -- One statement driven by an explicit pair list rather than six
 -- near-identical UPDATEs, so the pair list is the thing under review and
 -- there is no sixth statement to get subtly wrong.
 --
--- bool_or over the sources, OR'd with the target's own existing value,
--- so a target that is already true can never be turned false and a
--- source that is true always survives. Sources are then removed.
+-- TARGET WINS (R1). `fill` produces a value ONLY for targets that are
+-- ABSENT, so a canonical key that already exists is never rewritten —
+-- including an explicit `false`, which is a deliberate denial. Where the
+-- target is absent, bool_or over its sources supplies the value.
+--
+-- `merged` is driven off "holds any source key" rather than off `fill`,
+-- and coalesces newkeys to '{}'. That matters: a business whose only
+-- source has a PRESENT target contributes no fill row, and if the UPDATE
+-- were driven off `fill` it would drop out entirely and its source key
+-- would survive — failing VERIFY 6c. Sources are removed either way.
 
 WITH pairs(src, dst) AS (
   VALUES ('accounting_enabled',       'accounting'),
@@ -1130,20 +1228,22 @@ WITH pairs(src, dst) AS (
          ('whatsapp_enabled',         'whatsapp'),
          ('voice',                    'aria_voice')
 ),
+fill AS (
+  -- one row per (business, canonical key) where the key is ABSENT and at
+  -- least one of its sources is present. A present target yields no row.
+  SELECT b.id, p.dst,
+         bool_or(coalesce((b.feature_flags ->> p.src)::boolean, false)) AS val
+    FROM public.businesses b
+    JOIN pairs p ON b.feature_flags ? p.src
+   WHERE NOT (b.feature_flags ? p.dst)
+   GROUP BY b.id, p.dst
+),
 merged AS (
   SELECT b.id,
-         jsonb_object_agg(p.dst, t.val) AS newkeys
+         coalesce((SELECT jsonb_object_agg(f.dst, f.val)
+                     FROM fill f WHERE f.id = b.id), '{}'::jsonb) AS newkeys
     FROM public.businesses b
-    JOIN LATERAL (
-      SELECT p2.dst,
-             bool_or(coalesce((b.feature_flags ->> p2.src)::boolean, false))
-               OR coalesce((b.feature_flags ->> p2.dst)::boolean, false) AS val
-        FROM pairs p2
-       WHERE b.feature_flags ? p2.src
-       GROUP BY p2.dst
-    ) t ON true
-    JOIN pairs p ON p.dst = t.dst
-   GROUP BY b.id
+   WHERE EXISTS (SELECT 1 FROM pairs p WHERE b.feature_flags ? p.src)
 )
 UPDATE public.businesses b
    SET feature_flags =
@@ -1163,8 +1263,16 @@ UPDATE public.businesses b
 --    WHERE k.key IN ('accounting_enabled','calendar_booking_enabled',
 --                    'calendar','quoting_enabled','whatsapp_enabled','voice');
 --
--- VERIFY 6d — the merge never turned a true into a false. Compare the
--- backup against the result, per business, per target key. Expect 0 rows:
+-- VERIFY 6d — a FILLED-IN target never turned a true into a false.
+-- Expect 0 rows.
+--
+-- NOTE THE THIRD PREDICATE. It excludes sources whose target was ALREADY
+-- PRESENT in the backup, because under R1's target-wins rule those
+-- sources are deliberately discarded — Business Hero's `calendar: true`
+-- is dropped in favour of its explicit `calendar_booking: false`, and
+-- without this clause 6d reports that correct outcome as a failure and
+-- sends you into a rollback you do not want. PRE-FLIGHT 6e is where
+-- those cases are reviewed; 6d covers only the fills.
 --   SELECT b.name, x.dst
 --     FROM public.businesses b
 --     JOIN public.zz_033_flags_backup z ON z.id = b.id,
@@ -1175,7 +1283,24 @@ UPDATE public.businesses b
 --                          ('whatsapp_enabled','whatsapp'),
 --                          ('voice','aria_voice')) x(src,dst)
 --    WHERE coalesce((z.feature_flags ->> x.src)::boolean, false)
+--      AND NOT (z.feature_flags ? x.dst)
 --      AND NOT coalesce((b.feature_flags ->> x.dst)::boolean, false);
+--
+-- VERIFY 6e — TARGET-WINS ACTUALLY HELD. Every canonical key that was
+-- present in the backup still holds the SAME value. This is the check
+-- that would have caught the OR bug, and VERIFY 7b cannot: 7b only looks
+-- for features that LOST access, and the OR bug wrongly GRANTED one.
+-- Expect 0 rows:
+--   SELECT b.name, k.key,
+--          z.feature_flags -> k.key AS was,
+--          b.feature_flags -> k.key AS now
+--     FROM public.zz_033_flags_backup z
+--     JOIN public.businesses b ON b.id = z.id,
+--          LATERAL jsonb_object_keys(z.feature_flags) AS k(key)
+--    WHERE k.key IN ('quoting','invoicing','accounting','email','aria_chat',
+--                    'aria_voice','whatsapp','board_meetings',
+--                    'calendar_booking','calendar_sync','receptionist','outreach')
+--      AND b.feature_flags -> k.key IS DISTINCT FROM z.feature_flags -> k.key;
 
 
 --

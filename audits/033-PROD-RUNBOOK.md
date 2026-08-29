@@ -44,6 +44,14 @@ it takes a brief lock on a 6-row table.
 
 ### What prod is expected to hold going in
 
+> **⚠ THIS TABLE IS FROM 25 AUG 2026 AND PROD HAS SINCE DRIFTED.** A
+> `Business Hero` business exists carrying `calendar: true` **and**
+> `calendar_booking: false` — a shape none of the original fixtures had,
+> and the one that forced R1's merge rule to be rewritten (see STEP 17).
+> Treat the table below as the shape to expect, **not** as the EXPECT
+> values. **STEP 5's output is the authority.** Every row count in PART
+> ONE is written as "derive it from STEP 5" for that reason.
+
 From the live values supplied 25 Aug 2026, which the staging fixtures were
 built from:
 
@@ -53,8 +61,10 @@ built from:
 | New Body Health & Fitness | `pro` | 7 keys, incl. `brand_color: "#475569"` | `#3B82F6` |
 | Test 1–4 | `starter` | `{"receptionist": false}` | `#3B82F6` |
 
-**Expected end state after PART TWO: all six businesses at `{}`,** MSC's
-colour unchanged at `#3B82F6`, New Body's column updated to `#475569`.
+**Expected end state after PART TWO:** every business at `{}` **except**
+those carrying a genuine exception — on current prod that is Business
+Hero, which ends at `{"calendar_booking": false}`. MSC's colour unchanged
+at `#3B82F6`, New Body's column updated to `#475569`.
 
 ---
 
@@ -115,7 +125,8 @@ ORDER BY 1, 2, 3;
 
 **DO THIS:** click Export → CSV. Save it as `033-prod-before.csv`.
 
-**EXPECT:** a `DATA-BIZ` row for each of the **6** businesses and a
+**EXPECT:** a `DATA-BIZ` row for **every** business (6 as of 25 Aug 2026;
+prod has since gained at least Business Hero, so expect more) and a
 `DATA-PLAN` row for each plan. No `usage_meters` rows of any kind — that
 table does not exist yet.
 
@@ -136,8 +147,9 @@ SELECT current_database(),
        (SELECT to_regclass('public.zz_033_flags_backup')::text) AS backup_tbl;
 ```
 
-**EXPECT:** `businesses = 6`, `plans = 3`, `invoices` ≥ 5,
-`usage_meters = NULL`, `backup_tbl = NULL`.
+**EXPECT:** `businesses` ≥ 6, `plans = 3`, `invoices` ≥ 5,
+`usage_meters = NULL`, `backup_tbl = NULL`. **Write the business count
+down** — STEP 15 checks the backup against it.
 
 **STOP IF:**
 - `businesses = 3` **or** `plans = 0` — **you are on staging.** Close the
@@ -161,7 +173,8 @@ SELECT id, name, plan_tier FROM public.businesses
  WHERE plan_tier NOT IN ('starter','pro','business','beta');
 ```
 
-**EXPECT:** `0 rows`. (Expected reality: two `pro`, four `starter`.)
+**EXPECT:** `0 rows`. (As of 25 Aug: two `pro`, four `starter`, plus
+whatever has been created since.)
 
 **STOP IF:** any row comes back. STEP 6's `ALTER TABLE` will fail rather
 than corrupt anything, but a business sitting on `elite` or `paused` needs
@@ -302,6 +315,57 @@ SELECT name, brand_color AS column_now,
 -- 6d: the full before picture. SAVE THIS OUTPUT.
 SELECT name, plan_tier, brand_color, jsonb_pretty(feature_flags)
   FROM public.businesses ORDER BY name;
+
+-- 6e: MANDATORY, AND THE ONE TO ACTUALLY READ. Every rename whose
+--     outcome is not self-evident.
+WITH pairs(src, dst) AS (
+  VALUES ('accounting_enabled','accounting'),
+         ('calendar_booking_enabled','calendar_booking'),
+         ('calendar','calendar_booking'),
+         ('quoting_enabled','quoting'),
+         ('whatsapp_enabled','whatsapp'),
+         ('voice','aria_voice')
+),
+canonical(plan_tier, feature, enabled) AS (
+  VALUES ('starter','quoting',true),('starter','accounting',true),
+         ('starter','whatsapp',false),('starter','calendar_booking',false),
+         ('starter','aria_voice',false),
+         ('pro','quoting',true),('pro','accounting',true),
+         ('pro','whatsapp',true),('pro','calendar_booking',true),
+         ('pro','aria_voice',true),
+         ('business','quoting',true),('business','accounting',true),
+         ('business','whatsapp',true),('business','calendar_booking',true),
+         ('business','aria_voice',true),
+         ('beta','quoting',true),('beta','accounting',true),
+         ('beta','whatsapp',true),('beta','calendar_booking',true),
+         ('beta','aria_voice',true)
+),
+agg AS (
+  SELECT b.id, b.name, b.plan_tier, p.dst,
+         bool_or(coalesce((b.feature_flags ->> p.src)::boolean, false)) AS src_val,
+         string_agg(p.src || '=' || (b.feature_flags ->> p.src), ', '
+                    ORDER BY p.src) AS sources,
+         (b.feature_flags ? p.dst) AS target_present,
+         CASE WHEN b.feature_flags ? p.dst
+              THEN (b.feature_flags ->> p.dst)::boolean END AS target_val
+    FROM public.businesses b
+    JOIN pairs p ON b.feature_flags ? p.src
+   GROUP BY b.id, p.dst
+)
+SELECT a.name, a.plan_tier, a.dst AS canonical_key, a.sources,
+       a.target_val, a.src_val, c.enabled AS plan_default,
+       CASE
+         WHEN a.target_present AND a.target_val IS DISTINCT FROM a.src_val
+           THEN 'CONFLICT — target wins, source discarded'
+         WHEN NOT a.target_present AND a.src_val IS DISTINCT FROM c.enabled
+           THEN 'RESOLUTION CHANGES — ' || c.enabled::text
+                || ' -> ' || a.src_val::text
+       END AS effect
+  FROM agg a
+  LEFT JOIN canonical c ON c.plan_tier = a.plan_tier AND c.feature = a.dst
+ WHERE (a.target_present AND a.target_val IS DISTINCT FROM a.src_val)
+    OR (NOT a.target_present AND a.src_val IS DISTINCT FROM c.enabled)
+ ORDER BY a.name, a.dst;
 ```
 
 **EXPECT:**
@@ -309,8 +373,16 @@ SELECT name, plan_tier, brand_color, jsonb_pretty(feature_flags)
 - **6b:** `0 rows`.
 - **6c:** two rows. New Body `column_now=#3B82F6`, `flag_now=#475569`,
   `will_change=true`. MSC both `#3B82F6`, `will_change=false`.
-- **6d:** six rows matching the table in *Before you start*. **Save this.**
-  It is what STEP 22 and the rollbacks are judged against.
+- **6d:** one row per business. **Save this.** It is what STEP 22 and the
+  rollbacks are judged against, and it is where every EXPECT count in
+  STEPS 15–18 comes from. Count the businesses; count how many carry at
+  least one of `accounting_enabled`, `calendar_booking_enabled`,
+  `calendar`, `quoting_enabled`, `whatsapp_enabled`, `voice`; count how
+  many carry `brand_color`. Write those three numbers down.
+- **6e:** **at least one row — Business Hero, `calendar_booking`,
+  `CONFLICT — target wins, source discarded`.** Rows here are not a
+  failure. Zero rows would mean every rename is a no-op on resolved
+  access; any row means read it.
 
 **STOP IF:**
 - **6a returns a row.** A rename key holds a string or a number. The merge
@@ -325,6 +397,18 @@ SELECT name, plan_tier, brand_color, jsonb_pretty(feature_flags)
 - **6d shows flags you have never seen before.** Read them. R3 protects
   unknown keys from deletion, but an unknown key you cannot explain is
   worth understanding before you start moving things around.
+- **6e shows a `CONFLICT` row whose `target_val` is not the value you
+  want kept.** R1 keeps the **target** — the canonical key, the one the
+  admin panel writes and the deployed code reads — and discards the
+  legacy source. For Business Hero that means `calendar_booking: false`
+  survives and `calendar: true` is dropped, which is correct: the denial
+  was made deliberately in the wizard and `calendar` never gated
+  anything. If any row disagrees with that reading, **stop** — the fix is
+  to correct the flag first, not to change the migration.
+- **6e shows a `RESOLUTION CHANGES` row you did not expect.** That
+  business's access genuinely changes when the rename lands. It is not a
+  bug — it is the rename doing its job — but it is a customer's access
+  and it should be a decision. Read every one before continuing.
 
 ---
 
@@ -644,8 +728,8 @@ SELECT conname, convalidated FROM pg_constraint
 **EXPECT:**
 - `metered_usage_enabled | boolean | | | NO | false`
 - `monthly_spend_cap_gbp | numeric | 10 | 2 | YES | (none)`
-- `total = 6`, `metered = 0`, `capped = 0` — **every existing business is
-  opted out.** Metered overage is opt-in; defaulting it on would bill
+- `total` = your STEP 1 business count, `metered = 0`, `capped = 0` —
+  **every existing business is opted out.** Metered overage is opt-in; defaulting it on would bill
   people who never agreed to be billed.
 - `convalidated = true`.
 
@@ -908,8 +992,10 @@ UNION ALL SELECT 'anon or authenticated grants',
 ORDER BY 1;
 ```
 
-**EXPECT:** `backed up = 6`, `businesses = 6`,
-`old keys in backup = 11`, `anon or authenticated grants = 0`.
+**EXPECT:** `backed up` = `businesses` = your STEP 1 count.
+`old keys in backup` = the total number of legacy keys STEP 5's 6d
+showed, **greater than zero** (it was 11 on the 25 Aug data; Business
+Hero's `calendar` adds to it). `anon or authenticated grants = 0`.
 
 **STOP IF:**
 - **`anon or authenticated grants` is not 0.** `CREATE TABLE AS` inherits
@@ -950,8 +1036,10 @@ UPDATE public.businesses
    AND brand_color = feature_flags ->> 'brand_color';
 ```
 
-**EXPECT:** `UPDATE 1` then `UPDATE 2`. (Only New Body's column
-disagreed, so only it is rewritten; both businesses then lose the key.)
+**EXPECT:** the first `UPDATE` count = the number of `will_change=true`
+rows in STEP 5's 6c; the second = the number of businesses 6c listed at
+all. (On the 25 Aug data: `UPDATE 1` then `UPDATE 2` — only New Body's
+column disagreed, but both businesses lose the key.)
 
 Then:
 
@@ -961,8 +1049,8 @@ SELECT name, brand_color,
   FROM public.businesses ORDER BY name;
 ```
 
-**EXPECT:** six rows, `still_has_flag = false` on every one. MSC
-`#3B82F6`. **New Body `#475569`.** Test 1–4 `#3B82F6`.
+**EXPECT:** one row per business, `still_has_flag = false` on **every**
+one. MSC `#3B82F6`. **New Body `#475569`.** Test 1–4 `#3B82F6`.
 
 **STOP IF:** any row still has the flag — that is a value that failed the
 hex guard and was correctly left behind. Identify it and decide what it
@@ -972,14 +1060,40 @@ customer chose has just been dropped. Run `ROLLBACK 6`.
 
 ---
 
-## STEP 17 — Section 6.2: the six renames, merging by OR
+## STEP 17 — Section 6.2: the six renames. **The target wins.**
 
 One statement driven by an explicit pair list, so the pair list is the
 thing under review and there is no sixth near-identical UPDATE to get
-subtly wrong. `bool_or` over the sources, OR'd with the target's own
-existing value, so a target that is already `true` can never be turned
-`false`. `calendar_booking` has **two** sources; OR is associative, so the
-order cannot change the result.
+subtly wrong.
+
+**Read this before pasting — the rule changed on 29 Aug 2026.** It used
+to merge source and target with a boolean OR, on the reasoning that "a
+rename must never take access away". That is wrong whenever the target
+holds a **deliberate denial**, and prod contains exactly that case:
+Business Hero holds `calendar: true` **and** `calendar_booking: false`.
+Measured on staging 29 Aug 2026, the OR rule turned
+`{"calendar": true, "calendar_booking": false}` into
+`{"calendar_booking": true}` — silently **granting** a feature an admin
+had deliberately switched off. The same thing happened to a probe holding
+`accounting_enabled: true` with `accounting: false`. Any source/target
+disagreement flipped a denial into a grant.
+
+The rule is now: **a rename FILLS IN a canonical key that is absent; it
+never overwrites one that is present.** `calendar_booking: false` is
+written by the wizard through `setFeatureFlag`, in the canonical
+vocabulary, and it is what the deployed resolver reads. `calendar` is a
+legacy alias that gates nothing and the resolver cannot see. The
+canonical key wins.
+
+Where the target is **absent** and several sources map to it, they are
+still OR'd — `calendar_booking` has two sources, and OR is associative, so
+the order cannot change the result.
+
+`merged` is driven off "holds any source key" rather than off `fill`, and
+coalesces to `'{}'`. That matters: a business whose only source has a
+**present** target contributes no fill row, and if the UPDATE were driven
+off `fill` that business would drop out entirely and its source key would
+survive — failing STEP 18's first check. Sources are removed either way.
 
 ```sql
 WITH pairs(src, dst) AS (
@@ -990,20 +1104,22 @@ WITH pairs(src, dst) AS (
          ('whatsapp_enabled',         'whatsapp'),
          ('voice',                    'aria_voice')
 ),
+fill AS (
+  -- one row per (business, canonical key) where the key is ABSENT and at
+  -- least one of its sources is present. A present target yields no row.
+  SELECT b.id, p.dst,
+         bool_or(coalesce((b.feature_flags ->> p.src)::boolean, false)) AS val
+    FROM public.businesses b
+    JOIN pairs p ON b.feature_flags ? p.src
+   WHERE NOT (b.feature_flags ? p.dst)
+   GROUP BY b.id, p.dst
+),
 merged AS (
   SELECT b.id,
-         jsonb_object_agg(p.dst, t.val) AS newkeys
+         coalesce((SELECT jsonb_object_agg(f.dst, f.val)
+                     FROM fill f WHERE f.id = b.id), '{}'::jsonb) AS newkeys
     FROM public.businesses b
-    JOIN LATERAL (
-      SELECT p2.dst,
-             bool_or(coalesce((b.feature_flags ->> p2.src)::boolean, false))
-               OR coalesce((b.feature_flags ->> p2.dst)::boolean, false) AS val
-        FROM pairs p2
-       WHERE b.feature_flags ? p2.src
-       GROUP BY p2.dst
-    ) t ON true
-    JOIN pairs p ON p.dst = t.dst
-   GROUP BY b.id
+   WHERE EXISTS (SELECT 1 FROM pairs p WHERE b.feature_flags ? p.src)
 )
 UPDATE public.businesses b
    SET feature_flags =
@@ -1018,7 +1134,15 @@ UPDATE public.businesses b
  WHERE m.id = b.id;
 ```
 
-**EXPECT:** `UPDATE 2` — only MSC and New Body carry rename sources.
+**EXPECT:** the row count you wrote down at STEP 5 — the number of
+businesses carrying at least one of `accounting_enabled`,
+`calendar_booking_enabled`, `calendar`, `quoting_enabled`,
+`whatsapp_enabled`, `voice`. On the 25 Aug data that was 2 (MSC and New
+Body); with Business Hero it is at least 3.
+
+**STOP IF:** the count is lower than that number. A business holding a
+source key was not touched, and STEP 18's first check will show its
+source surviving.
 
 ---
 
@@ -1030,7 +1154,7 @@ SELECT 'surviving source keys' AS check,
                LATERAL jsonb_object_keys(b.feature_flags) AS k(key)
          WHERE k.key IN ('accounting_enabled','calendar_booking_enabled',
                          'calendar','quoting_enabled','whatsapp_enabled','voice')) AS value
-UNION ALL SELECT 'trues turned false',
+UNION ALL SELECT 'filled target turned false',
        (SELECT count(*)::text
           FROM public.businesses b
           JOIN public.zz_033_flags_backup z ON z.id = b.id,
@@ -1041,18 +1165,44 @@ UNION ALL SELECT 'trues turned false',
                                ('whatsapp_enabled','whatsapp'),
                                ('voice','aria_voice')) x(src,dst)
          WHERE coalesce((z.feature_flags ->> x.src)::boolean, false)
+           AND NOT (z.feature_flags ? x.dst)
            AND NOT coalesce((b.feature_flags ->> x.dst)::boolean, false))
+UNION ALL SELECT 'present canonical keys altered',
+       (SELECT count(*)::text
+          FROM public.zz_033_flags_backup z
+          JOIN public.businesses b ON b.id = z.id,
+               LATERAL jsonb_object_keys(z.feature_flags) AS k(key)
+         WHERE k.key IN ('quoting','invoicing','accounting','email','aria_chat',
+                         'aria_voice','whatsapp','board_meetings',
+                         'calendar_booking','calendar_sync','receptionist','outreach')
+           AND b.feature_flags -> k.key IS DISTINCT FROM z.feature_flags -> k.key)
 ORDER BY 1;
 ```
 
-**EXPECT:** `surviving source keys = 0`, `trues turned false = 0`.
+**EXPECT:** all three `0`.
 
-**STOP IF:** either is non-zero. A rename must never be able to take
-access away. Run `ROLLBACK 6`.
+**Note the third predicate on `filled target turned false`** —
+`AND NOT (z.feature_flags ? x.dst)`. It excludes sources whose target was
+already present, because target-wins discards those deliberately. Without
+it, Business Hero's dropped `calendar: true` reports as a failure and
+sends you into a rollback you do not want.
+
+**`present canonical keys altered` is the check that matters here**, and
+it is new. It asserts that every canonical key already in `feature_flags`
+still holds the same value — which is exactly what the OR rule violated.
+Verified on staging 29 Aug 2026: run against the OLD OR merge it returns
+the two wrongly-granted keys; run against the merge in STEP 17 it returns
+0. **VERIFY 7b cannot do this job** — 7b only looks for features that
+*lost* access, and the OR bug wrongly *granted* one.
+
+**STOP IF:** any is non-zero. Run `ROLLBACK 6`.
+- `surviving source keys` — a legacy key was not removed.
+- `filled target turned false` — a rename that should have granted did not.
+- `present canonical keys altered` — **a deliberate flag was overwritten.**
 
 > ### ⚠ RUN THIS CHECK **HERE** AND NEVER AGAIN
 >
-> `trues turned false` is only valid **before** SECTION 7. Section 7
+> `filled target turned false` is only valid **before** SECTION 7. Section 7
 > deliberately removes the very keys it looks for, so running it
 > afterwards returns a row per removed key — every one a false alarm. On
 > the staging rehearsal that was eight false alarms. A check that cries
@@ -1066,11 +1216,14 @@ SELECT name, plan_tier, brand_color, jsonb_pretty(feature_flags)
   FROM public.businesses ORDER BY name;
 ```
 
-**EXPECT:** MSC and New Body now carry **canonical key names only** —
-`accounting`, `calendar_booking`, `quoting`, `whatsapp`, `email`,
-`receptionist`, and for MSC also `aria_chat` and `aria_voice`. No
-`_enabled` suffixes, no `calendar`, no `voice`, no `brand_color`. Test 1–4
-still `{"receptionist": false}`.
+**EXPECT:** every business now carries **canonical key names only**. No
+`_enabled` suffixes, no `calendar`, no `voice`, no `brand_color`. On the
+25 Aug shape: MSC and New Body hold `accounting`, `calendar_booking`,
+`quoting`, `whatsapp`, `email`, `receptionist`, and MSC also `aria_chat`
+and `aria_voice`; Test 1–4 still `{"receptionist": false}`.
+**Business Hero must still show `"calendar_booking": false`** — that is
+the denial surviving, and it is the single most important line in this
+output.
 
 **Save this output.** It is PART TWO's starting point.
 
@@ -1322,9 +1475,13 @@ UPDATE public.businesses b
    AND array_length(r.drop_keys, 1) > 0;
 ```
 
-**EXPECT:** `UPDATE 6` — the two `pro` businesses, and all four `starter`
-ones (`receptionist: false` equals starter's canonical default of
-`false`, so it goes too).
+**EXPECT:** `UPDATE` = the number of businesses holding at least one
+canonical boolean equal to its tier default. On the 25 Aug data that was
+all 6 — the two `pro` businesses, and all four `starter` ones, whose
+`receptionist: false` equals starter's canonical default. Business Hero
+is also updated (its `email: true` equals the `pro` default) but does
+**not** reach `{}`: `calendar_booking: false` contradicts the `pro`
+default of `true` and is therefore a deliberate denial that survives.
 
 **STOP IF:** `UPDATE 0`. Either SECTION 7 has already run, or the tiers do
 not match the CTE. Do not re-paste; check `plan_tier` first.
@@ -1340,6 +1497,13 @@ longer enabled is a regression.
 
 Run it in **both** forms. They differ only in which default table the
 "before" side uses, and both must return 0 rows.
+
+**What 7b does NOT check:** it looks only for features that *lost* access
+(`was_enabled AND NOT is_enabled`). A feature wrongly **granted** passes
+7b silently. That is not hypothetical — it is exactly what the old OR
+merge did to Business Hero's `calendar_booking`, and 7b would have waved
+it through. The check for that is STEP 18's `present canonical keys
+altered`, which must have been 0 before you got here.
 
 ### 22a — before through the CANONICAL defaults (the strict form)
 
@@ -1478,8 +1642,11 @@ SELECT name, plan_tier, brand_color, jsonb_pretty(feature_flags)
   `backend/quoting_api.py:1151` to build the AI quoting prompt; deleting
   it would silently downgrade every AI quote to the `general` fallback,
   and nothing would error.
-- **7d:** all six businesses at `{}`. MSC `#3B82F6`, New Body `#475569`,
-  Test 1–4 `#3B82F6`.
+- **7d:** every business at `{}` **except** those STEP 5's 6e flagged as
+  genuine exceptions. On current prod that means MSC, New Body and
+  Test 1–4 at `{}`, and **Business Hero at `{"calendar_booking": false}`**
+  — the denial, correctly preserved all the way through. Colours: MSC
+  `#3B82F6`, New Body `#475569`, Test 1–4 `#3B82F6`.
 
 **STOP IF:** 7c lists a key you cannot account for — read it before you
 walk away, but do not delete it. R3 exists because ignoring an unknown key
@@ -1518,6 +1685,9 @@ UNION ALL SELECT 'spend cap UPDATE grants',
            AND column_name IN ('metered_usage_enabled','monthly_spend_cap_gbp'))
 UNION ALL SELECT 'businesses with non-empty flags',
        (SELECT count(*)::text FROM public.businesses WHERE feature_flags <> '{}'::jsonb)
+UNION ALL SELECT 'Business Hero calendar_booking',
+       (SELECT coalesce(feature_flags ->> 'calendar_booking','(absent)')
+          FROM public.businesses WHERE name ILIKE 'Business Hero%')
 UNION ALL SELECT 'brand_color flag survivors',
        (SELECT count(*)::text FROM public.businesses WHERE feature_flags ? 'brand_color')
 UNION ALL SELECT 'New Body brand_color',
@@ -1529,9 +1699,10 @@ ORDER BY 1;
 
 | check | value |
 |---|---|
+| Business Hero calendar_booking | **`false`** |
 | brand_color flag survivors | `0` |
 | businesses metered | `0` |
-| businesses with non-empty flags | `0` |
+| businesses with non-empty flags | the number of genuine exceptions from STEP 5's 6e — `1` on current prod |
 | New Body brand_color | `#475569` |
 | plan_definitions enterprise rows | `0` |
 | plan_tier CHECK has business | `true` |
@@ -1569,8 +1740,13 @@ Then as **platform admin**:
    with `feature_flags` now empty
 9. The business detail chips read **"Calendar Booking: On"** for MSC
 
-**EXPECT:** nothing visibly changes for either customer. That is the whole
-point of this migration — the plan now says what the flags used to say.
+Then as **Business Hero**:
+
+10. Calendar booking is still **off**, exactly as it was before tonight
+
+**EXPECT:** nothing visibly changes for any of them. That is the whole
+point of this migration — the plan now says what the flags used to say,
+and the one deliberate denial is still a denial.
 
 **STOP IF:** step 1, 2 or 6 shows a feature missing for MSC. Run
 `ROLLBACK 7` (STEP 22), then re-read STEP 20 — the gate did not hold.
@@ -1610,9 +1786,10 @@ Three caveats:
 
 1. **ROLLBACK 7 and ROLLBACK 6 are the same statement** — a copy-back
    from `zz_033_flags_backup`. There is no inverse transform, because the
-   OR-merge lost which source a `true` came from and the strip lost which
-   flags were explicit. Running it once undoes both sections. It is safe
-   to run repeatedly.
+   merge lost which source a filled-in `true` came from (and which
+   discarded sources were dropped under target-wins), and the strip lost
+   which flags were explicit. Running it once undoes both sections. It is
+   safe to run repeatedly.
 2. **ROLLBACK 3 is `DROP TABLE usage_meters` and it destroys data.** It
    is lossless only while the table is empty. Once the application starts
    writing meters, that data is **billing evidence**. Capture it first:
