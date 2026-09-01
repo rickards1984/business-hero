@@ -163,6 +163,10 @@ preview or edit UI) → Stripe with server-side enforcement → the frontend
 batch: 108 hardcoded `£`, `assistant_chat.py`'s hardcoded 20% VAT, and
 wiring the region resolver into the PDFs.
 
+**Post-launch:** Compliance & Site Operations module — brief, decisions and
+open questions in `audits/COMPLIANCE-MODULE-BRIEF.md`. Not started; marketed
+as "coming soon" at launch.
+
 **Deliberately still open** (recorded in the spec's out-of-scope list):
 the seven independent total calculations are not yet consolidated, the
 `float` → `Decimal` conversion covers new and touched code only, and
