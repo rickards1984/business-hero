@@ -353,6 +353,9 @@ class RecordingSession:
     def __init__(self, plan_tier="pro", is_admin=True):
         self.is_admin = is_admin
         self.plan_tier = plan_tier
+        # PART D: readers resolve `plan_tier` + `feature_flags` together, so
+        # the fake has to serve both from one row. Empty is the normal state.
+        self.feature_flags = {}
         self.statements = []
         self.committed = False
 
@@ -382,7 +385,8 @@ class RecordingSession:
                 "wizard_data": json.dumps({}),
             }))
         if "plan_tier" in sql and "FROM businesses" in sql:
-            return FakeResult(FakeRow({"plan_tier": self.plan_tier}))
+            return FakeResult(FakeRow({"plan_tier": self.plan_tier,
+                                       "feature_flags": self.feature_flags}))
         if "FROM receptionist_configs" in sql:
             return FakeResult(None)
         return FakeResult(None)

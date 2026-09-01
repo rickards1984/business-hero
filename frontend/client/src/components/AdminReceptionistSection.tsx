@@ -33,9 +33,13 @@ import {
   ChevronRight as ChevronRightIcon,
 } from '@mui/icons-material';
 import { apiRequest } from '@/lib/queryClient';
+import { isFeatureEnabled } from '@/lib/entitlements';
 
 interface AdminReceptionistSectionProps {
   businessId: string;
+  // Both, always. ENTITLEMENT-SPEC PART C makes `plan_tier` the source of
+  // truth and `featureFlags` the exceptions to it; neither answers on its own.
+  planTier?: string | null;
   featureFlags?: Record<string, any>;
   onFeatureFlagChange?: () => void;
 }
@@ -111,7 +115,7 @@ function formatDuration(s: number | null): string {
   return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
 }
 
-export default function AdminReceptionistSection({ businessId, featureFlags, onFeatureFlagChange }: AdminReceptionistSectionProps) {
+export default function AdminReceptionistSection({ businessId, planTier, featureFlags, onFeatureFlagChange }: AdminReceptionistSectionProps) {
   const [loading, setLoading] = useState(true);
   const [config, setConfig] = useState<ReceptionistConfig | null>(null);
   const [kbItems, setKbItems] = useState<KBItem[]>([]);
@@ -164,7 +168,10 @@ export default function AdminReceptionistSection({ businessId, featureFlags, onF
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' });
   const [togglingFlag, setTogglingFlag] = useState(false);
 
-  const receptionistEnabled = featureFlags?.receptionist === true;
+  // PART D. Reading the flag raw showed "Enable Feature" for a pro business
+  // that already had it, and pressing that button wrote the plan default
+  // back into the column — the repair path recreating the fault.
+  const receptionistEnabled = isFeatureEnabled(planTier, featureFlags, 'receptionist');
 
   const showSnack = useCallback((message: string, severity: 'success' | 'error') => {
     setSnackbar({ open: true, message, severity });

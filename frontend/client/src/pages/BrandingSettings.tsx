@@ -103,7 +103,7 @@ export default function BrandingSettings() {
   const queryClient = useQueryClient();
   // Only the columns this page selects. Narrowing the type as well as the
   // query means api_key cannot be read here even by accident.
-  type BrandingBusiness = Pick<Business, 'id' | 'logo_url' | 'feature_flags'>;
+  type BrandingBusiness = Pick<Business, 'id' | 'logo_url' | 'brand_color'>;
   const [business, setBusiness] = useState<BrandingBusiness | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -161,7 +161,7 @@ export default function BrandingSettings() {
 
       const { data: businessData, error: businessError } = await supabase
         .from('businesses')
-        .select('id,logo_url,feature_flags')
+        .select('id,logo_url,brand_color')
         .eq('id', memberData.business_id)
         .single();
       if (businessError) throw businessError;
@@ -172,7 +172,10 @@ export default function BrandingSettings() {
         setPreviewUrl(resolvedUrl);
       }
 
-      const savedColor = businessData.feature_flags?.brand_color;
+      // 033 SECTION 6 moved brand_color to its own column and
+      // PUT /v1/business/brand-color followed it. This read did not, so every
+      // saved colour came back undefined and the page reset to default blue.
+      const savedColor = businessData.brand_color;
       if (savedColor) {
         setSelectedColor(savedColor);
       }

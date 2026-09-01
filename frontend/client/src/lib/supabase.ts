@@ -46,6 +46,10 @@ export interface Business {
   timezone: string;
   api_key: string;
   logo_url: string | null;
+  // A column since the 028 baseline; migration 033 SECTION 6 moved the value
+  // out of feature_flags, where bool("#3B82F6") had it reading as an enabled
+  // feature. It is branding, not an entitlement.
+  brand_color?: string | null;
   created_at: string;
   plan_tier?: string;
   is_active?: boolean;

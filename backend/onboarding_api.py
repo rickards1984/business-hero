@@ -17,6 +17,7 @@ All endpoints under /v1/admin/onboarding/, guarded by platform-admin auth.
 import logging
 import secrets
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -25,7 +26,12 @@ from sqlmodel import Session
 from sqlalchemy import text
 
 from db import get_session
-from auth import get_platform_admin_context, is_platform_admin_user, strip_plan_defaults
+from auth import (
+    _is_feature_enabled,
+    get_platform_admin_context,
+    is_platform_admin_user,
+    strip_plan_defaults,
+)
 
 _logger = logging.getLogger("onboarding")
 
@@ -583,18 +589,37 @@ async def save_wizard_step(
     current_idx = STEP_ORDER.index(step_name) if step_name in STEP_ORDER else -1
     next_step = STEP_ORDER[current_idx + 1] if current_idx + 1 < len(STEP_ORDER) else "review_activate"
 
+    # ENTITLEMENT-SPEC PART D. `plan_tier` comes back with the flags because
+    # the flags alone do not answer the question: under PART C a missing key
+    # means "follow the plan", and this loop reads the answer to decide
+    # whether to SKIP a step.
+    #
+    # Reading raw here was the worst of the five sites, because it does not
+    # 403 — it writes `steps_completed[step] = True` and advances, so a
+    # skipped step is indistinguishable from a finished one. `accounting` is
+    # true on every tier, so after SECTION 7 no business has the key and
+    # accounting_setup was being skipped for every business the wizard ran.
     biz_row = session.execute(
-        text("SELECT feature_flags FROM businesses WHERE id = :biz"),
+        text("SELECT feature_flags, plan_tier FROM businesses WHERE id = :biz"),
         {"biz": business_id},
     ).fetchone()
-    flags = {}
+    entitlements = SimpleNamespace(feature_flags={}, plan_tier=None)
     if biz_row:
         raw = biz_row.feature_flags
-        flags = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        entitlements = SimpleNamespace(
+            feature_flags=json.loads(raw) if isinstance(raw, str) else (raw or {}),
+            plan_tier=biz_row.plan_tier,
+        )
 
     while next_step in STEP_SKIP_FEATURE_MAP:
         required_feature = STEP_SKIP_FEATURE_MAP[next_step]
-        if not flags.get(required_feature, False):
+        if not _is_feature_enabled(entitlements, required_feature):
+            # Say so. A silently auto-completed step is why this was invisible.
+            _logger.info(
+                "[Onboarding] business=%s skipping %s — plan '%s' does not "
+                "include '%s'",
+                business_id, next_step, entitlements.plan_tier, required_feature,
+            )
             steps_completed[next_step] = True
             current_idx += 1
             next_step = STEP_ORDER[current_idx + 1] if current_idx + 1 < len(STEP_ORDER) else "review_activate"

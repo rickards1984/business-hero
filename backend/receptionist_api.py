@@ -33,8 +33,10 @@ from services.voice_presets import (
     resolve_preset,
 )
 from auth import (
+    _is_feature_enabled,
     get_platform_admin_context,
     is_platform_admin_user,
+    strip_plan_defaults,
 )
 from dependencies import get_current_user_business
 
@@ -302,8 +304,17 @@ DEFAULT_BUSINESS_HOURS: Dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 def _require_receptionist_flag(business: Business):
-    flags = business.feature_flags or {}
-    if not flags.get("receptionist", False):
+    """ENTITLEMENT-SPEC PART D — resolve, do not read.
+
+    `feature_flags` holds exceptions only, so a MISSING key means "follow the
+    plan", not "denied". Reading it raw refused every `pro` business the
+    moment 033 SECTION 7 stripped the redundant `receptionist: true` — while
+    the phone kept ringing, because the Twilio webhook gates on
+    `receptionist_configs.enabled` and never looks at entitlement at all.
+    That left the owner locked out of `PATCH /config/toggle`, the only switch
+    that turns the thing off.
+    """
+    if not _is_feature_enabled(business, "receptionist"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Receptionist feature is not enabled for this business",
@@ -907,13 +918,16 @@ async def admin_receptionist_overview(
     result = []
     for biz in businesses:
         cfg = config_map.get(str(biz.id))
-        flags = biz.feature_flags or {}
         result.append({
             "business_id": str(biz.id),
             "business_name": biz.name,
             "plan_tier": biz.plan_tier,
             "is_active": biz.is_active,
-            "receptionist_enabled": flags.get("receptionist", False),
+            # Two different questions, deliberately kept apart: what the
+            # business is ENTITLED to (plan + exceptions), and whether the
+            # line is LIVE (receptionist_configs.enabled, which is what the
+            # Twilio webhook actually gates on).
+            "receptionist_enabled": _is_feature_enabled(biz, "receptionist"),
             "receptionist_live": cfg.enabled if cfg else False,
             "twilio_phone_number": cfg.twilio_phone_number if cfg else None,
             "voice": cfg.voice if cfg else None,
@@ -936,13 +950,22 @@ async def admin_toggle_receptionist_flag(
     if not biz:
         raise HTTPException(status_code=404, detail="Business not found")
 
+    # PART C's write rule, applied here too — this was the fourth creation
+    # path and the only one that still wrote a plan default back in. It
+    # closed a loop with the admin UI: after SECTION 7 stripped the flag the
+    # button read "Enable Feature", and pressing it re-pinned
+    # `receptionist: true`, undoing the migration one business at a time.
+    # Storing nothing is the correct outcome of enabling what the plan grants.
     flags = dict(biz.feature_flags or {})
     flags["receptionist"] = enabled
-    biz.feature_flags = flags
+    biz.feature_flags = strip_plan_defaults(flags, biz.plan_tier)
 
     session.add(biz)
     session.commit()
-    return {"business_id": business_id, "receptionist_enabled": enabled}
+    return {
+        "business_id": business_id,
+        "receptionist_enabled": _is_feature_enabled(biz, "receptionist"),
+    }
 
 
 @admin_router.get("/{business_id}/config")

@@ -671,7 +671,7 @@ export default function AdminBusinessDetail() {
                 </Box>
 
                 <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-                  <Chip label={`Email: ${health.business.feature_flags?.email ? 'On' : 'Off'}`} size="small" />
+                  <Chip label={`Email: ${isFeatureEnabled(health.business.plan_tier, health.business.feature_flags, 'email') ? 'On' : 'Off'}`} size="small" />
                   {/* Resolved through plan defaults, not raw flag lookups. The
                       old keys (`calendar`, `voice`) were renamed by migration
                       033 SECTION 6, and a raw lookup on a stripped key reads
@@ -714,6 +714,7 @@ export default function AdminBusinessDetail() {
                     <Box sx={{ display: 'grid', gap: 2 }}>
                       <AdminReceptionistSection
                         businessId={id}
+                        planTier={health.business.plan_tier}
                         featureFlags={health.business.feature_flags}
                         onFeatureFlagChange={() => { loadBusiness(); loadHealth(); }}
                       />
