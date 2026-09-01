@@ -1384,7 +1384,7 @@ makes later downgrades work. Run it while that is still true.
 
 ## STEP 20 — THE GATE. Do not skip, do not do from memory.
 
-**Three checks. All three must pass before STEP 21.**
+**Four checks. All four must pass before STEP 21.**
 
 ### 20a — the backend actually running is at `776604c` or later
 
@@ -1480,6 +1480,59 @@ and running it will not help.
 **All three green? Continue. Any one of them not green? Stop.**
 
 ---
+
+### 20d — the DEPLOYED backend resolves entitlement, it does not read it
+
+**This check did not exist when the gate was written, and 20a-20c do not
+cover it.** They prove the canonical *table* is deployed. They say nothing
+about how the running code *asks* it.
+
+The distinction is the whole of PART D. Under PART C a missing key means
+"follow the plan". Code that resolves — `auth._is_feature_enabled`,
+`entitlements.isFeatureEnabled` — reads a stripped `pro` business as fully
+entitled. Code that does `flags.get("receptionist", False)` reads the same
+row as denied. Same column, same business, opposite answer. Five readers
+were doing the latter, so STEP 21 would have broken them **even with 20a,
+20b and 20c all green**.
+
+What it would have looked like, so it is recognisable if the gate is ever
+skipped:
+
+| reader | what STEP 21 does to it, pre-PART D |
+|---|---|
+| receptionist settings (9 endpoints) | 403 for MSC and New Body. Including `PATCH /config/toggle` — **the phone keeps answering and the owner cannot switch it off**, because the Twilio webhook gates on `receptionist_configs.enabled`, a different column, and never checks entitlement |
+| onboarding wizard step-skip | marks `receptionist_setup` and `accounting_setup` COMPLETE and moves on. **No error.** `accounting` is true on every tier, so this one hits every business, not just these two |
+| admin receptionist overview | `receptionist_enabled: false` for a business that has it |
+| admin email chip | reads "Off" for every business — `email` is true on every tier |
+
+**EXPECT:** the active Railway deployment is `57f184a` — *"ENTITLEMENT-SPEC
+PART D — the readers resolve, they no longer read raw"* — or later, and
+Vercel likewise. Same place you looked in 20a and 20b.
+
+**STOP IF** it is `776604c`..`fc88a7a`. That range has the canonical table
+and the raw readers together, which is the exact combination this step
+exists to catch.
+
+Then prove it behaviourally on a business that is already stripped, which
+is what STEP 21 is about to create. Use one of the four `starter` test
+businesses and give it a goodwill grant — admin panel → Receptionist →
+**Enable Feature**:
+
+**EXPECT:** `feature_flags` gains `{"receptionist": true}` (a grant against
+a denying plan is a real exception, so it is stored), the button flips to
+**Disable Feature**, and the receptionist settings load rather than 403.
+
+Now press **Disable Feature**:
+
+**EXPECT:** `feature_flags` goes back to `{}` — **not** to
+`{"receptionist": false}`. Storing the plan default is the bug PART D
+fixed on this endpoint, and it is the loop that was quietly undoing
+SECTION 7: strip the key, admin sees "Enable", admin presses it, key comes
+back.
+
+**STOP IF** you land on `{"receptionist": false}`. The deployed backend is
+not stripping on this path and STEP 21's work will be reversed by hand the
+first time anyone touches that button.
 
 ## STEP 21 — Section 7: the strip
 
