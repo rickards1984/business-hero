@@ -143,12 +143,48 @@ canonical keys, `planDefaults()`/`setFeatureFlag`, matching
 `AdminBusinessDetail.tsx`. `plan_definitions` still prices plans; it no
 longer decides entitlement.
 
+**PART D — the READ side. DONE, `./check.sh` green, 358 tests (26 new in
+`backend/tests/test_entitlement_reads.py`).**
+
+PART C fixed every write path and touched no reader. `feature_flags` had
+been doing two jobs — recording exceptions AND being the readable state of
+the world — and PART C took the second away, so every reader still asking
+it raw read a column that is, correctly, empty. `_is_feature_enabled` reads
+a stripped `pro` business as entitled; `flags.get("receptionist", False)`
+reads the same row as denied.
+
+Five sites, now resolving: `_require_receptionist_flag` (nine settings
+endpoints — NOT the phone line, which gates on
+`receptionist_configs.enabled` and never checks entitlement, so a broken
+gate meant the receptionist answering while its owner was locked out of the
+only switch that stops it); onboarding's step-skip loop (the priority — it
+does not error, it marks the step COMPLETE, and `accounting` is true on
+every tier so it hit every business); the admin overview; the admin email
+chip; and `PUT /admin/receptionist/{id}/feature-flag`, now the fourth write
+path that strips — it closed a loop where the admin UI's "Enable Feature"
+button re-pinned the default SECTION 7 had just removed.
+
+Plus `BrandingSettings.tsx`, same species from SECTION 6: the column and
+the save endpoint moved, the read did not, so saved brand colours never
+loaded back.
+
+The guard that did not exist: the new test parses every backend and
+frontend source file for canonical-feature reads that bypass the resolver,
+resolving alias chains to a fixpoint, with a self-test so a regex matching
+nothing cannot pass as green. The vocabulary test protects what the table
+says; this protects how it is asked.
+
 **THIS UNBLOCKS 033 SECTION 7** — and SECTION 7 must now RUN. Two reasons.
 (1) Its ordering rule is satisfied only once this deploys. (2) The strip
 cannot tell a stale merged default from a goodwill grant, so a business
 carrying legacy flags keeps them through a downgrade; SECTION 7 strips
 against the CURRENT tier while both live businesses are still `pro`,
 reducing them to `{}` and making later downgrades work.
+
+**NOT DONE, and it is RED: the flags are still in prod.** Removing MSC's
+and New Body's `receptionist: true` IS `033-PROD-RUNBOOK.md` STEP 21, and
+it must not run before PART D is the DEPLOYED backend. The runbook's gate
+now has a fourth check (STEP 20d) that says so and names the commit.
 
 **Deliberately out of scope, still open:** `limits` untouched on every path
 (nothing reads it for enforcement). `AdminDashboard.tsx`'s `FEATURE_PRESETS`
