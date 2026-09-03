@@ -1845,6 +1845,66 @@ until it is resolved.
 
 ---
 
+## STEP 24b — Regenerate the schema guard's source of truth
+
+**Do this after EVERY migration, not just 033.** It takes one paste.
+
+`audits/live-schema-public.txt` is what `backend/tests/test_schema_conformance.py`
+compares the shipped SQL against. The guard exists because
+`admin_business_api` wrote `businesses.updated_at` — a column that has never
+existed — on two endpoints, and both returned 500 on every request from
+030b Release 1 until it was caught. `create_all()` creates tables but never
+columns, migration files are not evidence of live state, and the unit fakes
+accept any column name on a write. Nothing else looks at this.
+
+A stale dump is a guard that passes for the wrong reason. **033 SECTION 4
+makes it stale**: it adds `businesses.metered_usage_enabled` and
+`businesses.monthly_spend_cap_gbp`, so as of STEP 24 this file is out of date.
+
+Run `scripts/dump-live-schema.sql` in the SQL editor — **confirm the project
+selector reads `oxblcmwhuwtobdhsfgyi` first**. It is a read against
+`information_schema`; it touches no data and is safe to run at any time.
+
+**DO NOT BUILD THE FILE WITH `grep`.** The Supabase editor exports CSV, and
+CSV quotes any field containing a comma — which is every `numeric(p,s)` and
+`character varying(n)` row. `grep "^col "` therefore drops them silently. On
+the 2026-09-03 dump that was 111 of 816 rows, including
+`businesses.monthly_spend_cap_gbp` and `usage_meters.value`, and it reads
+exactly like a partially-applied migration. Parse it as CSV:
+
+```
+cd ~/Documents/business-hero-2 && python3 - <<'EOF'
+import csv, pathlib
+src = pathlib.Path.home()/"Downloads"/"<the downloaded file>.csv"
+dst = pathlib.Path("audits/live-schema-public.txt")
+rows = [r[0] for r in csv.reader(src.open(newline="")) if r and r[0].startswith("col   ")]
+head = dst.read_text().split("col   ")[0]          # keep the header block
+dst.write_text(head + "\n".join(rows) + "\n")
+print(len(rows), "columns")
+EOF
+```
+
+Keep the header block, set `coverage: FULL`, and set `UNGUARDED_BUDGET = 0`
+in `backend/tests/test_schema_conformance.py`. Update `EXPECTED_COVERED` if
+the backend has started writing a table it did not write before.
+
+```
+./check.sh
+```
+
+**EXPECT:** green, and `test_full_coverage_leaves_nothing_unguarded` RUNS
+rather than skips. If `test_every_written_column_exists_in_the_live_schema`
+fails, read the named file and line before assuming the dump is wrong — but
+if it fails in the dozens, suspect the dump. A truncated source produces mass
+failures, not silence, which is the intended behaviour.
+
+**STOP IF:** the parse reports fewer than ~700 columns or ~50 tables. The
+2026-09-03 baseline was 816 columns across 59 tables. A table count alone is
+not enough of a check — the CSV-quoting drop above loses columns while
+leaving all 59 tables present.
+
+---
+
 ## STEP 25 — Browser smoke test
 
 Log in as a **normal customer** (Multi Skilled Contractors), not a

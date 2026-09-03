@@ -301,8 +301,74 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(_request: Request, exc: Exception):
+    """LAST RESORT ONLY — `CORSSafeErrorMiddleware` below normally gets there
+    first, and it must, because a response from here has NO CORS HEADERS.
+
+    Starlette routes `Exception`/500 to `ServerErrorMiddleware`, which
+    `build_middleware_stack` puts at index 0 — ABOVE every user middleware,
+    CORSMiddleware included. Everything else (HTTPException, and so every 400,
+    404 and 422; plus RateLimitExceeded above) goes to `ExceptionMiddleware`,
+    which sits BELOW them and is wrapped by CORS as normal.
+
+    So this handler is the one response shape the browser cannot read. Chrome
+    blocks it for missing `Access-Control-Allow-Origin` and fetch() reports
+    "Failed to fetch" — the status and the detail body never reach the app.
+    Every unhandled server error looked like a network failure.
+
+    This still fires for an exception raised inside CORSMiddleware itself, or
+    before the stack is entered. Those responses remain unreadable by the
+    browser; there is no layer left to add the headers from.
+    """
     logging.getLogger("app").exception("Unhandled exception", exc_info=exc)
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
+
+class CORSSafeErrorMiddleware:
+    """Turn an unhandled exception into a 500 INSIDE the CORS layer.
+
+    Pure ASGI rather than `@app.middleware("http")`: BaseHTTPMiddleware
+    re-wraps every response through an anyio stream, which this app does not
+    need and which has a history of interfering with streaming responses.
+
+    ORDERING IS THE WHOLE POINT. `add_middleware` does `insert(0, ...)`, so
+    the LAST middleware added ends up OUTERMOST. This one is therefore added
+    BEFORE CORSMiddleware, which leaves CORS wrapping it and free to add the
+    headers on the way out. Reversing those two calls silently reintroduces
+    the bug — `backend/tests/test_error_cors.py` fails if that happens.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        response_started = False
+
+        async def _send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except Exception as exc:
+            logging.getLogger("app").exception("Unhandled exception", exc_info=exc)
+            if response_started:
+                # Headers are already on the wire. Nothing can be salvaged, and
+                # writing a second response start would corrupt the stream.
+                raise
+            response = JSONResponse(
+                status_code=500, content={"detail": "Internal Server Error"}
+            )
+            await response(scope, receive, send)
+
+
+# Added BEFORE CORSMiddleware so that CORS ends up OUTSIDE it. See the
+# docstring above — this order is load-bearing, not incidental.
+app.add_middleware(CORSSafeErrorMiddleware)
 
 
 # CORS configuration

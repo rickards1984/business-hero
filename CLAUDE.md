@@ -107,9 +107,14 @@ parties unless permission is on file.
 
 > Keep this section current. It is the first thing a fresh session reads.
 
-**Applied to prod:** migration `030a` (pre-billing security) and `031`
-(money engine schema). Both rehearsed on staging first. Runbooks in
-`audits/030a-PROD-RUNBOOK.md` and `audits/031-PROD-RUNBOOK.md`.
+**Applied to prod:** migrations `030a` (pre-billing security), `031`
+(money engine schema) and `033` (entitlement) **through SECTION 7**. All
+rehearsed on staging first. Runbooks in `audits/030a-PROD-RUNBOOK.md`,
+`audits/031-PROD-RUNBOOK.md` and `audits/033-PROD-RUNBOOK.md`.
+
+The 2026-09-03 schema dump confirms 033's schema half: `usage_meters` exists
+with all seven columns, and `businesses` carries both SECTION 4 columns
+(`metered_usage_enabled`, `monthly_spend_cap_gbp`).
 
 `031` added: `invoice_line_items`, `unit_cost` widened to `numeric(14,4)` on
 both line-item tables, per-line discount/apportionment/tax columns,
@@ -174,17 +179,28 @@ resolving alias chains to a fixpoint, with a self-test so a regex matching
 nothing cannot pass as green. The vocabulary test protects what the table
 says; this protects how it is asked.
 
-**THIS UNBLOCKS 033 SECTION 7** — and SECTION 7 must now RUN. Two reasons.
-(1) Its ordering rule is satisfied only once this deploys. (2) The strip
-cannot tell a stale merged default from a goodwill grant, so a business
-carrying legacy flags keeps them through a downgrade; SECTION 7 strips
-against the CURRENT tier while both live businesses are still `pro`,
-reducing them to `{}` and making later downgrades work.
+**THIS UNBLOCKED 033 SECTION 7, WHICH HAS NOW RUN.** The strip cannot tell
+a stale merged default from a goodwill grant, so a business carrying legacy
+flags would keep them through a downgrade; SECTION 7 stripped against the
+CURRENT tier while both live businesses were still `pro`, which is what makes
+later downgrades work.
 
-**NOT DONE, and it is RED: the flags are still in prod.** Removing MSC's
-and New Body's `receptionist: true` IS `033-PROD-RUNBOOK.md` STEP 21, and
-it must not run before PART D is the DEPLOYED backend. The runbook's gate
-now has a fourth check (STEP 20d) that says so and names the commit.
+**Post-SECTION-7 state, verified against the expected output at the time:**
+MSC and New Body are both `{}`, the four test businesses are `{}`, and
+Business Hero retains only `quoting: false`, `calendar_booking: false`,
+`industry`, and the two retired wizard keys.
+
+**THE ONE OUTSTANDING 033 ITEM, and it is RED: STEP 21.** MSC and New Body
+carry a manual `receptionist: true`, added as a stopgap when the raw reader
+in `receptionist_api.py` 403'd after the strip — the owner was locked out of
+the only switch that stops the receptionist answering. Removing it is
+`033-PROD-RUNBOOK.md` STEP 21.
+
+That reader is fixed (PART D) **but not yet verified in prod**, and the fix
+is in the same undeployed batch as the two bugs below. STEP 21 is gated on
+STEP 20d — the fourth gate check, which asks whether the DEPLOYED backend
+resolves entitlement rather than reading it raw, and names the commit. Do
+not run STEP 21 until 20d passes against prod.
 
 **Deliberately out of scope, still open:** `limits` untouched on every path
 (nothing reads it for enforcement). `AdminDashboard.tsx`'s `FEATURE_PRESETS`
@@ -192,6 +208,45 @@ still holds a fourth vocabulary (`ai_briefings`, `premium_support`) — now
 harmless, because the server strips what it submits, but it is a stale table.
 `plan_definitions` remains runtime-editable via
 `PUT /v1/admin/onboarding/plans`.
+
+**Two prod bugs found and fixed while reading the admin path, both
+undeployed. `./check.sh full` green, 382 tests (24 new).**
+
+(1) `admin_business_api` wrote `businesses.updated_at` on BOTH the overview
+save and the admin activate/pause endpoint. There is no such column — not in
+`models.py`, not in the 028 baseline, not in any observed dump. Both endpoints
+had returned 500 on every request since 030b Release 1 (`b325b50`, 20 Aug).
+Nothing read the column, so the write is simply gone rather than the column
+added: `create_all()` creates tables but never columns, so adding it means a
+migration plus a trigger, and `onboarding_api` writes this table without
+setting it — half-applied audit metadata is worse than none.
+
+New guard `backend/tests/test_schema_conformance.py` parses every
+`UPDATE`/`INSERT` in the backend and checks each written column against
+`audits/live-schema-public.txt`. **That file is now the FULL prod dump of
+2026-09-03 — 816 columns, 59 tables, `coverage: FULL`, `UNGUARDED_BUDGET = 0`
+— so all 39 written tables are guarded and nothing is exempt.** It found no
+phantom writes beyond the two `updated_at` ones. Regenerating after every
+migration is 033-PROD-RUNBOOK **STEP 24b**.
+
+Building that file with `grep` is a trap and STEP 24b now says so: the
+Supabase CSV export quotes every field containing a comma, so `grep "^col "`
+silently drops all 111 `numeric(p,s)` / `character varying(n)` rows and the
+result reads convincingly like a half-applied migration. Parse it as CSV. The
+guard does not fail quietly on a bad dump — fed the truncated version it
+reported 106 phantom writes.
+
+(2) Those 500s reached the browser as `Failed to fetch`. Starlette routes
+`Exception`/500 to `ServerErrorMiddleware`, which sits ABOVE all user
+middleware including CORS, so unhandled 500s carried no
+`Access-Control-Allow-Origin` and Chrome discarded them — status and body
+both unreachable. Every unhandled server error in this app has looked like a
+network failure. Fixed with `main.CORSSafeErrorMiddleware`, added BEFORE
+`CORSMiddleware` so CORS wraps it; `backend/tests/test_error_cors.py` asserts
+the ordering as well as the behaviour, verified to fail when reverted.
+**4xx were never affected** — they go through `ExceptionMiddleware`, below
+CORS — so any 400 seen on these endpoints is a separate, still-undiagnosed
+issue.
 
 **Then:** manual invoices → invoice PDF and branding (there is no invoice
 PDF at all today; `quote_pdf.py` has no sibling, and invoices have no

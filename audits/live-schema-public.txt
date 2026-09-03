@@ -1,0 +1,838 @@
+# Live schema — public schema of Supabase project oxblcmwhuwtobdhsfgyi
+#
+# SOURCE OF TRUTH for backend/tests/test_schema_conformance.py.
+# Regenerate with scripts/dump-live-schema.sql. See 033-PROD-RUNBOOK STEP 24b.
+#
+# coverage: FULL
+#
+# FULL means this file describes every table, so the guard checks every column
+# the backend writes and `test_full_coverage_leaves_nothing_unguarded` requires
+# that nothing is left unchecked. Keep UNGUARDED_BUDGET at 0 while this says
+# FULL — the test enforces that too.
+#
+# Captured 2026-09-03: 816 columns across 59 tables, covering all 39 tables
+# the backend writes. Supersedes the businesses-only bootstrap.
+#
+# The Supabase editor exports CSV, which QUOTES any field containing a comma —
+# every numeric(p,s) and character varying(n) line. Those quotes are stripped
+# here by a real CSV parse. A plain `grep "^col "` silently drops 111 of these
+# rows, so re-run the parse rather than hand-editing.
+#
+# NOTE: scripts/dump-live-schema.sql filters out `zz_%` tables, so the 033
+# rollback table is deliberately not represented here.
+col   accounting_categories.business_id uuid null=NO def=-
+col   accounting_categories.color character varying(7) null=YES def='#6B7280'::character varying
+col   accounting_categories.created_at timestamp with time zone null=YES def=now()
+col   accounting_categories.icon character varying(50) null=YES def=-
+col   accounting_categories.id uuid null=NO def=gen_random_uuid()
+col   accounting_categories.is_default boolean null=YES def=false
+col   accounting_categories.name character varying(100) null=NO def=-
+col   accounting_categories.type character varying(20) null=NO def=-
+col   accounting_categories.updated_at timestamp with time zone null=YES def=now()
+col   accounting_connections.business_id uuid null=NO def=-
+col   accounting_connections.created_at timestamp with time zone null=NO def=now()
+col   accounting_connections.id uuid null=NO def=gen_random_uuid()
+col   accounting_connections.is_active boolean null=NO def=true
+col   accounting_connections.last_sync_at timestamp with time zone null=YES def=-
+col   accounting_connections.provider text null=NO def=-
+col   accounting_connections.provider_metadata jsonb null=NO def='{}'::jsonb
+col   accounting_connections.refresh_token_ciphertext text null=YES def=-
+col   accounting_connections.sync_cursor text null=YES def=-
+col   accounting_connections.tenant_id text null=YES def=-
+col   accounting_connections.tenant_name text null=YES def=-
+col   accounting_connections.token_ciphertext text null=YES def=-
+col   accounting_connections.token_expires_at timestamp with time zone null=YES def=-
+col   accounting_connections.token_refreshed_at timestamp with time zone null=YES def=-
+col   accounting_connections.updated_at timestamp with time zone null=NO def=now()
+col   accounting_imports.business_id uuid null=NO def=-
+col   accounting_imports.column_mapping jsonb null=YES def=-
+col   accounting_imports.completed_at timestamp with time zone null=YES def=-
+col   accounting_imports.created_at timestamp with time zone null=YES def=now()
+col   accounting_imports.error_count integer(32,0) null=YES def=0
+col   accounting_imports.error_message text null=YES def=-
+col   accounting_imports.filename character varying(255) null=NO def=-
+col   accounting_imports.id uuid null=NO def=gen_random_uuid()
+col   accounting_imports.original_filename character varying(255) null=YES def=-
+col   accounting_imports.row_count integer(32,0) null=YES def=0
+col   accounting_imports.status character varying(20) null=YES def='pending'::character varying
+col   accounting_imports.success_count integer(32,0) null=YES def=0
+col   accounting_providers.api_base_url text null=YES def=-
+col   accounting_providers.created_at timestamp with time zone null=NO def=now()
+col   accounting_providers.description text null=YES def=-
+col   accounting_providers.features jsonb null=NO def='{}'::jsonb
+col   accounting_providers.id text null=NO def=-
+col   accounting_providers.is_available boolean null=NO def=true
+col   accounting_providers.logo_url text null=YES def=-
+col   accounting_providers.name text null=NO def=-
+col   accounting_providers.oauth_auth_url text null=YES def=-
+col   accounting_providers.oauth_token_url text null=YES def=-
+col   accounting_providers.required_env_vars ARRAY null=YES def=-
+col   accounting_providers.sort_order integer(32,0) null=NO def=0
+col   accounting_transactions.account character varying(100) null=YES def=-
+col   accounting_transactions.amount numeric(12,2) null=NO def=-
+col   accounting_transactions.business_id uuid null=NO def=-
+col   accounting_transactions.category_id uuid null=YES def=-
+col   accounting_transactions.created_at timestamp with time zone null=YES def=now()
+col   accounting_transactions.description text null=NO def=-
+col   accounting_transactions.external_id text null=YES def=-
+col   accounting_transactions.external_source text null=YES def=-
+col   accounting_transactions.id uuid null=NO def=gen_random_uuid()
+col   accounting_transactions.import_id uuid null=YES def=-
+col   accounting_transactions.is_archived boolean null=YES def=false
+col   accounting_transactions.is_reconciled boolean null=YES def=false
+col   accounting_transactions.notes text null=YES def=-
+col   accounting_transactions.payee_payer character varying(255) null=YES def=-
+col   accounting_transactions.provider text null=YES def='xero'::text
+col   accounting_transactions.reference character varying(100) null=YES def=-
+col   accounting_transactions.transaction_date date null=NO def=-
+col   accounting_transactions.type character varying(20) null=NO def=-
+col   accounting_transactions.updated_at timestamp with time zone null=YES def=now()
+col   assistant_conversations.business_id uuid null=NO def=-
+col   assistant_conversations.created_at timestamp with time zone null=NO def=now()
+col   assistant_conversations.id uuid null=NO def=gen_random_uuid()
+col   assistant_conversations.updated_at timestamp with time zone null=NO def=now()
+col   assistant_conversations.user_id uuid null=NO def=-
+col   assistant_messages.business_id uuid null=NO def=-
+col   assistant_messages.content text null=NO def=-
+col   assistant_messages.conversation_id uuid null=NO def=-
+col   assistant_messages.created_at timestamp with time zone null=NO def=now()
+col   assistant_messages.id uuid null=NO def=gen_random_uuid()
+col   assistant_messages.role text null=NO def=-
+col   assistant_messages.user_id uuid null=NO def=-
+col   automation_executions.action_result jsonb null=YES def=-
+col   automation_executions.approval_requested_at timestamp with time zone null=YES def=-
+col   automation_executions.approval_response text null=YES def=-
+col   automation_executions.approved_at timestamp with time zone null=YES def=-
+col   automation_executions.business_id uuid null=NO def=-
+col   automation_executions.created_at timestamp with time zone null=NO def=now()
+col   automation_executions.executed_at timestamp with time zone null=YES def=-
+col   automation_executions.id uuid null=NO def=gen_random_uuid()
+col   automation_executions.rule_id uuid null=NO def=-
+col   automation_executions.status text null=NO def='pending'::text
+col   automation_executions.trigger_data jsonb null=YES def=-
+col   automation_rule_templates.action_config jsonb null=NO def='{}'::jsonb
+col   automation_rule_templates.action_type text null=NO def=-
+col   automation_rule_templates.conditions jsonb null=NO def='{}'::jsonb
+col   automation_rule_templates.description text null=YES def=-
+col   automation_rule_templates.id uuid null=NO def=gen_random_uuid()
+col   automation_rule_templates.is_default boolean null=NO def=false
+col   automation_rule_templates.name text null=NO def=-
+col   automation_rule_templates.plan_tier text null=NO def='pro'::text
+col   automation_rule_templates.requires_approval boolean null=NO def=true
+col   automation_rule_templates.sort_order integer(32,0) null=NO def=0
+col   automation_rule_templates.trigger_type text null=NO def=-
+col   automation_rules.action_config jsonb null=NO def='{}'::jsonb
+col   automation_rules.action_type text null=NO def=-
+col   automation_rules.business_id uuid null=NO def=-
+col   automation_rules.conditions jsonb null=NO def='{}'::jsonb
+col   automation_rules.created_at timestamp with time zone null=NO def=now()
+col   automation_rules.description text null=YES def=-
+col   automation_rules.id uuid null=NO def=gen_random_uuid()
+col   automation_rules.is_active boolean null=NO def=true
+col   automation_rules.last_triggered_at timestamp with time zone null=YES def=-
+col   automation_rules.name text null=NO def=-
+col   automation_rules.requires_approval boolean null=NO def=true
+col   automation_rules.total_executions integer(32,0) null=NO def=0
+col   automation_rules.trigger_type text null=NO def=-
+col   automation_rules.updated_at timestamp with time zone null=NO def=now()
+col   booking_settings.appointment_types jsonb null=NO def='[]'::jsonb
+col   booking_settings.buffer_minutes integer(32,0) null=NO def=15
+col   booking_settings.business_hours jsonb null=NO def='[]'::jsonb
+col   booking_settings.business_id uuid null=NO def=-
+col   booking_settings.calendar_id text null=YES def='primary'::text
+col   booking_settings.confirmation_message text null=YES def='Your appointment has been booked. You will receive a calendar invite shortly.'::text
+col   booking_settings.created_at timestamp with time zone null=NO def=now()
+col   booking_settings.enabled boolean null=NO def=false
+col   booking_settings.id uuid null=NO def=gen_random_uuid()
+col   booking_settings.max_advance_days integer(32,0) null=NO def=30
+col   booking_settings.min_notice_hours integer(32,0) null=NO def=2
+col   booking_settings.updated_at timestamp with time zone null=NO def=now()
+col   briefing_snapshots.ai_observations jsonb null=YES def=-
+col   briefing_snapshots.ai_suggestions jsonb null=YES def=-
+col   briefing_snapshots.ai_summary text null=YES def=-
+col   briefing_snapshots.bank_balance numeric(12,2) null=YES def=-
+col   briefing_snapshots.business_id uuid null=NO def=-
+col   briefing_snapshots.calls_handled_by_ai integer(32,0) null=YES def=0
+col   briefing_snapshots.calls_total integer(32,0) null=YES def=0
+col   briefing_snapshots.calls_transferred integer(32,0) null=YES def=0
+col   briefing_snapshots.created_at timestamp with time zone null=NO def=now()
+col   briefing_snapshots.emails_action_required integer(32,0) null=YES def=0
+col   briefing_snapshots.emails_received integer(32,0) null=YES def=0
+col   briefing_snapshots.expenses numeric(12,2) null=YES def=0
+col   briefing_snapshots.full_data jsonb null=YES def=-
+col   briefing_snapshots.id uuid null=NO def=gen_random_uuid()
+col   briefing_snapshots.invoices_overdue_amount numeric(12,2) null=YES def=0
+col   briefing_snapshots.invoices_overdue_count integer(32,0) null=YES def=0
+col   briefing_snapshots.invoices_paid_amount numeric(12,2) null=YES def=0
+col   briefing_snapshots.invoices_paid_count integer(32,0) null=YES def=0
+col   briefing_snapshots.net_profit numeric(12,2) null=YES def=0
+col   briefing_snapshots.period_end date null=NO def=-
+col   briefing_snapshots.period_start date null=NO def=-
+col   briefing_snapshots.revenue numeric(12,2) null=YES def=0
+col   briefing_snapshots.snapshot_type text null=NO def=-
+col   briefing_snapshots.tasks_completed integer(32,0) null=YES def=0
+col   briefing_snapshots.tasks_created integer(32,0) null=YES def=0
+col   business_members.accepted_at timestamp with time zone null=YES def='2025-12-23 13:13:40.205968+00'::timestamp with time zone
+col   business_members.business_id uuid null=NO def=-
+col   business_members.created_at timestamp with time zone null=NO def=now()
+col   business_members.id uuid null=NO def=gen_random_uuid()
+col   business_members.invited_email text null=YES def=-
+col   business_members.is_active boolean null=NO def=true
+col   business_members.role text null=NO def='owner'::text
+col   business_members.user_id uuid null=YES def=-
+col   business_settings.business_id uuid null=NO def=-
+col   business_settings.created_at timestamp without time zone null=NO def=-
+col   business_settings.id uuid null=NO def=-
+col   business_settings.settings jsonb null=NO def='{}'::jsonb
+col   business_settings.updated_at timestamp without time zone null=NO def=-
+col   businesses.api_key text null=NO def=-
+col   businesses.brand_color text null=YES def='#3B82F6'::text
+col   businesses.cancel_at_period_end boolean null=NO def=false
+col   businesses.ceo_briefing_enabled boolean null=YES def=false
+col   businesses.created_at timestamp with time zone null=NO def=now()
+col   businesses.current_period_end timestamp with time zone null=YES def=-
+col   businesses.feature_flags jsonb null=NO def='{}'::jsonb
+col   businesses.id uuid null=NO def=gen_random_uuid()
+col   businesses.is_active boolean null=NO def=true
+col   businesses.last_stripe_event_at timestamp with time zone null=YES def=-
+col   businesses.limits jsonb null=NO def='{}'::jsonb
+col   businesses.logo_url text null=YES def=-
+col   businesses.metered_usage_enabled boolean null=NO def=false
+col   businesses.monthly_spend_cap_gbp numeric(10,2) null=YES def=-
+col   businesses.name text null=NO def=-
+col   businesses.onboarded_by uuid null=YES def=-
+col   businesses.onboarding_completed boolean null=YES def=false
+col   businesses.onboarding_completed_at timestamp with time zone null=YES def=-
+col   businesses.owner_whatsapp text null=YES def=-
+col   businesses.plan_tier text null=NO def='starter'::text
+col   businesses.region text null=NO def='UK'::text
+col   businesses.stripe_customer_id text null=YES def=-
+col   businesses.stripe_subscription_id text null=YES def=-
+col   businesses.subscription_status text null=YES def=-
+col   businesses.tax_number text null=YES def=-
+col   businesses.tax_registered boolean null=NO def=true
+col   businesses.timezone text null=NO def='Europe/London'::text
+col   businesses.trial_ends_at timestamp with time zone null=YES def=-
+col   calendar_events.attendees jsonb null=NO def='[]'::jsonb
+col   calendar_events.business_id uuid null=NO def=-
+col   calendar_events.created_at timestamp with time zone null=NO def=now()
+col   calendar_events.description text null=YES def=-
+col   calendar_events.email_account_id uuid null=NO def=-
+col   calendar_events.end_at timestamp with time zone null=YES def=-
+col   calendar_events.id uuid null=NO def=gen_random_uuid()
+col   calendar_events.is_all_day boolean null=NO def=false
+col   calendar_events.location text null=YES def=-
+col   calendar_events.organizer_email text null=YES def=-
+col   calendar_events.provider_event_id text null=NO def=-
+col   calendar_events.show_as text null=YES def=-
+col   calendar_events.start_at timestamp with time zone null=YES def=-
+col   calendar_events.status text null=YES def=-
+col   calendar_events.subject text null=YES def=-
+col   calendar_events.updated_at timestamp with time zone null=NO def=now()
+col   calendar_sync_state.cursor jsonb null=NO def='{}'::jsonb
+col   calendar_sync_state.email_account_id uuid null=NO def=-
+col   calendar_sync_state.last_error text null=YES def=-
+col   calendar_sync_state.last_synced_at timestamp with time zone null=YES def=-
+col   calendar_sync_state.updated_at timestamp with time zone null=NO def=now()
+col   calls.archived boolean null=YES def=false
+col   calls.business_id uuid null=NO def=-
+col   calls.caller_name text null=YES def=-
+col   calls.caller_number text null=YES def=-
+col   calls.created_at timestamp with time zone null=NO def=now()
+col   calls.duration_seconds integer(32,0) null=YES def=-
+col   calls.ended_at timestamp with time zone null=YES def=-
+col   calls.id uuid null=NO def=gen_random_uuid()
+col   calls.intent text null=YES def=-
+col   calls.outcome text null=YES def='handled'::text
+col   calls.receptionist_config_id uuid null=YES def=-
+col   calls.recording_url text null=YES def=-
+col   calls.source text null=NO def='Awaz'::text
+col   calls.started_at timestamp with time zone null=YES def=-
+col   calls.summary text null=YES def=-
+col   calls.transcript text null=YES def=-
+col   calls.updated_at timestamp with time zone null=YES def=now()
+col   email_accounts.business_id uuid null=NO def=-
+col   email_accounts.capabilities jsonb null=NO def='{}'::jsonb
+col   email_accounts.created_at timestamp with time zone null=NO def=now()
+col   email_accounts.display_name text null=YES def=-
+col   email_accounts.email_address text null=NO def=-
+col   email_accounts.id uuid null=NO def=gen_random_uuid()
+col   email_accounts.is_default boolean null=NO def=false
+col   email_accounts.provider text null=NO def=-
+col   email_accounts.refresh_token_ciphertext text null=YES def=-
+col   email_accounts.smtp_config jsonb null=NO def='{}'::jsonb
+col   email_accounts.token_ciphertext text null=YES def=-
+col   email_accounts.token_expires_at timestamp with time zone null=YES def=-
+col   email_accounts.updated_at timestamp with time zone null=NO def=now()
+col   email_accounts.user_id uuid null=NO def=-
+col   email_briefings.briefing_markdown text null=NO def=-
+col   email_briefings.business_id uuid null=NO def=-
+col   email_briefings.created_at timestamp with time zone null=NO def=now()
+col   email_briefings.email_account_id uuid null=YES def=-
+col   email_briefings.id uuid null=NO def=gen_random_uuid()
+col   email_briefings.period_end timestamp with time zone null=NO def=-
+col   email_briefings.period_start timestamp with time zone null=NO def=-
+col   email_briefings.stats jsonb null=NO def='{}'::jsonb
+col   email_briefings.user_id uuid null=NO def=-
+col   email_connections.business_id uuid null=NO def=-
+col   email_connections.created_at timestamp without time zone null=NO def=-
+col   email_connections.from_email character varying null=NO def=-
+col   email_connections.from_name character varying null=YES def=-
+col   email_connections.id uuid null=NO def=-
+col   email_connections.is_enabled boolean null=NO def=-
+col   email_connections.provider character varying null=NO def=-
+col   email_connections.smtp_host character varying null=NO def=-
+col   email_connections.smtp_password_encrypted character varying null=NO def=-
+col   email_connections.smtp_port integer(32,0) null=NO def=-
+col   email_connections.smtp_username character varying null=NO def=-
+col   email_connections.updated_at timestamp without time zone null=NO def=-
+col   email_connections.use_ssl boolean null=NO def=-
+col   email_connections.use_tls boolean null=NO def=-
+col   email_drafts.body_html text null=YES def=-
+col   email_drafts.body_text text null=YES def=-
+col   email_drafts.business_id uuid null=NO def=-
+col   email_drafts.created_at timestamp with time zone null=NO def=now()
+col   email_drafts.email_message_id uuid null=NO def=-
+col   email_drafts.id uuid null=NO def=gen_random_uuid()
+col   email_drafts.provider_message_id text null=YES def=-
+col   email_drafts.status text null=NO def=-
+col   email_drafts.subject text null=NO def=-
+col   email_drafts.to_emails ARRAY null=NO def=-
+col   email_drafts.updated_at timestamp with time zone null=NO def=now()
+col   email_messages.ai_analyzed_at timestamp with time zone null=YES def=-
+col   email_messages.ai_category text null=YES def=-
+col   email_messages.ai_priority integer(32,0) null=YES def=-
+col   email_messages.ai_suggested_action text null=YES def=-
+col   email_messages.ai_summary text null=YES def=-
+col   email_messages.body_html text null=YES def=-
+col   email_messages.body_text text null=YES def=-
+col   email_messages.business_id uuid null=NO def=-
+col   email_messages.cc_emails ARRAY null=YES def=-
+col   email_messages.created_at timestamp with time zone null=NO def=now()
+col   email_messages.email_account_id uuid null=NO def=-
+col   email_messages.folder text null=NO def='INBOX'::text
+col   email_messages.from_email text null=YES def=-
+col   email_messages.from_name text null=YES def=-
+col   email_messages.has_attachments boolean null=NO def=false
+col   email_messages.id uuid null=NO def=gen_random_uuid()
+col   email_messages.is_unread boolean null=NO def=true
+col   email_messages.labels ARRAY null=YES def=-
+col   email_messages.provider_message_id text null=NO def=-
+col   email_messages.provider_thread_id text null=YES def=-
+col   email_messages.raw_headers jsonb null=NO def='{}'::jsonb
+col   email_messages.received_at timestamp with time zone null=YES def=-
+col   email_messages.snippet text null=YES def=-
+col   email_messages.subject text null=YES def=-
+col   email_messages.to_emails ARRAY null=YES def=-
+col   email_messages.updated_at timestamp with time zone null=NO def=now()
+col   email_outbox.body_preview text null=NO def=-
+col   email_outbox.business_id uuid null=NO def=-
+col   email_outbox.chase_stage integer(32,0) null=YES def=-
+col   email_outbox.created_at timestamp with time zone null=NO def=now()
+col   email_outbox.email_account_id uuid null=NO def=-
+col   email_outbox.error text null=YES def=-
+col   email_outbox.id uuid null=NO def=gen_random_uuid()
+col   email_outbox.invoice_id uuid null=YES def=-
+col   email_outbox.provider_message_id text null=YES def=-
+col   email_outbox.sent_at timestamp with time zone null=YES def=-
+col   email_outbox.status text null=NO def=-
+col   email_outbox.subject text null=NO def=-
+col   email_outbox.to_emails ARRAY null=NO def=-
+col   email_sync_states.created_at timestamp without time zone null=NO def=-
+col   email_sync_states.cursor jsonb null=YES def='{}'::jsonb
+col   email_sync_states.email_account_id uuid null=NO def=-
+col   email_sync_states.error_message character varying null=YES def=-
+col   email_sync_states.id uuid null=NO def=-
+col   email_sync_states.last_error text null=YES def=-
+col   email_sync_states.last_history_id character varying null=YES def=-
+col   email_sync_states.last_sync_token character varying null=YES def=-
+col   email_sync_states.last_synced_at timestamp without time zone null=YES def=-
+col   email_sync_states.sync_status character varying null=NO def='idle'::character varying
+col   email_sync_states.updated_at timestamp without time zone null=NO def=-
+col   executive_meeting_action_items.assignee_email text null=YES def=-
+col   executive_meeting_action_items.assignee_name text null=YES def=-
+col   executive_meeting_action_items.business_id uuid null=NO def=-
+col   executive_meeting_action_items.completed_at timestamp with time zone null=YES def=-
+col   executive_meeting_action_items.created_at timestamp with time zone null=YES def=now()
+col   executive_meeting_action_items.description text null=YES def=-
+col   executive_meeting_action_items.due_date date null=YES def=-
+col   executive_meeting_action_items.id uuid null=NO def=gen_random_uuid()
+col   executive_meeting_action_items.last_reviewed_at timestamp with time zone null=YES def=-
+col   executive_meeting_action_items.meeting_id uuid null=NO def=-
+col   executive_meeting_action_items.notes text null=YES def=-
+col   executive_meeting_action_items.priority text null=YES def='medium'::text
+col   executive_meeting_action_items.rationale text null=YES def=-
+col   executive_meeting_action_items.status text null=NO def='open'::text
+col   executive_meeting_action_items.success_criteria text null=YES def=-
+col   executive_meeting_action_items.times_reviewed integer(32,0) null=YES def=0
+col   executive_meeting_action_items.title text null=NO def=-
+col   executive_meeting_action_items.updated_at timestamp with time zone null=YES def=now()
+col   executive_meeting_decisions.aria_recommendation text null=YES def=-
+col   executive_meeting_decisions.business_id uuid null=NO def=-
+col   executive_meeting_decisions.context text null=YES def=-
+col   executive_meeting_decisions.created_at timestamp with time zone null=YES def=now()
+col   executive_meeting_decisions.decision text null=NO def=-
+col   executive_meeting_decisions.id uuid null=NO def=gen_random_uuid()
+col   executive_meeting_decisions.meeting_id uuid null=NO def=-
+col   executive_meeting_decisions.outcome_notes text null=YES def=-
+col   executive_meeting_decisions.outcome_reviewed_at timestamp with time zone null=YES def=-
+col   executive_meeting_decisions.outcome_status text null=YES def=-
+col   executive_meeting_decisions.owner_chose_differently boolean null=YES def=false
+col   executive_meeting_decisions.rationale text null=YES def=-
+col   executive_meeting_goals.achieved_at timestamp with time zone null=YES def=-
+col   executive_meeting_goals.business_id uuid null=NO def=-
+col   executive_meeting_goals.category text null=YES def=-
+col   executive_meeting_goals.created_at timestamp with time zone null=YES def=now()
+col   executive_meeting_goals.description text null=YES def=-
+col   executive_meeting_goals.horizon text null=NO def=-
+col   executive_meeting_goals.id uuid null=NO def=gen_random_uuid()
+col   executive_meeting_goals.kpi_current_value numeric null=YES def=-
+col   executive_meeting_goals.kpi_name text null=YES def=-
+col   executive_meeting_goals.kpi_target_value numeric null=YES def=-
+col   executive_meeting_goals.kpi_unit text null=YES def=-
+col   executive_meeting_goals.progress_history jsonb null=YES def='[]'::jsonb
+col   executive_meeting_goals.set_in_meeting_id uuid null=YES def=-
+col   executive_meeting_goals.status text null=NO def='active'::text
+col   executive_meeting_goals.target_date date null=YES def=-
+col   executive_meeting_goals.title text null=NO def=-
+col   executive_meeting_goals.updated_at timestamp with time zone null=YES def=now()
+col   executive_meeting_messages.agenda_section text null=YES def=-
+col   executive_meeting_messages.business_id uuid null=NO def=-
+col   executive_meeting_messages.content text null=NO def=-
+col   executive_meeting_messages.created_at timestamp with time zone null=YES def=now()
+col   executive_meeting_messages.id uuid null=NO def=gen_random_uuid()
+col   executive_meeting_messages.meeting_id uuid null=NO def=-
+col   executive_meeting_messages.referenced_data jsonb null=YES def='{}'::jsonb
+col   executive_meeting_messages.role text null=NO def=-
+col   executive_meeting_messages.speaker_name text null=YES def=-
+col   executive_meeting_messages.suggested_actions jsonb null=YES def='[]'::jsonb
+col   executive_meeting_messages.tokens_used integer(32,0) null=YES def=0
+col   executive_meeting_settings.attendees jsonb null=YES def='[]'::jsonb
+col   executive_meeting_settings.business_id uuid null=NO def=-
+col   executive_meeting_settings.created_at timestamp with time zone null=YES def=now()
+col   executive_meeting_settings.custom_agenda_items jsonb null=YES def='[]'::jsonb
+col   executive_meeting_settings.day_of_month integer(32,0) null=YES def=1
+col   executive_meeting_settings.day_of_week integer(32,0) null=YES def=1
+col   executive_meeting_settings.directness_level text null=YES def='balanced'::text
+col   executive_meeting_settings.enabled boolean null=YES def=true
+col   executive_meeting_settings.focus_areas jsonb null=YES def='["financial", "operations", "team", "growth"]'::jsonb
+col   executive_meeting_settings.frequency text null=NO def='weekly'::text
+col   executive_meeting_settings.id uuid null=NO def=gen_random_uuid()
+col   executive_meeting_settings.include_disclaimers boolean null=YES def=true
+col   executive_meeting_settings.last_meeting_at timestamp with time zone null=YES def=-
+col   executive_meeting_settings.meeting_time time without time zone null=YES def='09:00:00'::time without time zone
+col   executive_meeting_settings.next_meeting_at timestamp with time zone null=YES def=-
+col   executive_meeting_settings.timezone text null=YES def='Europe/London'::text
+col   executive_meeting_settings.total_meetings_completed integer(32,0) null=YES def=0
+col   executive_meeting_settings.updated_at timestamp with time zone null=YES def=now()
+col   executive_meetings.agenda jsonb null=YES def='[]'::jsonb
+col   executive_meetings.ai_model text null=YES def=-
+col   executive_meetings.business_id uuid null=NO def=-
+col   executive_meetings.created_at timestamp with time zone null=YES def=now()
+col   executive_meetings.duration_minutes integer(32,0) null=YES def=-
+col   executive_meetings.ended_at timestamp with time zone null=YES def=-
+col   executive_meetings.id uuid null=NO def=gen_random_uuid()
+col   executive_meetings.key_takeaways jsonb null=YES def='[]'::jsonb
+col   executive_meetings.owner_notes text null=YES def=-
+col   executive_meetings.prep_data jsonb null=YES def='{}'::jsonb
+col   executive_meetings.prep_started_at timestamp with time zone null=YES def=-
+col   executive_meetings.scheduled_for timestamp with time zone null=NO def=-
+col   executive_meetings.sentiment text null=YES def=-
+col   executive_meetings.started_at timestamp with time zone null=YES def=-
+col   executive_meetings.status text null=NO def='scheduled'::text
+col   executive_meetings.summary text null=YES def=-
+col   executive_meetings.total_tokens_used integer(32,0) null=YES def=0
+col   executive_meetings.updated_at timestamp with time zone null=YES def=now()
+col   financial_summary_cache.bank_summary jsonb null=YES def=-
+col   financial_summary_cache.business_id uuid null=NO def=-
+col   financial_summary_cache.cached_at timestamp with time zone null=YES def=now()
+col   financial_summary_cache.created_at timestamp with time zone null=YES def=now()
+col   financial_summary_cache.id uuid null=NO def=gen_random_uuid()
+col   financial_summary_cache.invoices_summary jsonb null=YES def=-
+col   financial_summary_cache.period_end date null=YES def=-
+col   financial_summary_cache.period_start date null=YES def=-
+col   financial_summary_cache.profit_and_loss jsonb null=YES def=-
+col   financial_summary_cache.provider text null=NO def='xero'::text
+col   financial_summary_cache.updated_at timestamp with time zone null=YES def=now()
+col   integrations.business_id uuid null=NO def=-
+col   integrations.config jsonb null=NO def='{}'::jsonb
+col   integrations.created_at timestamp without time zone null=NO def=-
+col   integrations.id uuid null=NO def=-
+col   integrations.integration_type character varying(100) null=NO def=-
+col   integrations.is_enabled boolean null=NO def=-
+col   integrations.updated_at timestamp without time zone null=NO def=-
+col   invoice_line_items.apportioned_discount numeric(12,2) null=NO def=0
+col   invoice_line_items.category text null=NO def='general'::text
+col   invoice_line_items.created_at timestamp with time zone null=NO def=now()
+col   invoice_line_items.description text null=NO def=-
+col   invoice_line_items.discount_amount numeric(12,2) null=NO def=0
+col   invoice_line_items.discount_type text null=NO def='fixed'::text
+col   invoice_line_items.group_name text null=YES def=-
+col   invoice_line_items.id uuid null=NO def=gen_random_uuid()
+col   invoice_line_items.invoice_id uuid null=NO def=-
+col   invoice_line_items.line_total numeric(12,2) null=NO def=0
+col   invoice_line_items.markup_amount numeric(12,2) null=YES def=0
+col   invoice_line_items.markup_percentage numeric(5,2) null=YES def=0
+col   invoice_line_items.quantity numeric(12,3) null=NO def=1
+col   invoice_line_items.sort_order integer(32,0) null=YES def=0
+col   invoice_line_items.tax_amount numeric(12,2) null=NO def=0
+col   invoice_line_items.tax_rate numeric(5,2) null=NO def=0
+col   invoice_line_items.tax_treatment text null=NO def='standard'::text
+col   invoice_line_items.taxable numeric(12,2) null=NO def=0
+col   invoice_line_items.unit text null=YES def='each'::text
+col   invoice_line_items.unit_cost numeric(14,4) null=NO def=0
+col   invoices.amount numeric(12,2) null=NO def=-
+col   invoices.amount_due numeric(12,2) null=YES def=NULL::numeric
+col   invoices.amount_paid numeric(12,2) null=YES def=0
+col   invoices.archived boolean null=YES def=false
+col   invoices.business_id uuid null=NO def=-
+col   invoices.chase_stage integer(32,0) null=NO def=0
+col   invoices.created_at timestamp with time zone null=NO def=now()
+col   invoices.currency text null=NO def='GBP'::text
+col   invoices.customer_email text null=YES def=-
+col   invoices.customer_name text null=NO def=-
+col   invoices.due_date date null=NO def=-
+col   invoices.external_id text null=YES def=-
+col   invoices.external_source text null=YES def=-
+col   invoices.id uuid null=NO def=gen_random_uuid()
+col   invoices.invoice_date date null=YES def=-
+col   invoices.invoice_number text null=NO def=-
+col   invoices.invoice_type text null=YES def='ACCREC'::text
+col   invoices.issue_date date null=YES def=-
+col   invoices.last_chased_at timestamp with time zone null=YES def=-
+col   invoices.paid_amount numeric(10,2) null=YES def=-
+col   invoices.paid_at timestamp with time zone null=YES def=-
+col   invoices.paid_date date null=YES def=-
+col   invoices.provider text null=YES def='xero'::text
+col   invoices.related_invoice_id uuid null=YES def=-
+col   invoices.source text null=NO def='csv'::text
+col   invoices.source_ref text null=YES def=-
+col   invoices.status text null=NO def='unpaid'::text
+col   invoices.subtotal numeric(12,2) null=YES def=-
+col   invoices.tax_amount numeric(12,2) null=YES def=-
+col   invoices.updated_at timestamp with time zone null=NO def=now()
+col   knowledge_base_items.business_id uuid null=NO def=-
+col   knowledge_base_items.category text null=NO def='general'::text
+col   knowledge_base_items.content text null=NO def=-
+col   knowledge_base_items.created_at timestamp with time zone null=NO def=now()
+col   knowledge_base_items.id uuid null=NO def=gen_random_uuid()
+col   knowledge_base_items.is_active boolean null=NO def=true
+col   knowledge_base_items.sort_order integer(32,0) null=NO def=0
+col   knowledge_base_items.title text null=NO def=-
+col   knowledge_base_items.updated_at timestamp with time zone null=NO def=now()
+col   oauth_tokens.business_id uuid null=NO def=-
+col   oauth_tokens.created_at timestamp without time zone null=NO def=-
+col   oauth_tokens.encrypted_access_token character varying null=NO def=-
+col   oauth_tokens.encrypted_refresh_token character varying null=YES def=-
+col   oauth_tokens.expires_at timestamp without time zone null=YES def=-
+col   oauth_tokens.id uuid null=NO def=-
+col   oauth_tokens.integration_type character varying(100) null=NO def=-
+col   oauth_tokens.scope character varying null=YES def=-
+col   oauth_tokens.token_type character varying(50) null=NO def=-
+col   oauth_tokens.updated_at timestamp without time zone null=NO def=-
+col   onboarding_checklist.business_id uuid null=NO def=-
+col   onboarding_checklist.category text null=NO def='setup'::text
+col   onboarding_checklist.completed_at timestamp with time zone null=YES def=-
+col   onboarding_checklist.completed_by text null=YES def=-
+col   onboarding_checklist.created_at timestamp with time zone null=NO def=now()
+col   onboarding_checklist.id uuid null=NO def=gen_random_uuid()
+col   onboarding_checklist.is_completed boolean null=NO def=false
+col   onboarding_checklist.item_key text null=NO def=-
+col   onboarding_checklist.label text null=NO def=-
+col   onboarding_checklist.notes text null=YES def=-
+col   onboarding_checklist.sort_order integer(32,0) null=NO def=0
+col   onboarding_checklist.updated_at timestamp with time zone null=NO def=now()
+col   onboarding_sessions.business_id uuid null=NO def=-
+col   onboarding_sessions.completed_at timestamp with time zone null=YES def=-
+col   onboarding_sessions.current_step text null=NO def='business_details'::text
+col   onboarding_sessions.id uuid null=NO def=gen_random_uuid()
+col   onboarding_sessions.started_at timestamp with time zone null=NO def=now()
+col   onboarding_sessions.started_by uuid null=YES def=-
+col   onboarding_sessions.status text null=NO def='in_progress'::text
+col   onboarding_sessions.steps_completed jsonb null=NO def='{"email_setup": false, "owner_account": false, "plan_features": false, "calendar_setup": false, "review_activate": false, "accounting_setup": false, "business_details": false, "receptionist_setup": false}'::jsonb
+col   onboarding_sessions.updated_at timestamp with time zone null=NO def=now()
+col   onboarding_sessions.wizard_data jsonb null=NO def='{}'::jsonb
+col   plan_definitions.created_at timestamp with time zone null=NO def=now()
+col   plan_definitions.description text null=YES def=-
+col   plan_definitions.features jsonb null=NO def='{}'::jsonb
+col   plan_definitions.id text null=NO def=-
+col   plan_definitions.is_active boolean null=NO def=true
+col   plan_definitions.limits jsonb null=NO def='{}'::jsonb
+col   plan_definitions.monthly_price_gbp numeric(10,2) null=YES def=-
+col   plan_definitions.name text null=NO def=-
+col   plan_definitions.sort_order integer(32,0) null=NO def=0
+col   plan_definitions.updated_at timestamp with time zone null=NO def=now()
+col   platform_admins.created_at timestamp with time zone null=NO def=now()
+col   platform_admins.user_id uuid null=NO def=-
+col   profiles.created_at timestamp with time zone null=YES def=now()
+col   profiles.display_name text null=YES def=-
+col   profiles.full_name text null=YES def=-
+col   profiles.id uuid null=NO def=-
+col   profiles.job_title text null=YES def=-
+col   profiles.updated_at timestamp with time zone null=YES def=now()
+col   quote_line_items.apportioned_discount numeric(12,2) null=NO def=0
+col   quote_line_items.category text null=NO def='general'::text
+col   quote_line_items.created_at timestamp with time zone null=NO def=now()
+col   quote_line_items.description text null=NO def=-
+col   quote_line_items.discount_amount numeric(12,2) null=NO def=0
+col   quote_line_items.discount_type text null=NO def='fixed'::text
+col   quote_line_items.group_name text null=YES def=-
+col   quote_line_items.id uuid null=NO def=gen_random_uuid()
+col   quote_line_items.line_total numeric(12,2) null=NO def=0
+col   quote_line_items.markup_amount numeric(12,2) null=YES def=0
+col   quote_line_items.markup_percentage numeric(5,2) null=YES def=0
+col   quote_line_items.quantity numeric(12,3) null=NO def=1
+col   quote_line_items.quote_id uuid null=NO def=-
+col   quote_line_items.sort_order integer(32,0) null=YES def=0
+col   quote_line_items.tax_amount numeric(12,2) null=NO def=0
+col   quote_line_items.tax_rate numeric(5,2) null=NO def=0
+col   quote_line_items.tax_treatment text null=NO def='standard'::text
+col   quote_line_items.taxable numeric(12,2) null=NO def=0
+col   quote_line_items.unit text null=YES def='each'::text
+col   quote_line_items.unit_cost numeric(14,4) null=NO def=0
+col   quote_settings.business_id uuid null=NO def=-
+col   quote_settings.company_address text null=YES def=-
+col   quote_settings.company_email text null=YES def=-
+col   quote_settings.company_logo_url text null=YES def=-
+col   quote_settings.company_name text null=YES def=-
+col   quote_settings.company_phone text null=YES def=-
+col   quote_settings.company_registration text null=YES def=-
+col   quote_settings.created_at timestamp with time zone null=NO def=now()
+col   quote_settings.default_markup numeric(5,2) null=YES def=0
+col   quote_settings.default_tax_rate numeric(5,2) null=YES def=20.00
+col   quote_settings.default_terms text null=YES def='This quote is valid for 30 days from the date of issue. Payment terms: 50% deposit on acceptance, balance on completion.'::text
+col   quote_settings.default_valid_days integer(32,0) null=YES def=30
+col   quote_settings.id uuid null=NO def=gen_random_uuid()
+col   quote_settings.include_tax boolean null=YES def=true
+col   quote_settings.industry text null=YES def='general'::text
+col   quote_settings.invoice_prefix text null=NO def='INV-'::text
+col   quote_settings.labour_rates jsonb null=YES def='[]'::jsonb
+col   quote_settings.next_invoice_number integer(32,0) null=NO def=1
+col   quote_settings.next_quote_number integer(32,0) null=YES def=1
+col   quote_settings.quote_prefix text null=YES def='QTE-'::text
+col   quote_settings.updated_at timestamp with time zone null=NO def=now()
+col   quote_settings.vat_number text null=YES def=-
+col   quotes.accepted_at timestamp with time zone null=YES def=-
+col   quotes.ai_generated boolean null=YES def=false
+col   quotes.ai_model text null=YES def=-
+col   quotes.ai_prompt text null=YES def=-
+col   quotes.business_id uuid null=NO def=-
+col   quotes.created_at timestamp with time zone null=NO def=now()
+col   quotes.created_by uuid null=YES def=-
+col   quotes.currency text null=YES def='GBP'::text
+col   quotes.customer_address text null=YES def=-
+col   quotes.customer_email text null=YES def=-
+col   quotes.customer_name text null=NO def=-
+col   quotes.customer_notes text null=YES def=-
+col   quotes.customer_phone text null=YES def=-
+col   quotes.declined_at timestamp with time zone null=YES def=-
+col   quotes.discount_amount numeric(12,2) null=YES def=0
+col   quotes.discount_type text null=YES def='fixed'::text
+col   quotes.id uuid null=NO def=gen_random_uuid()
+col   quotes.invoice_id uuid null=YES def=-
+col   quotes.issue_date date null=YES def=-
+col   quotes.job_description text null=YES def=-
+col   quotes.job_location text null=YES def=-
+col   quotes.job_title text null=NO def=-
+col   quotes.markup_percentage numeric(5,2) null=YES def=0
+col   quotes.notes text null=YES def=-
+col   quotes.pdf_url text null=YES def=-
+col   quotes.profit_margin numeric(12,2) null=YES def=0
+col   quotes.project_reference text null=YES def=-
+col   quotes.quote_number text null=NO def=-
+col   quotes.reference text null=YES def=-
+col   quotes.sent_at timestamp with time zone null=YES def=-
+col   quotes.sent_via text null=YES def=-
+col   quotes.status text null=NO def='draft'::text
+col   quotes.subtotal numeric(12,2) null=NO def=0
+col   quotes.tax_amount numeric(12,2) null=YES def=0
+col   quotes.tax_rate numeric(5,2) null=YES def=20.00
+col   quotes.terms text null=YES def=-
+col   quotes.total numeric(12,2) null=NO def=0
+col   quotes.updated_at timestamp with time zone null=NO def=now()
+col   quotes.valid_until date null=YES def=-
+col   quotes.viewed_at timestamp with time zone null=YES def=-
+col   receptionist_call_stats.avg_duration_seconds numeric null=YES def=-
+col   receptionist_call_stats.business_id uuid null=YES def=-
+col   receptionist_call_stats.handled_calls bigint(64,0) null=YES def=-
+col   receptionist_call_stats.last_receptionist_call timestamp with time zone null=YES def=-
+col   receptionist_call_stats.missed_calls bigint(64,0) null=YES def=-
+col   receptionist_call_stats.this_week_calls bigint(64,0) null=YES def=-
+col   receptionist_call_stats.today_calls bigint(64,0) null=YES def=-
+col   receptionist_call_stats.total_receptionist_calls bigint(64,0) null=YES def=-
+col   receptionist_call_stats.transferred_calls bigint(64,0) null=YES def=-
+col   receptionist_call_stats.voicemail_calls bigint(64,0) null=YES def=-
+col   receptionist_configs.after_hours_action text null=NO def='message'::text
+col   receptionist_configs.after_hours_message text null=YES def='I''m sorry, we are currently closed. Our normal business hours are Monday to Friday, 9am to 5pm. Please call back during business hours or leave a message and we''ll get back to you.'::text
+col   receptionist_configs.business_hours jsonb null=NO def='{"friday": {"open": "09:00", "close": "17:00", "enabled": true}, "monday": {"open": "09:00", "close": "17:00", "enabled": true}, "sunday": {"open": "00:00", "close": "00:00", "enabled": false}, "tuesday": {"open": "09:00", "close": "17:00", "enabled": true}, "saturday": {"open": "10:00", "close": "14:00", "enabled": false}, "thursday": {"open": "09:00", "close": "17:00", "enabled": true}, "wednesday": {"open": "09:00", "close": "17:00", "enabled": true}}'::jsonb
+col   receptionist_configs.business_id uuid null=NO def=-
+col   receptionist_configs.created_at timestamp with time zone null=NO def=now()
+col   receptionist_configs.enabled boolean null=NO def=false
+col   receptionist_configs.greeting_message text null=NO def='Hello, thank you for calling. How can I help you today?'::text
+col   receptionist_configs.humor_enabled boolean null=NO def=false
+col   receptionist_configs.id uuid null=NO def=gen_random_uuid()
+col   receptionist_configs.language text null=NO def='en-GB'::text
+col   receptionist_configs.max_call_duration_seconds integer(32,0) null=NO def=300
+col   receptionist_configs.personality_prompt text null=YES def=-
+col   receptionist_configs.speaking_speed text null=NO def='normal'::text
+col   receptionist_configs.timezone text null=NO def='Europe/London'::text
+col   receptionist_configs.tone text null=NO def='professional'::text
+col   receptionist_configs.transfer_enabled boolean null=NO def=true
+col   receptionist_configs.transfer_number text null=YES def=-
+col   receptionist_configs.transfer_trigger_phrases text null=YES def=-
+col   receptionist_configs.twilio_phone_number text null=YES def=-
+col   receptionist_configs.twilio_phone_sid text null=YES def=-
+col   receptionist_configs.updated_at timestamp with time zone null=NO def=now()
+col   receptionist_configs.voice text null=NO def='shimmer'::text
+col   receptionist_configs.voice_preset_id text null=YES def='shimmer_british'::text
+col   stripe_events.business_id uuid null=YES def=-
+col   stripe_events.created_at timestamp with time zone null=NO def=now()
+col   stripe_events.event_id text null=NO def=-
+col   stripe_events.id uuid null=NO def=gen_random_uuid()
+col   stripe_events.payload jsonb null=NO def='{}'::jsonb
+col   stripe_events.type text null=NO def=-
+col   support_articles.category text null=NO def='general'::text
+col   support_articles.content text null=NO def=-
+col   support_articles.created_at timestamp with time zone null=NO def=now()
+col   support_articles.id uuid null=NO def=gen_random_uuid()
+col   support_articles.is_published boolean null=NO def=true
+col   support_articles.sort_order integer(32,0) null=NO def=0
+col   support_articles.summary text null=YES def=-
+col   support_articles.tags ARRAY null=YES def=-
+col   support_articles.title text null=NO def=-
+col   support_articles.updated_at timestamp with time zone null=NO def=now()
+col   support_conversations.admin_notes text null=YES def=-
+col   support_conversations.ai_confidence real null=YES def=-
+col   support_conversations.ai_resolved boolean null=NO def=false
+col   support_conversations.assigned_to uuid null=YES def=-
+col   support_conversations.business_id uuid null=NO def=-
+col   support_conversations.category text null=YES def=-
+col   support_conversations.closed_at timestamp with time zone null=YES def=-
+col   support_conversations.created_at timestamp with time zone null=NO def=now()
+col   support_conversations.escalated_at timestamp with time zone null=YES def=-
+col   support_conversations.escalation_reason text null=YES def=-
+col   support_conversations.id uuid null=NO def=gen_random_uuid()
+col   support_conversations.last_admin_reply_at timestamp with time zone null=YES def=-
+col   support_conversations.last_message_at timestamp with time zone null=YES def=now()
+col   support_conversations.priority text null=NO def='normal'::text
+col   support_conversations.resolved_at timestamp with time zone null=YES def=-
+col   support_conversations.status text null=NO def='ai_chat'::text
+col   support_conversations.subject text null=YES def=-
+col   support_conversations.updated_at timestamp with time zone null=NO def=now()
+col   support_conversations.user_id uuid null=YES def=-
+col   support_messages.ai_sources ARRAY null=YES def=-
+col   support_messages.content text null=NO def=-
+col   support_messages.conversation_id uuid null=NO def=-
+col   support_messages.created_at timestamp with time zone null=NO def=now()
+col   support_messages.id uuid null=NO def=gen_random_uuid()
+col   support_messages.is_internal boolean null=NO def=false
+col   support_messages.sender_id uuid null=YES def=-
+col   support_messages.sender_name text null=YES def=-
+col   support_messages.sender_type text null=NO def=-
+col   support_stats.ai_resolution_rate numeric null=YES def=-
+col   support_stats.ai_resolved_total bigint(64,0) null=YES def=-
+col   support_stats.awaiting_admin bigint(64,0) null=YES def=-
+col   support_stats.awaiting_reply bigint(64,0) null=YES def=-
+col   support_stats.created_today bigint(64,0) null=YES def=-
+col   support_stats.in_progress bigint(64,0) null=YES def=-
+col   support_stats.open_tickets bigint(64,0) null=YES def=-
+col   support_stats.resolved_today bigint(64,0) null=YES def=-
+col   support_stats.resolved_total bigint(64,0) null=YES def=-
+col   support_tickets.admin_notes text null=YES def=-
+col   support_tickets.business_id uuid null=NO def=-
+col   support_tickets.category text null=NO def='general'::text
+col   support_tickets.context jsonb null=NO def='{}'::jsonb
+col   support_tickets.created_at timestamp with time zone null=NO def=now()
+col   support_tickets.id uuid null=NO def=gen_random_uuid()
+col   support_tickets.message text null=NO def=-
+col   support_tickets.page_url text null=YES def=-
+col   support_tickets.severity text null=NO def='normal'::text
+col   support_tickets.status text null=NO def='open'::text
+col   support_tickets.title text null=NO def=-
+col   support_tickets.updated_at timestamp with time zone null=NO def=now()
+col   support_tickets.user_id uuid null=NO def=-
+col   tasks.business_id uuid null=NO def=-
+col   tasks.category text null=YES def='general'::text
+col   tasks.created_at timestamp with time zone null=NO def=now()
+col   tasks.deleted_at timestamp with time zone null=YES def=-
+col   tasks.description text null=YES def=-
+col   tasks.due_at timestamp with time zone null=YES def=-
+col   tasks.id uuid null=NO def=gen_random_uuid()
+col   tasks.priority text null=YES def='medium'::text
+col   tasks.recurrence text null=NO def='none'::text
+col   tasks.source text null=NO def='manual'::text
+col   tasks.source_id text null=YES def=-
+col   tasks.status text null=NO def='open'::text
+col   tasks.title text null=NO def=-
+col   tasks.updated_at timestamp with time zone null=NO def=now()
+col   usage_meters.business_id uuid null=NO def=-
+col   usage_meters.created_at timestamp with time zone null=NO def=now()
+col   usage_meters.id uuid null=NO def=gen_random_uuid()
+col   usage_meters.meter text null=NO def=-
+col   usage_meters.period text null=NO def=-
+col   usage_meters.updated_at timestamp with time zone null=NO def=now()
+col   usage_meters.value numeric(14,4) null=NO def=0
+col   whatsapp_configs.alert_bank_balance_threshold numeric(10,2) null=YES def=-
+col   whatsapp_configs.alert_invoice_overdue_days integer(32,0) null=NO def=7
+col   whatsapp_configs.alert_payment_received_threshold numeric(10,2) null=YES def=100
+col   whatsapp_configs.alert_receptionist_transfers boolean null=NO def=true
+col   whatsapp_configs.alert_urgent_emails boolean null=NO def=true
+col   whatsapp_configs.auto_chase_after_days integer(32,0) null=NO def=7
+col   whatsapp_configs.auto_chase_invoices boolean null=NO def=false
+col   whatsapp_configs.auto_create_tasks_from_emails boolean null=NO def=false
+col   whatsapp_configs.auto_kb_gap_detection boolean null=NO def=true
+col   whatsapp_configs.business_id uuid null=NO def=-
+col   whatsapp_configs.created_at timestamp with time zone null=NO def=now()
+col   whatsapp_configs.daily_pulse_enabled boolean null=NO def=true
+col   whatsapp_configs.daily_pulse_time text null=NO def='07:30'::text
+col   whatsapp_configs.enabled boolean null=NO def=true
+col   whatsapp_configs.id uuid null=NO def=gen_random_uuid()
+col   whatsapp_configs.owner_name text null=YES def=-
+col   whatsapp_configs.phone_number text null=NO def=-
+col   whatsapp_configs.preferred_detail_level text null=NO def='standard'::text
+col   whatsapp_configs.real_time_alerts_enabled boolean null=NO def=true
+col   whatsapp_configs.task_reminder_enabled boolean null=YES def=false
+col   whatsapp_configs.task_reminder_frequency text null=YES def='daily'::text
+col   whatsapp_configs.task_reminder_time text null=YES def='08:00'::text
+col   whatsapp_configs.timezone text null=NO def='Europe/London'::text
+col   whatsapp_configs.updated_at timestamp with time zone null=NO def=now()
+col   whatsapp_configs.weekly_briefing_day text null=NO def='monday'::text
+col   whatsapp_configs.weekly_briefing_enabled boolean null=NO def=true
+col   whatsapp_configs.weekly_briefing_time text null=NO def='08:00'::text
+col   whatsapp_messages.business_id uuid null=NO def=-
+col   whatsapp_messages.content text null=NO def=-
+col   whatsapp_messages.created_at timestamp with time zone null=NO def=now()
+col   whatsapp_messages.delivered_at timestamp with time zone null=YES def=-
+col   whatsapp_messages.direction text null=NO def='outbound'::text
+col   whatsapp_messages.id uuid null=NO def=gen_random_uuid()
+col   whatsapp_messages.message_type text null=NO def=-
+col   whatsapp_messages.phone_number text null=NO def=-
+col   whatsapp_messages.read_at timestamp with time zone null=YES def=-
+col   whatsapp_messages.related_entity_id text null=YES def=-
+col   whatsapp_messages.related_entity_type text null=YES def=-
+col   whatsapp_messages.twilio_message_sid text null=YES def=-
+col   whatsapp_messages.twilio_status text null=YES def=-
+col   whatsapp_pending_actions.action_config jsonb null=NO def='{}'::jsonb
+col   whatsapp_pending_actions.action_label text null=NO def=-
+col   whatsapp_pending_actions.action_number integer(32,0) null=NO def=-
+col   whatsapp_pending_actions.action_type text null=NO def=-
+col   whatsapp_pending_actions.business_id uuid null=NO def=-
+col   whatsapp_pending_actions.created_at timestamp with time zone null=NO def=now()
+col   whatsapp_pending_actions.executed_at timestamp with time zone null=YES def=-
+col   whatsapp_pending_actions.expires_at timestamp with time zone null=NO def=(now() + '24:00:00'::interval)
+col   whatsapp_pending_actions.id uuid null=NO def=gen_random_uuid()
+col   whatsapp_pending_actions.source_message_id uuid null=YES def=-
+col   whatsapp_pending_actions.status text null=NO def='pending'::text
+col   xero_connections.business_id uuid null=NO def=-
+col   xero_connections.created_at timestamp without time zone null=NO def=-
+col   xero_connections.id uuid null=NO def=-
+col   xero_connections.is_active boolean null=NO def=-
+col   xero_connections.last_sync_at timestamp without time zone null=YES def=-
+col   xero_connections.refresh_token_ciphertext character varying null=NO def=-
+col   xero_connections.sync_cursor character varying null=YES def=-
+col   xero_connections.tenant_id character varying null=NO def=-
+col   xero_connections.tenant_name character varying null=YES def=-
+col   xero_connections.token_ciphertext character varying null=NO def=-
+col   xero_connections.token_expires_at timestamp without time zone null=NO def=-
+col   xero_connections.token_refreshed_at timestamp with time zone null=YES def=-
+col   xero_connections.updated_at timestamp without time zone null=NO def=-

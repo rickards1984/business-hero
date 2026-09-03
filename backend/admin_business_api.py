@@ -301,10 +301,19 @@ async def update_business_overview(
     if not fields:
         return current
 
+    # NO `updated_at` HERE. `businesses` has no such column and never has —
+    # this statement and the one in `set_business_active` carried it from
+    # 030b Release 1 until it was found, and both endpoints 500'd on every
+    # request for the whole of that time (UndefinedColumn -> main.py's
+    # catch-all -> "Internal Server Error"). If audit timestamps are wanted,
+    # they need a migration plus the repo's `update_updated_at_column` trigger,
+    # not a fragment here — `onboarding_api` writes this table too and would
+    # not set it. `backend/tests/test_schema_conformance.py` now fails the
+    # build if this comes back.
     assignments = ", ".join(f"{name} = :{name}" for name in fields)
     session.execute(
         _json_statement(
-            f"UPDATE businesses SET {assignments}, updated_at = now() WHERE id = :bid",
+            f"UPDATE businesses SET {assignments} WHERE id = :bid",
             fields.keys(),
         ),
         {**fields, "bid": str(business_id)},
@@ -350,8 +359,7 @@ async def set_business_active(
         )
 
     session.execute(
-        text("UPDATE businesses SET is_active = :is_active, updated_at = now() "
-             "WHERE id = :bid"),
+        text("UPDATE businesses SET is_active = :is_active WHERE id = :bid"),
         {"is_active": is_active, "bid": str(business_id)},
     )
     session.commit()
