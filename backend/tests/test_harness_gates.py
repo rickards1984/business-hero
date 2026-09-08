@@ -31,7 +31,25 @@ HOOK = REPO / ".githooks" / "pre-push"
 
 
 def run(cmd, cwd=REPO, env=None, stdin=None):
-    e = os.environ.copy()
+    """Run a command with every GIT_* variable stripped from the environment.
+
+    This is not tidiness, it is the difference between a test and an incident.
+    When `git push` invokes the pre-push hook, git exports GIT_DIR and
+    GIT_INDEX_FILE into the hook's environment. The hook runs ./check.sh, which
+    runs pytest, which runs this file. GIT_DIR overrides repository discovery
+    regardless of cwd — so `git commit` inside a throwaway fixture repo under
+    tmp_path committed onto the REAL branch instead, and `git rev-parse
+    --show-toplevel` inside the hook under test resolved to the real worktree
+    rather than the fixture.
+
+    That happened: it moved a live ticket branch onto a commit containing two
+    fixture files. Recovered from reflog, but the branch was briefly wrong.
+
+    Stripping GIT_* makes each fixture repo genuinely independent, and makes
+    these tests safe to run from inside a git hook — which is exactly where
+    check.sh runs them.
+    """
+    e = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     if env:
         e.update(env)
     return subprocess.run(
@@ -200,3 +218,33 @@ def test_hook_refuses_when_the_gate_is_red(tmp_path):
     r = _push(d, f"refs/heads/main {head} refs/heads/main {'0'*40}\n")
     assert r.returncode != 0
     assert "PUSH REFUSED" in r.stderr
+
+
+# --------------------------------------------- fixture isolation (incident) --
+# Regression for a real incident: run from inside the pre-push hook, these
+# tests inherited git's GIT_DIR and committed fixture files onto a live ticket
+# branch. The failure is silent, so it needs its own test.
+
+def test_git_env_is_stripped_from_subprocesses():
+    r = run(["bash", "-c", "env | grep -c '^GIT_' || true"])
+    assert r.stdout.strip() == "0", "GIT_* leaked into a subprocess"
+
+
+def test_a_fixture_commit_cannot_land_in_the_real_repository(tmp_path):
+    d = tmp_path / "r"
+    d.mkdir()
+    run(["git", "init", "-q", "-b", "main"], cwd=d)
+    run(["git", "config", "user.email", "t@t"], cwd=d)
+    run(["git", "config", "user.name", "t"], cwd=d)
+    (d / "only-in-fixture.txt").write_text("x\n")
+    run(["git", "add", "-A"], cwd=d)
+    run(["git", "commit", "-qm", "fixture-commit-marker"], cwd=d)
+
+    assert "fixture-commit-marker" in run(
+        ["git", "log", "--oneline", "-1"], cwd=d
+    ).stdout, "the fixture repo did not receive its own commit"
+
+    tip = run(["git", "log", "--oneline", "-5"]).stdout
+    assert "fixture-commit-marker" not in tip, (
+        "a fixture commit reached the real repository"
+    )
