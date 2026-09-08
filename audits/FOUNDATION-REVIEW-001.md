@@ -120,3 +120,53 @@ installs under node 22 / Python 3.12; deployed behaviour; browser journeys;
 and the production exploitability of finding 5 are all **unverified**, because
 database and network access were prohibited. The CI changes here are
 *unexercised* — no run has occurred against them.
+
+---
+
+## 8 · Re-review outcome — **REQUEST-CHANGES, and the cycle is spent**
+
+`audits/foundation-review-001-codex-rereview.md` (unedited) reviewed the
+correction commit `34861db`. Result: **4 RESOLVED, 5 PARTIAL, 2 DEFERRED
+ACCEPTABLY**, four new findings, verdict **REQUEST-CHANGES**.
+
+Per the handoff rules, one correction/re-review cycle was permitted and has
+been used. **No cycle-2 changes have been made.** The foundation is
+**BLOCKED pending Mike's decision.** A second REQUEST-CHANGES is not
+approval, and nothing here should be read as one.
+
+### Claims in this repository that the re-review showed are unsupported
+
+These are committed and currently **wrong**. They are Claude Code's errors,
+left in place only because correcting them would be an unapproved second
+cycle:
+
+1. `audits/032-PROD-RUNBOOK.md:3` — "**NOT YET APPLIED TO PROD (established
+   8 Sep 2026)**". Overstated. Absence from a documentation table plus a
+   schema snapshot that `033` STEP 24b itself marks stale do not *establish*
+   that 032 was never applied. The honest claim is "no in-repository evidence
+   that 032 was applied; treat as pending until confirmed against the live
+   database."
+2. `audits/FOUNDATION-REVIEW-001.md:110` — "Codex's **six** challenges are
+   recorded **verbatim**". Both wrong: `docs/RC1_SCOPE.md` records **five**,
+   **paraphrased**. The omitted two are the shared PDF/manual-invoice
+   entitlement contract and the unpaid-customer export deliverable.
+3. `docs/CURRENT_STATE.md:77` — still calls CI "**complete and verified**"
+   while no CI run has ever executed the current workflow.
+
+### Correction-cycle fixes that were incomplete
+
+4. `scripts/preflight.sh` — `PREFLIGHT_BASE=HEAD` exits **0** reporting "no
+   changed files to scan". The equal-base guard was added to CI but **not**
+   to preflight itself, so the fail-closed claim is only true for the CI
+   path. Verified locally.
+5. `check.sh:11` — `MODE="${1:-fast}"` means any unrecognised argument
+   silently runs fast mode. `./check.sh ful` prints "Green. Safe to proceed."
+   having skipped every deploy trap. Verified locally.
+6. `.github/workflows/ci.yml` — the required-checks assertion is substring
+   matching, which accepts unrelated output containing the same text and
+   breaks on a formatting change.
+7. `.githooks/pre-push` — annotated tags cannot be pushed at all: the tag
+   object SHA never equals HEAD. Untracked files are still excluded from the
+   cleanliness check, so tested content can differ from pushed content.
+8. `docs/PERMISSIONS_AND_TENANCY.md` — `role_table_grants` does not carry
+   **column** grants; those need separate collection.
