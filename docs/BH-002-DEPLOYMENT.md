@@ -47,8 +47,11 @@ SELECT count(*)                              AS affected_rows,
 
 **Interpretation.**
 
-- **0** — no data was ever affected. The defect was reachable but never
-  exercised. Deploy as a straightforward hardening change.
+- **0** — no cross-tenant reference exists **right now**. That is not the
+  same as "never happened": a row could have been created and later
+  recategorised or archived, and this query cannot see that. It bounds the
+  present, not the history. Deploy as a straightforward hardening change; if
+  you need the historical question answered, that needs audit logs, not this.
 - **> 0** — cross-tenant references exist in live data. Still deploy: after
   this change those rows stop rendering another tenant's category name. Then
   decide separately whether to null out the offending `category_id` values —
@@ -108,12 +111,29 @@ production one — it belongs with BH-003, not here.
 
 No schema change, so rollback is purely code and carries no data risk.
 
-```
-git revert b768580        # on main, then push
+**This branch is two commits, not one** — `b768580` (the four joins in
+accounting.py and the three write-path checks) and `c8200f7` (the two joins in
+main.py and assistant_tools.py). Reverting only the first leaves half the fix
+in place and is not a rollback. Codex caught this instruction being stale;
+use the form that matches how you merged:
+
+```bash
+# If you merged with a merge commit M (the usual case):
+git revert -m 1 <M>
+
+# If it was squashed into a single commit S:
+git revert <S>
+
+# If it was fast-forwarded, revert both, newest first:
+git revert c8200f7 b768580
 ```
 
-Railway redeploys the previous backend. Nothing else to undo: no migration to
-reverse, no config to restore, no data written by this change.
+Then push. Railway redeploys the previous backend. Nothing else to undo: no
+migration to reverse, no config to restore, no data written by this change.
+
+Confirm the rollback landed by checking that
+`grep -c "c.business_id = t.business_id" backend/accounting.py backend/main.py
+backend/assistant_tools.py` returns zero in all three files.
 
 Reverting restores the leak. If you revert because a legitimate category
 stopped displaying, that is a **scoping bug in the join**, and the better fix
@@ -135,7 +155,14 @@ is fixed here, and all need their own ticket:
    shows a contaminated row as uncategorised: the count uses raw
    `category_id IS NULL`, the joins now exclude foreign references. Cosmetic,
    but it is a contradiction a customer can see.
-4. **No database constraint backs the application check.** A composite foreign
+4. **The completeness test is a text scan, not a guarantee.** Codex
+   demonstrated five ways a category join could evade it — extra whitespace,
+   lowercase SQL, schema-qualified names, reversed table order, and the
+   predicate appearing only in a comment — and it cannot see joins built
+   dynamically or through SQLAlchemy expressions. It is a tripwire for the
+   obvious regression, not proof. Independent inspection found no remaining
+   unscoped join in this commit; that is what the assurance rests on.
+5. **No database constraint backs the application check.** A composite foreign
    key on `(category_id, business_id)` would make this class of bug
    impossible. That is a schema change, so a separate RED ticket.
 
