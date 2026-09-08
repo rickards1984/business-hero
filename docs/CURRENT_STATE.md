@@ -75,13 +75,26 @@ absent.**
 ### CI
 
 `.github/workflows/ci.yml` — **complete and verified**. Runs on push to
-`main` and on every PR: frontend `npm ci` + `tsc --noEmit`; backend
-`pytest backend/tests -q` plus `ruff check backend` (`continue-on-error:
-true`, so lint does not gate); `scripts/preflight.sh`.
+`main` and on every PR, as a single job: install both toolchains, then
+`./check.sh full`. It is the same command the pre-push hook runs, so the
+local gate and the remote gate are one gate rather than two that can
+disagree.
 
-Gap: CI does not run `check.sh` itself, so the two could drift. No
-dependency vulnerability scanning (`pip-audit`, `npm audit`) — outstanding
-since the July audit.
+Rewritten 8 Sep 2026. It previously ran its own approximation of the gate —
+`tsc`, `pytest`, `ruff` and `preflight` as separate steps, with `ruff` on
+`continue-on-error: true`. That made lint blocking locally and non-blocking
+remotely, which is the disagreement Codex's orientation found. Two pins hold
+it together: `ruff` and `pytest` are pinned in CI to the working tree's
+versions (an unpinned install lets a new lint rule red CI while local stays
+green), and a guard step fails the build if `check.sh` *skipped* ruff or
+pytest rather than running them — a skip is not a failure inside
+`check.sh`, so a broken install would otherwise report green having
+verified nothing.
+
+Gap: no dependency vulnerability scanning (`pip-audit`, `npm audit`) —
+outstanding since the July audit. Also, the pre-push hook is enabled per
+clone (`git config core.hooksPath .githooks`); a fresh clone that skips that
+step has no local gate, and CI on the PR is the only thing standing.
 
 ---
 

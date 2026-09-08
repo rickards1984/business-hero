@@ -1,9 +1,9 @@
 # Harness setup — ~90 minutes, then it pays for itself all week
 
-Run from `~/Documents/business-hero-2`. Back up the existing CLAUDE.md first.
+Run from `~/dev/business-hero-2`. Back up the existing CLAUDE.md first.
 
 ```bash
-cd ~/Documents/business-hero-2
+cd ~/dev/business-hero-2
 cp CLAUDE.md CLAUDE.md.bak-preharness-$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p scripts .github/workflows
 # copy check.sh, scripts/preflight.sh, CLAUDE.md, .github/workflows/ci.yml in
@@ -13,7 +13,7 @@ chmod +x check.sh scripts/preflight.sh
 ## Step 1 — Local TypeScript (the single highest-value ten minutes)
 
 ```bash
-cd ~/Documents/business-hero-2/frontend/client
+cd ~/dev/business-hero-2/frontend/client
 npm install
 npx tsc --noEmit
 ```
@@ -31,7 +31,7 @@ Add to `.gitignore` if not already there: `node_modules/`
 ## Step 2 — Python tooling
 
 ```bash
-cd ~/Documents/business-hero-2
+cd ~/dev/business-hero-2
 pip3 install --user pytest ruff
 pytest backend/tests -q
 ```
@@ -64,7 +64,7 @@ again. This is what makes it safe to let an agent write SQL at all.
 ## Step 4 — Browser testing (do this on Day 3, not now)
 
 ```bash
-cd ~/Documents/business-hero-2/frontend/client
+cd ~/dev/business-hero-2/frontend/client
 npm install -D @playwright/test && npx playwright install chromium
 ```
 

@@ -53,18 +53,32 @@ refactors, adding tests, logging, non-behavioural cleanup.
 A mistake here is visible immediately and costs nothing. Just go.
 
 ### AMBER — plan first, one approval, then run to completion
-New endpoints, schema-additive migrations, PDF generation, feature work,
-integration wiring.
+New endpoints, PDF generation, feature work, integration wiring.
 
 Propose the plan with acceptance criteria. Once approved, execute the whole
 plan without stopping between steps. Report at the end with results.
 
+**Migrations are not in this tier.** This list read "schema-additive
+migrations" until 8 Sep 2026. That was wrong, and it never described
+practice: every migration this project has run went through a RED prod
+runbook (`audits/*-PROD-RUNBOOK.md`). All prod SQL is RED, additive or not —
+and "additive" is precisely the dangerous case, because `create_all()` gives
+a new table **RLS OFF and default grants** (§3.3), so an additive change is
+the one that silently exposes data.
+
 ### RED — never autonomous, always explicit approval per action
 - Money: quoting maths, invoice numbering, VAT, Stripe, plan enforcement
 - Security: RLS, grants, policies, auth, `businesses` / `business_members`
-- `git push`, or any command that deploys
-- Any SQL against production
+- **Pushing or merging `main`**, or any command that deploys
+- Any SQL against production — **including every schema migration**
 - Deleting data or dropping anything
+
+**Feature branches are the builder's; `main` is Mike's.** A builder pushes
+its own ticket branch as a matter of course — that is not RED, it is how work
+reaches review, and the pre-push hook gates it by refusing a red tree. What
+is RED is `main`: no agent pushes it and no agent merges into it. Mike
+merges, and **the merge is the deploy**. Mechanics in
+`docs/DEVELOPMENT_WORKFLOW.md` §3.
 
 **Tests first.** Write the failing test that encodes correct behaviour. Mike
 reviews *the test*, not the implementation. Then code until green.
@@ -123,7 +137,8 @@ why this tier exists.
   ~33.8k lines)
 - **Backend:** FastAPI on Railway — `backend/` (~41.3k lines, ~209 routes)
 - **DB:** Supabase Postgres, project `oxblcmwhuwtobdhsfgyi`
-- **Deploy:** push to `main` → Railway + Vercel auto-deploy. **Mike pushes.**
+- **Deploy:** merge to `main` → Railway + Vercel auto-deploy. **Mike merges;
+  the merge is the deploy.** Builders push their own feature branches only.
 - **Two DB paths, opposite RLS behaviour.** The backend connects as an
   elevated role and **bypasses RLS** — tenant isolation is application-layer
   `WHERE business_id = …`. The frontend uses supabase-js with the public anon
@@ -209,7 +224,7 @@ ticket approved
   → a DIFFERENT agent reviews the diff
   → defects return to the same ticket (no new ticket)
   → CI runs on the PR
-  → merge only when docs/DEFINITION_OF_DONE.md passes
+  → Mike merges, only when docs/DEFINITION_OF_DONE.md passes
   → post-merge smoke check
 ```
 
@@ -228,9 +243,9 @@ bounded ticket.
 - **Dependency changes.** Any new package goes in **root
   `requirements.txt`** and `backend/requirements.txt`. Flag it in the ticket
   — it changes the deploy.
-- **Conflicts.** The agent that merges second rebases and re-runs
-  `./check.sh full`. Never merge a branch whose check output predates the
-  rebase.
+- **Conflicts.** The ticket that lands second rebases and re-runs
+  `./check.sh full` — the builder does that on its own branch, before Mike
+  merges. Never merge a branch whose check output predates the rebase.
 
 ---
 

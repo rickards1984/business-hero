@@ -20,8 +20,11 @@ backend.
 - **No tenant-isolation test.** The July audit asked for one; it does not
   exist. This is the highest-value missing test in the repository
 - **No test of any golden journey** from the brief
-- CI runs pytest directly rather than `check.sh`, so the two can drift
-- `ruff` runs with `continue-on-error: true` in CI — lint does not gate
+- ~~CI runs pytest directly rather than `check.sh`, so the two can drift~~ —
+  **fixed 8 Sep 2026: CI runs `./check.sh full`**, the same command the
+  pre-push hook runs
+- ~~`ruff` runs with `continue-on-error: true` in CI — lint does not gate~~ —
+  **fixed 8 Sep 2026: lint gates in CI**, because it gates inside `check.sh`
 
 ## Minimum critical test layer, in dependency order
 
