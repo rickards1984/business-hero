@@ -177,7 +177,10 @@ July; still present.
 
 Second scheme: `MASTER_ADMIN_KEY`, compared with `!=` rather than
 `hmac.compare_digest` (SEC-13). `030b` PART C required confirming no external
-consumer holds it before retirement — **that human check is still open.**
+consumer holds it before retirement. **That check was completed on 8 Sep 2026
+— no consumer holds it** (§11). It is queued for deletion from the Railway
+environment; the code is still present until that lands. This paragraph and
+§11 previously disagreed about whether the check was open.
 
 ### Tenant isolation — **partial, and the weakest verified area**
 
@@ -192,6 +195,15 @@ Two paths with opposite behaviour:
 **No automated test asserts tenant isolation on either path.** The July audit
 recommended "a two-business integration test using the anon key"; it does not
 exist. This is the highest-value missing test in the repository.
+
+**One cross-tenant leak is now confirmed, not merely untested.** Review 001
+finding 5 reproduced it locally: `backend/accounting.py:200` joins
+`accounting_categories` by id with the tenant filter applied only to the
+transaction, and `:300` accepts a caller-supplied `category_id` without an
+ownership check, so business A's transaction can return business B's category
+name and colour. Tracked as **P0-9a** in `docs/RC1_SCOPE.md`. Production
+exploitability is unverified — it needs authorised inspection of live
+constraints — but the application-layer defect is confirmed in code.
 
 ### RLS coverage — **unknown**
 
@@ -294,8 +306,13 @@ Present: `POST /v1/billing/checkout-session`, `GET /v1/billing/status`,
 `POST /v1/billing/portal`, `POST /v1/billing/webhook` with signature
 verification.
 
-Present and correct: the webhook writes `plan_tier` only when the price
-changes, not on payment events — DECISION 3's most important criterion.
+**Was claimed correct; it is not** (review 001 finding 4, reproduced against
+the extracted handler). `backend/main.py:990` handles
+`customer.subscription.created`, `.updated` **and `.deleted` identically**,
+and assigns the tier at `:1012` from whatever price the event carries,
+without testing whether the price changed. A deletion event carrying an old
+Pro price therefore *sets* the business to `pro`. DECISION 3's most important
+criterion is **not met**; it is P0 work, not a completed property.
 
 Missing:
 - **No `subscription_status` → access-level resolver.** DECISION 3 requires
@@ -377,8 +394,12 @@ lines.** Unreadable financial data, and an accessibility flag at review.
 | Google / Microsoft email | OAuth | Gmail per-message fetch is N+1 (PERF-01) |
 | Supabase | Service role + anon | JWT verified remotely per request |
 
-**Idempotency: partial.** Quote conversion is blocked by a status gate and
-Stripe events are de-duplicated. `create_quote`, chase-send and the WhatsApp
+**Idempotency: weaker than previously recorded.** Quote conversion is blocked
+by a status gate. Stripe events are **not** reliably de-duplicated (review 001
+finding 4): the `StripeEvent` record is written at `backend/main.py:1025`,
+*after* the business mutation has already been committed at `:1022`, so
+replaying an event applies the write twice. `create_quote`, chase-send and the
+WhatsApp
 action path have no idempotency key, so a retry can duplicate a customer-
 facing send.
 

@@ -1,0 +1,77 @@
+# ./check.sh full — foundation verification run
+# commit:    3a388f98762a59084efa6de3f64afe94ce8ce0dc
+# branch:    foundation/rc1-baseline
+# tree:      0 uncommitted tracked changes
+# run at:    2026-09-08T19:05:45Z UTC
+# host py:   Python 3.12.14
+# ruff:      ruff 0.16.6
+# pytest:    pytest 9.1.1
+# node:      v22.22.2
+
+----- output -----
+
+------------------------------------------------------------
+  FRONTEND
+------------------------------------------------------------
+  PASS  tsc --noEmit
+  SKIP  eslint  (no lint script in package.json)
+------------------------------------------------------------
+  BACKEND
+------------------------------------------------------------
+  PASS  python syntax (py_compile)
+        All checks passed!
+  PASS  ruff
+        ........................................................................ [ 29%]
+        ................................................................ [ 46%]
+        ........................................................................ [ 65%]
+        ................................................................ [ 81%]
+        .....................................................................                   [100%]
+        =============================== warnings summary ===============================
+        backend/schemas.py:98
+          /Users/michaelrickards/dev/business-hero-2/backend/schemas.py:98: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+            class CallCreate(BaseModel):
+        
+        backend/schemas.py:180
+          /Users/michaelrickards/dev/business-hero-2/backend/schemas.py:180: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+            class ChatRequest(BaseModel):
+        
+        .venv/lib/python3.12/site-packages/starlette/testclient.py:53
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/starlette/testclient.py:53: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+            _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+        
+        backend/tests/test_entitlement_defaults.py: 9 warnings
+        backend/tests/test_entitlement_reads.py: 8 warnings
+          /Users/michaelrickards/dev/business-hero-2/backend/onboarding_api.py:142: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+            return datetime.utcnow().isoformat()
+        
+        -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+        382 passed, 20 warnings, 104 subtests passed in 2.00s
+  PASS  pytest
+------------------------------------------------------------
+  PREFLIGHT (deploy traps)
+------------------------------------------------------------
+        
+        TRAP 1 — requirements.txt sync
+          PASS  every backend dep is present in root requirements.txt
+        
+        TRAP 2 — trailing newline on requirements.txt
+          PASS  trailing newline present
+        
+        TRAP 3 — repo location
+          PASS  repo is outside CloudStorage/Dropbox
+        
+        TRAP 4 — create_all() RLS drift warning
+          PASS  no models.py changes on this branch
+        
+        TRAP 5 — secret scan on staged/changed files
+          PASS  no secret patterns in changed files
+        
+        PREFLIGHT PASSED — safe to push.
+        
+  PASS  preflight
+------------------------------------------------------------
+  5 passed   0 failed   1 skipped
+  Green. Safe to proceed.
+------------------------------------------------------------
+
+----- exit code: 0 -----

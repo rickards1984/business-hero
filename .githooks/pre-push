@@ -20,16 +20,49 @@ cd "$ROOT" || exit 1
 
 # A branch deletion pushes an all-zeros local sha and has no tree to verify.
 DELETE_ONLY=1
+PUSHED_SHAS=""
 while read -r _local_ref local_sha _remote_ref _remote_sha; do
   [ -z "${local_sha:-}" ] && continue
   case "$local_sha" in
-    *[!0]*) DELETE_ONLY=0 ;;
+    *[!0]*) DELETE_ONLY=0; PUSHED_SHAS="$PUSHED_SHAS $local_sha" ;;
   esac
 done
 
 if [ "$DELETE_ONLY" -eq 1 ]; then
   echo "pre-push: branch deletion only — nothing to verify."
   exit 0
+fi
+
+# ./check.sh verifies the WORKING TREE. That is only evidence about the commit
+# being pushed if the two are the same thing. Review 001 finding 11: pushing a
+# ref other than HEAD, or pushing with uncommitted fixes in the tree, made the
+# gate verify content that was not what the reviewer would receive.
+HEAD_SHA="$(git rev-parse HEAD)"
+for sha in $PUSHED_SHAS; do
+  if [ "$sha" != "$HEAD_SHA" ]; then
+    cat >&2 <<MSG
+pre-push: REFUSED — you are pushing a revision that is not your HEAD.
+
+  pushing:  $sha
+  HEAD:     $HEAD_SHA
+
+./check.sh verifies the working tree, so it proves nothing about $sha.
+Check out the revision you intend to push and push from there.
+MSG
+    exit 1
+  fi
+done
+
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  cat >&2 <<'MSG'
+pre-push: REFUSED — the working tree has uncommitted tracked changes.
+
+./check.sh would verify your working tree, which is NOT what you are
+pushing. Commit or stash them, then push, so the gate and the pushed
+commit are the same content.
+MSG
+  git status --short --untracked-files=no >&2
+  exit 1
 fi
 
 if [ ! -x ./check.sh ]; then

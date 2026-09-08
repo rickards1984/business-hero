@@ -43,7 +43,15 @@ of Python, 34k of TypeScript — so targeted reads beat whole-file ones.
 **Run long checks in the background and wait once.** Do not poll with
 `sleep`. `./check.sh full` takes seconds; a Playwright suite will not.
 
-**Do not re-derive what the audits already establish.** `audits/` holds three
+**Do not re-derive what the audits already establish — but do re-check what
+they *claim*.** These are different things. An audit's *evidence* (a schema
+dump, a rollback diff, a captured before-snapshot) does not need redoing. An
+audit's *status claim* ("complete", "verified", "enforced") is a statement
+about the code at the time of writing, and this repository has a documented
+history of such claims being honest and wrong — see "Verify before
+recommending" below, and review 001 findings 4, 7 and 8, each of which was a
+document claiming behaviour the code did not have. Cite evidence; verify
+claims. `audits/` holds three
 weeks of evidence: five migration runbooks, four specs, a full findings log
 and a live schema dump. Re-deriving a conclusion that is already written down
 costs tokens and risks reaching a different answer from the same facts. Read

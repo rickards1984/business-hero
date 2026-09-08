@@ -5,8 +5,10 @@
 
 ## Release path
 
-Push to `main` → Railway (backend) and Vercel (frontend) auto-deploy. There
-is no staged rollout; a Vercel deploy is atomic per release. **Mike pushes.**
+Merge to `main` → Railway (backend) and Vercel (frontend) auto-deploy. There
+is no staged rollout; a Vercel deploy is atomic per release. **Builders push
+their own feature branches; `main` is Mike's, and the merge is the deploy.**
+The full rule is `AGENTS.md` §2 and `docs/DEVELOPMENT_WORKFLOW.md` §3.
 
 Before any push: `./check.sh full`. The five deploy traps in
 `scripts/preflight.sh` each encode a real outage — the root

@@ -10,11 +10,25 @@ name: CI
 #
 # If a step here should not block, change ./check.sh — do not special-case it
 # in this file, or the two drift apart again.
+#
+# Review 001 findings 1, 2 and 3 hardened this further: feature branches now
+# get a run (the pre-push hook is per-clone config and absent in a fresh
+# clone), the preflight comparison base is resolved per event instead of
+# assuming origin/main, runtimes match the local toolchain, and the final
+# step asserts the required checks PASSED rather than looking for the absence
+# of two skip strings.
 
 on:
+  # Every branch, not just main. A builder pushing a feature branch before
+  # opening a PR previously got no remote verification at all.
   push:
-    branches: [main]
   pull_request:
+
+# A second push to the same branch cancels the first: the older run's verdict
+# is about content nobody will merge.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
@@ -22,20 +36,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # preflight TRAP 4 and TRAP 5 diff against origin/main...HEAD.
-          # A shallow clone has no origin/main, and both traps then pass
-          # for the wrong reason.
+          # preflight TRAPs 4 and 5 diff against a base ref. A shallow clone
+          # has no history to diff against, and those traps then inspect
+          # nothing.
           fetch-depth: 0
 
+      # Runtimes match the local toolchain that the pre-push hook runs on.
+      # Node 20 was not merely a mismatch: frontend/client/package-lock.json
+      # declares node >=22.0.0 for @capacitor/cli, so `npm ci` was running
+      # against an unsupported runtime.
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: frontend/client/package-lock.json
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
           cache: pip
 
       # check.sh FAILS if frontend/client/node_modules is absent, by design:
@@ -56,23 +74,66 @@ jobs:
           pip install -r requirements.txt
           pip install 'ruff==0.16.6' 'pytest==9.1.1'
 
+      # preflight fails closed when it cannot resolve a base, so resolve one
+      # explicitly per event rather than letting it assume origin/main.
+      - name: Resolve preflight comparison base
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)"
+          BASE=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BEFORE="${{ github.event.before }}"
+            if [ -n "$BEFORE" ] && git rev-parse --verify -q "${BEFORE}^{commit}" >/dev/null; then
+              BASE="$BEFORE"
+            elif git rev-parse --verify -q origin/main >/dev/null; then
+              BASE="$(git rev-parse origin/main)"
+            fi
+          fi
+          # A base equal to HEAD yields an empty diff, which would let the
+          # changed-file traps pass having inspected nothing.
+          if [ -z "$BASE" ] || [ "$BASE" = "$HEAD_SHA" ]; then
+            if git rev-parse --verify -q HEAD~1 >/dev/null; then
+              BASE="$(git rev-parse HEAD~1)"
+            else
+              echo "Cannot resolve a comparison base for the preflight traps." >&2
+              exit 1
+            fi
+          fi
+          echo "PREFLIGHT_BASE=$BASE" >> "$GITHUB_ENV"
+          echo "Comparison base: $BASE (event: ${{ github.event_name }})"
+
       - name: Run the gate
         run: |
           chmod +x check.sh scripts/preflight.sh
           ./check.sh full 2>&1 | tee /tmp/check-output.txt
           exit "${PIPESTATUS[0]}"
 
-      # check.sh SKIPS ruff or pytest when the tool is missing, and a skip is
-      # not a failure — so a broken install would go green having verified
-      # nothing. Locally that is visible in the terminal; in CI nobody reads
-      # a green log. Assert the two that must always run actually ran.
-      - name: Assert no step silently skipped
+      # Assert the required checks actually PASSED. A green exit code is not
+      # enough on its own: the point is that each mandatory step ran and
+      # succeeded, named explicitly, so that silently losing one is a build
+      # failure rather than a quieter log. eslint is deliberately absent —
+      # it is the one legitimately optional step (no lint script).
+      - name: Assert required checks ran and passed
         run: |
-          for tool in ruff pytest; do
-            if grep -qE "SKIP +$tool" /tmp/check-output.txt; then
-              echo "CI REFUSED — check.sh skipped '$tool' instead of running it." >&2
-              echo "The gate reported green without verifying anything." >&2
-              exit 1
+          set -uo pipefail
+          missing=0
+          while IFS= read -r required; do
+            if ! grep -qF "  PASS  $required" /tmp/check-output.txt; then
+              echo "CI REFUSED — required check did not pass: $required" >&2
+              missing=1
             fi
-          done
-          echo "ruff and pytest both ran."
+          done <<'REQUIRED'
+          tsc --noEmit
+          python syntax (py_compile)
+          ruff
+          pytest
+          preflight
+          REQUIRED
+          if [ "$missing" -ne 0 ]; then
+            echo "" >&2
+            echo "check.sh reported success without every required step passing." >&2
+            exit 1
+          fi
+          echo "All required checks ran and passed."

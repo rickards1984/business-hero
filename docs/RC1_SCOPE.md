@@ -47,8 +47,12 @@ Everything in P0 is on that line or is what makes it safe to charge for.
 
 **P0-1 · Server-side entitlement enforcement**
 `require_feature` gates exactly one endpoint (email). Realtime voice, Aria
-chat, quoting, WhatsApp, accounting sync and board meetings are all
-authenticated but ungated. Paid AI spend is currently gated by hiding
+chat, quoting, WhatsApp and accounting sync are authenticated but ungated.
+**Board meetings are the exception and were wrongly listed here as ungated**
+(review 001 finding 7): `backend/executive_meeting_api.py:51` calls
+`require_tier_feature(...)`, a *second* server-side mechanism. That makes
+this item's real problem clearer — not "one gate exists" but "three
+mechanisms exist and only one is canonical". Paid AI spend is currently gated by hiding
 buttons. Includes folding `services/tier_gating.py` and
 `_require_receptionist_flag` into the single mechanism — three gates is how
 they drift, and `tier_gating.py` still documents the removed `paused` tier.
@@ -90,6 +94,21 @@ Webhooks stopped for two months in 2026 and nothing surfaced it. A scheduled
 comparison of Stripe subscriptions against `businesses`, alerting on
 divergence. Small, and it protects every other billing item here.
 
+Acceptance criteria added after review 001 finding 4 — both defects were
+reproduced against the extracted handler, so these are known bugs, not
+hypotheticals:
+
+- [ ] `customer.subscription.deleted` no longer assigns a plan tier from the
+      price the event happens to carry. `backend/main.py:990` currently
+      handles created/updated/deleted identically, so a deletion carrying an
+      old Pro price *upgrades* the business to `pro`
+- [ ] The tier is written only when the price actually changes, per
+      DECISION 3
+- [ ] Event de-duplication is **atomic with** the business mutation. The
+      `StripeEvent` row is written at `backend/main.py:1025`, after the
+      commit at `:1022`; replaying the same event applies the write twice
+- [ ] A replay test: deliver an identical event twice, assert one write
+
 ### Security and safety
 
 **P0-8 · Establish live RLS, policy and grant state**
@@ -104,6 +123,21 @@ Two businesses, the anon key, asserting one cannot read or write the other's
 rows — on both the RLS path and the backend `WHERE business_id` path. The
 July audit asked for this; it does not exist. It is the single highest-value
 missing test.
+
+**P0-9a · Fix the confirmed accounting cross-tenant leak** *(new — review
+001 finding 5, reproduced locally against extracted code)*
+`backend/accounting.py:200` joins categories on `t.category_id = c.id` with
+the tenant filter applied **only to the transaction**, and
+`backend/accounting.py:300` accepts a caller-supplied `category_id` without
+checking that the category belongs to the caller's business. A transaction
+referencing another business's category returns that business's category
+name and colour. This is an **isolation** defect, not an entitlement one:
+adding `require_feature` does not touch it, and the backend connects as an
+elevated role that **bypasses RLS**, so the database will not catch it
+either. Validate category ownership on create, update and bulk-update, scope
+the join by `business_id`, and land the two-business regression test with
+P0-9. Production exploitability is unverified — it needs authorised
+inspection of live constraints.
 
 **P0-10 · Complete 033 STEP 21**
 Remove the stopgap `receptionist: true` from MSC and New Body once STEP 20d
@@ -217,6 +251,32 @@ VAT applied.
 | Automated US sales tax lookup | Permanently out until funded |
 | Hunter/Apollo customer-facing data supply | Redistribution terms unanswered |
 | Per-line mixed VAT | P2; needs a migration |
+
+---
+
+## Review 001 boundary challenges — **for Mike's decision, not yet applied**
+
+Codex challenged the boundary below (`audits/foundation-review-001-codex-report.md`
+§6). These are recorded, not actioned: the RC1 boundary is Mike's acceptance
+gate, so nothing here has been moved. Each needs a yes or no.
+
+1. **P1-8 contains P0 tax behaviour.** "An invoice PDF from a non-registered
+   business shows no VAT line at all" is a release criterion in *this
+   document* (§What "RC1 ready" means), but the work sits in P1-8. Either
+   move that slice into the P0 money path or drop the release criterion.
+2. **Subscription-status access should be defined alongside P0-1**, not after
+   P0-2. As sequenced, the same access decisions get implemented twice — once
+   for plan gating, once for status.
+3. **P0-3 must precede any claim that enforcement is effective**, since the
+   `businesses` UPDATE grant lets a customer edit their own entitlement
+   fields.
+4. **Accounting-sync direction is undefined.** The RC1 journey ends in
+   "accounting sync", but the inspected code imports provider data; no
+   invoice-push implementation was found. Decide the direction before
+   treating the journey as covered.
+5. **Receptionist metering broadens "the smallest contractor edition".**
+   Keep it in RC1 only as an explicit decision that receptionist service
+   ships in RC1.
 
 ---
 

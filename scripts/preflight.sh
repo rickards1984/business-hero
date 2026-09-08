@@ -14,6 +14,34 @@ ok()   { printf '  PASS  %s\n' "$1"; }
 bad()  { printf '  FAIL  %s\n' "$1"; FAIL=1; }
 note() { printf '        %s\n' "$1"; }
 
+# --- Comparison base for the changed-file traps (4 and 5). ------------------
+# Review 001 finding 2: these traps diffed against a hardcoded `origin/main`
+# and swallowed the error. Two ways that passed for the wrong reason:
+#   - on a push-to-main checkout HEAD *is* origin/main, so the diff was empty
+#     and the traps inspected nothing;
+#   - if origin/main was absent (shallow clone, fresh CI), `2>/dev/null` hid
+#     the failure and the traps again inspected nothing.
+# Resolve it once, here, and FAIL if it cannot be resolved. A trap that cannot
+# see the changes must not report PASS.
+RANGE=""
+BASE_DESC=""
+if [ -n "${PREFLIGHT_BASE:-}" ]; then
+  if git rev-parse --verify -q "${PREFLIGHT_BASE}^{commit}" >/dev/null 2>&1; then
+    RANGE="${PREFLIGHT_BASE}...HEAD"; BASE_DESC="PREFLIGHT_BASE=${PREFLIGHT_BASE}"
+  fi
+elif git rev-parse --verify -q origin/main >/dev/null 2>&1 \
+     && [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+  RANGE="origin/main...HEAD"; BASE_DESC="origin/main"
+elif git rev-parse --verify -q HEAD~1 >/dev/null 2>&1; then
+  # On main at the tip: compare against the previous commit.
+  RANGE="HEAD~1..HEAD"; BASE_DESC="HEAD~1 (at the tip of the base branch)"
+fi
+
+changed_files() {
+  [ -n "$RANGE" ] || return 1
+  git diff --name-only "$RANGE" 2>/dev/null
+}
+
 # --- TRAP 1: Railway installs from ROOT requirements.txt, not backend/. ------
 # Bit us twice: slowapi, then reportlab. Both crashed the deploy with
 # ModuleNotFoundError because the dep was only in backend/requirements.txt.
@@ -68,8 +96,12 @@ esac
 # live tables with RLS OFF and default grants. Any unmigrated model is a
 # potentially exposed table. This is a heads-up, not a hard fail.
 printf '\nTRAP 4 — create_all() RLS drift warning\n'
-if [ -f backend/db.py ] && grep -q 'create_all' backend/db.py; then
-  if git diff --name-only origin/main...HEAD 2>/dev/null | grep -q 'models.py'; then
+if [ -z "$RANGE" ]; then
+  bad "cannot resolve a comparison base — TRAPS 4 and 5 cannot inspect changes"
+  note "Set PREFLIGHT_BASE=<ref> explicitly, or fetch origin/main."
+  note "Refusing to report PASS for a check that inspected nothing."
+elif [ -f backend/db.py ] && grep -q 'create_all' backend/db.py; then
+  if changed_files | grep -q 'models.py'; then
     bad "models.py changed AND create_all() is live"
     note "A new SQLModel class creates a live table with RLS OFF."
     note "Confirm RLS + policies for any new table before deploying."
@@ -81,11 +113,19 @@ if [ -f backend/db.py ] && grep -q 'create_all' backend/db.py; then
 else
   ok "create_all() not detected in backend/db.py"
 fi
+if [ -n "$RANGE" ]; then
+  note "comparison base: $BASE_DESC"
+fi
 
 # --- TRAP 5: secrets must never be committed. -------------------------------
 printf '\nTRAP 5 — secret scan on staged/changed files\n'
-CHANGED=$(git diff --name-only origin/main...HEAD 2>/dev/null; git diff --name-only --cached 2>/dev/null)
-if [ -n "$CHANGED" ]; then
+if [ -z "$RANGE" ]; then
+  bad "cannot resolve a comparison base — the secret scan inspected nothing"
+  CHANGED=""
+else
+  CHANGED=$(changed_files; git diff --name-only --cached 2>/dev/null)
+fi
+if [ -n "$RANGE" ] && [ -n "$CHANGED" ]; then
   HITS=$(printf '%s\n' "$CHANGED" | sort -u | while read -r f; do
     [ -f "$f" ] || continue
     # This script's own source contains the detection patterns below (e.g.
@@ -101,7 +141,7 @@ if [ -n "$CHANGED" ]; then
   else
     ok "no secret patterns in changed files"
   fi
-else
+elif [ -n "$RANGE" ]; then
   ok "no changed files to scan"
 fi
 

@@ -1,5 +1,14 @@
 # 032 — PROD RUNBOOK
 
+> **Status: NOT YET APPLIED TO PROD (established 8 Sep 2026).** Unlike
+> `030a`, `031` and `033`, this runbook is pending, so its commands are still
+> executable and its paths were updated for the move to `~/dev/business-hero-2`.
+> Evidence: `docs/CURRENT_STATE.md`'s migration table does not list `032` at
+> all, and `audits/live-schema-public.txt:479,588` still show
+> `invoice_line_items.tax_rate` and `quote_line_items.tax_rate` as
+> `null=NO` — the exact columns this migration makes nullable. Review 001
+> finding 9 caught it being treated as a completed historical record.
+
 **Migration:** `backend/migrations/032_nullable_line_tax.sql`
 **Target:** Business Hero prod — Supabase project **`oxblcmwhuwtobdhsfgyi`**
 **Rehearsed:** business-hero-staging (`gzcrsrqmygublveuzqyg`), applied →
@@ -363,7 +372,7 @@ is reaching code that expected a number.
 ## STEP 11 — Record it
 
 ```
-cd ~/Documents/business-hero-2 && mv ~/Downloads/032-prod-before.csv audits/
+cd ~/dev/business-hero-2 && mv ~/Downloads/032-prod-before.csv audits/
 ```
 
 Then have Claude Code append to `audits/FINDINGS.md`: date applied, the

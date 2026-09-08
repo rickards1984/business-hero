@@ -18,8 +18,24 @@ Analysis is in `docs/CURRENT_STATE.md` §4. The essential points:
 ~30 tables with RLS off (`audits/AUDIT-2026-07-04.md` Appendix B). Three
 migrations have landed since. The schema dump carries no policy data.
 
-**This cannot be answered from the repository.** It needs one read-only query
-against `oxblcmwhuwtobdhsfgyi`:
+**This cannot be answered from the repository.** It needs a read-only
+evidence packet against `oxblcmwhuwtobdhsfgyi`. The query below is the
+**inventory** half — table, RLS flag, policy count — and review 001 finding 6
+is right that inventory is not isolation evidence: a single permissive
+`USING (true)` policy satisfies a non-zero count while defeating isolation
+entirely. P0-8 is not satisfied by this query alone. It must also capture:
+
+- **policy expressions** — `pg_policy.polqual` and `polwithcheck`, not just
+  the count
+- **which roles and commands** each policy applies to (`polroles`, `polcmd`)
+- **table and column grants** for `anon` and `authenticated`
+  (`information_schema.role_table_grants`), since RLS is only the second gate
+- **default privileges** (`pg_default_acl`), which decide what a *new* table
+  gets — the `create_all()` trap
+- **negative tests executed as each role**: authenticate as business A and
+  attempt to read business B, and record the failure
+
+Start with the inventory:
 
 ```sql
 SELECT c.relname AS table_name,
