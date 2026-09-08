@@ -138,7 +138,7 @@ class TestWritePathsRefuseAnotherTenantsCategory(unittest.TestCase):
 
     def test_patch_transaction_refuses(self):
         session = a_session()
-        updates = accounting.UpdateTransactionRequest(
+        updates = accounting.TransactionUpdate(
             category_id=str(CATEGORY_OF_B))
         with self.assertRaises(HTTPException) as caught:
             asyncio.run(accounting.update_transaction(
@@ -149,7 +149,7 @@ class TestWritePathsRefuseAnotherTenantsCategory(unittest.TestCase):
 
     def test_patch_transaction_allows_its_own(self):
         session = a_session()
-        updates = accounting.UpdateTransactionRequest(
+        updates = accounting.TransactionUpdate(
             category_id=str(CATEGORY_OF_A))
         asyncio.run(accounting.update_transaction(
             transaction_id=str(uuid.uuid4()), updates=updates,
@@ -228,18 +228,28 @@ class TestTheJoinCannotReadAnotherTenantsCategory(unittest.TestCase):
 class TestEveryCategoryJoinIsScoped(unittest.TestCase):
     """Coverage, not behaviour: a fifth join added later must be scoped too."""
 
-    def test_no_unscoped_category_join_remains(self):
-        src = (Path(accounting.__file__)).read_text()
-        joins = [
-            block for block in src.split("JOIN accounting_categories")[1:]
-        ]
-        self.assertGreaterEqual(len(joins), 4, "expected at least four joins")
-        for block in joins:
-            condition = block.split("WHERE")[0]
-            self.assertIn(
-                "c.business_id = t.business_id", condition,
-                "a category join is not scoped to the transaction's business:\n"
-                + condition.strip()[:200])
+    def test_no_unscoped_category_join_remains_anywhere_in_the_backend(self):
+        """Scans the whole backend, not just accounting.py.
+
+        The first version of this test scanned one module and reported the fix
+        complete. Two more unscoped joins were live in other modules — the
+        accountant-pack export in main.py and the assistant's spending analysis
+        — and both leaked a foreign category name. A category join is not an
+        accounting.py concern; it is a backend-wide one.
+        """
+        backend = Path(accounting.__file__).parent
+        found = 0
+        for path in sorted(backend.rglob("*.py")):
+            if "tests" in path.parts:
+                continue
+            for block in path.read_text().split("JOIN accounting_categories")[1:]:
+                found += 1
+                condition = block.split("WHERE")[0]
+                self.assertIn(
+                    "c.business_id = t.business_id", condition,
+                    f"unscoped category join in {path.name}:\n"
+                    + condition.strip()[:200])
+        self.assertGreaterEqual(found, 6, "expected at least six category joins")
 
 
 if __name__ == "__main__":

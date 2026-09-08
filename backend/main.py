@@ -4964,7 +4964,8 @@ async def export_accountant_pack(
                    c.name as category_name, t.type, t.amount, t.reference,
                    t.external_source, t.is_reconciled
             FROM accounting_transactions t
-            LEFT JOIN accounting_categories c ON t.category_id = c.id
+            LEFT JOIN accounting_categories c
+                   ON t.category_id = c.id AND c.business_id = t.business_id
             WHERE t.business_id = :business_id
               AND t.transaction_date >= :start_date
               AND t.transaction_date <= :end_date

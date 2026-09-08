@@ -318,7 +318,7 @@ async def create_transaction(
     from sqlalchemy import text
     
     require_own_category(session, transaction.category_id, business.id)
-    
+
     result = session.execute(
         text("""
             INSERT INTO accounting_transactions 
@@ -373,7 +373,7 @@ async def update_transaction(
     # reaches the SET clause unchecked unless it is validated here.
     if "category_id" in params:
         require_own_category(session, params["category_id"], business.id)
-    
+
     update_fields.append("updated_at = NOW()")
     
     query = f"""
@@ -462,7 +462,7 @@ async def bulk_update_category(
     from sqlalchemy import text
     
     require_own_category(session, request.category_id, business.id)
-    
+
     result = session.execute(
         text("""
             UPDATE accounting_transactions 
