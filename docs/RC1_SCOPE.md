@@ -139,9 +139,32 @@ Failure renders behind the open drawer; success floats above it. The user
 reliably sees "sent" and reliably misses "failed" — on an action that
 contacts a customer about money.
 
-**P1-5 · Frontend smoke tests for the RC1 journey**
-Playwright over the one journey above. Not full coverage — the minimum
-critical layer, in dependency order.
+**P1-5 · Playwright smoke tests for the golden journeys**
+There are no frontend tests and no end-to-end tests. Playwright over the
+golden journeys, in dependency order — not full coverage, the minimum
+critical layer:
+
+1. Lead → quote → acceptance → invoice → payment (the RC1 journey)
+2. Tenant and role separation — one business cannot reach another's records
+3. Failure handling — AI, telephony, email or payment failure must not
+   corrupt data or silently duplicate an outbound action
+
+Journeys 4 and 5 from the engineering brief (incoming call → CRM update;
+B2B prospect → outreach) and the contractor compliance journey are out of
+RC1 and out of this item.
+
+> **Until these exist, Mike is the browser test.**
+>
+> This is not a figure of speech and it is not temporary goodwill — it is
+> the only browser coverage the project has. Therefore: **every UI-touching
+> PR must state what Mike needs to click**, with the specific path, the
+> expected result, and what failure would look like. A PR that touches the
+> frontend and does not carry that section is not ready for review.
+>
+> The rule is enforced in `docs/DEVELOPMENT_WORKFLOW.md` §7 and
+> `docs/DEFINITION_OF_DONE.md`. Each Playwright journey that lands retires
+> a corresponding block of manual clicking, and the PR that adds it should
+> say which.
 
 **P1-6 · Daily pulse discards its AI output**
 Pays for an OpenAI call on every run and throws the result away. Either use

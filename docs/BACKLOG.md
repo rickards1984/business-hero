@@ -16,3 +16,10 @@ tickets only when they enter a release scope.
 
 **Rule:** a backlog item without evidence — a file:line, a failing test, or
 an audit reference — is not ready to become a ticket (`AGENTS.md` §6).
+
+## Carried actions with no home yet
+
+| Action | Source |
+|---|---|
+| Delete `MASTER_ADMIN_KEY` from the Railway environment and remove `verify_master_key` | `030B-SPEC.md` PART C; confirmed unused 8 Sep 2026 |
+| Locate the 14-char `sk_` API key generator, or prove it unreachable | `030B-SPEC.md` scope note 4 — still open |

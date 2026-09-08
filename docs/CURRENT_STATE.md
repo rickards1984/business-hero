@@ -331,7 +331,7 @@ This is the paywall hole. It is documented, understood, and open.
 | Admin surface | **complete and verified** | 71 tests; two 500s fixed 2026-09-03 |
 | CRM / customer management | **partial** | No dedicated module; customer data lives on quotes and invoices |
 | Job / project management | **absent** | |
-| B2B prospecting (Control Tower) | **unknown** | Not in this repository. Runs on Mike's ChatGPT OAuth quota per `PRICING-MODEL.md` §4 |
+| B2B prospecting (Control Tower) | **absent from this repo** | Separate repository, `~/control-tower` (confirmed 8 Sep 2026). Runs on Mike's ChatGPT OAuth quota per `PRICING-MODEL.md` §4; economics change at multi-tenant. `outreach` remains a real canonical feature key here, reserved for the future integration |
 | Staff / contractor management | **absent** | |
 | Compliance & site operations | **absent** | Deliberate. `audits/COMPLIANCE-MODULE-BRIEF.md`, post-launch |
 | Mobile / site workflows | **absent** | |
@@ -436,9 +436,17 @@ Evidence-backed only.
 - **Live RLS, policy and grant state.** Needs one query against prod. The
   single highest-value unknown.
 - Railway environment: replica count, which variables are actually set.
-- Whether any external consumer holds `MASTER_ADMIN_KEY`.
+- ~~Whether any external consumer holds `MASTER_ADMIN_KEY`~~ — **answered
+  8 Sep 2026: no consumer.** Mike grepped Control Tower and `.openclaw`;
+  nothing holds it. This clears the one human check that was blocking
+  `030B-SPEC.md` PART C. **Action: delete `MASTER_ADMIN_KEY` from the
+  Railway environment**, and remove `verify_master_key` with it — it is a
+  shared static secret compared with `!=` rather than
+  `hmac.compare_digest` (SEC-13), on an admin surface that has already
+  settled on `get_platform_admin_context`.
 - Whether the 14-char `sk_` API key generator is still reachable
   (`030B-SPEC.md` scope note 4).
 - Dependency CVE status.
-- Whether Control Tower shares this codebase.
+- ~~Whether Control Tower shares this codebase~~ — **answered 8 Sep 2026:
+  it does not.** Separate repository at `~/control-tower`.
 - Real behaviour of every "apparently complete but unverified" module.

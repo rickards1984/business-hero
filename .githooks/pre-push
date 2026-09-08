@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Business Hero — pre-push gate.
+#
+# The working agreement says "iterate until green". This makes that mechanical
+# rather than voluntary: a push that would carry a red tree is refused here,
+# before it reaches a branch a reviewer or Railway might act on.
+#
+# Installed by:  git config core.hooksPath .githooks
+# (Set once per clone. Worktrees share the main .git config, so one setting
+# covers every worktree.)
+#
+# --no-verify is NOT PERMITTED. See docs/DEVELOPMENT_WORKFLOW.md. If the gate
+# is wrong, fix the gate in a ticket — do not step around it, because the next
+# person cannot tell a deliberate bypass from a forgotten one.
+
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT" || exit 1
+
+# A branch deletion pushes an all-zeros local sha and has no tree to verify.
+DELETE_ONLY=1
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  [ -z "${local_sha:-}" ] && continue
+  case "$local_sha" in
+    *[!0]*) DELETE_ONLY=0 ;;
+  esac
+done
+
+if [ "$DELETE_ONLY" -eq 1 ]; then
+  echo "pre-push: branch deletion only — nothing to verify."
+  exit 0
+fi
+
+if [ ! -x ./check.sh ]; then
+  echo "pre-push: REFUSED — ./check.sh is missing or not executable." >&2
+  echo "          The verification gate cannot run, so the push cannot be trusted." >&2
+  exit 1
+fi
+
+echo "pre-push: running ./check.sh full ..."
+echo
+
+if ./check.sh full; then
+  echo
+  echo "pre-push: green. Pushing."
+  exit 0
+fi
+
+cat >&2 <<'MSG'
+
+────────────────────────────────────────────────────────────────────
+  PUSH REFUSED — ./check.sh full is red.
+────────────────────────────────────────────────────────────────────
+  Fix it and push again. The output above names the failing step.
+
+  Do NOT use --no-verify. It is not permitted by the working
+  agreement (docs/DEVELOPMENT_WORKFLOW.md). A bypassed gate is
+  indistinguishable from a forgotten one to the next reader, and
+  this branch is what a reviewer and Mike's merge will act on.
+
+  If the gate itself is wrong, that is a ticket, not a bypass.
+────────────────────────────────────────────────────────────────────
+MSG
+exit 1

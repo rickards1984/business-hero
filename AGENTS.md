@@ -79,8 +79,17 @@ why this tier exists.
 1. **Railway installs from ROOT `requirements.txt`**, not `backend/`. Adding a
    dep to only the backend file crashes the deploy. Bit us twice (`slowapi`,
    `reportlab`). `scripts/preflight.sh` TRAP 1 checks this.
-2. **Repo must stay outside Dropbox/CloudStorage** (`.git/index.lock`). It
-   lives at `~/Documents/business-hero-2`. Do not move it.
+2. **Repo must stay outside Dropbox/CloudStorage *and* outside the
+   TCC-protected user folders** (`.git/index.lock`; macOS privacy prompts).
+   It lives at `~/dev/business-hero-2`. Do not move it.
+
+   Moved from `~/Documents/business-hero-2` on 8 Sep 2026. macOS TCC treats
+   `~/Documents` as a protected location, so every agent process needed its
+   own Full Disk Access grant — and the grant was revoked five times in three
+   weeks, each time mid-task, each time presenting as a filesystem error
+   rather than a permissions one. `~/dev` is not TCC-protected, so no grant
+   is needed and none can be revoked. The Dropbox constraint is unchanged and
+   still binds: `~/dev` satisfies both.
 3. **`create_all()` runs at every boot.** A new SQLModel class silently
    creates a live table with **RLS OFF and default grants**. Any new model is
    a possibly-exposed table. Confirm RLS and policies before deploying.

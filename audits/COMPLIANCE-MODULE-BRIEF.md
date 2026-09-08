@@ -191,8 +191,14 @@ the product is in the conversation.
 
 ## 3 · Open questions
 
-1. **When is MSC's desktop assessment?** The hard deadline. If it falls after
-   1 November 2026, MSC is assessed against **V6**, which changes what to map.
+1. ~~**When is MSC's desktop assessment?**~~ **Ruled 8 Sep 2026: assume it
+   falls on or after 1 November 2026.** Build the framework mapping against
+   **CAS V5**, and **plan the V6 remap as a known, dated event** rather than
+   a surprise. This is what D3's versioned-framework design is for: controls
+   describe what the business does and do not change; the framework version
+   describes what the standard asks for; only the mapping between them is
+   rebuilt. Confirm the actual date before Phase 1 mapping begins — if it
+   lands before 1 Nov, V5 is assessed and the remap becomes non-urgent.
 2. **What does MSC use for evidence today** — paper, WhatsApp, Drive, nothing?
    Determines how much is new build versus organising what exists.
 3. How many operatives and subcontractors would need access at MSC? Sizes the

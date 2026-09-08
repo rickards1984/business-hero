@@ -299,8 +299,15 @@ change — an upgrade, a downgrade, or an admin acting deliberately.
 
 *Can:*
 - Log in
-- View quotes, invoices and accounting history
-- Export PDFs and CSV
+- View quotes and invoices
+- Export PDFs and CSV — **quotes and invoices only**
+
+**Scope of export, decided 8 Sep 2026:** quotes and invoices, not accounting
+history. Accounting data reaches Business Hero from the customer's own
+Xero / QuickBooks / FreeAgent subscription, and it stays available to them
+there regardless of their Business Hero payment state. The statutory
+retention argument below is about records this product is the origin of —
+their invoices — not about records it merely syncs.
 
 *Cannot:*
 - Create or edit anything
@@ -438,13 +445,20 @@ receptionist allowances are set correctly. Those numbers are assumptions until
 somebody's actual month is measured against them, and a founder account that
 does not meter produces no such measurement.
 
-**⚠ Open sub-question — which allowance gets tested?** Putting both founder
-accounts on `business` means founder usage only ever exercises the **350**
-allowance. The 120-minute Pro allowance — the one on the tier most customers
-will buy — would remain uncalibrated. There are two founder accounts, so the
-obvious answer is **one on `business` and one on `pro`**, which exercises both
-allowances and both overage thresholds. Not decided here; flagging it because
-the calibration rationale above is otherwise only half-served.
+**RESOLVED (27 Aug 2026) — MSC on `business`, New Body on `pro`.**
+
+This was the last open sub-question in this spec. Both allowances are now
+exercised by a real account: MSC calibrates the 350-minute Business
+allowance, New Body the 120-minute Pro allowance — the tier most customers
+will buy, and the one that would otherwise have shipped uncalibrated.
+
+It also means the two overage thresholds are both live, so DECISION 2's
+metered-overage path is exercised at both plan boundaries rather than one.
+
+Consequence for PART E: founder usage is the only real data on whether
+either allowance is set correctly, so **metering must not be skipped on
+these accounts** — `billing_exempt` waives the charge, never the meter and
+never the cap.
 
 ### Acceptance criteria
 
