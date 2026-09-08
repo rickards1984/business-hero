@@ -1,13 +1,21 @@
 # 032 — PROD RUNBOOK
 
-> **Status: NOT YET APPLIED TO PROD (established 8 Sep 2026).** Unlike
-> `030a`, `031` and `033`, this runbook is pending, so its commands are still
-> executable and its paths were updated for the move to `~/dev/business-hero-2`.
-> Evidence: `docs/CURRENT_STATE.md`'s migration table does not list `032` at
-> all, and `audits/live-schema-public.txt:479,588` still show
-> `invoice_line_items.tax_rate` and `quote_line_items.tax_rate` as
-> `null=NO` — the exact columns this migration makes nullable. Review 001
-> finding 9 caught it being treated as a completed historical record.
+> **Status: no in-repository evidence that this was applied to production.
+> Treat as PENDING until confirmed against the live database.**
+>
+> This is weaker than the previous wording, which said "NOT YET APPLIED …
+> established" — the re-review was right that the available evidence cannot
+> establish that. What the repository actually shows is: `032` is absent from
+> `docs/CURRENT_STATE.md`'s migration table (which lists `030a`, `031` and
+> `033`), and `audits/live-schema-public.txt:479,588` record
+> `invoice_line_items.tax_rate` and `quote_line_items.tax_rate` as `null=NO`,
+> the columns this migration makes nullable. That snapshot is itself stale by
+> `033` STEP 24b's own account, so it is **suggestive, not dispositive**.
+>
+> Consequence either way: the runbook is treated as executable, so its paths
+> were updated for the move to `~/dev/business-hero-2` rather than preserved
+> as history. **Confirm against the live database before running it** — the
+> BH-001 read (`docs/BH-001-TICKET.md`) is a good moment to check.
 
 **Migration:** `backend/migrations/032_nullable_line_tax.sql`
 **Target:** Business Hero prod — Supabase project **`oxblcmwhuwtobdhsfgyi`**

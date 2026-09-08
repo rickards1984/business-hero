@@ -107,9 +107,16 @@ prohibited.
   `backend/main.py` and `backend/accounting.py`. Fixing them is RC1 lane
   work, and the feature lanes are not open. They are recorded as P0 items
   with acceptance criteria.
-- **The RC1 boundary was not redrawn.** Codex's six challenges are recorded
-  verbatim in `docs/RC1_SCOPE.md` under "Review 001 boundary challenges" and
-  marked as needing Mike's decision. The boundary is his acceptance gate.
+- **The RC1 boundary was not redrawn.** Codex's boundary challenges are
+  recorded in `docs/RC1_SCOPE.md` under "Review 001 boundary challenges",
+  **paraphrased, not verbatim**, and marked as needing Mike's decision. The
+  boundary is his acceptance gate.
+
+  *Corrected in cycle 2:* this line previously said "six challenges …
+  verbatim" when five were recorded, in paraphrase. The two that had been
+  dropped — the shared entitlement/read-only/tax contract for the PDF and
+  manual-invoice work, and the export deliverable for unpaid customers — are
+  now recorded as challenges 6 and 7.
 - **No production SQL, no Railway change, no merge to main.**
 
 ## 7 · Limits of this review

@@ -23,23 +23,42 @@ note() { printf '        %s\n' "$1"; }
 #     the failure and the traps again inspected nothing.
 # Resolve it once, here, and FAIL if it cannot be resolved. A trap that cannot
 # see the changes must not report PASS.
+# Re-review findings, both reproduced: an explicit PREFLIGHT_BASE=HEAD exited 0
+# reporting "no changed files"; and a resolved ref with no merge base made
+# `git diff` fail, whose empty output then read as "nothing changed". A diff
+# that ERRORED and a diff that found NOTHING must never look the same.
+HEAD_SHA="$(git rev-parse HEAD)"
 RANGE=""
 BASE_DESC=""
+BASE_SHA=""
+
+resolve_base() {   # $1 = ref, $2 = description
+  git rev-parse --verify -q "$1^{commit}" >/dev/null 2>&1 || return 1
+  local sha; sha="$(git rev-parse "$1^{commit}")"
+  # A base equal to HEAD yields an empty diff, which would let the changed-file
+  # traps pass having inspected nothing.
+  [ "$sha" = "$HEAD_SHA" ] && return 1
+  # Three-dot needs a merge base; without one the diff errors.
+  git merge-base "$sha" HEAD >/dev/null 2>&1 || return 1
+  BASE_SHA="$sha"; RANGE="$sha...HEAD"; BASE_DESC="$2"
+  return 0
+}
+
 if [ -n "${PREFLIGHT_BASE:-}" ]; then
-  if git rev-parse --verify -q "${PREFLIGHT_BASE}^{commit}" >/dev/null 2>&1; then
-    RANGE="${PREFLIGHT_BASE}...HEAD"; BASE_DESC="PREFLIGHT_BASE=${PREFLIGHT_BASE}"
+  # An explicitly supplied base that cannot be used is an ERROR, not a cue to
+  # fall back to something else — the caller asserted a scope; honour or fail.
+  if ! resolve_base "$PREFLIGHT_BASE" "PREFLIGHT_BASE=$PREFLIGHT_BASE"; then
+    BASE_DESC="UNUSABLE:PREFLIGHT_BASE=$PREFLIGHT_BASE"
   fi
-elif git rev-parse --verify -q origin/main >/dev/null 2>&1 \
-     && [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
-  RANGE="origin/main...HEAD"; BASE_DESC="origin/main"
-elif git rev-parse --verify -q HEAD~1 >/dev/null 2>&1; then
-  # On main at the tip: compare against the previous commit.
-  RANGE="HEAD~1..HEAD"; BASE_DESC="HEAD~1 (at the tip of the base branch)"
+elif ! resolve_base origin/main "origin/main"; then
+  resolve_base "HEAD~1" "HEAD~1 (at the tip of the base branch)" || true
 fi
 
+# changed_files prints the changed paths and returns non-zero if the diff could
+# not be produced. Callers MUST check the status.
 changed_files() {
   [ -n "$RANGE" ] || return 1
-  git diff --name-only "$RANGE" 2>/dev/null
+  git diff --name-only "$RANGE" || return 1
 }
 
 # --- TRAP 1: Railway installs from ROOT requirements.txt, not backend/. ------
@@ -96,12 +115,25 @@ esac
 # live tables with RLS OFF and default grants. Any unmigrated model is a
 # potentially exposed table. This is a heads-up, not a hard fail.
 printf '\nTRAP 4 — create_all() RLS drift warning\n'
+# Produce the changed-file list ONCE, and separate three outcomes that used
+# to collapse into "PASS": no base, diff error, and genuinely no changes.
+DIFF_OK=0
+CHANGED_LIST=""
+if [ -n "$RANGE" ]; then
+  if CHANGED_LIST="$(changed_files)"; then DIFF_OK=1; fi
+fi
+
 if [ -z "$RANGE" ]; then
   bad "cannot resolve a comparison base — TRAPS 4 and 5 cannot inspect changes"
+  if [ -n "$BASE_DESC" ]; then note "$BASE_DESC"; fi
+  note "A base equal to HEAD, or one with no common ancestry, is unusable."
   note "Set PREFLIGHT_BASE=<ref> explicitly, or fetch origin/main."
   note "Refusing to report PASS for a check that inspected nothing."
+elif [ "$DIFF_OK" -ne 1 ]; then
+  bad "git diff failed for range '$RANGE' — TRAPS 4 and 5 inspected nothing"
+  note "An errored diff is not an empty diff. Refusing to report PASS."
 elif [ -f backend/db.py ] && grep -q 'create_all' backend/db.py; then
-  if changed_files | grep -q 'models.py'; then
+  if printf '%s\n' "$CHANGED_LIST" | grep -q 'models.py'; then
     bad "models.py changed AND create_all() is live"
     note "A new SQLModel class creates a live table with RLS OFF."
     note "Confirm RLS + policies for any new table before deploying."
@@ -122,10 +154,13 @@ printf '\nTRAP 5 — secret scan on staged/changed files\n'
 if [ -z "$RANGE" ]; then
   bad "cannot resolve a comparison base — the secret scan inspected nothing"
   CHANGED=""
+elif [ "$DIFF_OK" -ne 1 ]; then
+  bad "git diff failed for range '$RANGE' — the secret scan inspected nothing"
+  CHANGED=""
 else
-  CHANGED=$(changed_files; git diff --name-only --cached 2>/dev/null)
+  CHANGED=$(printf '%s\n' "$CHANGED_LIST"; git diff --name-only --cached)
 fi
-if [ -n "$RANGE" ] && [ -n "$CHANGED" ]; then
+if [ -n "$RANGE" ] && [ "$DIFF_OK" -eq 1 ] && [ -n "$CHANGED" ]; then
   HITS=$(printf '%s\n' "$CHANGED" | sort -u | while read -r f; do
     [ -f "$f" ] || continue
     # This script's own source contains the detection patterns below (e.g.
@@ -141,7 +176,7 @@ if [ -n "$RANGE" ] && [ -n "$CHANGED" ]; then
   else
     ok "no secret patterns in changed files"
   fi
-elif [ -n "$RANGE" ]; then
+elif [ -n "$RANGE" ] && [ "$DIFF_OK" -eq 1 ]; then
   ok "no changed files to scan"
 fi
 

@@ -277,6 +277,14 @@ gate, so nothing here has been moved. Each needs a yes or no.
 5. **Receptionist metering broadens "the smallest contractor edition".**
    Keep it in RC1 only as an explicit decision that receptionist service
    ships in RC1.
+6. **PDF and manual-invoice work may proceed independently, but both need
+   the same contract** — the same entitlement gate, the same read-only
+   behaviour, and the same tax treatment. Two invoice-producing paths with
+   different rules is how a VAT bug ships on one and not the other.
+7. **"Read-only customers can still export" needs an actual deliverable.**
+   DECISION 3 promises unpaid and cancelled customers can still export their
+   quotes and invoices. No item in this document builds that export. Either
+   name the ticket or drop the promise.
 
 ---
 

@@ -28,8 +28,12 @@ entirely. P0-8 is not satisfied by this query alone. It must also capture:
 - **policy expressions** — `pg_policy.polqual` and `polwithcheck`, not just
   the count
 - **which roles and commands** each policy applies to (`polroles`, `polcmd`)
-- **table and column grants** for `anon` and `authenticated`
+- **table grants** for `anon` and `authenticated`
   (`information_schema.role_table_grants`), since RLS is only the second gate
+- **column grants**, collected separately from
+  `information_schema.column_privileges` — `role_table_grants` does not carry
+  them, and a column-level grant can expose a field on a table whose
+  table-level grant looks clean
 - **default privileges** (`pg_default_acl`), which decide what a *new* table
   gets — the `create_all()` trap
 - **negative tests executed as each role**: authenticate as business A and

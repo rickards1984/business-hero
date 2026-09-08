@@ -37,16 +37,34 @@ fi
 # being pushed if the two are the same thing. Review 001 finding 11: pushing a
 # ref other than HEAD, or pushing with uncommitted fixes in the tree, made the
 # gate verify content that was not what the reviewer would receive.
+#
+# SUPPORTED PUSH TYPES (re-review made these explicit rather than emergent):
+#   - a branch whose tip is HEAD                          -> verified, allowed
+#   - a lightweight or annotated tag pointing AT HEAD      -> allowed (the tag
+#     object's own SHA differs from the commit, so it is peeled with ^{commit}
+#     before comparing; the previous version refused every annotated tag)
+#   - a branch or tag pointing at any other commit         -> REFUSED
+#   - a deletion                                           -> allowed, nothing
+#     to verify
+# Anything pushed must resolve to the commit this gate actually tested.
 HEAD_SHA="$(git rev-parse HEAD)"
 for sha in $PUSHED_SHAS; do
-  if [ "$sha" != "$HEAD_SHA" ]; then
+  # Peel tag objects to the commit they point at. A non-commit that cannot be
+  # peeled is refused rather than assumed harmless.
+  if ! target="$(git rev-parse -q --verify "${sha}^{commit}" 2>/dev/null)"; then
+    echo "pre-push: REFUSED — $sha does not resolve to a commit." >&2
+    exit 1
+  fi
+  if [ "$target" != "$HEAD_SHA" ]; then
+    kind="$(git cat-file -t "$sha" 2>/dev/null || echo unknown)"
     cat >&2 <<MSG
 pre-push: REFUSED — you are pushing a revision that is not your HEAD.
 
-  pushing:  $sha
-  HEAD:     $HEAD_SHA
+  pushing:        $sha ($kind)
+  which resolves: $target
+  HEAD:           $HEAD_SHA
 
-./check.sh verifies the working tree, so it proves nothing about $sha.
+./check.sh verifies the working tree, so it proves nothing about $target.
 Check out the revision you intend to push and push from there.
 MSG
     exit 1
@@ -62,6 +80,34 @@ pushing. Commit or stash them, then push, so the gate and the pushed
 commit are the same content.
 MSG
   git status --short --untracked-files=no >&2
+  exit 1
+fi
+
+# Untracked, non-ignored files are work that exists locally and does not exist
+# in the pushed commit. check.sh may have imported a helper or collected a test
+# from one, in which case the gate tested content the reviewer will not get.
+# Ignored files (node_modules, .venv, scratch) are not affected.
+UNTRACKED="$(git ls-files --others --exclude-standard)"
+if [ -n "$UNTRACKED" ] && [ "${PREPUSH_ALLOW_UNTRACKED:-0}" != "1" ]; then
+  cat >&2 <<'MSG'
+pre-push: REFUSED — untracked files are present.
+
+These exist in your working tree but not in the commit you are pushing, so
+./check.sh may have verified content the pushed commit does not contain
+(an imported helper, a collected test):
+MSG
+  printf '%s\n' "$UNTRACKED" | sed 's/^/    /' >&2
+  cat >&2 <<'MSG'
+
+Commit them, add them to .gitignore, or remove them. If they genuinely
+cannot affect the gate, re-run with:
+
+    PREPUSH_ALLOW_UNTRACKED=1 git push ...
+
+That escape is deliberate and visible in your shell history. --no-verify
+is still not permitted: it disables the gate entirely rather than
+narrowing one documented check.
+MSG
   exit 1
 fi
 

@@ -68,11 +68,16 @@ jobs:
       # ruff` would let a newer release add a rule that reds CI while the
       # local gate stays green — reintroducing the disagreement this file
       # exists to remove. Bump these together with the local .venv.
+      # requirements.txt is what Railway installs, so CI installs the same
+      # file — but constrained by requirements.lock.txt so the resolution is
+      # reproducible. requirements.txt pins nothing on its own, so without the
+      # lock every run silently tested different library versions.
       - name: Install backend deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt -c requirements.lock.txt
           pip install 'ruff==0.16.6' 'pytest==9.1.1'
+          pip check
 
       # preflight fails closed when it cannot resolve a base, so resolve one
       # explicitly per event rather than letting it assume origin/main.

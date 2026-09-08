@@ -15,7 +15,27 @@
 # legitimate skip is eslint, which is genuinely optional (no lint script).
 
 set -uo pipefail
-MODE="${1:-fast}"
+# ${1-fast}, NOT ${1:-fast}: the colon form treats an explicitly-passed EMPTY
+# argument as "absent" and substitutes fast, so `./check.sh ""` silently ran
+# the gate in fast mode. An argument that was passed must be validated, even
+# when it is empty.
+MODE="${1-fast}"
+# Re-review finding: any unrecognised argument silently selected fast mode, so
+# `./check.sh ful` skipped every deploy trap and still printed "Green. Safe to
+# proceed." A typo must not quietly downgrade the gate.
+case "$MODE" in
+  fast|full) ;;
+  *)
+    printf 'check.sh: unknown mode "%s"\n' "$MODE" >&2
+    printf 'Usage: ./check.sh [fast|full]\n' >&2
+    exit 2
+    ;;
+esac
+if [ "$#" -gt 1 ]; then
+  printf 'check.sh: too many arguments (got %d)\n' "$#" >&2
+  printf 'Usage: ./check.sh [fast|full]\n' >&2
+  exit 2
+fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 

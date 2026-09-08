@@ -91,10 +91,18 @@ pytest rather than running them — a skip is not a failure inside
 `check.sh`, so a broken install would otherwise report green having
 verified nothing.
 
+**Execution evidence (this is what "verified" now rests on).** GitHub
+Actions run **34268900401** on `foundation/rc1-baseline`, `headSha`
+`ddb6e3e505003a873852f48e10fa589b847f1ae4`, conclusion **success**: node
+v22.23.2, comparison base resolved to the parent commit, `./check.sh full`
+green, and the required-checks assertion printed "All required checks ran and
+passed." Before this, the workflow had never executed and calling it
+"verified" was a claim about unexercised code.
+
 Gap: no dependency vulnerability scanning (`pip-audit`, `npm audit`) —
 outstanding since the July audit. Also, the pre-push hook is enabled per
 clone (`git config core.hooksPath .githooks`); a fresh clone that skips that
-step has no local gate, and CI on the PR is the only thing standing.
+step has no local gate, and CI is the only thing standing.
 
 ---
 
