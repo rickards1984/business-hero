@@ -1873,7 +1873,7 @@ the 2026-09-03 dump that was 111 of 816 rows, including
 exactly like a partially-applied migration. Parse it as CSV:
 
 ```
-cd ~/Documents/business-hero-2 && python3 - <<'EOF'
+cd ~/dev/business-hero-2 && python3 - <<'EOF'
 import csv, pathlib
 src = pathlib.Path.home()/"Downloads"/"<the downloaded file>.csv"
 dst = pathlib.Path("audits/live-schema-public.txt")
@@ -1997,7 +1997,7 @@ modification. Everything else round-trips exactly.
 ## STEP 27 — Record it
 
 ```
-cd ~/Documents/business-hero-2 && mv ~/Downloads/033-prod-before.csv audits/
+cd ~/dev/business-hero-2 && mv ~/Downloads/033-prod-before.csv audits/
 ```
 
 Then have Claude Code append to `audits/FINDINGS.md`: date applied, which

@@ -208,7 +208,13 @@ records.
 - [ ] Every gate **fails closed** — an unknown feature or missing business
       denies, never grants
 - [ ] Frontend hiding stays, but is understood as cosmetic; a test calls each
-      protected endpoint directly on a Starter plan and asserts 403
+      protected endpoint directly **on a plan that does not grant that
+      feature** and asserts 403. Not "Starter is refused everything":
+      `backend/auth.py:288` grants Starter `quoting`, `invoicing`,
+      `accounting`, `email`, `aria_chat` and `calendar_sync`. The expectation
+      is **per feature, per plan, per subscription status**, taken from the
+      canonical matrix in PART A — review 001 finding 7 found this criterion
+      contradicting that matrix
 - [ ] A test enumerates every LLM/voice/Twilio call site and asserts each sits
       behind a gate, so a new expensive endpoint cannot ship ungated
 
@@ -299,8 +305,15 @@ change — an upgrade, a downgrade, or an admin acting deliberately.
 
 *Can:*
 - Log in
-- View quotes, invoices and accounting history
-- Export PDFs and CSV
+- View quotes and invoices
+- Export PDFs and CSV — **quotes and invoices only**
+
+**Scope of export, decided 8 Sep 2026:** quotes and invoices, not accounting
+history. Accounting data reaches Business Hero from the customer's own
+Xero / QuickBooks / FreeAgent subscription, and it stays available to them
+there regardless of their Business Hero payment state. The statutory
+retention argument below is about records this product is the origin of —
+their invoices — not about records it merely syncs.
 
 *Cannot:*
 - Create or edit anything
@@ -342,8 +355,10 @@ that goes.
 - [ ] `past_due` grants the **same** entitlements as `active`, and sets a
       user-visible warning state — a banner, not a silent flag
 - [ ] `unpaid` and `canceled` resolve to read-only
-- [ ] Read-only permits: login, viewing quotes/invoices/accounting history,
-      PDF export, CSV export
+- [ ] Read-only permits: login, viewing quotes and invoices, PDF export, CSV
+      export — **quotes and invoices only, not accounting history** (the
+      8 Sep 2026 decision in DECISION 3 above; this line previously
+      contradicted it)
 - [ ] Read-only refuses: every create and edit path, every AI feature, every
       outbound send — enforced **server-side**, per PART D. Hiding the buttons
       is not enforcement
@@ -438,13 +453,24 @@ receptionist allowances are set correctly. Those numbers are assumptions until
 somebody's actual month is measured against them, and a founder account that
 does not meter produces no such measurement.
 
-**⚠ Open sub-question — which allowance gets tested?** Putting both founder
-accounts on `business` means founder usage only ever exercises the **350**
-allowance. The 120-minute Pro allowance — the one on the tier most customers
-will buy — would remain uncalibrated. There are two founder accounts, so the
-obvious answer is **one on `business` and one on `pro`**, which exercises both
-allowances and both overage thresholds. Not decided here; flagging it because
-the calibration rationale above is otherwise only half-served.
+**RESOLVED (27 Aug 2026) — MSC on `business`, New Body on `pro`.**
+
+This was the last open sub-question in this spec. **This is a decision, not
+an observed state** — review 001 finding 8 caught the original wording
+claiming it as already working. Once implemented, MSC calibrates the
+350-minute Business allowance and New Body the 120-minute Pro allowance —
+the tier most customers will buy, and the one that would otherwise ship
+uncalibrated.
+
+Neither allowance is exercised today and neither overage threshold is live,
+because **there is no metering implementation in the backend** (PART E is
+unbuilt; `docs/CURRENT_STATE.md` records no executable metering). The
+calibration argument is the reason to build it, not evidence that it runs.
+
+Consequence for PART E: founder usage is the only real data on whether
+either allowance is set correctly, so **metering must not be skipped on
+these accounts** — `billing_exempt` waives the charge, never the meter and
+never the cap.
 
 ### Acceptance criteria
 
@@ -452,8 +478,10 @@ the calibration rationale above is otherwise only half-served.
       forever coupon** — not a trial, not a manually-set status. `checkout`,
       the webhook, and `subscription_status` all behave as for a paying
       customer
-- [ ] `plan_tier = 'business'` on the exempt accounts, set through the normal
-      plan path, not by direct edit
+- [ ] `plan_tier = 'business'` on **MSC** and `plan_tier = 'pro'` on **New
+      Body**, each set through the normal plan path, not by direct edit —
+      per the resolution above. This criterion previously required `business`
+      on both, contradicting it (review 001 finding 8)
 - [ ] **No `founder` or `internal` value exists** in the plan vocabulary — the
       canonical set stays `starter`, `pro`, `business`, `beta` (PART A)
 - [ ] New column `businesses.billing_exempt boolean NOT NULL DEFAULT false`
@@ -524,8 +552,11 @@ the calibration rationale above is otherwise only half-served.
 4. Tests written. **Michael reviews the tests**
 5. Implementation until green
 6. `033` to prod via runbook
-7. Smoke test: a Starter business is denied voice, quoting and outreach at the
-   API, not just in the UI
+7. Smoke test: a Starter business is denied **voice, WhatsApp, board meetings
+   and outreach** at the API, not just in the UI — and is *permitted*
+   quoting, invoicing, accounting, email and Aria text chat, which Starter
+   genuinely grants (`backend/auth.py:288`). Listing quoting as denied
+   contradicted the plan matrix (review 001 finding 7)
 8. Founder accounts moved onto real subscriptions with the 100% coupon, and
    the next monthly renewal confirmed to arrive — the dead-webhook monitor
    from DECISION 4 only works once it has run at least once

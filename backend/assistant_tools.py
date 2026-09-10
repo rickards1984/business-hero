@@ -2137,7 +2137,8 @@ def _analyze_spending(engine, business_id: str, args: dict) -> dict:
                 COUNT(*) as count,
                 COALESCE(SUM(ABS(t.amount)), 0) as total
             FROM accounting_transactions t
-            LEFT JOIN accounting_categories c ON t.category_id = c.id
+            LEFT JOIN accounting_categories c
+                   ON t.category_id = c.id AND c.business_id = t.business_id
             WHERE t.business_id = :business_id 
               AND t.is_archived = false
               AND t.type = 'expense'

@@ -78,6 +78,39 @@ class BulkUpdateCategoryRequest(BaseModel):
     category_id: Optional[str] = None
 
 
+def require_own_category(session, category_id, business_id):
+    """Refuse a category_id that does not belong to this business.
+
+    BH-002. The transaction tables are scoped by `business_id`, but
+    `category_id` arrived straight from the request body and was written
+    unchecked, so one business could attach another business's category to its
+    own transaction — and the reporting joins then read that category back.
+
+    This is a TENANT ISOLATION control, not an entitlement one. The backend
+    connects as an elevated role and bypasses RLS (`AGENTS.md` §4), so the
+    database will not catch this; the check has to be here.
+
+    Returns the id unchanged when it is absent or valid. Raises 404 — not 403 —
+    when it is not: whether a category id exists in some other business is
+    itself information this caller is not entitled to.
+    """
+    if category_id is None or category_id == "":
+        return category_id
+
+    from sqlalchemy import text as _text
+
+    row = session.execute(
+        _text(
+            "SELECT 1 FROM accounting_categories "
+            "WHERE id = CAST(:category_id AS uuid) AND business_id = :business_id"
+        ),
+        {"category_id": str(category_id), "business_id": str(business_id)},
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return category_id
+
+
 # ============== Categories Endpoints ==============
 
 @router.get("/categories")
@@ -197,7 +230,8 @@ async def list_transactions(
             t.is_reconciled, t.created_at,
             c.id as category_id, c.name as category_name, c.color as category_color
         FROM accounting_transactions t
-        LEFT JOIN accounting_categories c ON t.category_id = c.id
+        LEFT JOIN accounting_categories c
+               ON t.category_id = c.id AND c.business_id = t.business_id
         WHERE t.business_id = :business_id AND t.is_archived = false
     """
     params = {"business_id": str(business.id)}
@@ -283,6 +317,8 @@ async def create_transaction(
     
     from sqlalchemy import text
     
+    require_own_category(session, transaction.category_id, business.id)
+
     result = session.execute(
         text("""
             INSERT INTO accounting_transactions 
@@ -333,6 +369,11 @@ async def update_transaction(
     if not update_fields:
         raise HTTPException(status_code=400, detail="No fields to update")
     
+    # The update is built dynamically from the request body, so category_id
+    # reaches the SET clause unchecked unless it is validated here.
+    if "category_id" in params:
+        require_own_category(session, params["category_id"], business.id)
+
     update_fields.append("updated_at = NOW()")
     
     query = f"""
@@ -420,6 +461,8 @@ async def bulk_update_category(
     
     from sqlalchemy import text
     
+    require_own_category(session, request.category_id, business.id)
+
     result = session.execute(
         text("""
             UPDATE accounting_transactions 
@@ -808,7 +851,8 @@ async def get_accounting_summary(
                 COUNT(*) as count,
                 COALESCE(SUM(ABS(t.amount)), 0) as total
             FROM accounting_transactions t
-            LEFT JOIN accounting_categories c ON t.category_id = c.id
+            LEFT JOIN accounting_categories c
+                   ON t.category_id = c.id AND c.business_id = t.business_id
             WHERE t.business_id = :business_id 
               AND t.is_archived = false
               AND t.transaction_date >= :start_date 
@@ -936,7 +980,8 @@ async def get_ai_insights(
     categories_result = session.execute(text("""
         SELECT c.name, SUM(ABS(t.amount)) as total
         FROM accounting_transactions t
-        JOIN accounting_categories c ON t.category_id = c.id
+        JOIN accounting_categories c
+             ON t.category_id = c.id AND c.business_id = t.business_id
         WHERE t.business_id = :business_id 
         AND t.type = 'expense'
         AND t.transaction_date >= :start_date
@@ -952,7 +997,8 @@ async def get_ai_insights(
     income_cats_result = session.execute(text("""
         SELECT c.name, SUM(ABS(t.amount)) as total
         FROM accounting_transactions t
-        JOIN accounting_categories c ON t.category_id = c.id
+        JOIN accounting_categories c
+             ON t.category_id = c.id AND c.business_id = t.business_id
         WHERE t.business_id = :business_id
         AND t.amount > 0
         AND t.transaction_date >= :start_date

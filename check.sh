@@ -6,9 +6,36 @@
 #
 # Exit 0 = safe to proceed. Non-zero = something is broken; the output says what.
 # This script is the agent's feedback loop. It must stay fast and honest.
+#
+# FAIL CLOSED. A missing tool is a FAILURE, not a skip. Review 001 finding 1:
+# check.sh could report green having verified almost nothing — no backend
+# directory, no ruff, no pytest, no preflight all counted as skips, and a skip
+# is not a failure. That is the worst possible behaviour in a gate, because it
+# is indistinguishable from success in CI logs nobody reads. The ONLY
+# legitimate skip is eslint, which is genuinely optional (no lint script).
 
 set -uo pipefail
-MODE="${1:-fast}"
+# ${1-fast}, NOT ${1:-fast}: the colon form treats an explicitly-passed EMPTY
+# argument as "absent" and substitutes fast, so `./check.sh ""` silently ran
+# the gate in fast mode. An argument that was passed must be validated, even
+# when it is empty.
+MODE="${1-fast}"
+# Re-review finding: any unrecognised argument silently selected fast mode, so
+# `./check.sh ful` skipped every deploy trap and still printed "Green. Safe to
+# proceed." A typo must not quietly downgrade the gate.
+case "$MODE" in
+  fast|full) ;;
+  *)
+    printf 'check.sh: unknown mode "%s"\n' "$MODE" >&2
+    printf 'Usage: ./check.sh [fast|full]\n' >&2
+    exit 2
+    ;;
+esac
+if [ "$#" -gt 1 ]; then
+  printf 'check.sh: too many arguments (got %d)\n' "$#" >&2
+  printf 'Usage: ./check.sh [fast|full]\n' >&2
+  exit 2
+fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
@@ -28,7 +55,7 @@ skip(){ printf '  SKIP  %s  (%s)\n' "$1" "$2"; SKIP=$((SKIP+1)); }
 step "FRONTEND"
 FE="frontend/client"
 if [ ! -d "$FE" ]; then
-  skip "frontend" "no $FE directory"
+  bad "frontend directory $FE is missing — cannot verify the frontend"
 elif [ ! -d "$FE/node_modules" ]; then
   bad "frontend deps not installed — run: (cd $FE && npm install)"
   printf '        Without node_modules, TypeScript errors only appear at the\n'
@@ -54,7 +81,7 @@ fi
 # ----------------------------------------------------------------- backend ---
 step "BACKEND"
 if [ ! -d backend ]; then
-  skip "backend" "no backend directory"
+  bad "backend directory is missing — cannot verify the backend"
 else
   # Syntax check every Python file. Cheap, catches the obvious.
   if find backend -name '*.py' -not -path '*/.venv/*' -print0 \
@@ -71,7 +98,8 @@ else
       bad "ruff"
     fi
   else
-    skip "ruff" "not installed — pip install ruff"
+    bad "ruff is not installed — the lint gate cannot run"
+    printf '        Install it: %s -m pip install ruff\n' "$PY"
   fi
 
   if "$PY" -m pytest --version >/dev/null 2>&1 && [ -d backend/tests ]; then
@@ -81,7 +109,8 @@ else
       bad "pytest"
     fi
   else
-    skip "pytest" "pytest missing or no backend/tests"
+    bad "pytest is not installed, or backend/tests is missing — tests cannot run"
+    printf '        Install it: %s -m pip install pytest\n' "$PY"
   fi
 fi
 
@@ -95,7 +124,7 @@ if [ "$MODE" = "full" ]; then
       bad "preflight"
     fi
   else
-    skip "preflight" "scripts/preflight.sh not executable"
+    bad "scripts/preflight.sh is missing or not executable — deploy traps cannot run"
   fi
 fi
 
