@@ -177,3 +177,67 @@ cycle:
    cleanliness check, so tested content can differ from pushed content.
 8. `docs/PERMISSIONS_AND_TENANCY.md` — `role_table_grants` does not carry
    **column** grants; those need separate collection.
+
+---
+
+## 9 · Cycle 2 outcome — **REQUEST-CHANGES again; stopping as instructed**
+
+Mike authorised one further bounded cycle. It was used, reviewed, and the
+verdict is `audits/foundation-review-003-codex-report.md`: **REQUEST-CHANGES**,
+reviewed commit `c72d4fc`, all five blockers **PARTIAL**.
+
+His instruction was to stop after this cycle if material blockers remain. They
+do. **No cycle-3 changes have been made.**
+
+### What cycle 2 did close
+
+| Was | Now |
+|---|---|
+| `./check.sh ful` ran fast mode and printed "Green" | Unrecognised and extra arguments rejected; `${1-fast}` so an explicitly empty argument is validated too — a second instance found while writing the test |
+| `PREFLIGHT_BASE=HEAD` exited 0 having inspected nothing | Equal bases, unresolvable refs and missing merge bases all fail closed |
+| A failed `git diff` read as "no changes" | The primary diff's status is propagated; both traps refuse to PASS |
+| Every annotated tag refused | Tags peeled with `^{commit}`; supported push types written down |
+| Untracked files invisible to the gate | Refused by default, with a named escape |
+| 19 requirement lines, 0 pins | `requirements.lock.txt`, 62 packages, applied as constraints; clean-environment evidence captured |
+| CI "complete and verified", never executed | Four real runs cited with SHAs and conclusions |
+
+### What still stands — five MAJOR findings
+
+1. **A base that is a *descendant* of HEAD still inspects nothing.** Rejecting
+   `base == HEAD` was not enough: when the base descends from HEAD the merge
+   base *is* HEAD, so the three-dot diff is empty. Reachable by force-pushing
+   backwards. `scripts/preflight.sh:35-43`.
+2. **The cached-diff failure is still unchecked** — `preflight.sh:161`. Codex
+   reproduced `exit 0 / PREFLIGHT PASSED` with only that call failing.
+3. **The CI required-checks assertion is still substring matching**, unchanged
+   from the previous review. Synthetic `diagnostic: PASS <name> NOT RUN` lines
+   satisfy it. Minimum fix `grep -Fxq` on exact lines; better, have the gate
+   emit a machine-readable result file.
+4. **`PREPUSH_ALLOW_UNTRACKED=1` forfeits the guarantee it was added to
+   provide.** Defensible as a documented human override; not a mechanical
+   guarantee that tested content equals pushed content.
+5. **Dependency coverage is incomplete.** A dependency added to
+   `requirements.txt` but absent from the lock installs unpinned, and
+   `pip check` does not detect the omission. Railway's install still does not
+   use the constraints, so production resolution remains unpinned.
+
+Also recorded: Codex declined to run `./check.sh full`, because the new harness
+tests execute git commits and its constraints forbade commits. That is a fair
+objection to the test design. And `test_harness_gates.py` still runs
+`git commit-tree` against the real repository.
+
+### The incident this cycle caused, and fixed
+
+Writing those harness tests caused a real one. Run from inside the pre-push
+hook, they inherited git's exported `GIT_DIR`, so fixture `git` commands
+operated on the real repository: a fixture commit landed on
+`ticket/BH-002-accounting-category-isolation`, and a fixture `git init` set
+`core.bare = true` on the main clone. Both were detected within minutes — by
+the hook refusing the push — and both were repaired from reflog and config.
+`foundation/rc1-baseline` was never moved; verified against its reflog and
+against origin. Nothing was force-pushed and no history was lost. `run()` now
+strips every `GIT_*` variable, with two tests covering it.
+
+It is worth stating plainly: the gate caught this, which is the argument for
+having it. It is equally worth stating that the gate's own test suite was the
+thing that broke the repository.
