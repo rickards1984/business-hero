@@ -374,12 +374,24 @@ UNCOVERED = {
         "coverage gap rather than an injection concern — an earlier draft of "
         "this note said 'interpolates', which was wrong and alarmist."
     ),
-    "response metadata and structure": (
-        "Pagination beyond page one, ordering influenced by another tenant's "
-        "rows, duplicate rows, date-range and reconciliation filters, and the "
-        "reverse direction (B calling, A's data) are all untested. Exact ids "
-        "and totals ARE now asserted for the two covered readers, which is "
-        "what catches an aggregate or id-only disclosure."
+    "response metadata, structure and CATEGORY ids": (
+        "Corrected after Codex's second review, which mutation-tested this "
+        "file 15 ways. The previous wording claimed 'exact ids and totals ARE "
+        "now asserted for the two covered readers'. That was FALSE for the "
+        "category reader, which asserts only name and count — so replacing a "
+        "returned category id with business B's id survives, on both the "
+        "category list and the nested category of a transaction. These "
+        "mutations are confirmed to survive a green run:\n"
+        "  - a category id replaced with B's id (list, and nested)\n"
+        "  - B's transaction id added as response METADATA rather than a row\n"
+        "  - a duplicated row; reversed ordering; total_pages set to 999\n"
+        "  - pagination offset ignored\n"
+        "  - THE TENANT RESTRICTION REMOVED ONLY BEYOND PAGE ONE — every "
+        "assertion here reads page one, so a leak on page two is invisible\n"
+        "Also untested: date-range and reconciliation filters, and the "
+        "reverse direction (B calling, A's data). Partial-field disclosure "
+        "remains possible because both tenants share amounts, dates and "
+        "colours in the fixture, so those values carry no provenance."
     ),
     "HTTP, authentication and serialisation": (
         "The caller tuple is injected directly, so FastAPI parsing, "
