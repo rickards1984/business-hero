@@ -76,36 +76,70 @@ class FakeResult:
         return self._row
 
 
-class WebhookSession:
-    """Enough session for the webhook, and honest about what it is asked.
+class UnsupportedQuery(AssertionError):
+    """The fake was asked something it cannot answer truthfully.
 
-    It answers the StripeEvent lookup truthfully — if an event id has already
-    been recorded, a query for it finds it. The current handler never asks;
-    a correct one must, and this session lets it.
+    Raised rather than guessed. Codex's review of the first version found the
+    fake returning the fixture business for ANY non-stripe_events query,
+    regardless of its predicates — which meant an implementation that looked
+    up the wrong business still passed.
+    """
+
+
+class WebhookSession:
+    """A session honest enough that a wrong implementation fails.
+
+    It understands exactly two queries and refuses everything else:
+
+      businesses     -> returns the fixture business ONLY if the query's bound
+                        parameters actually match its customer or subscription
+                        id. A lookup for an unknown customer returns None, as
+                        the real table would.
+      stripe_events  -> returns a recorded event only if it was COMMITTED and
+                        its event_id matches. Uncommitted or rolled-back audit
+                        rows are invisible, so "record without committing"
+                        cannot pass for de-duplication.
     """
 
     def __init__(self, business):
         self.business = business
-        self.recorded_events = []
+        self.committed_events = []
+        self._uncommitted_events = []
         self.business_commits = 0
         self._pending_business = False
 
+    @staticmethod
+    def _bound_values(statement):
+        try:
+            return set(statement.compile().params.values())
+        except Exception as exc:                      # pragma: no cover
+            raise UnsupportedQuery(f"cannot read bound params: {exc}")
+
     def exec(self, statement):
         sql = str(statement).lower()
+        values = self._bound_values(statement)
+
         if "stripe_events" in sql:
-            wanted = None
-            params = getattr(statement, "compile", lambda: None)()
-            if params is not None:
-                wanted = getattr(params, "params", {}).get("event_id_1")
-            for recorded in self.recorded_events:
-                if wanted is None or recorded.event_id == wanted:
+            for recorded in self.committed_events:
+                if recorded.event_id in values:
                     return FakeResult(recorded)
             return FakeResult(None)
-        return FakeResult(self.business)
+
+        if "businesses" in sql:
+            identifiers = {self.business.stripe_customer_id,
+                           self.business.stripe_subscription_id}
+            if values & identifiers:
+                return FakeResult(self.business)
+            return FakeResult(None)
+
+        raise UnsupportedQuery(
+            "the webhook issued a query this fake cannot answer truthfully "
+            f"— extend the fake rather than loosening the test:\n{sql[:300]}"
+        )
 
     def add(self, obj):
         if isinstance(obj, StripeEvent):
-            self.recorded_events.append(obj)
+            self._uncommitted_events.append(obj)
         else:
             self._pending_business = True
 
@@ -113,9 +147,48 @@ class WebhookSession:
         if self._pending_business:
             self.business_commits += 1
             self._pending_business = False
+        self.committed_events.extend(self._uncommitted_events)
+        self._uncommitted_events = []
 
     def rollback(self):
         self._pending_business = False
+        self._uncommitted_events = []
+
+
+# The cancellation invariant. `beta` is deliberately absent from the ladder:
+# it is not a paid rung and a cancellation should never produce it.
+TIER_RANK = {"starter": 0, "pro": 1, "business": 2}
+CANCELLED_FLOOR = "starter"
+
+
+def assert_tier_not_taken_from_the_event(business, before, what):
+    """After a cancellation the tier must be the one we had, or the floor.
+
+    Getting this invariant right took two attempts and both failures are
+    instructive:
+
+      `!= "pro"`            too weak — `business`, `None` or garbage passed.
+      `== "business"`       too strong — it forbade downgrading to starter,
+                            silently choosing the policy the file claimed to
+                            leave open.
+      rank(after) <= rank(before)
+                            still too weak — `business` -> `pro` is a
+                            *descent* in rank, so the tier being rewritten
+                            from the cancelled subscription's price passed.
+
+    What is actually wrong is narrower than any of those: the tier must not be
+    DERIVED FROM THE EVENT at all. So the only acceptable outcomes are the
+    tier we already had, or the defined cancelled floor. Which of those two is
+    right remains Mike's decision (RC1 P0-6); this permits either and forbids
+    "whatever price the cancellation happened to carry".
+    """
+    after = business.plan_tier
+    allowed = {before, CANCELLED_FLOOR}
+    assert after in allowed, (
+        f"{what}: plan_tier became {after!r}. A cancellation may leave the "
+        f"tier at {before!r} or drop it to {CANCELLED_FLOOR!r} — anything "
+        f"else means it was taken from the event's price."
+    )
 
 
 def a_business(**overrides):
@@ -187,7 +260,8 @@ def deliver(monkeypatch):
            "subscription SETS plan_tier='pro'. Remove this marker in the "
            "commit that fixes it.",
 )
-def test_a_cancellation_carrying_a_pro_price_must_not_upgrade_the_tier(deliver):
+def test_a_cancellation_does_not_take_the_tier_from_the_event(deliver):
+    """Unchanged or dropped to the floor both pass; the event's price fails."""
     business = a_business(plan_tier="starter")
     session = WebhookSession(business)
 
@@ -200,17 +274,15 @@ def test_a_cancellation_carrying_a_pro_price_must_not_upgrade_the_tier(deliver):
     )
 
     assert response.status_code == 200
-    assert business.plan_tier != "pro", (
-        "a cancellation carrying the old Pro price upgraded the business to Pro"
-    )
+    assert_tier_not_taken_from_the_event(
+        business, "starter", "cancellation carrying a Pro price")
 
 
 @pytest.mark.xfail(
     strict=True,
-    reason="BH-006 defect 1: same root cause — a cancellation must not change "
-           "the tier at all on the strength of the price it carries.",
+    reason="BH-006 defect 1: same root cause, from a higher tier.",
 )
-def test_a_cancellation_does_not_rewrite_the_tier_from_the_events_price(deliver):
+def test_a_cancellation_does_not_take_the_tier_from_the_event_at_business(deliver):
     business = a_business(plan_tier="business")
     session = WebhookSession(business)
 
@@ -222,17 +294,67 @@ def test_a_cancellation_does_not_rewrite_the_tier_from_the_events_price(deliver)
         session,
     )
 
-    assert business.plan_tier == "business", (
-        "a cancellation carrying a Pro price rewrote the tier of a Business "
-        "customer"
+    assert_tier_not_taken_from_the_event(
+        business, "business", "cancellation of a Business plan")
+
+
+def test_a_cancellation_still_records_the_status_it_carries(deliver):
+    """Closes the "just ignore every cancellation" bypass.
+
+    Skipping the tier assignment is not enough: the cancellation still has to
+    land its own facts, or the business stays `active` forever and access
+    gating (RC1 P0-6) reads stale state. Not xfail — this passes today and
+    must keep passing.
+    """
+    business = a_business(plan_tier="pro", subscription_status="active")
+    session = WebhookSession(business)
+
+    deliver(
+        subscription_event(
+            "customer.subscription.deleted", PRICE_PRO,
+            event_id="evt_cancel_status", status="canceled",
+        ),
+        session,
+    )
+
+    assert business.subscription_status == "canceled", (
+        "the cancellation was ignored wholesale — status was not updated"
+    )
+    assert business.is_active is False
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BH-006 defect 1: on a cancellation the handler still calls "
+           "strip_plan_defaults with the CANCELLED plan's price, so genuine "
+           "per-business feature exceptions can be stripped on the way out.",
+)
+def test_a_cancellation_does_not_strip_a_genuine_feature_exception(deliver):
+    """A hand-granted exception must survive a cancellation.
+
+    `feature_flags` carries deliberate per-business grants. Re-running the
+    plan-default strip on a cancellation can erase one, and nothing would say
+    so — the customer simply loses a feature someone decided to give them.
+    """
+    business = a_business(plan_tier="pro",
+                          feature_flags={"receptionist": True})
+    session = WebhookSession(business)
+
+    deliver(
+        subscription_event(
+            "customer.subscription.deleted", PRICE_PRO,
+            event_id="evt_cancel_flags", status="canceled",
+        ),
+        session,
+    )
+
+    assert business.feature_flags.get("receptionist") is True, (
+        "a cancellation stripped a hand-granted feature exception"
     )
 
 
 def test_a_genuine_upgrade_still_applies(deliver):
-    """The guard must not break the case the handler exists for.
-
-    Not xfail: this passes today and must keep passing.
-    """
+    """The guard that stops "ignore everything" passing. Passes today."""
     business = a_business(plan_tier="starter")
     session = WebhookSession(business)
 
@@ -282,11 +404,11 @@ def test_a_redelivered_event_applies_exactly_once(deliver):
            "state that moved on after the first delivery.",
 )
 def test_a_replay_does_not_overwrite_state_that_moved_on(deliver):
-    """The consequence that actually costs money.
+    """The consequence that costs money.
 
-    First delivery upgrades to Pro. The customer then downgrades to Starter.
-    Stripe redelivers the original event. Without de-duplication the stale
-    event silently puts them back on Pro — and they are billed for Starter.
+    Upgrade to Pro, customer downgrades to Starter, Stripe redelivers the
+    original event. Without de-duplication they are silently back on Pro while
+    being billed for Starter.
     """
     business = a_business(plan_tier="starter")
     session = WebhookSession(business)
@@ -304,11 +426,30 @@ def test_a_replay_does_not_overwrite_state_that_moved_on(deliver):
     )
 
 
-def test_two_different_events_both_apply(deliver):
-    """De-duplication must key on the event id, not suppress everything.
+def test_deduplication_must_key_on_the_event_id_alone(deliver):
+    """Closes the "de-duplicate by payload or subscription+price" bypass.
 
-    Not xfail: this passes today and must keep passing.
+    These two events are IDENTICAL apart from their event ids — same
+    subscription, same price, same status. Both are real and both must apply.
+    Keying de-duplication on anything but the event id suppresses the second.
+    Passes today (nothing de-duplicates); it exists to constrain the fix.
     """
+    business = a_business(plan_tier="starter")
+    session = WebhookSession(business)
+
+    for event_id in ("evt_same_a", "evt_same_b"):
+        deliver(subscription_event(
+            "customer.subscription.updated", PRICE_PRO,
+            event_id=event_id, status="active"), session)
+
+    assert session.business_commits == 2, (
+        "two distinct events with identical payloads must both apply — "
+        "de-duplication is keyed on something other than the event id"
+    )
+
+
+def test_two_different_events_both_apply(deliver):
+    """De-duplication must not suppress everything. Passes today."""
     business = a_business(plan_tier="starter")
     session = WebhookSession(business)
 
@@ -319,6 +460,30 @@ def test_two_different_events_both_apply(deliver):
 
     assert business.plan_tier == "business"
     assert session.business_commits == 2
+
+
+def test_an_event_for_an_unknown_customer_touches_nothing(deliver):
+    """The fake answers the business lookup honestly, so this is meaningful.
+
+    An event for a customer we do not have must not mutate the business we do
+    have. Passes today; it exists so a fix cannot start writing to whichever
+    business the query happens to return.
+    """
+    business = a_business(plan_tier="starter")
+    session = WebhookSession(business)
+
+    event = subscription_event(
+        "customer.subscription.updated", PRICE_BUSINESS,
+        event_id="evt_stranger", status="active",
+    )
+    event["data"]["object"]["customer"] = "cus_someone_else"
+    event["data"]["object"]["id"] = "sub_someone_else"
+
+    response = deliver(event, session)
+
+    assert response.status_code == 200
+    assert business.plan_tier == "starter", "an unrelated event mutated us"
+    assert session.business_commits == 0
 
 
 # ── Defect 3 — current_period_end lives on the item ──────────────────────────
@@ -357,7 +522,12 @@ def test_current_period_end_is_read_from_the_subscription_item(deliver):
     reason="BH-006 defect 3: an event carrying no period anywhere must leave "
            "the stored value alone rather than nulling it.",
 )
-def test_an_event_without_a_period_does_not_wipe_the_stored_one(deliver):
+def test_an_event_without_a_period_preserves_the_exact_stored_value(deliver):
+    """Exact equality, not merely non-null.
+
+    The first version asserted only `is not None`, which an implementation
+    could satisfy by writing any date at all.
+    """
     known = datetime(2026, 11, 1, tzinfo=timezone.utc)
     business = a_business(current_period_end=known)
     session = WebhookSession(business)
@@ -373,13 +543,14 @@ def test_an_event_without_a_period_does_not_wipe_the_stored_one(deliver):
     assert business.current_period_end is not None, (
         "an event with no period field nulled the period we already knew"
     )
+    assert int(business.current_period_end.timestamp()) == int(known.timestamp()), (
+        "the stored period was replaced with a different date rather than "
+        "left alone"
+    )
 
 
 def test_the_subscription_level_period_is_still_honoured(deliver):
-    """Older API versions put it on the subscription. Both must work.
-
-    Not xfail: this passes today and must keep passing.
-    """
+    """Older API versions put it on the subscription. Both must work."""
     period_end = int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp())
     business = a_business()
     session = WebhookSession(business)
@@ -395,3 +566,53 @@ def test_the_subscription_level_period_is_still_honoured(deliver):
 
     assert business.current_period_end is not None
     assert int(business.current_period_end.timestamp()) == period_end
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOT PINNED HERE — named so the implementer knows what is still open.
+# From Codex's review of the first version of this file.
+# ─────────────────────────────────────────────────────────────────────────────
+
+NOT_PINNED = {
+    "atomicity and durability": (
+        "These tests use one in-process fake session. They do not prove the "
+        "business write and the audit write are ATOMIC, that de-duplication "
+        "survives a new process, or that two concurrent deliveries of the "
+        "same event apply once. That needs a real database and is the single "
+        "biggest gap — a fix passing this file could still lose or double an "
+        "event under a crash or a race."
+    ),
+    "out-of-order delivery of a previously unseen event": (
+        "The stale-replay test covers an event id already seen. An OLDER "
+        "event arriving after a NEWER one, never seen before, is not covered "
+        "— de-duplication by id will not help, and the handler has no event "
+        "ordering metadata. Needs a product decision before it can be pinned."
+    ),
+    "cancel_at_period_end": (
+        "A subscription scheduled to cancel at the end of the period is not a "
+        "deleted one — the customer keeps access until the period ends. The "
+        "handler stores the flag but nothing asserts the two are treated "
+        "differently, so a fix could collapse them."
+    ),
+    "checkout.session.completed": (
+        "Shares the same audit-after-commit problem and links the customer "
+        "and subscription ids, but has no coverage here at all."
+    ),
+    "the cancelled-state ACCESS policy": (
+        "docs/RC1_SCOPE.md:86 already specifies it — past_due keeps access, "
+        "unpaid and canceled go read-only. What is undecided is the stored "
+        "TIER on cancellation, not access. The first version of this file "
+        "wrongly implied the whole policy was open."
+    ),
+    "unknown price ids and empty items": (
+        "An event whose price maps to no plan, or which carries no items at "
+        "all. Today `plan_tier` is simply left alone, which is probably "
+        "right, but nothing asserts it — so a fix that defaults an unknown "
+        "price to a tier would pass. Cheap to pin once the policy is stated."
+    ),
+}
+
+
+def test_the_not_pinned_registry_explains_itself():
+    for area, reason in NOT_PINNED.items():
+        assert len(reason) > 80, f"NOT_PINNED['{area}'] must say why"
