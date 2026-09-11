@@ -91,7 +91,19 @@ Do this in the app, as yourself, on a business you own:
    the risk of this change is over-scoping the join and blanking legitimate
    categories.
 2. **Assign a category** to a transaction and confirm it saves and displays.
-3. **Bulk-assign** a category to two or more transactions.
+3. ~~**Bulk-assign** a category to two or more transactions.~~
+   **Not testable through the UI — do not attempt this check.** Verified
+   2026-09-11: `POST /transactions/bulk-update-category` has **no frontend
+   caller**. The only bulk action wired to multi-select is bulk *delete*
+   (`frontend/client/src/pages/Accounting.tsx:1960`); the `selectedCategory`
+   state that looks like a bulk control is the list *filter* (`:260`).
+   This step was written from the backend endpoints without checking the UI
+   exposes each one.
+
+   The endpoint is still live and authenticated — no UI does not mean
+   unreachable — so its tenant scoping matters and **is** covered, by
+   `test_bulk_update_category_refuses` and `..._allows_its_own`, not by
+   clicking. Building the UI is **BH-005** in `docs/BACKLOG.md`.
 4. **Edit a transaction's category** (the PATCH path) and confirm it saves.
 5. **Accounting summary and AI insights** still render category breakdowns
    with names, not blanks.

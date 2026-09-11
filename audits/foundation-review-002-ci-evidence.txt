@@ -1,0 +1,43 @@
+# CI execution evidence — GitHub Actions
+
+Obtained with the gh CLI against the real repository. These are runs that
+actually executed, not claims about the workflow file.
+
+## run 34268900401
+  sha        ddb6e3e505003a873852f48e10fa589b847f1ae4
+  branch     foundation/rc1-baseline
+  conclusion success
+  created    2026-09-08T19:25:46Z
+  url        https://github.com/rickards1984/business-hero/actions/runs/34268900401
+
+## run 34273353152
+  sha        b0e32edb236389937ad42f951bdaa60ff8780856
+  branch     foundation/rc1-baseline
+  conclusion success
+  created    2026-09-08T20:11:38Z
+  url        https://github.com/rickards1984/business-hero/actions/runs/34273353152
+
+## run 34274117990
+  sha        c72d4fcec0e773e47f6b11a0c39e203b91fd702f
+  branch     foundation/rc1-baseline
+  conclusion success
+  created    2026-09-08T20:19:26Z
+  url        https://github.com/rickards1984/business-hero/actions/runs/34274117990
+  check	Run actions/setup-node@v4	2026-09-08T20:19:32.7866286Z node: v22.23.2
+  check	Install backend deps	2026-09-08T20:20:14.6685062Z No broken requirements found.
+  check	Resolve preflight comparison base	2026-09-08T20:20:14.7261267Z Comparison base: b0e32edb236389937ad42f951bdaa60ff8780856 (event: push)
+  check	Run the gate	2026-09-08T20:20:33.5831187Z         402 passed, 1 skipped, 20 warnings, 104 subtests passed in 4.90s
+  check	Assert required checks ran and passed	2026-09-08T20:20:33.7705997Z All required checks ran and passed.
+
+## run 34274187862
+  sha        b768580bb24c15d72998ba6c9f286f7289592cb1
+  branch     ticket/BH-002-accounting-category-isolation
+  conclusion success
+  created    2026-09-08T20:20:07Z
+  url        https://github.com/rickards1984/business-hero/actions/runs/34274187862
+  check	Run actions/setup-node@v4	2026-09-08T20:20:17.1129059Z node: v22.23.2
+  check	Install backend deps	2026-09-08T20:21:04.0989061Z No broken requirements found.
+  check	Resolve preflight comparison base	2026-09-08T20:21:04.2022729Z Comparison base: 9826f61a6ccf998877fc333018b78b6b14bef466 (event: push)
+  check	Run the gate	2026-09-08T20:21:20.8000324Z         414 passed, 1 skipped, 22 warnings, 104 subtests passed in 4.11s
+  check	Assert required checks ran and passed	2026-09-08T20:21:20.9899128Z All required checks ran and passed.
+
