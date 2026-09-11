@@ -40,6 +40,7 @@ All data is synthetic. Nothing touches a live or staging database.
 """
 
 import asyncio
+import os
 import sqlite3
 import unittest
 import uuid
@@ -47,6 +48,21 @@ from datetime import date, datetime
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
+
+# Checked BEFORE importing the application, and deliberately so. `import
+# accounting` pulls in `db`, which CONNECTS AND RUNS `SELECT 1` at import time
+# when a Postgres URL is configured. A tenant-isolation test that silently
+# opens a production connection on import would be an appalling way to find
+# that out, so refuse loudly first. Codex found this; the fix has to run
+# before the import, which is why it sits above it.
+_configured = os.getenv("SUPABASE_DATABASE_URL") or os.getenv("DATABASE_URL") or ""
+if _configured and not _configured.startswith("sqlite"):
+    raise RuntimeError(
+        "REFUSING TO RUN: a non-SQLite database is configured "
+        f"({_configured.split('@')[-1][:40]!r}). Importing the app would open "
+        "a connection to it. Clear DATABASE_URL/SUPABASE_DATABASE_URL — these "
+        "tests need no database but the synthetic one they build."
+    )
 
 import accounting
 
@@ -210,9 +226,35 @@ class TenantIsolationCase(unittest.TestCase):
 
 class TestAccountingReadsAreScopedToTheCaller(TenantIsolationCase):
 
+    def _ids(self, result):
+        return {row["id"] for row in result["transactions"]}
+
     def test_transaction_list_returns_only_the_callers_rows(self):
         result = list_transactions_as(self.session, self.caller_a)
         assert_no_b_data(result, "GET /accounting/transactions")
+
+    def test_transaction_list_returns_exactly_the_callers_ids(self):
+        """Marker-absence is not enough — assert the EXACT id set.
+
+        Codex mutated the endpoint to append business B's transaction id to
+        the response and this file stayed green, because the id carries none
+        of B's marker strings. An id is quite sufficient to enumerate another
+        tenant's records.
+        """
+        result = list_transactions_as(self.session, self.caller_a)
+        self.assertEqual(
+            self._ids(result),
+            {self.db.a_transaction, self.db.a_contaminated},
+            "the response did not contain exactly business A's transactions",
+        )
+
+    def test_the_total_counts_only_the_callers_rows(self):
+        """Codex mutated the count to span every tenant and this file stayed
+        green. A total is an aggregate disclosure: it tells A how much data B
+        holds."""
+        result = list_transactions_as(self.session, self.caller_a)
+        self.assertEqual(result["total"], 2,
+                         "the total counted rows belonging to another tenant")
 
     def test_transaction_list_still_returns_the_callers_own_rows(self):
         """The guard that stops 'return nothing' passing as isolation."""
@@ -224,22 +266,45 @@ class TestAccountingReadsAreScopedToTheCaller(TenantIsolationCase):
     def test_a_foreign_category_reads_as_uncategorised_not_as_bs_name(self):
         """BH-002's exact defect, now guarded generically."""
         result = list_transactions_as(self.session, self.caller_a)
-        blob = repr(result)
-        assert "A's row with a foreign category" in blob, "fixture row missing"
-        assert "B-PRIVATE-CATEGORY" not in blob, (
-            "a transaction referencing another tenant's category displayed "
-            "that tenant's category name"
-        )
+        rows = {row["id"]: row for row in result["transactions"]}
 
-    def test_filtering_by_another_tenants_category_returns_nothing(self):
-        """A filter is caller-supplied input, so it is an attack surface."""
+        contaminated = rows[self.db.a_contaminated]
+        self.assertIsNone(contaminated.get("category"),
+                          "the foreign category was rendered, not suppressed")
+
+        # And A's OWN category must still come through: asserting only that
+        # B's name is absent is satisfied by returning no categories at all,
+        # which Codex demonstrated by mutation.
+        own = rows[self.db.a_transaction]
+        self.assertIsNotNone(own.get("category"),
+                             "business A cannot see its own category")
+        self.assertEqual(own["category"]["name"], "A Office Costs",
+                         "business A cannot see its own category — over-scoped")
+
+    def test_filtering_by_another_tenants_category_yields_only_as_own_row(self):
+        """A filter is caller-supplied input, so it is an attack surface.
+
+        The honest contract, stated rather than implied: A's transaction that
+        *references* B's category still matches the filter, because the filter
+        is on the transaction's stored category_id and that row belongs to A.
+        What must never happen is B's own transaction appearing, or B's
+        category name being rendered. The earlier name promised "returns
+        nothing", which is not what happens and not what should.
+        """
         result = list_transactions_as(
             self.session, self.caller_a, category_id=self.db.b_category)
         assert_no_b_data(result, "GET /accounting/transactions?category_id=<B's>")
+        self.assertEqual(self._ids(result), {self.db.a_contaminated})
+        self.assertEqual(result["total"], 1)
+        self.assertIsNone(result["transactions"][0].get("category"))
 
     def test_category_list_returns_only_the_callers_categories(self):
         result = list_categories_as(self.session, self.caller_a)
         assert_no_b_data(result, "GET /accounting/categories")
+        self.assertEqual([c["name"] for c in result["categories"]],
+                         ["A Office Costs"],
+                         "the category list is not exactly business A's")
+        self.assertEqual(result["count"], 1)
 
 
 class TestTheHarnessItselfCanDetectALeak(TenantIsolationCase):
@@ -273,37 +338,65 @@ class TestTheHarnessItselfCanDetectALeak(TenantIsolationCase):
 UNCOVERED = {
     "the RLS / anon-key path (the other half of P0-9)": (
         "Needs a real Postgres carrying the live policies — `supabase start`, "
-        "which needs Docker. DOCKER IS NOT INSTALLED on this machine, so this "
-        "is BLOCKED, not done. Until it runs, no statement about frontend "
-        "tenant isolation is evidence-backed. This is the larger half of the "
-        "risk: on that path RLS is the only gate."
+        "which needs Docker. Docker was not found in PATH or in the standard "
+        "install locations on this machine, so that route is BLOCKED here. "
+        "Note the narrower claim: Docker is absent from THIS environment, and "
+        "other local-Postgres routes are not ruled out. On that path RLS is "
+        "the only gate, so nothing here licenses any statement about frontend "
+        "tenant isolation."
+    ),
+    "Postgres behaviour generally": (
+        "These tests run on SQLite. UUID typing and casts, arrays, ILIKE, "
+        "numeric precision, timezone handling, constraints, defaults, "
+        "policies and database roles all differ or are absent. The seeded "
+        "schema uses TEXT ids, omits foreign keys, and relaxes required "
+        "fields. Removing either tenant predicate IS caught here, which is "
+        "real evidence; Postgres equivalence is not established."
+    ),
+    "endpoints whose SQL is Postgres-only": (
+        "Bulk operations use ANY(CAST(:ids AS uuid[])) and the ownership "
+        "check uses CAST(:id AS uuid); SQLite mangles both. BH-002's tests "
+        "cover CATEGORY-OWNERSHIP VALIDATION on those paths against fakes — "
+        "narrower than it first sounds: they do not establish that a bulk "
+        "operation validates the TRANSACTION ids it is given, and there is "
+        "no bulk-delete isolation test anywhere."
+    ),
+    "the remaining accounting reads": (
+        "Import history (`backend/accounting.py:1100`), the summary totals, "
+        "the category aggregates, the AI-insight reads, the assistant tool "
+        "reads and the dashboard reads are NOT executed here. Two readers are "
+        "covered out of a larger set; the harness is a start on accounting, "
+        "not a completion of it."
     ),
     "the transaction search filter": (
         "`search` emits ILIKE, which SQLite rejects, so the search path is "
-        "not exercised here. It interpolates caller-supplied text into a "
-        "query that is already tenant-scoped, but it is untested by this "
-        "harness and should be covered once a Postgres fixture exists."
+        "not exercised. It passes the term as a BOUND parameter, so this is a "
+        "coverage gap rather than an injection concern — an earlier draft of "
+        "this note said 'interpolates', which was wrong and alarmist."
     ),
-    "endpoints whose SQL is Postgres-only": (
-        "Bulk operations use ANY(CAST(:ids AS uuid[])) and the ownership check "
-        "uses CAST(:id AS uuid); SQLite mangles both. Their tenant scoping is "
-        "covered by test_accounting_tenant_isolation.py against fakes, which "
-        "proves the validator is called, not what Postgres does with it."
+    "response metadata and structure": (
+        "Pagination beyond page one, ordering influenced by another tenant's "
+        "rows, duplicate rows, date-range and reconciliation filters, and the "
+        "reverse direction (B calling, A's data) are all untested. Exact ids "
+        "and totals ARE now asserted for the two covered readers, which is "
+        "what catches an aggregate or id-only disclosure."
+    ),
+    "HTTP, authentication and serialisation": (
+        "The caller tuple is injected directly, so FastAPI parsing, "
+        "validation, dependency resolution and real business selection are "
+        "bypassed. Error responses and existence-disclosure via status codes "
+        "are untested."
     ),
     "every non-accounting resource": (
         "Quotes, invoices, emails, calls, tasks, bookings, receptionist "
-        "configs, board meetings. The harness generalises — add a fixture "
-        "table and a reader — but they are NOT covered yet. Accounting was "
-        "first because BH-002 proved a live defect there."
+        "configs, board meetings. The two-tenant pattern is reusable, but "
+        "'add a table and a reader' understates it: each resource needs its "
+        "own seeding, its own markers and its own exact-value expectations."
     ),
     "the admin surface": (
         "Admin and customer share the `authenticated` Postgres role, so an "
         "admin-only column grant is a customer-reachable grant. Needs the "
         "BH-001 evidence packet before it can even be stated correctly."
-    ),
-    "write-path isolation beyond accounting categories": (
-        "BH-002 covered the three category write paths. No systematic test "
-        "asserts that a write naming another tenant's id is refused elsewhere."
     ),
 }
 
@@ -317,8 +410,13 @@ class TestTheRegistryIsHonest(unittest.TestCase):
                 f"UNCOVERED['{area}'] must say why, not just that")
 
     def test_the_rls_path_is_still_recorded_as_blocked(self):
-        """If someone installs Docker and wires it up, this should be deleted
-        in the same commit — and it failing is the reminder."""
+        """A bookmark, not a detector.
+
+        Codex's point stands: this cannot notice that Docker has been
+        installed, so it will not remind anyone of anything. It asserts only
+        that the entry has not been quietly deleted while the work remains
+        undone — which is the failure mode that actually worries me.
+        """
         key = "the RLS / anon-key path (the other half of P0-9)"
         self.assertIn(key, UNCOVERED)
         self.assertIn("BLOCKED", UNCOVERED[key])
