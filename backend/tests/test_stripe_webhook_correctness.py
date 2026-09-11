@@ -76,6 +76,9 @@ class FakeResult:
         return self._row
 
 
+_UNSET = object()
+
+
 class UnsupportedQuery(AssertionError):
     """The fake was asked something it cannot answer truthfully.
 
@@ -109,32 +112,67 @@ class WebhookSession:
         self._pending_business = False
 
     @staticmethod
-    def _bound_values(statement):
-        try:
-            return set(statement.compile().params.values())
-        except Exception as exc:                      # pragma: no cover
-            raise UnsupportedQuery(f"cannot read bound params: {exc}")
+    def _evaluate(clause, row):
+        """Evaluate the query's real WHERE clause against a candidate row.
+
+        The first version compared the set of BOUND VALUES against the row's
+        identifiers, which is not predicate evaluation: Codex demonstrated
+        that `Business.name == customer_id`, and a correct customer with an
+        incorrect subscription, both returned the fixture business. An
+        implementation looking up the wrong COLUMN would have passed.
+
+        This walks the clause instead, so the fake answers what was actually
+        asked — and anything it does not understand raises rather than
+        guessing.
+        """
+        from sqlalchemy.sql import operators
+        from sqlalchemy.sql.elements import BinaryExpression, BooleanClauseList
+
+        if isinstance(clause, BooleanClauseList):
+            parts = [WebhookSession._evaluate(c, row) for c in clause.clauses]
+            if clause.operator is operators.or_:
+                return any(parts)
+            if clause.operator is operators.and_:
+                return all(parts)
+            raise UnsupportedQuery(f"unsupported boolean operator: {clause.operator}")
+
+        if isinstance(clause, BinaryExpression):
+            if clause.operator is not operators.eq:
+                raise UnsupportedQuery(
+                    f"only equality is supported, got {clause.operator}")
+            column = getattr(clause.left, "key", None)
+            if column is None:
+                raise UnsupportedQuery(f"cannot identify column in {clause}")
+            if not hasattr(row, column):
+                raise UnsupportedQuery(
+                    f"query filters on {column!r}, which this row does not have")
+            expected = getattr(clause.right, "value", _UNSET)
+            if expected is _UNSET:
+                raise UnsupportedQuery(f"cannot read bound value in {clause}")
+            return getattr(row, column) == expected
+
+        raise UnsupportedQuery(f"unsupported clause: {clause!r}")
 
     def exec(self, statement):
-        sql = str(statement).lower()
-        values = self._bound_values(statement)
+        entity = statement.column_descriptions[0]["entity"]
+        where = statement.whereclause
+        if where is None:
+            raise UnsupportedQuery("an unfiltered query would match anything")
 
-        if "stripe_events" in sql:
+        if entity is StripeEvent:
             for recorded in self.committed_events:
-                if recorded.event_id in values:
+                if self._evaluate(where, recorded):
                     return FakeResult(recorded)
             return FakeResult(None)
 
-        if "businesses" in sql:
-            identifiers = {self.business.stripe_customer_id,
-                           self.business.stripe_subscription_id}
-            if values & identifiers:
+        if entity is Business:
+            if self._evaluate(where, self.business):
                 return FakeResult(self.business)
             return FakeResult(None)
 
         raise UnsupportedQuery(
-            "the webhook issued a query this fake cannot answer truthfully "
-            f"— extend the fake rather than loosening the test:\n{sql[:300]}"
+            f"the webhook queried {entity!r}, which this fake cannot answer "
+            "truthfully — extend the fake rather than loosening the test"
         )
 
     def add(self, obj):
@@ -332,11 +370,24 @@ def test_a_cancellation_still_records_the_status_it_carries(deliver):
 def test_a_cancellation_does_not_strip_a_genuine_feature_exception(deliver):
     """A hand-granted exception must survive a cancellation.
 
-    `feature_flags` carries deliberate per-business grants. Re-running the
-    plan-default strip on a cancellation can erase one, and nothing would say
-    so — the customer simply loses a feature someone decided to give them.
+    THE FIXTURE MATTERS, and the first version of this test got it wrong. It
+    started from Pro with `receptionist: True` — but Pro GRANTS receptionist,
+    so that flag is a redundant default and `strip_plan_defaults` removing it
+    is exactly its documented job (`auth.py:330`). The test observed correct
+    behaviour and called it a defect. Codex caught it.
+
+    The real defect needs a flag that genuinely contradicts the business's own
+    plan: a STARTER business hand-granted `receptionist: True`. Verified
+    directly against the helper —
+
+        strip_plan_defaults({"receptionist": True}, "starter") -> kept
+        strip_plan_defaults({"receptionist": True}, "pro")     -> {}
+
+    — so when a cancellation carrying a Pro price makes the handler strip
+    against Pro rather than the business's actual tier, the genuine exception
+    is destroyed and nothing announces it.
     """
-    business = a_business(plan_tier="pro",
+    business = a_business(plan_tier="starter",
                           feature_flags={"receptionist": True})
     session = WebhookSession(business)
 
