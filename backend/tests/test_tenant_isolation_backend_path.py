@@ -30,11 +30,11 @@ that a tripwire, not proof.
 what is not yet tested and why. **It is part of the deliverable.** An honest
 list of gaps is worth more than a number that implies coverage nobody checked.
 
-### Not covered here at all: the RLS path
+### Not covered here: the RLS path
 
-The anon-key half of P0-9 needs a real Postgres with the live policies —
-`supabase start`, which needs Docker. **Docker is not installed on this
-machine**, so that half is blocked, not done. See `UNCOVERED`.
+The anon-key half of P0-9 is `test_tenant_isolation_rls_path.py`, which runs
+against a local Supabase Postgres (`scripts/rls-local.sh`) and is not part of
+`./check.sh`. Its limits are its own; the one that matters is in `UNCOVERED`.
 
 All data is synthetic. Nothing touches a live or staging database.
 """
@@ -44,7 +44,7 @@ import os
 import sqlite3
 import unittest
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
@@ -108,13 +108,30 @@ def list_transactions_as(session, caller, **overrides):
     params = dict(type=None, category_id=None, start_date=None, end_date=None,
                   search=None, is_reconciled=None, limit=50, page=1, offset=None)
     params.update(overrides)
-    return asyncio.run(accounting.list_transactions(
+    return _one_request(session, accounting.list_transactions(
         user_business=caller, session=session, **params))
 
 
 def list_categories_as(session, caller, type=None):
-    return asyncio.run(accounting.list_categories(
+    return _one_request(session, accounting.list_categories(
         type=type, user_business=caller, session=session))
+
+
+def _one_request(session, coroutine):
+    """Run one endpoint call the way one HTTP request would.
+
+    Both readers do `with session.connection() as conn:`, which closes the
+    session's connection on exit. In the app every request gets its own
+    session, so that is harmless. Here a test that calls the endpoint twice
+    — a page walk, a filter comparison — reuses one session, and the second
+    call finds the connection closed. `session.close()` afterwards ends the
+    stale transaction so the next call begins a fresh one. The in-memory
+    database lives in the pooled DBAPI connection and survives it.
+    """
+    try:
+        return asyncio.run(coroutine)
+    finally:
+        session.close()
 
 
 class FakeBusiness:
@@ -166,10 +183,40 @@ class TwoTenantDatabase:
 
         # The contaminated row BH-002 could create: A's transaction pointing at
         # B's category. It must render as uncategorised, never as B's name.
+        # Created one minute EARLIER than A's own row so the endpoint's
+        # `ORDER BY transaction_date DESC, created_at DESC` is deterministic:
+        # the exact-response test below asserts order, and two rows with
+        # identical sort keys would make that assertion flap.
         self.a_contaminated = str(uuid.uuid4())
         self._transaction(self.a_contaminated, BUSINESS_A, self.b_category,
                           "A's row with a foreign category", "A-PAYEE-2",
-                          "A-REF-2", "A-NOTE-2", now)
+                          "A-REF-2", "A-NOTE-2", now - timedelta(minutes=1))
+        self.now = now
+
+    def add_paging_rows(self, per_tenant):
+        """Seed `per_tenant` more rows for EACH tenant, interleaved by date.
+
+        The dates alternate A, B, A, B … so that on any date-ordered page the
+        neighbouring row belongs to the other tenant. A tenant predicate that
+        is dropped, or applied only to the first page, puts B's rows exactly
+        where a page boundary falls. Returns A's new ids in the order the
+        endpoint must return them (newest first).
+        """
+        a_ids = []
+        for n in range(per_tenant):
+            day = date(2026, 8, 30) - timedelta(days=n)
+            stamp = datetime.combine(day, datetime.min.time())
+            a_id = str(uuid.uuid4())
+            self._transaction(a_id, BUSINESS_A, self.a_category,
+                              f"A page row {n}", "A-PAYEE", f"A-REF-P{n}",
+                              "A-NOTE", stamp, transaction_date=day)
+            a_ids.append(a_id)
+            self._transaction(str(uuid.uuid4()), BUSINESS_B, self.b_category,
+                              "B-PRIVATE-TRANSACTION", "B-PRIVATE-PAYEE",
+                              "B-PRIVATE-REFERENCE", "B-PRIVATE-NOTE", stamp,
+                              transaction_date=day)
+        self.session.commit()
+        return a_ids
 
     def _category(self, cid, business_id, name, now):
         self.session.execute(
@@ -181,7 +228,7 @@ class TwoTenantDatabase:
         )
 
     def _transaction(self, tid, business_id, category_id, description,
-                     payee, reference, note, now):
+                     payee, reference, note, now, transaction_date=None):
         self.session.execute(
             text("INSERT INTO accounting_transactions "
                  "(id, business_id, category_id, transaction_date, description,"
@@ -190,7 +237,8 @@ class TwoTenantDatabase:
                  "VALUES (:i, :b, :c, :d, :desc, -100.0, 'expense', :ref, :pay,"
                  " 'current', :note, 0, 0, :now)"),
             {"i": tid, "b": business_id, "c": category_id,
-             "d": date(2026, 9, 1), "desc": description, "ref": reference,
+             "d": transaction_date or date(2026, 9, 1),
+             "desc": description, "ref": reference,
              "pay": payee, "note": note, "now": now},
         )
 
@@ -306,6 +354,174 @@ class TestAccountingReadsAreScopedToTheCaller(TenantIsolationCase):
                          "the category list is not exactly business A's")
         self.assertEqual(result["count"], 1)
 
+    def test_the_transaction_response_is_exactly_as_expected(self):
+        """Codex's "single most valuable next addition": the WHOLE response,
+        built from the fixture, compared with assertEqual.
+
+        Every value below is written out from what was seeded, not read back
+        from the endpoint. Closes, by construction, the mutations the second
+        review confirmed survived: a nested category id swapped for B's, B's
+        transaction id smuggled in as response metadata, a duplicated row,
+        reversed ordering, and `total_pages` set to 999.
+        """
+        result = list_transactions_as(self.session, self.caller_a)
+        stamp = self.db.now
+        self.assertEqual(result, {
+            "transactions": [
+                {
+                    "id": self.db.a_transaction,
+                    "transaction_date": "2026-09-01",
+                    "description": "A's own transaction",
+                    "amount": -100.0,
+                    "type": "expense",
+                    "reference": "A-REF",
+                    "payee_payer": "A-PAYEE",
+                    "account": "current",
+                    "notes": "A-NOTE",
+                    "is_reconciled": False,
+                    "created_at": stamp.isoformat(),
+                    "category": {
+                        "id": self.db.a_category,
+                        "name": "A Office Costs",
+                        "color": "#000000",
+                    },
+                },
+                {
+                    "id": self.db.a_contaminated,
+                    "transaction_date": "2026-09-01",
+                    "description": "A's row with a foreign category",
+                    "amount": -100.0,
+                    "type": "expense",
+                    "reference": "A-REF-2",
+                    "payee_payer": "A-PAYEE-2",
+                    "account": "current",
+                    "notes": "A-NOTE-2",
+                    "is_reconciled": False,
+                    "created_at": (stamp - timedelta(minutes=1)).isoformat(),
+                    "category": None,
+                },
+            ],
+            "total": 2,
+            "page": 1,
+            "per_page": 50,
+            "total_pages": 1,
+            "limit": 50,
+            "offset": 0,
+        })
+
+    def test_the_category_response_is_exactly_as_expected(self):
+        """Same discipline for the category reader, whose id was the one the
+        second review showed could be swapped for B's without detection."""
+        result = list_categories_as(self.session, self.caller_a)
+        self.assertEqual(result, {
+            "categories": [{
+                "id": self.db.a_category,
+                "name": "A Office Costs",
+                "type": "expense",
+                "color": "#000000",
+                "icon": "tag",
+                "is_default": False,
+                "created_at": self.db.now.isoformat(),
+            }],
+            "count": 1,
+        })
+
+    def test_date_range_and_reconciliation_filters_stay_scoped(self):
+        """Filters are caller input. Each must narrow A's rows, never widen
+        into B's — and B has rows on the SAME dates, so a filter that
+        forgot the tenant predicate would admit them."""
+        self.db.add_paging_rows(3)   # A and B rows on 30, 29, 28 Aug
+
+        in_range = list_transactions_as(
+            self.session, self.caller_a,
+            start_date=date(2026, 8, 29), end_date=date(2026, 8, 30))
+        assert_no_b_data(in_range, "date-range filter")
+        self.assertEqual(in_range["total"], 2)
+        self.assertEqual(
+            [t["description"] for t in in_range["transactions"]],
+            ["A page row 0", "A page row 1"])
+
+        unreconciled = list_transactions_as(
+            self.session, self.caller_a, is_reconciled=False)
+        assert_no_b_data(unreconciled, "is_reconciled filter")
+        self.assertEqual(unreconciled["total"], 5)
+
+        reconciled = list_transactions_as(
+            self.session, self.caller_a, is_reconciled=True)
+        self.assertEqual(reconciled, {
+            "transactions": [], "total": 0, "page": 1, "per_page": 50,
+            "total_pages": 1, "limit": 50, "offset": 0,
+        })
+
+
+class TestEveryPageIsScoped(TenantIsolationCase):
+    """The mutation I said I would worry about: the tenant restriction
+    removed only beyond page one. Every earlier assertion read page one."""
+
+    def setUp(self):
+        super().setUp()
+        self.newer = self.db.add_paging_rows(5)
+        # Newest first: the two 1 Sep rows, then the five paging rows.
+        self.expected_order = [self.db.a_transaction, self.db.a_contaminated,
+                               *self.newer]
+
+    def test_walking_every_page_yields_exactly_as_rows_once_each(self):
+        limit = 2
+        first = list_transactions_as(self.session, self.caller_a,
+                                     limit=limit, page=1)
+        self.assertEqual(first["total"], len(self.expected_order))
+        self.assertEqual(first["total_pages"], 4)
+
+        seen = []
+        for page in range(1, first["total_pages"] + 1):
+            result = list_transactions_as(self.session, self.caller_a,
+                                          limit=limit, page=page)
+            assert_no_b_data(result, f"page {page}")
+            self.assertEqual(result["page"], page)
+            self.assertEqual(result["offset"], (page - 1) * limit)
+            self.assertEqual(result["total"], len(self.expected_order),
+                             f"the total changed on page {page}")
+            seen.extend(t["id"] for t in result["transactions"])
+
+        self.assertEqual(seen, self.expected_order,
+                         "the pages, concatenated, are not exactly A's rows "
+                         "in the endpoint's declared order")
+
+        beyond = list_transactions_as(self.session, self.caller_a,
+                                      limit=limit, page=first["total_pages"] + 1)
+        self.assertEqual(beyond["transactions"], [],
+                         "a page past the end returned rows")
+
+    def test_an_explicit_offset_is_honoured_and_scoped(self):
+        """The legacy `offset` parameter takes a different code path from
+        `page`; the second review showed ignoring it survived."""
+        result = list_transactions_as(self.session, self.caller_a,
+                                      limit=3, offset=3)
+        assert_no_b_data(result, "offset=3")
+        self.assertEqual([t["id"] for t in result["transactions"]],
+                         self.expected_order[3:6])
+        self.assertEqual(result["offset"], 3)
+
+    def test_the_reverse_direction_holds_too(self):
+        """B calling must see only B. Isolation is not a property of A."""
+        caller_b = as_business(BUSINESS_B)
+        b_ids = {row[0] for row in self.session.execute(text(
+            "SELECT id FROM accounting_transactions WHERE business_id = :b"),
+            {"b": BUSINESS_B}).fetchall()}
+        self.assertEqual(len(b_ids), 6)
+
+        seen = set()
+        for page in (1, 2, 3):
+            result = list_transactions_as(self.session, caller_b,
+                                          limit=2, page=page)
+            blob = repr(result)
+            for a_marker in ("A's own transaction", "A page row", "A-PAYEE",
+                             "A Office Costs", BUSINESS_A):
+                self.assertNotIn(a_marker, blob,
+                                 f"business A's {a_marker!r} reached B")
+            seen.update(t["id"] for t in result["transactions"])
+        self.assertEqual(seen, b_ids)
+
 
 class TestTheHarnessItselfCanDetectALeak(TenantIsolationCase):
     """A test suite that cannot fail is not evidence.
@@ -336,14 +552,17 @@ class TestTheHarnessItselfCanDetectALeak(TenantIsolationCase):
 # ─────────────────────────────────────────────────────────────────────────────
 
 UNCOVERED = {
-    "the RLS / anon-key path (the other half of P0-9)": (
-        "Needs a real Postgres carrying the live policies — `supabase start`, "
-        "which needs Docker. Docker was not found in PATH or in the standard "
-        "install locations on this machine, so that route is BLOCKED here. "
-        "Note the narrower claim: Docker is absent from THIS environment, and "
-        "other local-Postgres routes are not ruled out. On that path RLS is "
-        "the only gate, so nothing here licenses any statement about frontend "
-        "tenant isolation."
+    "the RLS / anon-key path — PRODUCTION equivalence": (
+        "The other half of P0-9 now exists: test_tenant_isolation_rls_path.py "
+        "runs against a local Supabase Postgres built by scripts/rls-local.sh "
+        "from this repository's migrations, pruned to the 5 July 2026 "
+        "production policy export. It is NOT part of ./check.sh (needs "
+        "Docker) and a skip there is a skip. What it proves is that the "
+        "policies AS THE MIGRATIONS DESCRIBE THEM isolate two tenants on the "
+        "exercised tables; what it cannot prove is that production carries "
+        "those policies — AGENTS.md §3.4. It also ASSUMES 029 was applied to "
+        "production, which the repository does not record. BH-001's census "
+        "compared with `scripts/rls-local.sh census` closes both gaps."
     ),
     "Postgres behaviour generally": (
         "These tests run on SQLite. UUID typing and casts, arrays, ILIKE, "
@@ -374,24 +593,17 @@ UNCOVERED = {
         "coverage gap rather than an injection concern — an earlier draft of "
         "this note said 'interpolates', which was wrong and alarmist."
     ),
-    "response metadata, structure and CATEGORY ids": (
-        "Corrected after Codex's second review, which mutation-tested this "
-        "file 15 ways. The previous wording claimed 'exact ids and totals ARE "
-        "now asserted for the two covered readers'. That was FALSE for the "
-        "category reader, which asserts only name and count — so replacing a "
-        "returned category id with business B's id survives, on both the "
-        "category list and the nested category of a transaction. These "
-        "mutations are confirmed to survive a green run:\n"
-        "  - a category id replaced with B's id (list, and nested)\n"
-        "  - B's transaction id added as response METADATA rather than a row\n"
-        "  - a duplicated row; reversed ordering; total_pages set to 999\n"
-        "  - pagination offset ignored\n"
-        "  - THE TENANT RESTRICTION REMOVED ONLY BEYOND PAGE ONE — every "
-        "assertion here reads page one, so a leak on page two is invisible\n"
-        "Also untested: date-range and reconciliation filters, and the "
-        "reverse direction (B calling, A's data). Partial-field disclosure "
-        "remains possible because both tenants share amounts, dates and "
-        "colours in the fixture, so those values carry no provenance."
+    "partial-field provenance": (
+        "The second review's surviving mutations — category id swapped for "
+        "B's (list and nested), B's transaction id as response metadata, a "
+        "duplicated row, reversed ordering, total_pages=999, offset ignored, "
+        "and the tenant restriction removed only beyond page one — are now "
+        "targeted by exact full-response assertions and a page walk. They "
+        "are CLAIMED closed by construction, and Codex's third review is the "
+        "confirmation, not this sentence. What remains: both tenants still "
+        "share amounts, account names and colours in the fixture, so a row "
+        "carrying only those fields has no provenance and a mutation that "
+        "copied B's `amount` onto A's row would pass."
     ),
     "HTTP, authentication and serialisation": (
         "The caller tuple is injected directly, so FastAPI parsing, "
@@ -421,17 +633,13 @@ class TestTheRegistryIsHonest(unittest.TestCase):
                 len(reason), 80,
                 f"UNCOVERED['{area}'] must say why, not just that")
 
-    def test_the_rls_path_is_still_recorded_as_blocked(self):
-        """A bookmark, not a detector.
-
-        Codex's point stands: this cannot notice that Docker has been
-        installed, so it will not remind anyone of anything. It asserts only
-        that the entry has not been quietly deleted while the work remains
-        undone — which is the failure mode that actually worries me.
-        """
-        key = "the RLS / anon-key path (the other half of P0-9)"
+    def test_the_rls_paths_production_gap_is_still_recorded(self):
+        """A bookmark, not a detector. The RLS suite exists now; what stays
+        open is production equivalence, and this asserts that entry has not
+        been quietly deleted before BH-001 closes it."""
+        key = "the RLS / anon-key path — PRODUCTION equivalence"
         self.assertIn(key, UNCOVERED)
-        self.assertIn("BLOCKED", UNCOVERED[key])
+        self.assertIn("AGENTS.md §3.4", UNCOVERED[key])
 
 
 if __name__ == "__main__":
