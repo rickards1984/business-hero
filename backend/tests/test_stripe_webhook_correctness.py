@@ -57,6 +57,8 @@ from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
+from sqlmodel import select
 
 import main
 from db import get_session
@@ -264,8 +266,18 @@ def a_business(**overrides):
 
 
 def subscription_event(event_type, price_id, *, event_id, status,
-                       item_period_end=None, subscription_period_end=None):
-    """A Stripe subscription event, shaped as Stripe actually sends one."""
+                       item_period_end=None, subscription_period_end=None,
+                       previous_attributes=None):
+    """A Stripe subscription event, shaped as Stripe actually sends one.
+
+    `previous_attributes` is Stripe's own account of WHAT CHANGED on an
+    `.updated` event (`data.previous_attributes`). It is the only signal in
+    the event that distinguishes "the customer changed plan" (`items` moved)
+    from "the payment state changed" (`status` moved). DECISION 3 says the
+    tier may follow the former and never the latter, so the tests below
+    carry it explicitly rather than letting the handler infer intent from a
+    price that happens to be on the object.
+    """
     item = {"price": {"id": price_id}}
     if item_period_end is not None:
         item["current_period_end"] = item_period_end
@@ -278,7 +290,10 @@ def subscription_event(event_type, price_id, *, event_id, status,
     }
     if subscription_period_end is not None:
         obj["current_period_end"] = subscription_period_end
-    return {"id": event_id, "type": event_type, "data": {"object": obj}}
+    data = {"object": obj}
+    if previous_attributes is not None:
+        data["previous_attributes"] = previous_attributes
+    return {"id": event_id, "type": event_type, "data": data}
 
 
 @pytest.fixture
@@ -378,7 +393,11 @@ def test_a_cancellation_still_records_the_status_it_carries(deliver):
     assert business.subscription_status == "canceled", (
         "the cancellation was ignored wholesale — status was not updated"
     )
-    assert business.is_active is False
+    # Deliberately NOT asserted: `is_active`. DECISION 3 separates
+    # `is_active` (the admin's manual switch) from `subscription_status`
+    # (Stripe's), and names the webhook writing one from the other as the
+    # conflation it removes. An earlier version asserted `is_active is False`
+    # here, which would have pinned that conflation in place. Codex caught it.
 
 
 @pytest.mark.xfail(
@@ -429,8 +448,20 @@ def test_a_cancellation_does_not_strip_a_genuine_feature_exception(deliver):
     )
 
 
-def test_a_genuine_upgrade_still_applies(deliver):
-    """The guard that stops "ignore everything" passing. Passes today."""
+def test_a_genuine_plan_change_still_applies(deliver):
+    """The guard that stops "ignore everything" passing. Passes today.
+
+    DECISION 3 allows exactly one webhook-driven write to `plan_tier`: "when
+    the subscription's PRICE changes — a genuine plan change". In Stripe's
+    vocabulary that is an `.updated` event whose `previous_attributes`
+    carries `items` — the customer moved from one price to another. That is
+    what this fixture sends, and it is the only fixture in this file that
+    expects the tier to move.
+
+    Contrast `test_a_status_transition_does_not_move_the_tier` below: the
+    same event type, a price that also differs from the stored tier, but
+    `previous_attributes` says only `status` moved. There the tier must hold.
+    """
     business = a_business(plan_tier="starter")
     session = WebhookSession(business)
 
@@ -438,12 +469,59 @@ def test_a_genuine_upgrade_still_applies(deliver):
         subscription_event(
             "customer.subscription.updated", PRICE_PRO,
             event_id="evt_upgrade_1", status="active",
+            previous_attributes={
+                "items": {"data": [{"price": {"id": PRICE_STARTER}}]},
+            },
         ),
         session,
     )
 
     assert business.plan_tier == "pro"
-    assert business.is_active is True
+
+
+# A status transition, as Stripe reports one: `previous_attributes.status`
+# is set and `items` is not. The price on the object DIFFERS from the stored
+# tier in every case — because Stripe sends the whole subscription on every
+# event, and a stored tier can legitimately differ from the live price (an
+# admin acting deliberately is one of DECISION 3's three permitted writers).
+# A handler that "resolves the tier from the price" on every event, as the
+# current one does, moves the tier on all three of these.
+STATUS_TRANSITIONS = [
+    pytest.param("active", "past_due", id="recovers_to_active"),
+    pytest.param("trialing", "incomplete", id="trial_starts"),
+    pytest.param("past_due", "active", id="falls_past_due"),
+]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BH-006 defect 1, reached through a status transition: the "
+           "handler resolves the tier from the object's price on every "
+           "event, so a status-only update carrying a mismatched price "
+           "rewrites the tier. Remove this marker in the commit that fixes "
+           "defect 1.",
+)
+@pytest.mark.parametrize("status,previous_status", STATUS_TRANSITIONS)
+def test_a_status_transition_does_not_move_the_tier(deliver, status,
+                                                   previous_status):
+    """DECISION 3: never "in response to ... a status transition"."""
+    business = a_business(plan_tier="business",
+                          subscription_status=previous_status)
+    session = WebhookSession(business)
+
+    deliver(
+        subscription_event(
+            "customer.subscription.updated", PRICE_PRO,
+            event_id=f"evt_transition_{previous_status}_{status}",
+            status=status,
+            previous_attributes={"status": previous_status},
+        ),
+        session,
+    )
+
+    assert business.subscription_status == status
+    assert_tier_unchanged(business, "business",
+                          f"status transition {previous_status} -> {status}")
 
 
 # ── Defect 5 — status must drive access, and past_due must keep it ──────────
@@ -461,21 +539,34 @@ class GateSession:
     probe (raw SQL via .execute) and the Business lookup (via .exec).
     """
 
-    def __init__(self, business, is_platform_admin=False):
+    def __init__(self, business, user_id, admin_user_ids=()):
         self.business = business
-        self.is_platform_admin = is_platform_admin
+        self.user_id = user_id
+        self.admin_user_ids = set(admin_user_ids)
 
     def execute(self, statement, params=None):
+        """The platform_admins probe. Answered for the user actually asked
+        about — a probe for someone else is not this user's admin status."""
         sql = str(statement).lower()
         if "platform_admins" not in sql:
             raise UnsupportedQuery(f"unexpected raw SQL in the gate: {sql[:160]}")
-        return FakeResult((1,) if self.is_platform_admin else None)
+        asked_about = (params or {}).get("user_id", _UNSET)
+        if asked_about is _UNSET:
+            raise UnsupportedQuery("the admin probe did not bind :user_id")
+        return FakeResult((1,) if asked_about in self.admin_user_ids else None)
 
     def exec(self, statement):
+        """The Business lookup. Same predicate walk as WebhookSession, so a
+        gate that looked up the wrong business, or no business, gets None."""
         entity = statement.column_descriptions[0]["entity"]
         if entity is not Business:
             raise UnsupportedQuery(f"the gate queried {entity!r}")
-        return FakeResult(self.business)
+        where = statement.whereclause
+        if where is None:
+            raise UnsupportedQuery("an unfiltered gate lookup would match anything")
+        if WebhookSession._evaluate(where, self.business):
+            return FakeResult(self.business)
+        return FakeResult(None)
 
 
 def has_access(business, feature_name="email"):
@@ -484,13 +575,36 @@ def has_access(business, feature_name="email"):
     from fastapi import HTTPException as _HTTPException
 
     dependency = auth.require_feature(feature_name)
-    auth_ctx = {"user_id": "user-synthetic", "business_id": str(business.id)}
+    user_id = "user-synthetic"
+    # `business.id` itself, not `str(business.id)`: the fake evaluates the
+    # gate's `Business.id == …` predicate by strict equality against the
+    # row, as the first version's `str()` would have silently failed.
+    auth_ctx = {"user_id": user_id, "business_id": business.id}
     try:
         asyncio.run(dependency(auth_ctx=auth_ctx,
-                               session=GateSession(business)))
+                               session=GateSession(business, user_id)))
         return True
     except _HTTPException:
         return False
+
+
+def test_the_gate_fake_refuses_a_business_it_was_not_asked_about():
+    """Self-check on GateSession: the fake must not hand the fixture business
+    to a gate that asked for a different one. Without this, `has_access`
+    could pass on a gate that never actually found the business."""
+    business = a_business(plan_tier="pro", trial_ends_at=None)
+    stranger = a_business(plan_tier="pro", trial_ends_at=None)
+    session = GateSession(business, "user-synthetic",
+                          admin_user_ids={"an-admin"})
+
+    assert session.exec(
+        select(Business).where(Business.id == business.id)).first() is business
+    assert session.exec(
+        select(Business).where(Business.id == stranger.id)).first() is None
+
+    probe = text("SELECT 1 FROM platform_admins WHERE user_id = :user_id LIMIT 1")
+    assert session.execute(probe, {"user_id": "an-admin"}).first() is not None
+    assert session.execute(probe, {"user_id": "someone-else"}).first() is None
 
 
 @pytest.mark.parametrize("status", FULL_ACCESS_STATUSES)

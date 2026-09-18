@@ -1,13 +1,19 @@
 # BH-006 — Codex reviews (ORIGINAL, UNEDITED)
 
-Three passes on the same test file. Nothing edited, softened or reordered.
+Four passes on the same test file. Nothing edited, softened or reordered.
 
-| | Review 1 | Review 2 | Verification |
-|---|---|---|---|
-| Commit | `6ab8a70` | `adf30a0` | `f0becd7` |
-| Session | `01a09283-45dc-7580-9c79-a16cdfdc8fae` | `01a0928a-f0e4-70d3-9c3f-f18a9eb8f0e6` | `01a09292-cfa1-7ed0-b31c-16c46f3f2849` |
-| Tokens reported | 23,951 | 31,684 | 31,604 |
-| Verdict | REQUEST-CHANGES | REQUEST-CHANGES | **NO** — one blocker partially open |
+| | Review 1 | Review 2 | Verification | Review 4 |
+|---|---|---|---|---|
+| Commit | `6ab8a70` | `adf30a0` | `f0becd7` | `3fa4648` |
+| Session | `01a09283-45dc-7580-9c79-a16cdfdc8fae` | `01a0928a-f0e4-70d3-9c3f-f18a9eb8f0e6` | `01a09292-cfa1-7ed0-b31c-16c46f3f2849` | `01a0b615-fc3a-7b61-b946-f5135318389a` |
+| Tokens reported | 23,951 | 31,684 | 31,604 | 44,700 |
+| Verdict | REQUEST-CHANGES | REQUEST-CHANGES | **NO** — one blocker partially open | REQUEST-CHANGES — 4 items, all taken |
+
+Review 4 ran on `gpt-5.6-sol` (the CLI's default had moved); the first
+three ran on `gpt-6-astra`. Same CLI version, same sandbox, same read-only
+confinement. Review 4 was asked to review only `a947c90..3fa4648` — the
+commit that replaced the `in {before, starter}` hedge with the exact policy
+Mike confirmed — and not to repeat the earlier three.
 
 Reviewer: Codex CLI 0.153.4, `gpt-6-astra`, ChatGPT auth, sandbox confined
 to the worktree, no network, no database. All three declined to run
@@ -237,3 +243,60 @@ Verification was restricted to `adf30a0..f0becd7`; HEAD matched `f0becd7`.
    Resolve that boundary before treating this file as a sound approval gate. The existing `NOT_PINNED` limitations also remain; passing these synthetic tests cannot establish atomicity, durability, or concurrency correctness.
 
 Baseline result: **7 passed, 7 xfailed**. Network connections were guarded against; database configuration was memory-only. No files were edited, and the working tree remains clean. `check.sh` was not run because it writes compiled files/caches; full verification and live behavior are **UNVERIFIED**.
+
+---
+
+## REVIEW 4 — 3fa4648
+
+1. Policy assertions
+
+No `plan_tier` hedge remains. The helper now requires exact equality at [test_stripe_webhook_correctness.py:244](/Users/michaelrickards/dev/bh2-BH-006-stripe/backend/tests/test_stripe_webhook_correctness.py:244).
+
+However, the file does not consistently encode the stated policy:
+
+- [Line 445](/Users/michaelrickards/dev/bh2-BH-006-stripe/backend/tests/test_stripe_webhook_correctness.py:445) asserts that a generic `customer.subscription.updated` changes `plan_tier` from Starter to Pro. That conflicts with the unqualified statement that payment events never change `plan_tier`. The test provides no separate evidence that this event represents a deliberate plan change rather than merely carrying a different price.
+- [Lines 496–510](/Users/michaelrickards/dev/bh2-BH-006-stripe/backend/tests/test_stripe_webhook_correctness.py:496) verify status storage for `active`, `trialing`, and `past_due`, but use matching Pro-before/Pro-event fixtures and never assert tier invariance. A handler that still derives the tier from every status event passes.
+- [Line 381](/Users/michaelrickards/dev/bh2-BH-006-stripe/backend/tests/test_stripe_webhook_correctness.py:381) requires cancellation to set `is_active=False`. That is an additional storage policy not contained in the stated decision, which says `subscription_status` drives access.
+- The suite does not establish that `unpaid` and `canceled` actually produce read-only access; it explicitly defers that at [lines 827–834](/Users/michaelrickards/dev/bh2-BH-006-stripe/backend/tests/test_stripe_webhook_correctness.py:827).
+
+The only remaining hedge is historical documentation, not an operative assertion:
+
+> `in {before, starter}` too PERMISSIVE
+
+at [lines 235–238](/Users/michaelrickards/dev/bh2-BH-006-stripe/backend/tests/test_stripe_webhook_correctness.py:235).
+
+2. `GateSession` and XFAIL integrity
+
+The fake supplies the two result types the current real gate requests:
+
+- `is_platform_admin_user()` performs the raw `platform_admins` query at [auth.py:233–238](/Users/michaelrickards/dev/bh2-BH-006-stripe/backend/auth.py:233).
+- `require_feature()` queries `Business.id == auth_ctx["business_id"]` at [auth.py:369–391](/Users/michaelrickards/dev/bh2-BH-006-stripe/backend/auth.py:369).
+
+But it can false-green. [GateSession.exec at lines 474–478](/Users/michaelrickards/dev/bh2-BH-006-stripe/backend/tests/test_stripe_webhook_correctness.py:474) checks only the selected entity and returns the fixture business without validating the `Business.id` predicate or even requiring a predicate. Its raw-SQL path similarly checks only that the SQL text mentions `platform_admins`, ignoring the parameter at [lines 468–472](/Users/michaelrickards/dev/bh2-BH-006-stripe/backend/tests/test_stripe_webhook_correctness.py:468).
+
+Verification results:
+
+- Normal: `11 passed, 10 xfailed`
+- `--runxfail --tb=short`: `10 failed, 11 passed`
+- Every XFAIL failed at its intended behavioral assertion. The past-due test failed at [line 567](/Users/michaelrickards/dev/bh2-BH-006-stripe/backend/tests/test_stripe_webhook_correctness.py:567), not from `asyncio`, fixture setup, or another exception.
+
+Because the read-only sandbox offered no writable temporary directory, pytest capture was disabled through `PYTEST_ADDOPTS=-s`; otherwise the requested arguments were unchanged.
+
+3. Defect attribution
+
+Yes. Both parameterizations of `test_a_read_only_status_does_not_move_the_tier` fail at [line 529](/Users/michaelrickards/dev/bh2-BH-006-stripe/backend/tests/test_stripe_webhook_correctness.py:529) because the handler copies the Pro price into a Business-tier account. That is precisely defect 1.
+
+4. Remaining false-green routes
+
+An incorrect webhook can still:
+
+- Derive `plan_tier` from the event price for `active`, `trialing`, and `past_due`; all those fixtures begin on Pro and carry a Pro price.
+- Treat an arbitrary `subscription.updated` price change as authorization to change the purchased tier, because line 445 expressly requires that behavior without modeling a deliberate plan-change signal.
+- Grant full access to `unpaid` or `canceled`; this suite records their status but does not test read-only enforcement.
+
+VERDICT: REQUEST-CHANGES
+
+1. Resolve the conflict between “payment events never change `plan_tier`” and the generic subscription-update assertion at line 445; model a deliberate plan change distinctly if that is the intended exception.
+2. Add mismatched-price fixtures and exact unchanged-tier assertions for `active`, `trialing`, and `past_due`.
+3. Make `GateSession` validate the actual admin parameter and exact `Business.id` predicate, failing closed for unsupported query shapes.
+4. Remove or separately justify the stronger `is_active=False` cancellation requirement under a policy that says `subscription_status` drives access.
