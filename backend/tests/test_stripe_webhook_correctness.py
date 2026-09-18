@@ -36,15 +36,23 @@ turns an unexpected pass into a FAILURE.
 they must delete the `xfail` marker in the same commit that fixes the
 behaviour, which is the point at which a reviewer sees both.
 
-### What these tests deliberately do NOT decide
+### The cancellation policy IS decided, and these tests assert it exactly
 
-Test 1 asserts only that a cancellation must not RAISE the tier. Whether a
-cancelled business should drop to `starter`, keep its tier with
-`subscription_status='canceled'` doing the gating, or something else, is a
-product decision (RC1 P0-6) and is not encoded here. The minimum correct
-property is asserted; the policy is left to Mike.
+ENTITLEMENT-SPEC DECISION 3 (27 Aug 2026), confirmed by Mike 12 Sep 2026:
+
+  - `plan_tier` is unchanged by any payment event. It records what was
+    purchased. A cancellation is NOT a downgrade to `starter`.
+  - `subscription_status` drives access: `past_due` keeps full access with a
+    banner; `unpaid` / `canceled` are read-only (log in, view quotes,
+    invoices and accounting, export quotes and invoices as PDF/CSV; no
+    create, no edit, no AI, no outbound; the Twilio number releases).
+
+Earlier versions of this file left the stored tier open as "P0-6". That was
+a hedge the spec had already closed. What remains open is the read-only
+RESOLVER and the Twilio release — see NOT_PINNED at the bottom.
 """
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -193,39 +201,51 @@ class WebhookSession:
         self._uncommitted_events = []
 
 
-# The cancellation invariant. `beta` is deliberately absent from the ladder:
-# it is not a paid rung and a cancellation should never produce it.
-TIER_RANK = {"starter": 0, "pro": 1, "business": 2}
-CANCELLED_FLOOR = "starter"
+# DECISION 3 (ENTITLEMENT-SPEC, resolved 27 Aug 2026), confirmed by Mike
+# 12 Sep 2026. The separation is the whole point of that decision:
+#
+#   | column                | meaning                | changed by a payment event? |
+#   | plan_tier             | what was purchased     | NEVER                       |
+#   | subscription_status   | whether it is paid for | yes — Stripe's field        |
+#
+# The damage the decision exists to prevent is concrete: writing a payment
+# state into `plan_tier` destroys the record of what the customer bought, and
+# restoring them after they pay becomes guesswork. "A payment blip would
+# permanently lose the sale."
+#
+# Access by status, from the same decision:
+#   active, trialing  -> full access to everything plan_tier includes
+#   past_due          -> FULL access, plus a warning banner
+#   unpaid, canceled  -> read-only
+#
+# READ-ONLY STATUSES THAT MUST NOT MOVE THE TIER.
+READ_ONLY_STATUSES = ("unpaid", "canceled")
+FULL_ACCESS_STATUSES = ("active", "trialing", "past_due")
 
 
-def assert_tier_not_taken_from_the_event(business, before, what):
-    """After a cancellation the tier must be the one we had, or the floor.
+def assert_tier_unchanged(business, before, what):
+    """`plan_tier` must be EXACTLY what it was. No exceptions, no floor.
 
-    Getting this invariant right took two attempts and both failures are
-    instructive:
+    Three earlier versions of this helper were all wrong, and the history is
+    worth keeping because each failure was a different way of being vague:
 
-      `!= "pro"`            too weak — `business`, `None` or garbage passed.
-      `== "business"`       too strong — it forbade downgrading to starter,
-                            silently choosing the policy the file claimed to
-                            leave open.
-      rank(after) <= rank(before)
-                            still too weak — `business` -> `pro` is a
-                            *descent* in rank, so the tier being rewritten
-                            from the cancelled subscription's price passed.
+      `!= "pro"`                  too weak — `business`, `None` or garbage passed
+      `== "business"`             right shape, but asserted in only one test
+      rank(after) <= rank(before) too weak — `business` -> `pro` is a descent
+      `in {before, starter}`      too PERMISSIVE — it preserved a
+                                  downgrade-to-starter option that DECISION 3
+                                  had already ruled out on 27 Aug. That hedge
+                                  was mine, not the spec's.
 
-    What is actually wrong is narrower than any of those: the tier must not be
-    DERIVED FROM THE EVENT at all. So the only acceptable outcomes are the
-    tier we already had, or the defined cancelled floor. Which of those two is
-    right remains Mike's decision (RC1 P0-6); this permits either and forbids
-    "whatever price the cancellation happened to carry".
+    DECISION 3 is decided: `plan_tier` is only ever changed by an actual plan
+    change — an upgrade, a downgrade, or an admin acting deliberately. A
+    payment event is none of those.
     """
-    after = business.plan_tier
-    allowed = {before, CANCELLED_FLOOR}
-    assert after in allowed, (
-        f"{what}: plan_tier became {after!r}. A cancellation may leave the "
-        f"tier at {before!r} or drop it to {CANCELLED_FLOOR!r} — anything "
-        f"else means it was taken from the event's price."
+    assert business.plan_tier == before, (
+        f"{what}: plan_tier changed from {before!r} to {business.plan_tier!r}. "
+        "DECISION 3: plan_tier records what was purchased and is NEVER "
+        "changed by a payment event — subscription_status carries the payment "
+        "state."
     )
 
 
@@ -298,8 +318,8 @@ def deliver(monkeypatch):
            "subscription SETS plan_tier='pro'. Remove this marker in the "
            "commit that fixes it.",
 )
-def test_a_cancellation_does_not_take_the_tier_from_the_event(deliver):
-    """Unchanged or dropped to the floor both pass; the event's price fails."""
+def test_a_cancellation_leaves_the_tier_exactly_as_purchased(deliver):
+    """DECISION 3: plan_tier is never changed by a payment event."""
     business = a_business(plan_tier="starter")
     session = WebhookSession(business)
 
@@ -312,15 +332,15 @@ def test_a_cancellation_does_not_take_the_tier_from_the_event(deliver):
     )
 
     assert response.status_code == 200
-    assert_tier_not_taken_from_the_event(
-        business, "starter", "cancellation carrying a Pro price")
+    assert_tier_unchanged(business, "starter",
+                          "cancellation carrying a Pro price")
 
 
 @pytest.mark.xfail(
     strict=True,
     reason="BH-006 defect 1: same root cause, from a higher tier.",
 )
-def test_a_cancellation_does_not_take_the_tier_from_the_event_at_business(deliver):
+def test_a_cancellation_leaves_a_business_tier_exactly_as_purchased(deliver):
     business = a_business(plan_tier="business")
     session = WebhookSession(business)
 
@@ -332,8 +352,8 @@ def test_a_cancellation_does_not_take_the_tier_from_the_event_at_business(delive
         session,
     )
 
-    assert_tier_not_taken_from_the_event(
-        business, "business", "cancellation of a Business plan")
+    assert_tier_unchanged(business, "business",
+                          "cancellation of a Business plan")
 
 
 def test_a_cancellation_still_records_the_status_it_carries(deliver):
@@ -386,6 +406,11 @@ def test_a_cancellation_does_not_strip_a_genuine_feature_exception(deliver):
     — so when a cancellation carrying a Pro price makes the handler strip
     against Pro rather than the business's actual tier, the genuine exception
     is destroyed and nothing announces it.
+
+    Under DECISION 3 this follows directly: since `plan_tier` must not change
+    on a payment event, the strip must run against the tier the business
+    already has. Stripping against the event's price is the same mistake as
+    writing the event's price into the tier, one layer down.
     """
     business = a_business(plan_tier="starter",
                           feature_flags={"receptionist": True})
@@ -419,6 +444,156 @@ def test_a_genuine_upgrade_still_applies(deliver):
 
     assert business.plan_tier == "pro"
     assert business.is_active is True
+
+
+# ── Defect 5 — status must drive access, and past_due must keep it ──────────
+#
+# DECISION 3: `past_due` gets FULL access plus a banner. "Stripe is still
+# retrying — the customer has usually not done anything wrong, and a card that
+# expired on Tuesday should not take the receptionist off the phones on
+# Wednesday."
+
+
+class GateSession:
+    """Enough session for `require_feature`, which is where access is decided.
+
+    It answers the two queries that dependency makes: the platform_admins
+    probe (raw SQL via .execute) and the Business lookup (via .exec).
+    """
+
+    def __init__(self, business, is_platform_admin=False):
+        self.business = business
+        self.is_platform_admin = is_platform_admin
+
+    def execute(self, statement, params=None):
+        sql = str(statement).lower()
+        if "platform_admins" not in sql:
+            raise UnsupportedQuery(f"unexpected raw SQL in the gate: {sql[:160]}")
+        return FakeResult((1,) if self.is_platform_admin else None)
+
+    def exec(self, statement):
+        entity = statement.column_descriptions[0]["entity"]
+        if entity is not Business:
+            raise UnsupportedQuery(f"the gate queried {entity!r}")
+        return FakeResult(self.business)
+
+
+def has_access(business, feature_name="email"):
+    """Run the REAL access gate and report whether it permits the feature."""
+    import auth
+    from fastapi import HTTPException as _HTTPException
+
+    dependency = auth.require_feature(feature_name)
+    auth_ctx = {"user_id": "user-synthetic", "business_id": str(business.id)}
+    try:
+        asyncio.run(dependency(auth_ctx=auth_ctx,
+                               session=GateSession(business)))
+        return True
+    except _HTTPException:
+        return False
+
+
+@pytest.mark.parametrize("status", FULL_ACCESS_STATUSES)
+def test_the_status_the_event_carries_is_recorded(deliver, status):
+    """Whatever Stripe says the status is, that is what we must store.
+
+    Not xfail: this passes today. It is the half of DECISION 3 the handler
+    already gets right, and it must survive the fix to the other half.
+    """
+    business = a_business(plan_tier="pro", subscription_status="active")
+    session = WebhookSession(business)
+
+    deliver(subscription_event(
+        "customer.subscription.updated", PRICE_PRO,
+        event_id=f"evt_status_{status}", status=status), session)
+
+    assert business.subscription_status == status
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BH-006 defect 1, reached through the read-only statuses: the "
+           "tier is taken from the event's price regardless of status. Remove "
+           "this marker in the commit that fixes defect 1.",
+)
+@pytest.mark.parametrize("status", READ_ONLY_STATUSES)
+def test_a_read_only_status_does_not_move_the_tier(deliver, status):
+    """DECISION 3: unpaid and canceled are read-only — a STATUS, not a tier."""
+    business = a_business(plan_tier="business", subscription_status="active")
+    session = WebhookSession(business)
+
+    deliver(subscription_event(
+        "customer.subscription.deleted", PRICE_PRO,
+        event_id=f"evt_readonly_{status}", status=status), session)
+
+    assert_tier_unchanged(business, "business", f"status {status!r}")
+    assert business.subscription_status == status
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BH-006 defect 5: main.py:1021 sets is_active = status in "
+           "('active','trialing'), so past_due sets is_active=False. The gate "
+           "at auth.py:381 then refuses when _is_trial_expired() is also true "
+           "— and that returns True whenever trial_ends_at is None, which is "
+           "every customer who never had a trial. DECISION 3 requires past_due "
+           "to keep FULL access. Remove this marker in the commit that fixes "
+           "it. Either the webhook must stop marking past_due inactive, or the "
+           "gate must consult subscription_status — the fix is open, the "
+           "outcome is not.",
+)
+def test_a_past_due_business_keeps_full_access(deliver):
+    """The one that takes the receptionist off the phones.
+
+    A paying Pro customer whose card expires. Stripe sends past_due and keeps
+    retrying. Per DECISION 3 nothing should change for them except a banner.
+
+    Today this is reachable on `email`, the single endpoint `require_feature`
+    gates. Once P0-1 gates every paid feature, a past_due card takes the whole
+    product offline for that customer — so this is an interaction between P0-1
+    and P0-6, not a bug in either alone.
+    """
+    business = a_business(plan_tier="pro", subscription_status="active",
+                          trial_ends_at=None)
+    session = WebhookSession(business)
+
+    assert has_access(business), "fixture must start with access"
+
+    deliver(subscription_event(
+        "customer.subscription.updated", PRICE_PRO,
+        event_id="evt_past_due", status="past_due"), session)
+
+    assert business.subscription_status == "past_due"
+    assert has_access(business), (
+        "a past_due business lost feature access. DECISION 3: past_due gets "
+        "FULL access plus a banner — a card that expired on Tuesday must not "
+        "take the receptionist off the phones on Wednesday."
+    )
+
+
+def test_a_cancelled_business_still_reaches_the_read_only_surface(deliver):
+    """Read-only is not lockout.
+
+    DECISION 3 is explicit: a cancelled customer can still log in, view quotes
+    and invoices, and export them — VAT records are a six-year statutory
+    obligation and GDPR Art. 20 portability does not lapse with payment.
+
+    This asserts only the webhook's part: cancelling records the status and
+    leaves the purchased tier intact, so a read-only resolver has something
+    truthful to read. Enforcing read-only is P0-6's resolver, not the
+    webhook's job — see NOT_PINNED.
+    """
+    business = a_business(plan_tier="business", subscription_status="active")
+    session = WebhookSession(business)
+
+    deliver(subscription_event(
+        "customer.subscription.deleted", PRICE_BUSINESS,
+        event_id="evt_readonly_surface", status="canceled"), session)
+
+    assert business.subscription_status == "canceled"
+    assert business.plan_tier == "business", (
+        "the tier a read-only export must be scoped by was destroyed"
+    )
 
 
 # ── Defect 2 — a redelivered event must apply once ───────────────────────────
@@ -649,11 +824,19 @@ NOT_PINNED = {
         "Shares the same audit-after-commit problem and links the customer "
         "and subscription ids, but has no coverage here at all."
     ),
-    "the cancelled-state ACCESS policy": (
-        "docs/RC1_SCOPE.md:86 already specifies it — past_due keeps access, "
-        "unpaid and canceled go read-only. What is undecided is the stored "
-        "TIER on cancellation, not access. The first version of this file "
-        "wrongly implied the whole policy was open."
+    "ENFORCEMENT of read-only (P0-6's resolver, not the webhook)": (
+        "DECISION 3 is now fully pinned on the webhook side: the tier never "
+        "moves and the status is recorded faithfully. What is NOT tested here "
+        "is the resolver that turns `unpaid`/`canceled` into an actually "
+        "read-only surface — refusing every create, edit, AI call and "
+        "outbound send while still permitting login, viewing and export. That "
+        "is P0-6 and it needs its own tests; a faithful status with no "
+        "resolver behind it enforces nothing."
+    ),
+    "releasing the Twilio number on cancellation": (
+        "DECISION 3 says the number releases when a business goes read-only. "
+        "Nothing here or anywhere else tests that, and it is the one "
+        "read-only consequence that costs real money every month if missed."
     ),
     "unknown price ids and empty items": (
         "An event whose price maps to no plan, or which carries no items at "
