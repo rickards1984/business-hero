@@ -25,15 +25,22 @@ WHAT A GREEN RUN MEANS
   comparing `scripts/rls-local.sh census` with the six production CSVs.
 
 HOW A TENANT IS IMPERSONATED
-  Exactly as PostgREST does it: `SET LOCAL ROLE authenticated` and the JWT
-  claims as transaction-local settings. Supabase's `auth.uid()` reads
-  `request.jwt.claim.sub` (and newer builds read `request.jwt.claims`), so
-  both are set. Every test runs in a transaction that is rolled back.
+  The way PostgREST does it, as far as the policies here can tell:
+  `SET LOCAL ROLE authenticated` and the JWT claims as transaction-local
+  settings. Supabase's `auth.uid()` reads `request.jwt.claim.sub` (newer
+  builds read `request.jwt.claims`), so both are set. Every test runs in a
+  transaction that is rolled back. NOT reproduced: `session_user` is
+  postgres rather than PostgREST's authenticator; request method, path and
+  headers are unset; `acting_as("anon")` sets no claims. No replayed policy
+  reads `auth.jwt()`, request metadata or `session_user`, so none of that
+  changes what `auth.uid()` resolves to today — it would if one did.
 
 REFUSES TO RUN against anything that is not loopback. This file writes rows.
 """
 
+import csv
 import os
+import re
 import uuid
 from contextlib import contextmanager
 from urllib.parse import urlparse
@@ -220,18 +227,24 @@ def test_every_public_table_is_either_rls_on_or_unreachable_by_client_roles(db):
     """
     conn, _ = db
     with conn.cursor() as cur:
+        # has_any_column_privilege() is the EFFECTIVE check: it sees table
+        # grants, column grants, grants to PUBLIC and grants inherited through
+        # role membership. role_table_grants sees only direct table grants.
         cur.execute("""
             SELECT c.relname
               FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
              WHERE n.nspname = 'public' AND c.relkind = 'r'
                AND NOT c.relrowsecurity
-               AND EXISTS (SELECT 1 FROM information_schema.role_table_grants g
-                            WHERE g.table_schema = 'public' AND g.table_name = c.relname
-                              AND g.grantee IN ('anon', 'authenticated'))
+               AND (has_any_column_privilege('anon', c.oid,
+                        'SELECT, INSERT, UPDATE, REFERENCES')
+                    OR has_any_column_privilege('authenticated', c.oid,
+                        'SELECT, INSERT, UPDATE, REFERENCES')
+                    OR has_table_privilege('anon', c.oid, 'DELETE, TRUNCATE')
+                    OR has_table_privilege('authenticated', c.oid, 'DELETE, TRUNCATE'))
              ORDER BY 1""")
         exposed = [r[0] for r in cur.fetchall()]
     assert exposed == [], (
-        f"RLS OFF with client-role grants — publicly reachable: {exposed}")
+        f"RLS OFF with client-role privileges — publicly reachable: {exposed}")
 
 
 def test_every_rls_table_reachable_by_authenticated_has_a_policy(db):
@@ -241,15 +254,20 @@ def test_every_rls_table_reachable_by_authenticated_has_a_policy(db):
             SELECT c.relname
               FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
              WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relrowsecurity
-               AND NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid)
-               AND EXISTS (SELECT 1 FROM information_schema.role_table_grants g
-                            WHERE g.table_schema = 'public' AND g.table_name = c.relname
-                              AND g.grantee = 'authenticated')
+               AND NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid
+                                 AND (p.polroles = '{0}'::oid[]
+                                      OR p.polroles && ARRAY(SELECT oid FROM pg_roles
+                                                              WHERE rolname IN ('anon','authenticated'))))
+               AND (has_any_column_privilege('authenticated', c.oid,
+                        'SELECT, INSERT, UPDATE')
+                    OR has_table_privilege('authenticated', c.oid, 'DELETE'))
              ORDER BY 1""")
         silent = [r[0] for r in cur.fetchall()]
-    # RLS on + no policy = deny-all on the client path. Not a leak, but it
-    # means no frontend code can be relying on the table. Listed, not hidden.
-    assert silent == [], f"RLS on, no policy, still granted: {silent}"
+    # RLS on + no policy FOR A CLIENT ROLE = deny-all on the client path. Not
+    # a leak; an outage-in-waiting, since no frontend code can be relying on
+    # the table. Listed rather than hidden. (A policy scoped to some other
+    # role does not count — Codex's point on the first version.)
+    assert silent == [], f"RLS on, no client-role policy, still privileged: {silent}"
 
 
 # The only permissive policies allowed to be unconditionally true for a
@@ -285,6 +303,115 @@ def test_no_tenant_table_has_an_unscoped_permissive_policy(db):
     assert unscoped == ALLOWED_UNSCOPED_POLICIES, (
         f"unexpected unconditional policies: {unscoped - ALLOWED_UNSCOPED_POLICIES}; "
         f"missing expected: {ALLOWED_UNSCOPED_POLICIES - unscoped}")
+    # The allowlist is safe only while those tables carry no tenant column.
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT table_name FROM information_schema.columns
+             WHERE table_schema = 'public' AND column_name = 'business_id'
+               AND table_name = ANY(%s)""",
+                    ([t for t, _ in ALLOWED_UNSCOPED_POLICIES],))
+        tenant_scoped = [r[0] for r in cur.fetchall()]
+    assert tenant_scoped == [], (
+        f"an allowlisted catalogue table now has business_id: {tenant_scoped}")
+
+
+# Policies the July capture had that later migrations DROPPED, by name and
+# by the migration that did it. A July policy absent from the database
+# must be one of these; a July policy present must match its definition.
+DROPPED_SINCE_JULY = {
+    ("businesses", "Members can select their own businesses"):  "030a",
+    ("businesses", "Members can view their business"):          "030a",
+    ("businesses", "Users can view their businesses"):          "030a",
+    ("businesses", "members can read their businesses"):        "030a",
+    ("businesses", "Platform admins can view all businesses"):  "030a",
+    ("businesses", "Platform admins full access to businesses"): "030a",
+    ("stripe_events", "stripe_events_member_access"):           "030a",
+}
+
+
+def _policy_file(path):
+    out = {}
+    with open(path, newline="") as f:
+        for r in csv.DictReader(l for l in f if not l.startswith("#")):
+            out[(r["tablename"], r["policyname"])] = (
+                r["cmd"], r["roles"],
+                None if r["qual"] == "null" else r["qual"],
+                None if r["with_check"] == "null" else r["with_check"])
+    return out
+
+
+def test_every_policy_matches_its_reviewed_definition(db):
+    """The exact approved-policy-definition check.
+
+    Codex's third review showed that "references is_business_member" as a
+    substring is satisfied by `NOT is_business_member(...)` and by
+    `is_business_member(...) OR true`, and that the prune step's match by
+    NAME would let a weaker same-named policy through. So this compares
+    every live policy's COMPLETE definition — command, roles, USING, WITH
+    CHECK, rendered by pg_policies — against the two reviewed files:
+    the 5 July 2026 production capture, and the post-July reference for
+    what 029/031/033 added. A policy that is not byte-identical to one of
+    those, or a reviewed policy that is missing, fails with the diff.
+    """
+    root = os.path.join(os.path.dirname(__file__), "..", "..")
+    approved = _policy_file(os.path.join(root, "audits", "live-policies-2026-07-05.csv"))
+    for key in DROPPED_SINCE_JULY:
+        assert key in approved, f"{key} is listed as dropped but was never in the July capture"
+        del approved[key]
+    approved.update(_policy_file(os.path.join(root, "audits", "BH-003-rls-policies-post-july.csv")))
+
+    conn, _ = db
+    with conn.cursor() as cur:
+        cur.execute("SELECT tablename, policyname, cmd, roles::text, qual, with_check "
+                    "FROM pg_policies WHERE schemaname = 'public'")
+        live = {(t, p): (cmd, roles, q, w) for t, p, cmd, roles, q, w in cur.fetchall()}
+
+    unexpected = {k: live[k] for k in live if k not in approved}
+    missing = {k: approved[k] for k in approved if k not in live}
+    changed = {k: (approved[k], live[k]) for k in live if k in approved and live[k] != approved[k]}
+    assert not (unexpected or missing or changed), (
+        f"\nUNAPPROVED policies present: {sorted(unexpected)}"
+        f"\nAPPROVED policies missing:   {sorted(missing)}"
+        f"\nDEFINITION CHANGED:          {changed}")
+    assert len(live) == len(approved) == 87
+
+
+def test_no_policy_negates_membership_or_short_circuits_to_true(db):
+    """Cheap semantic guard on top of the exact check, so the failure reads
+    as what it is rather than as a definition diff."""
+    conn, _ = db
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT tablename, policyname,
+                   coalesce(qual, '') || ' ' || coalesce(with_check, '')
+              FROM pg_policies WHERE schemaname = 'public'""")
+        bad = [(t, p) for t, p, expr in cur.fetchall()
+               if re.search(r"NOT\s+is_(business_member|platform_admin)|OR\s+true\b|IS NOT NULL\)?\s*$",
+                            expr, re.I)]
+    assert bad == [], f"policies that negate membership or short-circuit: {bad}"
+
+
+def test_business_members_update_grant_is_exactly_the_two_030a_columns(db):
+    """`users_link_self` is a self-scoped UPDATE policy on the membership
+    table. It is safe ONLY together with 030a's column grant: an invitee may
+    write `user_id` and `accepted_at` on their own pending row, and nothing
+    else — never `role`, never `business_id`. Restore a table-wide UPDATE
+    and the policy becomes a cross-tenant pivot while looking unchanged."""
+    conn, _ = db
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT column_name FROM information_schema.column_privileges
+             WHERE table_schema = 'public' AND table_name = 'business_members'
+               AND grantee = 'authenticated' AND privilege_type = 'UPDATE'
+             ORDER BY 1""")
+        cols = [r[0] for r in cur.fetchall()]
+        cur.execute("""
+            SELECT count(*) FROM information_schema.role_table_grants
+             WHERE table_schema = 'public' AND table_name = 'business_members'
+               AND grantee = 'authenticated' AND privilege_type = 'UPDATE'""")
+        table_level = cur.fetchone()[0]
+    assert cols == ["accepted_at", "user_id"], cols
+    assert table_level == 0, "table-level UPDATE on business_members is back"
 
 
 def test_every_policy_on_a_tenant_table_references_the_membership(db):
@@ -339,9 +466,8 @@ def test_no_view_bypasses_the_rls_of_its_base_tables(db):
              WHERE n.nspname = 'public' AND c.relkind IN ('v', 'm')
                AND NOT coalesce('security_invoker=on' = ANY(c.reloptions)
                                 OR 'security_invoker=true' = ANY(c.reloptions), false)
-               AND EXISTS (SELECT 1 FROM information_schema.role_table_grants g
-                            WHERE g.table_schema = 'public' AND g.table_name = c.relname
-                              AND g.grantee IN ('anon', 'authenticated'))
+               AND (has_any_column_privilege('anon', c.oid, 'SELECT')
+                    OR has_any_column_privilege('authenticated', c.oid, 'SELECT'))
              ORDER BY 1""")
         leaky = [r[0] for r in cur.fetchall()]
     assert leaky == [], f"views reachable by client roles that run as their owner: {leaky}"

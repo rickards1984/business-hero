@@ -174,12 +174,36 @@ class TwoTenantDatabase:
                           "A's own transaction", "A-PAYEE", "A-REF", "A-NOTE", now)
 
         # Business B: everything distinctively labelled.
+        # Every B value differs from every A value, INCLUDING amount, account
+        # and colour: Codex's third review copied B's amount onto A's rows and
+        # the suite stayed green, because both tenants were seeded at -100.
+        # A value shared across tenants carries no provenance.
         self.b_category = str(uuid.uuid4())
-        self._category(self.b_category, BUSINESS_B, "B-PRIVATE-CATEGORY", now)
+        self._category(self.b_category, BUSINESS_B, "B-PRIVATE-CATEGORY", now,
+                       color="#BBBBBB")
         self.b_transaction = str(uuid.uuid4())
         self._transaction(self.b_transaction, BUSINESS_B, self.b_category,
                           "B-PRIVATE-TRANSACTION", "B-PRIVATE-PAYEE",
-                          "B-PRIVATE-REFERENCE", "B-PRIVATE-NOTE", now)
+                          "B-PRIVATE-REFERENCE", "B-PRIVATE-NOTE", now,
+                          amount=-777.77, account="B-PRIVATE-ACCOUNT")
+
+        # One income row each, so the caller-controlled `type` filter — a
+        # branch both readers expose and no earlier test took — can be shown
+        # to narrow within the tenant rather than widen across it.
+        self.a_income_category = str(uuid.uuid4())
+        self._category(self.a_income_category, BUSINESS_A, "A Sales", now,
+                       type="income")
+        self.a_income = str(uuid.uuid4())
+        self._transaction(self.a_income, BUSINESS_A, self.a_income_category,
+                          "A's income", "A-CLIENT", "A-INV-1", "A-NOTE-3",
+                          now - timedelta(minutes=2), amount=500.0, type="income")
+        self._category(str(uuid.uuid4()), BUSINESS_B, "B-PRIVATE-INCOME-CAT",
+                       now, type="income", color="#BBBBBB")
+        self._transaction(str(uuid.uuid4()), BUSINESS_B, self.b_category,
+                          "B-PRIVATE-INCOME", "B-PRIVATE-PAYEE",
+                          "B-PRIVATE-REFERENCE", "B-PRIVATE-NOTE", now,
+                          amount=999.99, account="B-PRIVATE-ACCOUNT",
+                          type="income")
 
         # The contaminated row BH-002 could create: A's transaction pointing at
         # B's category. It must render as uncategorised, never as B's name.
@@ -214,32 +238,36 @@ class TwoTenantDatabase:
             self._transaction(str(uuid.uuid4()), BUSINESS_B, self.b_category,
                               "B-PRIVATE-TRANSACTION", "B-PRIVATE-PAYEE",
                               "B-PRIVATE-REFERENCE", "B-PRIVATE-NOTE", stamp,
-                              transaction_date=day)
+                              transaction_date=day, amount=-777.77,
+                              account="B-PRIVATE-ACCOUNT")
         self.session.commit()
         return a_ids
 
-    def _category(self, cid, business_id, name, now):
+    def _category(self, cid, business_id, name, now, type="expense",
+                  color="#000000"):
         self.session.execute(
             text("INSERT INTO accounting_categories "
                  "(id, business_id, name, type, color, icon, is_default,"
                  " created_at) "
-                 "VALUES (:i, :b, :n, 'expense', '#000000', 'tag', 0, :c)"),
-            {"i": cid, "b": business_id, "n": name, "c": now},
+                 "VALUES (:i, :b, :n, :t, :col, 'tag', 0, :c)"),
+            {"i": cid, "b": business_id, "n": name, "t": type, "col": color,
+             "c": now},
         )
 
     def _transaction(self, tid, business_id, category_id, description,
-                     payee, reference, note, now, transaction_date=None):
+                     payee, reference, note, now, transaction_date=None,
+                     amount=-100.0, account="current", type="expense"):
         self.session.execute(
             text("INSERT INTO accounting_transactions "
                  "(id, business_id, category_id, transaction_date, description,"
                  " amount, type, reference, payee_payer, account, notes,"
                  " is_reconciled, is_archived, created_at) "
-                 "VALUES (:i, :b, :c, :d, :desc, -100.0, 'expense', :ref, :pay,"
-                 " 'current', :note, 0, 0, :now)"),
+                 "VALUES (:i, :b, :c, :d, :desc, :amt, :t, :ref, :pay,"
+                 " :acct, :note, 0, 0, :now)"),
             {"i": tid, "b": business_id, "c": category_id,
              "d": transaction_date or date(2026, 9, 1),
-             "desc": description, "ref": reference,
-             "pay": payee, "note": note, "now": now},
+             "desc": description, "amt": amount, "t": type, "ref": reference,
+             "pay": payee, "acct": account, "note": note, "now": now},
         )
 
     def close(self):
@@ -292,7 +320,7 @@ class TestAccountingReadsAreScopedToTheCaller(TenantIsolationCase):
         result = list_transactions_as(self.session, self.caller_a)
         self.assertEqual(
             self._ids(result),
-            {self.db.a_transaction, self.db.a_contaminated},
+            {self.db.a_transaction, self.db.a_contaminated, self.db.a_income},
             "the response did not contain exactly business A's transactions",
         )
 
@@ -301,7 +329,7 @@ class TestAccountingReadsAreScopedToTheCaller(TenantIsolationCase):
         green. A total is an aggregate disclosure: it tells A how much data B
         holds."""
         result = list_transactions_as(self.session, self.caller_a)
-        self.assertEqual(result["total"], 2,
+        self.assertEqual(result["total"], 3,
                          "the total counted rows belonging to another tenant")
 
     def test_transaction_list_still_returns_the_callers_own_rows(self):
@@ -350,9 +378,9 @@ class TestAccountingReadsAreScopedToTheCaller(TenantIsolationCase):
         result = list_categories_as(self.session, self.caller_a)
         assert_no_b_data(result, "GET /accounting/categories")
         self.assertEqual([c["name"] for c in result["categories"]],
-                         ["A Office Costs"],
+                         ["A Office Costs", "A Sales"],
                          "the category list is not exactly business A's")
-        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["count"], 2)
 
     def test_the_transaction_response_is_exactly_as_expected(self):
         """Codex's "single most valuable next addition": the WHOLE response,
@@ -400,8 +428,26 @@ class TestAccountingReadsAreScopedToTheCaller(TenantIsolationCase):
                     "created_at": (stamp - timedelta(minutes=1)).isoformat(),
                     "category": None,
                 },
+                {
+                    "id": self.db.a_income,
+                    "transaction_date": "2026-09-01",
+                    "description": "A's income",
+                    "amount": 500.0,
+                    "type": "income",
+                    "reference": "A-INV-1",
+                    "payee_payer": "A-CLIENT",
+                    "account": "current",
+                    "notes": "A-NOTE-3",
+                    "is_reconciled": False,
+                    "created_at": (stamp - timedelta(minutes=2)).isoformat(),
+                    "category": {
+                        "id": self.db.a_income_category,
+                        "name": "A Sales",
+                        "color": "#000000",
+                    },
+                },
             ],
-            "total": 2,
+            "total": 3,
             "page": 1,
             "per_page": 50,
             "total_pages": 1,
@@ -414,14 +460,54 @@ class TestAccountingReadsAreScopedToTheCaller(TenantIsolationCase):
         second review showed could be swapped for B's without detection."""
         result = list_categories_as(self.session, self.caller_a)
         self.assertEqual(result, {
+            "categories": [
+                {
+                    "id": self.db.a_category,
+                    "name": "A Office Costs",
+                    "type": "expense",
+                    "color": "#000000",
+                    "icon": "tag",
+                    "is_default": False,
+                    "created_at": self.db.now.isoformat(),
+                },
+                {
+                    "id": self.db.a_income_category,
+                    "name": "A Sales",
+                    "type": "income",
+                    "color": "#000000",
+                    "icon": "tag",
+                    "is_default": False,
+                    "created_at": self.db.now.isoformat(),
+                },
+            ],
+            "count": 2,
+        })
+
+    def test_the_type_filter_narrows_within_the_tenant_on_both_readers(self):
+        """Codex's third review removed the tenant predicate ONLY when `type`
+        was supplied, on each reader in turn, and the suite stayed green:
+        no test had taken that branch. B has an income row and an income
+        category, so a type filter that forgot the tenant would admit them.
+        """
+        txns = list_transactions_as(self.session, self.caller_a, type="income")
+        assert_no_b_data(txns, "GET /accounting/transactions?type=income")
+        self.assertEqual([t["id"] for t in txns["transactions"]], [self.db.a_income])
+        self.assertEqual(txns["total"], 1)
+        self.assertEqual(txns["transactions"][0]["amount"], 500.0)
+
+        expenses = list_transactions_as(self.session, self.caller_a, type="expense")
+        assert_no_b_data(expenses, "GET /accounting/transactions?type=expense")
+        self.assertEqual(self._ids(expenses),
+                         {self.db.a_transaction, self.db.a_contaminated})
+        self.assertEqual(expenses["total"], 2)
+
+        cats = list_categories_as(self.session, self.caller_a, type="income")
+        assert_no_b_data(cats, "GET /accounting/categories?type=income")
+        self.assertEqual(cats, {
             "categories": [{
-                "id": self.db.a_category,
-                "name": "A Office Costs",
-                "type": "expense",
-                "color": "#000000",
-                "icon": "tag",
-                "is_default": False,
-                "created_at": self.db.now.isoformat(),
+                "id": self.db.a_income_category, "name": "A Sales",
+                "type": "income", "color": "#000000", "icon": "tag",
+                "is_default": False, "created_at": self.db.now.isoformat(),
             }],
             "count": 1,
         })
@@ -444,7 +530,7 @@ class TestAccountingReadsAreScopedToTheCaller(TenantIsolationCase):
         unreconciled = list_transactions_as(
             self.session, self.caller_a, is_reconciled=False)
         assert_no_b_data(unreconciled, "is_reconciled filter")
-        self.assertEqual(unreconciled["total"], 5)
+        self.assertEqual(unreconciled["total"], 6)
 
         reconciled = list_transactions_as(
             self.session, self.caller_a, is_reconciled=True)
@@ -461,16 +547,16 @@ class TestEveryPageIsScoped(TenantIsolationCase):
     def setUp(self):
         super().setUp()
         self.newer = self.db.add_paging_rows(5)
-        # Newest first: the two 1 Sep rows, then the five paging rows.
+        # Newest first: the three 1 Sep rows, then the five paging rows.
         self.expected_order = [self.db.a_transaction, self.db.a_contaminated,
-                               *self.newer]
+                               self.db.a_income, *self.newer]
 
     def test_walking_every_page_yields_exactly_as_rows_once_each(self):
         limit = 2
         first = list_transactions_as(self.session, self.caller_a,
                                      limit=limit, page=1)
         self.assertEqual(first["total"], len(self.expected_order))
-        self.assertEqual(first["total_pages"], 4)
+        self.assertEqual(first["total_pages"], 4)   # 8 rows, 2 per page
 
         seen = []
         for page in range(1, first["total_pages"] + 1):
@@ -481,6 +567,11 @@ class TestEveryPageIsScoped(TenantIsolationCase):
             self.assertEqual(result["offset"], (page - 1) * limit)
             self.assertEqual(result["total"], len(self.expected_order),
                              f"the total changed on page {page}")
+            # Codex: total_pages=999 ONLY after page one survived. Every
+            # piece of metadata is asserted on every page, not just the first.
+            self.assertEqual(result["total_pages"], 4, f"total_pages moved on page {page}")
+            self.assertEqual(result["per_page"], limit)
+            self.assertEqual(result["limit"], limit)
             seen.extend(t["id"] for t in result["transactions"])
 
         self.assertEqual(seen, self.expected_order,
@@ -501,6 +592,7 @@ class TestEveryPageIsScoped(TenantIsolationCase):
         self.assertEqual([t["id"] for t in result["transactions"]],
                          self.expected_order[3:6])
         self.assertEqual(result["offset"], 3)
+        self.assertEqual(result["total_pages"], 3)   # 8 rows, 3 per page
 
     def test_the_reverse_direction_holds_too(self):
         """B calling must see only B. Isolation is not a property of A."""
@@ -508,15 +600,16 @@ class TestEveryPageIsScoped(TenantIsolationCase):
         b_ids = {row[0] for row in self.session.execute(text(
             "SELECT id FROM accounting_transactions WHERE business_id = :b"),
             {"b": BUSINESS_B}).fetchall()}
-        self.assertEqual(len(b_ids), 6)
+        self.assertEqual(len(b_ids), 7)
 
         seen = set()
-        for page in (1, 2, 3):
+        for page in (1, 2, 3, 4):
             result = list_transactions_as(self.session, caller_b,
                                           limit=2, page=page)
             blob = repr(result)
             for a_marker in ("A's own transaction", "A page row", "A-PAYEE",
-                             "A Office Costs", BUSINESS_A):
+                             "A Office Costs", "A Sales", "A's income",
+                             BUSINESS_A):
                 self.assertNotIn(a_marker, blob,
                                  f"business A's {a_marker!r} reached B")
             seen.update(t["id"] for t in result["transactions"])
@@ -593,17 +686,17 @@ UNCOVERED = {
         "coverage gap rather than an injection concern — an earlier draft of "
         "this note said 'interpolates', which was wrong and alarmist."
     ),
-    "partial-field provenance": (
-        "The second review's surviving mutations — category id swapped for "
-        "B's (list and nested), B's transaction id as response metadata, a "
-        "duplicated row, reversed ordering, total_pages=999, offset ignored, "
-        "and the tenant restriction removed only beyond page one — are now "
-        "targeted by exact full-response assertions and a page walk. They "
-        "are CLAIMED closed by construction, and Codex's third review is the "
-        "confirmation, not this sentence. What remains: both tenants still "
-        "share amounts, account names and colours in the fixture, so a row "
-        "carrying only those fields has no provenance and a mutation that "
-        "copied B's `amount` onto A's row would pass."
+    "the search filter, and any filter branch not listed here": (
+        "Codex's third review confirmed the second review's eight surviving "
+        "mutations closed, then found three more: the tenant restriction "
+        "removed only when `type` is supplied (each reader), B's amount "
+        "copied onto A's rows, and total_pages=999 only after page one. All "
+        "three are now targeted — a type-filter test on both readers, "
+        "tenant-distinct amounts, accounts and colours in the fixture, and "
+        "every metadata field asserted on every page. What is still NOT "
+        "exercised: `search` (ILIKE; SQLite rejects it), and the combination "
+        "of filters. A tenant predicate dropped only when two filters are "
+        "supplied together would survive."
     ),
     "HTTP, authentication and serialisation": (
         "The caller tuple is injected directly, so FastAPI parsing, "

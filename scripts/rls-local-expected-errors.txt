@@ -1,0 +1,19 @@
+# Expected errors when scripts/rls-local.sh replays the migrations onto a
+# fresh Supabase image. One line per (replay index, file, message): the
+# replay FAILS if any (index, message) pair occurs a different number of
+# times, or if any error not listed here appears. Reviewed 18 Sep 2026.
+#
+# index | count | file | message (regex, anchored) | why it is expected
+1  | 111 | supabase/migrations/028_baseline_live_state.sql | relation "public\.[a-z_]+" does not exist | pass 1 runs before the historical files create these tables; pass 2 (index 32) re-asserts every policy once they exist
+1  | 1   | supabase/migrations/028_baseline_live_state.sql | relation "realtime\.subscription" does not exist | the image has no realtime schema; a dumped trigger on it
+3  | 2   | backend/migrations/002_create_rls_policies.sql | cannot change name of input parameter "p_user_id" | 002 re-declares is_platform_admin/is_business_member with a different parameter name than 028's (the live one); 028's wins, which is what production has
+5  | 4   | backend/migrations/004_storage_rls_policies.sql | relation "storage\.objects" does not exist | storage schema is not in the bare image; storage policies are out of scope here
+8  | 1   | backend/migrations/007_email_accounts_messages.sql | column "email_account_id" does not exist | an index on a column that 006's version of email_outbox lacks; 028 carries the live shape
+8  | 1   | backend/migrations/007_email_accounts_messages.sql | relation "email_outbox" already exists | 006 created it first
+8  | 2   | backend/migrations/007_email_accounts_messages.sql | relation "idx_email_outbox_[a-z_]+" already exists | same
+8  | 6   | backend/migrations/007_email_accounts_messages.sql | syntax error at or near "," | CREATE POLICY ... FOR INSERT, UPDATE, DELETE is not valid Postgres (one command per policy); these six policies never existed anywhere
+9  | 2   | backend/migrations/008_calendar_events.sql | syntax error at or near "," | same invalid multi-command CREATE POLICY
+15 | 4   | supabase/migrations/011_calls_archived.sql | relation "calls" does not exist | calls is created by 028 pass 2 (its pass-1 CREATE fails on an FK); 028 already carries 011's columns
+20 | 4   | supabase/migrations/016_receptionist_tables.sql | relation "calls" does not exist | same
+28 | 2   | supabase/migrations/024_background_sync.sql | relation "email_sync_state" does not exist | the singular table was dropped in prod (029 header); 028 carries the plural one
+32 | 1   | supabase/migrations/028_baseline_live_state.sql | relation "realtime\.subscription" does not exist | pass 2, same realtime trigger

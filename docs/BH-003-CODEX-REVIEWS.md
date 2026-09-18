@@ -1,16 +1,23 @@
 # BH-003 — Codex reviews (ORIGINAL, UNEDITED)
 
-Two passes, both mutation-driven. Nothing edited or softened.
+Three passes, all mutation-driven. Nothing edited or softened.
 
-| | Review 1 | Re-review |
-|---|---|---|
-| Commit | `dd0574a` | `ca8df9a` |
-| Session | `01a0928b-5361-7dc1-9236-94a8aabcada1` | `01a09292-8100-77b1-8685-e5e45ca2afc8` |
-| Tokens reported | 30,609 | 40,417 |
-| Verdict | REQUEST-CHANGES | REQUEST-CHANGES |
+| | Review 1 | Re-review | Review 3 |
+|---|---|---|---|
+| Commit | `dd0574a` | `ca8df9a` | `d31a4a3` |
+| Session | `01a0928b-5361-7dc1-9236-94a8aabcada1` | `01a09292-8100-77b1-8685-e5e45ca2afc8` | `01a0b62d-d06d-73d3-8303-c765c78d868c` |
+| Tokens reported | 30,609 | 40,417 | 127,691 |
+| Verdict | REQUEST-CHANGES | REQUEST-CHANGES | REQUEST-CHANGES — 4 items, all taken |
 
-Reviewer: Codex CLI 0.153.4, `gpt-6-astra`, ChatGPT auth, sandboxed to the
-worktree, no network, no database. Both declined `./check.sh full`.
+Reviewer: Codex CLI 0.153.4, ChatGPT auth, sandboxed to the worktree, no
+network. Reviews 1–2 on `gpt-6-astra`; review 3 on `gpt-5.6-sol` (the CLI's
+default had moved). All declined `./check.sh full`. Review 3 was given
+`--sandbox workspace-write` so it could mutation-test `accounting.py`; it
+restored the file by reverse patch (the sandbox could not write the linked
+worktree's `.git/index.lock`) and `git status` was clean afterwards. Its
+sandbox could not open loopback TCP, so it could not run the RLS suite
+against the container; its findings on that file are from reading it, and
+the builder's re-run of its five proposed policy mutations is in the PR.
 
 **The re-review's mutation table is the most important thing here.**
 It is the honest measure of what this harness detects.
@@ -163,3 +170,137 @@ Partial-field disclosure remains possible beyond IDs: tenants share fixture valu
 **Single most valuable next addition:** Add an exact full-response assertion using tenant-distinct field values, including category IDs and response metadata.
 
 **What green now justifies:** “For the seeded SQLite fixture and directly injected A caller, the tested first-page transaction calls return the expected transaction-ID sets and totals, suppress the contaminated category, preserve A’s category name, and return the expected category name/count without the configured B markers.”
+
+---
+
+## REVIEW 3 — d31a4a3
+
+The eight claimed backend mutations are now detected. However, additional branch-specific tenant leaks survive, and the RLS structural checks admit unsafe states. I recommend changes before approval.
+
+## A. Backend mutation results
+
+Control run: **17 passed**.
+
+| Mutation | Result |
+|---|---:|
+| Category-list ID replaced with B’s category ID | Detected — **1 failure** |
+| Nested transaction category ID replaced with B’s category ID | Detected — **3 failures** |
+| B transaction ID added as response metadata | Detected — **2 failures** |
+| Duplicate returned transaction | Detected — **4 failures** |
+| Reverse transaction ordering | Detected — **4 failures** |
+| `total_pages=999` | Detected — **3 failures** |
+| Ignore requested offset | Detected — **3 failures** |
+| Remove transaction tenant restriction only beyond page one | Detected — **2 failures** |
+
+The builder’s stated claim is accurate.
+
+Additional mutations:
+
+| Additional mutation | Result |
+|---|---:|
+| `total_pages=999` only after page one | **Survives — 17 passed** |
+| Remove transaction tenant restriction only when `type` is supplied | **Survives — 17 passed** |
+| Remove category tenant restriction only when `type` is supplied | **Survives — 17 passed** |
+| Copy B’s amount onto every returned A transaction | **Survives — 17 passed** |
+
+The type-filter escapes are material: both endpoints expose a caller-controlled `type` branch, but no test invokes it. The current `UNCOVERED` registry discusses search and partial-field provenance, but does not disclose the untested type branches.
+
+The amount mutation confirms the acknowledged fixture-provenance limitation at [test_tenant_isolation_backend_path.py:596](/Users/michaelrickards/dev/bh2-BH-003-isolation/backend/tests/test_tenant_isolation_backend_path.py:596): both tenants use `-100.0`, so the exact-response assertion cannot identify whose amount was returned.
+
+`accounting.py` was restored byte-for-byte to `HEAD`; `cmp` returned zero, final targeted pytest was **17 passed**, and final `git status --short` was empty. The requested `git checkout -- backend/accounting.py` was attempted, but the sandbox could not write the linked worktree’s external `.git/index.lock`; I restored every mutation with exact reverse patches instead.
+
+## B. RLS review
+
+### 1. Impersonation
+
+[acting_as at lines 157–174](/Users/michaelrickards/dev/bh2-BH-003-isolation/backend/tests/test_tenant_isolation_rls_path.py:157) is sufficient for the policies presently replayed:
+
+- `SET LOCAL ROLE authenticated` gives the correct `current_user`.
+- Both legacy individual claims and the JSON `request.jwt.claims` value are set transaction-locally.
+- Consequently, `auth.uid()` and `auth.email()` should resolve as they do through PostgREST for these fixed inputs.
+
+“Exactly as PostgREST does it” is slightly overstated:
+
+- The connection’s `session_user` remains `postgres`, rather than PostgREST’s authenticator role.
+- The harness does not set the full PostgREST request environment: method, path, headers, cookies, or the complete JWT claim set.
+- `acting_as("anon")` sets no JSON role claim, whereas PostgREST supplies claims for an anonymous request.
+
+None of the currently replayed policies uses `auth.jwt()`, request metadata, or `session_user`, so these differences should not change `auth.uid()` today. They remain an equivalence limitation worth stating.
+
+### 2. Structural invariants
+
+The current invariants are not all strong enough.
+
+- **RLS-or-unreachable**, [lines 213–234](/Users/michaelrickards/dev/bh2-BH-003-isolation/backend/tests/test_tenant_isolation_rls_path.py:213), considers only direct table grants reported by `role_table_grants`. It can miss access through `PUBLIC`, inherited roles, and column-level privileges. The view check at lines 325–347 has the same direct-grant limitation.
+
+- **Policy-exists**, [lines 237–252](/Users/michaelrickards/dev/bh2-BH-003-isolation/backend/tests/test_tenant_isolation_rls_path.py:237), counts any policy. It does not require the policy to apply to `authenticated` or to any command the role may execute. Conversely, RLS with no policy is secure deny-all, so the test can also produce a functional false red.
+
+- **No unscoped permissive policy**, [lines 265–287](/Users/michaelrickards/dev/bh2-BH-003-isolation/backend/tests/test_tenant_isolation_rls_path.py:265), recognizes only an expression rendered exactly as `true`. Semantically unconditional expressions such as `is_business_member(...) OR business_id IS NOT NULL` evade it.
+
+- **Every policy references membership**, [lines 290–322](/Users/michaelrickards/dev/bh2-BH-003-isolation/backend/tests/test_tenant_isolation_rls_path.py:290), is only a substring check. `NOT is_business_member(...)`, or `is_business_member(...) OR true`, passes. The latter also evades the exact-`true` invariant.
+
+The three `ALLOWED_UNSCOPED_POLICIES` are justified by migration 029’s declared product design: accounting providers and plan definitions are public catalogues, while automation templates are authenticated-user catalogues. But the allowlist remains safe only while those tables remain non-tenant catalogues. The test does not verify that condition.
+
+`users_view_own` is a justified self-scoped exception. `users_link_self` is justified only together with 030a’s exact two-column UPDATE grant. The RLS suite does not assert that grant remains limited to `user_id` and `accepted_at`; restoring table-wide UPDATE would reopen the documented cross-tenant membership pivot while the structural test stayed green.
+
+Expected policy mutations:
+
+| Policy mutation | Assertion that should catch it |
+|---|---|
+| Grant an RLS-off table’s sensitive column to `PUBLIC` | RLS-or-unreachable |
+| Add `FOR INSERT WITH CHECK (is_business_member(...) OR true)` | Unscoped-policy invariant |
+| Change a member policy to `NOT is_business_member(...)` | Exact approved-policy-definition check |
+| Restore table-wide UPDATE on `business_members` | Exact column-grant invariant |
+| Make an allowed catalogue tenant-scoped while retaining `USING(true)` | Catalogue allowlist invariant |
+
+### 3. Entitlement xfails
+
+The required normal and `--runxfail` commands could not connect because this execution sandbox rejects loopback TCP with `Operation not permitted`.
+
+- Normal run: **24 setup errors, 4 xfailed**.
+- `--runxfail --tb=short`: **28 setup errors**.
+
+That also demonstrates why `--runxfail` is necessary: ordinary strict-xfail reporting classified the four connection failures as xfails, even though they never reached the entitlement assertion.
+
+Static inspection indicates all four should reach and fail [the `rowcount == 0` assertion at lines 516–525](/Users/michaelrickards/dev/bh2-BH-003-isolation/backend/tests/test_tenant_isolation_rls_path.py:516): migration 033 grants all four columns, `biz_update_if_owner` permits the seeded owner, and the supplied values are valid. Runtime confirmation remains unverified in this sandbox. Read-only `docker exec` was also blocked because the Docker socket is outside the permitted filesystem.
+
+### 4. Replay analysis
+
+The intended high-level order in [rls-local.sh:48](/Users/michaelrickards/dev/bh2-BH-003-isolation/scripts/rls-local.sh:48) is defensible for this unusual history: bootstrap ORM-created tables with 028, replay both migration families, reassert the July baseline, then apply 029 and the runbook migrations.
+
+The principal false-green risk is [the global expected-error regex at line 90](/Users/michaelrickards/dev/bh2-BH-003-isolation/scripts/rls-local.sh:90):
+
+- Expected errors are matched by message alone, not by migration and expected occurrence count.
+- `syntax error at or near ","` is especially broad.
+- A matching error in an unrelated security statement could be accepted.
+- Because replay uses `ON_ERROR_STOP=0` without per-file transactions, the file continues after the error, leaving a partially applied migration.
+- Depending on whether the failed statement was an RLS enable, revoke, policy replacement, or grant, this can create either a more-permissive false green or a less-permissive false red.
+
+The ghost-policy prune at [lines 168–208](/Users/michaelrickards/dev/bh2-BH-003-isolation/scripts/rls-local.sh:168) compares only `table|policy-name`. It does not compare command, roles, permissiveness, `USING`, or `WITH CHECK`. A weaker same-named policy can therefore survive as “allowed.” Conversely, a legitimate policy missed by the regex or absent from the selected source set is dropped, generally making the replay less permissive and producing false confidence.
+
+The 031/032 cleanup at [lines 154–166](/Users/michaelrickards/dev/bh2-BH-003-isolation/scripts/rls-local.sh:154) deliberately makes the database less permissive than the literal migration files, but it matches the cited runbook completion steps and recorded September schema. That is reasonable, provided the output continues to describe this as reconstructed runbook state rather than raw migration state.
+
+### 5. What green does not prove
+
+A green RLS run does not prove:
+
+- Current production or staging schema, grants, policies, views, or migration application.
+- That migration 029 was actually applied in production.
+- PostgREST HTTP/JWT validation, role switching, query translation, or response serialization.
+- Isolation for tables other than the five behaviorally seeded resources.
+- Every operation on those tables; only selected reads, inserts, updates, and deletes are exercised.
+- Pending-invite safety, exact `business_members` column grants, inactive-member behavior, multi-business memberships, or role changes.
+- Platform-admin, service-role, SECURITY DEFINER, RPC/function, storage, or auth-schema paths.
+- Tenant safety of parent-scoped tables lacking a direct `business_id`.
+- Production-only views absent from the replay.
+- Backend application isolation; that remains the SQLite endpoint suite’s separate concern.
+- Protection from semantically unsafe policies that merely contain one of the accepted membership substrings.
+
+I did not run `./check.sh`, as requested.
+
+VERDICT: **REQUEST-CHANGES**
+
+1. Add mutation-sensitive `type`-filter tests for both transaction and category readers, and update `UNCOVERED` for any intentionally untested filter branches and later-page metadata.
+2. Strengthen the structural checks to include effective `PUBLIC`/inherited/column privileges and reject semantically unsafe policy expressions; add an exact `business_members` UPDATE-column invariant before allowing `users_link_self`.
+3. Scope each replay-expected error to a specific migration and expected count, and fail on unexpected partial application.
+4. Compare allowed ghost policies by complete policy definition—not only table and policy name—so a weaker same-named policy cannot produce a false green.

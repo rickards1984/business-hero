@@ -85,10 +85,6 @@ ORDER=(
   backend/migrations/033_entitlement.sql
 )
 
-# Every error the replay is known to raise on a fresh Supabase image, as a
-# regex matched against the ERROR line. Anything else fails the replay.
-REPLAY_EXPECTED_ERRORS='relation "storage\.objects" does not exist|relation "realtime\.subscription" does not exist|cannot change name of input parameter "p_user_id"|relation "email_outbox" already exists|relation "idx_email_outbox_[a-z_]*" already exists|column "email_account_id" does not exist|syntax error at or near ","|relation "calls" does not exist|relation "email_sync_state" does not exist|relation "public\.calls" does not exist'
-
 psql_in() { docker exec -i "$CONTAINER" psql -U postgres -v ON_ERROR_STOP=0 -q "$@"; }
 psql_c()  { docker exec "$CONTAINER" psql -U postgres -At -c "$1"; }
 
@@ -135,19 +131,43 @@ replay() {
     fi
     printf '%s\n' "$out" | grep '^ERROR' | sed "s|^|$i $f: |" >> "$log" || true
   done
-  # Pass 1 of 028 (index 1) runs before every table exists; its "relation
-  # does not exist" errors are the reason for the second pass and are
-  # tolerated THERE ONLY. On every other file that error is a real failure.
-  if grep -vE "$REPLAY_EXPECTED_ERRORS" "$log" \
-       | grep -vE '^1 supabase/migrations/028_[^:]*: ERROR:  relation "public\.[a-z_]+" does not exist$' \
-       | grep -q .; then
-    echo "UNEXPECTED replay errors (not in REPLAY_EXPECTED_ERRORS):" >&2
-    grep -vE "$REPLAY_EXPECTED_ERRORS" "$log" \
-      | grep -vE '^1 supabase/migrations/028_[^:]*: ERROR:  relation "public\.[a-z_]+" does not exist$' >&2
-    unexpected=1
-  fi
-  printf 'replay done: %s error lines, all expected=%s\n' \
-    "$(wc -l < "$log" | tr -d ' ')" "$([ $unexpected = 0 ] && echo yes || echo NO)"
+  # Every error must be in scripts/rls-local-expected-errors.txt, matched by
+  # replay index AND message AND exact count. A tolerated message appearing
+  # once more than expected, or in a different file, fails the replay —
+  # because the files run with ON_ERROR_STOP=0 and a stray failure in a
+  # GRANT, REVOKE, ENABLE ROW LEVEL SECURITY or CREATE POLICY would leave a
+  # database quietly more (or less) permissive than the migrations say.
+  if ! .venv/bin/python - "$log" scripts/rls-local-expected-errors.txt <<'PY'
+import re, sys
+from collections import Counter
+log, manifest = sys.argv[1:3]
+expected = {}
+for line in open(manifest):
+    if not line.strip() or line.startswith("#"): continue
+    idx, count, path, pattern, _why = [x.strip() for x in line.split("|", 4)]
+    expected[(int(idx), path, pattern)] = int(count)
+seen = Counter()
+unmatched = []
+for line in open(log):
+    m = re.match(r"^(\d+) (\S+): ERROR:  (.*)$", line.rstrip("\n"))
+    if not m: unmatched.append(line.rstrip()); continue
+    idx, path, msg = int(m.group(1)), m.group(2), m.group(3)
+    for (eidx, epath, pat) in expected:
+        if eidx == idx and epath == path and re.fullmatch(pat, msg):
+            seen[(eidx, epath, pat)] += 1; break
+    else:
+        unmatched.append(line.rstrip())
+bad = False
+for key, n in expected.items():
+    if seen[key] != n:
+        print(f"replay: expected {n} x [{key[0]} {key[1]}: {key[2]}], saw {seen[key]}", file=sys.stderr); bad = True
+for u in unmatched:
+    print(f"replay: UNEXPECTED: {u}", file=sys.stderr); bad = True
+print(f"replay: {sum(seen.values())} error lines, every one expected, every count exact"
+      if not bad else "replay: FAILED manifest check")
+sys.exit(1 if bad else 0)
+PY
+  then unexpected=1; fi
   [ $unexpected = 0 ] && prune_ghost_policies && apply_runbook_cleanups
 }
 
@@ -175,7 +195,11 @@ apply_runbook_cleanups() {
 # table holding accounting OAuth tokens, and RLS tests against that would be
 # testing a database production never was. The allowlist is: every policy
 # in the July export, plus every CREATE POLICY in 029 and the runbook-driven
-# 030a–033. Anything else is dropped, and listed.
+# 030a–033. Anything else is dropped, and listed. This step matches by
+# (table, name) only; test_every_policy_matches_its_reviewed_definition in
+# the RLS suite then compares every surviving policy's FULL definition
+# (command, roles, USING, WITH CHECK) against the July capture and the
+# reviewed post-July reference, so a weaker same-named policy cannot pass.
 prune_ghost_policies() {
   local allow ghosts
   allow="$(.venv/bin/python - <<'PY'
