@@ -21,8 +21,10 @@
 --       .update({ plan_tier: 'business', feature_flags: {...} })
 --       .eq('id', myBusinessId)
 --
---   backend/tests/test_tenant_isolation_rls_path.py encodes exactly that
---   as four xfail(strict) tests; this migration is what makes them pass.
+--   backend/tests/test_tenant_isolation_rls_path.py (PR #9, branch
+--   ticket/BH-003-tenant-isolation-harness — not on main at the time of
+--   writing) encodes exactly that as four xfail(strict) tests; this
+--   migration is what makes them pass.
 --
 -- EVIDENCE THIS IS BUILT ON (gathered 18 Sep 2026)
 --   * Frontend supabase-js writes: business_members (3 sites),
@@ -54,7 +56,8 @@
 --   are automatically revoked on each column of the table, as well").
 --   VERIFY 1b checks column_privileges directly rather than trusting it.
 --
--- SECTION 2 IS SEPARATE AND OPTIONAL. Mike's instruction named INSERT
+-- SECTION 2 IS SEPARATE, OPTIONAL, AND NOT TO BE APPLIED WITHOUT MIKE'S
+--   EXPLICIT APPROVAL OF THAT STEP. Mike's instruction named INSERT
 --   and UPDATE. The spec's own VERIFY expects authenticated to hold
 --   SELECT and TRIGGER ONLY, which also means DELETE, TRUNCATE and
 --   REFERENCES go. No client path uses any of them (no DELETE policy

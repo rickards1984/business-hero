@@ -213,3 +213,18 @@ target: ('postgres', '2a05:d018:a0:6000:335:8640:4823:1dd3') project gzcrsrqmygu
 
 REHEARSAL COMPLETE
 ```
+
+## Addendum, 19 Sep 2026 — after Codex review 1
+
+Codex asked for the post-apply role check to cover all five entitlement
+columns, and for the live pre-checks (0d/0e/0f). Staging is in the
+final state above (Section 1 applied). Run verbatim:
+
+```
+0d (post-apply): (0, 0, 0, 28) -> PASS (0 | 0 | 0 | 28; pre-state on the local replay is 26 | 28 | 0 | 28)
+0e: [] -> PASS (0 rows)
+0f: [] -> PASS (0 rows)
+1d is_active: permission denied for table businesses -> PASS
+1d "limits": permission denied for table businesses -> PASS
+1d subscription_status: permission denied for table businesses -> PASS
+```

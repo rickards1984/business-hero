@@ -20,6 +20,15 @@ browser with the anon key.
 the backend (connects as the table owner; owner privilege is not a grant),
 `business_members`, any data.
 
+**Depends on PR #9 (BH-003, branch `ticket/BH-003-tenant-isolation-harness`)
+for STEP 10 only.** `backend/tests/test_tenant_isolation_rls_path.py` and
+`scripts/rls-local.sh` live there, not on `main` yet. STEPS 0–9 need
+neither. If #9 has not merged when this runs, STEP 10's marker removal
+happens on #9's branch instead.
+
+**SECTION 2 (STEP 8) is not part of the instruction for Release 2 and must
+not be applied without Mike's explicit, separate approval of that step.**
+
 ---
 
 ## Before you start
@@ -107,12 +116,74 @@ SELECT polname, polcmd, polpermissive,
   file restores the 26-column list, **not** the table-level grant, so the
   rollback would be wrong. Stop and report; the rollback needs rewriting
   before continuing.
-- **0b shows more than 26 UPDATE columns**, or lists
-  `metered_usage_enabled` / `monthly_spend_cap_gbp`. Same reason.
+- **0b shows any UPDATE column set other than exactly the 26 named** —
+  more, fewer, or different columns, or either of `metered_usage_enabled`
+  / `monthly_spend_cap_gbp`. The rollback restores that exact list;
+  anything else and it restores the wrong state.
 - **0c does not show exactly those three policies.** Something has been
   changed in the dashboard since 030a. Report before continuing; the
   runbook drops one policy by name and must not be run against an
   unknown set.
+
+Then three more, still read-only. These look past the direct grants at
+what the client roles can **effectively** reach — through `PUBLIC`,
+through role inheritance, through a function or a view — because the
+repository is not evidence of live state and a route added in the
+dashboard would not be in any file. **Save these outputs too.**
+
+```sql
+-- 0d: EFFECTIVE column privileges (has_column_privilege sees PUBLIC,
+--     inherited and column grants alike)
+SELECT count(*) FILTER (WHERE has_column_privilege('authenticated','public.businesses',column_name,'UPDATE')) AS auth_update_cols,
+       count(*) FILTER (WHERE has_column_privilege('authenticated','public.businesses',column_name,'INSERT')) AS auth_insert_cols,
+       count(*) FILTER (WHERE has_column_privilege('anon','public.businesses',column_name,'INSERT')
+                           OR has_column_privilege('anon','public.businesses',column_name,'UPDATE')) AS anon_write_cols,
+       count(*) AS total_cols
+  FROM information_schema.columns
+ WHERE table_schema='public' AND table_name='businesses';
+
+-- 0e: SECURITY DEFINER functions a client role can call whose body
+--     mentions businesses (these run as their owner and ignore grants)
+SELECT n.nspname||'.'||p.proname AS func, pg_get_userbyid(p.proowner) AS owner
+  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+ WHERE p.prosecdef AND p.prosrc ILIKE '%businesses%'
+   AND (has_function_privilege('authenticated', p.oid, 'EXECUTE')
+        OR has_function_privilege('anon', p.oid, 'EXECUTE'))
+ ORDER BY 1;
+
+-- 0f: views over businesses that a client role can read or write
+SELECT DISTINCT v.relname, v.relkind, pg_get_userbyid(v.relowner) AS owner,
+       coalesce(array_to_string(v.reloptions, ','), '-') AS options
+  FROM pg_depend d
+  JOIN pg_rewrite r ON r.oid = d.objid
+  JOIN pg_class v   ON v.oid = r.ev_class
+ WHERE d.refobjid = 'public.businesses'::regclass
+   AND v.relkind IN ('v','m') AND v.oid <> d.refobjid
+   AND (has_any_column_privilege('authenticated', v.oid, 'SELECT, INSERT, UPDATE')
+        OR has_any_column_privilege('anon', v.oid, 'SELECT'))
+ ORDER BY 1;
+```
+
+**EXPECT:**
+- **0d:** `26 | 28 | 0 | 28`. (Local replay and staging pre-state, 18 Sep
+  2026.) 26 = the column list; 28 = table-level INSERT reported per
+  column; anon writes nothing.
+- **0e:** `0 rows`. (Staging: the only client-callable SECURITY DEFINER
+  function is `public.whoami`, which does not mention `businesses`.)
+- **0f:** `0 rows`. (Staging: two views exist in `public` —
+  `receptionist_call_stats`, `support_stats` — neither depends on
+  `businesses`. They are a separate finding for BH-001, not this runbook.)
+
+**STOP IF:**
+- **0d's first number is not 26, or `anon_write_cols` is not 0.** An
+  effective privilege exists that 0b did not show — `PUBLIC` or an
+  inherited role. The REVOKE in STEP 5 targets `authenticated` only and
+  would not remove it. Report the output; do not continue.
+- **0e returns any row.** A function the browser can call writes or reads
+  `businesses` as its owner. The revoke does not reach it. Report.
+- **0f returns any row.** A view over `businesses` that a client role can
+  use, running as its owner unless `options` says `security_invoker=on`.
+  Report.
 
 ---
 
@@ -153,20 +224,41 @@ the backend's write path.
 ## STEP 3 — Pre-flight: nothing on the client path still writes the table
 
 This is the Release 1 gate, checked from the repository, not from memory.
-Run in a terminal on `main`:
+Four checks, run in a terminal on `main`. The first is the direct one; the
+other three are the routes a write could take that a four-line grep would
+not see — a chain split over more lines, an RPC, a raw REST URL, a table
+name that is not a literal.
 
 ```bash
-grep -rn -B4 "\.\(insert\|update\|upsert\|delete\)(" frontend/client/src \
-  --include='*.tsx' --include='*.ts' | grep "from('businesses')"
+FE=frontend/client/src
+
+# 3a: every from('businesses') chain, up to 12 lines, containing a write
+grep -rn -A12 "from('businesses')" $FE --include='*.ts' --include='*.tsx' \
+  | grep -E "\.(insert|update|upsert|delete)\("
+
+# 3b: every RPC call — each must be read and judged; expect only whoami
+grep -rn "\.rpc(" $FE --include='*.ts' --include='*.tsx'
+
+# 3c: raw PostgREST URLs to the table
+grep -rn "rest/v1/businesses" $FE
+
+# 3d: .from() with anything other than a string literal
+grep -rnE "\.from\(\s*[^'\"\`)]" $FE --include='*.ts' --include='*.tsx' \
+  | grep -v "Array.from\|Uint8Array.from\|Buffer.from"
 ```
 
-**EXPECT:** no output. (18 Sep 2026: the only supabase-js writes are to
+**EXPECT:** 3a, 3c, 3d: no output. 3b: exactly one line,
+`components/DebugPanel.tsx` calling `rpc('whoami')` — a read-only identity
+function (`028_baseline_live_state.sql:460`). (18 Sep 2026, confirmed
+independently by Codex: the only supabase-js writes are to
 `business_members`, `support_tickets` and `tasks`; all four
 `from('businesses')` calls are `.select()`.)
 
-**STOP IF:** any line. A browser write to `businesses` survives; Release 2
-would break it with `permission denied` inside a `catch`. That is Release 1
-work, not this runbook.
+**STOP IF:** any output from 3a, 3c or 3d, or any RPC in 3b other than
+`whoami`. A browser route to `businesses` survives; Release 2 would break
+it with `permission denied` inside a `catch`. That is Release 1 work, not
+this runbook. Note this checks the repository; STEP 0's 0e/0f check the
+live database for routes no file records.
 
 ---
 
@@ -248,9 +340,46 @@ SELECT polname, polcmd FROM pg_policy
 is open. Or 1a still lists INSERT or UPDATE. Or 1c still lists
 `biz_update_if_owner`, or lists fewer than two policies (the SELECT policy
 must survive or every customer loses their business row on the next page
-load). Run `ROLLBACK 1` from the migration file, as one paste, then re-run
-this step and confirm STEP 0's numbers are back (UPDATE 26, INSERT 28,
-three policies).
+load). **Run ROLLBACK 1 (below), then re-run STEP 0's queries — not this
+step's — and confirm they match the saved STEP 0 output exactly:** 0a
+`authenticated` back to `DELETE, INSERT, REFERENCES, SELECT, TRIGGER,
+TRUNCATE`; 0b UPDATE 26 and INSERT 28; 0c three policies with the
+`biz_update_if_owner` expressions as saved; 0d `26 | 28 | 0 | 28`. Then
+report.
+
+### ROLLBACK 1 — executable, one paste
+
+This is the same SQL as the commented block in the migration file, here
+uncommented so it can be pasted. It restores the exact pre-state: the
+26-column UPDATE list from 033 SECTION 5, table-level INSERT, and the
+policy verbatim from 028 line 597. Executed on staging three times on
+18 Sep 2026; the before-snapshot came back byte-identical each time,
+policy expressions included.
+
+```sql
+GRANT INSERT ON public.businesses TO authenticated;
+GRANT UPDATE (
+  id, name, timezone, api_key, created_at, logo_url, plan_tier, is_active,
+  trial_ends_at, feature_flags, limits, stripe_customer_id,
+  stripe_subscription_id, subscription_status, current_period_end,
+  cancel_at_period_end, last_stripe_event_at, onboarding_completed,
+  onboarding_completed_at, onboarded_by, brand_color, owner_whatsapp,
+  ceo_briefing_enabled, region, tax_registered, tax_number
+) ON public.businesses TO authenticated;
+CREATE POLICY biz_update_if_owner ON public.businesses FOR UPDATE
+  TO authenticated
+  USING ((EXISTS ( SELECT 1 FROM public.business_members bm
+           WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid())
+             AND (bm.role = 'owner'::text) AND (bm.is_active = true)))))
+  WITH CHECK ((EXISTS ( SELECT 1 FROM public.business_members bm
+           WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid())
+             AND (bm.role = 'owner'::text) AND (bm.is_active = true)))));
+```
+
+**EXPECT:** `Success. No rows returned.` The GRANTs run before the CREATE
+POLICY, so there is no instant with a policy and no grant; in the instant
+with a grant and no policy, RLS denies by default. Pasted as one block it
+is one transaction and no instant is visible at all.
 
 ---
 
@@ -269,6 +398,22 @@ BEGIN;
   UPDATE public.businesses SET feature_flags = '{}'::jsonb;
 ROLLBACK;
 
+-- 1d-2b, 1d-2c, 1d-2d: must FAIL — the other three entitlement columns
+BEGIN;
+  SET LOCAL ROLE authenticated;
+  UPDATE public.businesses SET is_active = true;
+ROLLBACK;
+
+BEGIN;
+  SET LOCAL ROLE authenticated;
+  UPDATE public.businesses SET "limits" = '{}'::jsonb;
+ROLLBACK;
+
+BEGIN;
+  SET LOCAL ROLE authenticated;
+  UPDATE public.businesses SET subscription_status = 'active';
+ROLLBACK;
+
 -- 1d-3: must FAIL
 BEGIN;
   SET LOCAL ROLE authenticated;
@@ -282,21 +427,26 @@ BEGIN;
 ROLLBACK;
 ```
 
-**EXPECT:** 1d-1, 1d-2, 1d-3 each error `permission denied for table
-businesses`. 1d-4 returns `0` with no error — SELECT retained, zero rows
+**EXPECT:** 1d-1, 1d-2, 1d-2b, 1d-2c, 1d-2d and 1d-3 each error
+`permission denied for table businesses` — all five entitlement columns
+and INSERT. 1d-4 returns `0` with no error — SELECT retained, zero rows
 because `auth.uid()` is NULL here.
 
-**STOP IF:** any of 1d-1..3 succeeds (even `UPDATE 0` — that means
-*permitted*), or 1d-4 raises `permission denied` (you have removed SELECT;
-`ROLLBACK 1` does not restore SELECT because it never removed it — run
-`GRANT SELECT ON public.businesses TO authenticated;` and report).
+**STOP IF:** any of the six write blocks succeeds (even `UPDATE 0` — that
+means *permitted*): run ROLLBACK 1 and report. Or **1d-4 raises
+`permission denied`**: SECTION 1 cannot remove SELECT, so this means the
+database is not in the state STEP 0 recorded — something else changed it,
+before or during this runbook. **Do not grant anything. Stop, save the
+output, compare against the saved STEP 0 output, and report.** Whether to
+run ROLLBACK 1 is decided from that comparison, not here.
 
 ---
 
 ## STEP 8 — SECTION 2 (OPTIONAL): DELETE, TRUNCATE, REFERENCES
 
-**Decide before pasting.** The instruction for Release 2 named INSERT and
-UPDATE. The spec's VERIFY (`030B-SPEC.md` PART E) says `authenticated`
+**Not without Mike's explicit approval of this step.** The instruction for
+Release 2 named INSERT and UPDATE; this section is outside it. If that
+approval has not been given in so many words, skip to STEP 9. The spec's VERIFY (`030B-SPEC.md` PART E) says `authenticated`
 holds **SELECT and TRIGGER only**, which is this section too. No client
 path uses any of the three: no DELETE policy exists for members, TRUNCATE
 is not subject to RLS and not exposed by PostgREST, REFERENCES is DDL.
@@ -330,17 +480,33 @@ Not SQL. The four pages that read `businesses` through supabase-js:
 6. **Onboarding wizard** completes a step that writes the business
    (`onboarding_api.py`, backend).
 
-**EXPECT:** all six work. **STOP IF:** any shows a permission error. 1–2
-failing means SELECT was lost (STEP 7 1d-4 should have caught it). 3–6
-failing means a write path still goes through the anon key — `ROLLBACK 1`,
-and that path is Release 1 work.
+**EXPECT:** all six work.
+
+**STOP IF any fails.** Do not diagnose from the symptom and do not roll
+back reflexively — a backend deploy, an expired session or Railway being
+mid-restart fails these the same way. Preserve the evidence first: the
+on-screen error text, the browser console, and the failing request's
+response from the Network tab. Then decide from the evidence:
+
+- The response is a PostgREST error naming `businesses` with
+  `permission denied` (HTTP 401/403 from `rest/v1/businesses`): the revoke
+  is causal — a browser route to the table survived STEP 3 and STEP 0's
+  0e/0f. **Run ROLLBACK 1**, confirm STEP 0's output is back, and report;
+  that route is Release 1 work.
+- The failing request is to the backend (`/v1/...`) or to auth: the revoke
+  is not the cause (the backend is the table owner). **Leave SECTION 1 in
+  place**, report, and fix the actual fault.
+- Unclear: leave it in place, report with the evidence, and decide
+  together. The hole being closed for an hour longer costs nothing; a
+  reflexive rollback re-opens it and tells you nothing.
 
 ---
 
 ## STEP 10 — Remove the xfail markers, and record it
 
-In `backend/tests/test_tenant_isolation_rls_path.py`, the four
-`test_an_owner_cannot_raise_their_own_entitlement` cases are
+On PR #9's branch (`ticket/BH-003-tenant-isolation-harness` — see the
+dependency note at the top), `backend/tests/test_tenant_isolation_rls_path.py`
+carries four `test_an_owner_cannot_raise_their_own_entitlement` cases as
 `xfail(strict=True)` with reason "030b Release 2 not yet applied". After
 this runbook has run **in prod**, a local rehearsal
 (`scripts/rls-local.sh up`, apply SECTION 1, `scripts/rls-local.sh test`)
@@ -360,7 +526,12 @@ commit also:
 
 ## If you need to undo everything
 
-`ROLLBACK 2` (if Section 2 was applied) then `ROLLBACK 1`, each as one
-paste from the migration file. Both were executed on staging in that
-order and STEP 0's numbers came back exactly. Then re-run STEP 0 and
+`ROLLBACK 2` (only if Section 2 was applied):
+
+```sql
+GRANT DELETE, TRUNCATE, REFERENCES ON public.businesses TO authenticated;
+```
+
+then **ROLLBACK 1 as printed under STEP 6**. Both were executed on staging
+in that order and STEP 0's numbers came back exactly. Then re-run STEP 0 and
 compare.
