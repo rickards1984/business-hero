@@ -644,18 +644,6 @@ def test_a_read_only_status_does_not_move_the_tier(deliver, status):
     assert business.subscription_status == status
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 5: main.py:1021 sets is_active = status in "
-           "('active','trialing'), so past_due sets is_active=False. The gate "
-           "at auth.py:381 then refuses when _is_trial_expired() is also true "
-           "— and that returns True whenever trial_ends_at is None, which is "
-           "every customer who never had a trial. DECISION 3 requires past_due "
-           "to keep FULL access. Remove this marker in the commit that fixes "
-           "it. Either the webhook must stop marking past_due inactive, or the "
-           "gate must consult subscription_status — the fix is open, the "
-           "outcome is not.",
-)
 def test_a_past_due_business_keeps_full_access(deliver):
     """The one that takes the receptionist off the phones.
 

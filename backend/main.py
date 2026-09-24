@@ -66,6 +66,9 @@ from auth import (
     # plan -> feature table. auth.py now owns the only one, and main.py
     # no longer needs to read it at all — it needs the rule, not the table.
     strip_plan_defaults,
+    # DECISION 3's resolver. `/v1/billing/status` reports what the gate
+    # enforces, rather than deriving access a second time in the client.
+    is_read_only, needs_payment_warning, resolve_access_level,
 )
 from openai_utils import generate_call_summary
 from supabase_auth import verify_supabase_token
@@ -916,10 +919,25 @@ async def create_checkout_session(
 
 
 @app.get("/v1/billing/status", tags=["Billing"])
-async def billing_status(auth_ctx=Depends(get_user_business_context)):
+async def billing_status(
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
     ok, missing = validate_stripe_config()
     config = get_stripe_config()
     prices = config.get("prices", {})
+
+    # DECISION 3: past_due keeps full access "plus a user-visible warning
+    # state — a banner, not a silent flag". This is where the frontend reads
+    # it. `access_level` is the resolver's answer, not a second derivation:
+    # a client that renders from this cannot disagree with what the server
+    # enforces.
+    business = None
+    if auth_ctx.get("business_id"):
+        business = session.exec(
+            select(Business).where(Business.id == auth_ctx["business_id"])
+        ).first()
+
     return {
         "configured": ok,
         "missing": missing,
@@ -929,6 +947,11 @@ async def billing_status(auth_ctx=Depends(get_user_business_context)):
             "pro": bool(prices.get("pro")),
             "business": bool(prices.get("business")),
         },
+        "plan_tier": business.plan_tier if business else None,
+        "subscription_status": business.subscription_status if business else None,
+        "access_level": resolve_access_level(business) if business else None,
+        "payment_warning": needs_payment_warning(business) if business else False,
+        "read_only": is_read_only(business) if business else False,
     }
 
 
@@ -1018,7 +1041,23 @@ async def stripe_webhook(
                 business.feature_flags = strip_plan_defaults(
                     business.feature_flags or {}, plan_tier
                 )
-            business.is_active = status in ("active", "trialing")
+            # BH-006 defect 5 — `is_active` is NOT written here any more.
+            #
+            # This line used to be `business.is_active = status in ("active",
+            # "trialing")`, which is exactly the conflation DECISION 3 exists
+            # to remove: `is_active` is the ADMIN's manual switch,
+            # `subscription_status` is Stripe's. Worse, it was a live
+            # customer-facing failure: a `past_due` card set is_active=False,
+            # and the feature gate refused when `_is_trial_expired()` was also
+            # true — which it is for every customer who never had a trial
+            # (`trial_ends_at IS NULL`). A customer mid-dunning lost feature
+            # access on their next request, when DECISION 3 says past_due
+            # keeps FULL access plus a banner.
+            #
+            # Access is resolved from `subscription_status` by
+            # `auth.resolve_access_level`. Rows whose `is_active` this code
+            # wrote before today are ambiguous and are repaired by runbook —
+            # audits/BH-006-PROD-RUNBOOK.md.
             session.add(business)
             session.commit()
 

@@ -117,6 +117,64 @@ async def get_user_auth_context(
     }
 
 
+# Write-shaped requests a READ-ONLY business must still be allowed to make.
+# Matched against the request path; each one is here for a stated reason.
+#
+# DECISION 3 promises a read-only customer can still export, and that they can
+# pay to restore. Both of those are POSTs, so a blanket "refuse every
+# POST/PUT/PATCH/DELETE" would break the two things the decision exists to
+# protect. Nothing else belongs in this list: it is the difference between
+# "read-only" and "locked out".
+READ_ONLY_ALLOWED_PATH_PREFIXES = (
+    "/v1/billing/checkout-session",  # pay to restore full access
+    "/v1/billing/portal",            # Stripe customer portal — update the card
+)
+# Exports. Suffix-matched because the quote id sits in the middle of the path.
+READ_ONLY_ALLOWED_PATH_SUFFIXES = (
+    "/generate-pdf",                 # POST /v1/quotes/{id}/generate-pdf
+)
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _is_read_only_allowed_request(request: Optional[Request]) -> bool:
+    """True when this request is one a read-only business may still make."""
+    if request is None:
+        # No request object means the dependency was called directly, which
+        # only happens in tests. Fail CLOSED: a caller that cannot say what it
+        # is asking for does not get the exemption.
+        return False
+    if request.method.upper() not in _MUTATING_METHODS:
+        return True
+    path = request.url.path
+    if path.startswith(READ_ONLY_ALLOWED_PATH_PREFIXES):
+        return True
+    return path.endswith(READ_ONLY_ALLOWED_PATH_SUFFIXES)
+
+
+def enforce_read_only(request: Optional[Request], business: Optional[Business]) -> None:
+    """Refuse a mutating request from a read-only business. Server-side.
+
+    DECISION 3: "enforced server-side, per PART D. Hiding the buttons is not
+    enforcement." This sits in the two shared context dependencies that every
+    authenticated endpoint resolves, so a new endpoint is covered the day it
+    is written rather than when someone remembers to add a decorator. It keys
+    on the HTTP METHOD, which is why it cannot be forgotten: a create or an
+    edit is a POST/PUT/PATCH/DELETE by definition, and the exceptions are the
+    short, stated list above.
+    """
+    if business is None or not is_read_only(business):
+        return
+    if _is_read_only_allowed_request(request):
+        return
+    raise HTTPException(status_code=403, detail=READ_ONLY_DETAIL)
+
+
+def _load_business(session: Session, business_id) -> Optional[Business]:
+    if not business_id:
+        return None
+    return session.exec(select(Business).where(Business.id == business_id)).first()
+
+
 async def get_user_business_context(
     request: Request,
     token: str = Depends(get_access_token),
@@ -126,6 +184,11 @@ async def get_user_business_context(
     """Return user_id and business_id from a Supabase JWT.
 
     If business_id is provided, verify user membership for that business.
+
+    Also enforces DECISION 3's read-only state: a business whose
+    `subscription_status` is `unpaid` or `canceled` is refused every mutating
+    request here, except the exports and billing paths named above. Platform
+    admins are exempt — they are how a read-only account gets fixed.
     """
     user = await verify_supabase_token(token)
     is_platform_admin = is_platform_admin_user(user.id, session)
@@ -168,6 +231,7 @@ async def get_user_business_context(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     request.state.user_email = user.email
+    enforce_read_only(request, _load_business(session, business_ctx.id))
     return {"user_id": user.id, "business_id": business_ctx.id, "is_platform_admin": False}
 
 
@@ -244,6 +308,105 @@ def _is_trial_expired(trial_ends_at: Optional[datetime]) -> bool:
     if trial_ends_at.tzinfo is None:
         return trial_ends_at < datetime.utcnow()
     return trial_ends_at < datetime.now(timezone.utc)
+
+
+# ── ENTITLEMENT-SPEC DECISION 3 — subscription_status -> access level ────────
+#
+# THE ONE RESOLVER. DECISION 3 separates two columns this codebase had
+# conflated, and the separation is the whole point:
+#
+#   plan_tier            what was purchased.  NEVER written by a payment event.
+#   subscription_status  whether it is paid for. Stripe's field, verbatim.
+#   is_active            the ADMIN's manual switch. Not Stripe's.
+#
+# Access follows `subscription_status`, never `plan_tier`:
+#
+#   active, trialing  -> FULL access to everything plan_tier includes
+#   past_due          -> FULL access, plus a user-visible warning. Stripe is
+#                        still retrying; the customer has usually done nothing
+#                        wrong, and a card that expired on Tuesday must not
+#                        take the receptionist off the phones on Wednesday.
+#   unpaid, canceled  -> READ-ONLY. NOT a downgrade to starter: plan_tier
+#                        still records what they bought, so paying restores
+#                        exactly what they had, with no re-entry.
+#
+# READ-ONLY means, precisely (DECISION 3; export scope decided 8 Sep 2026):
+#   CAN     log in; view quotes, invoices and accounting; export quotes and
+#           invoices as PDF/CSV; reach billing to pay and restore.
+#   CANNOT  create or edit anything; use any AI feature; send anything
+#           outbound; keep a Twilio number (release is its own ticket).
+#
+# Why read-only and not lockout: UK VAT records must be kept six years (HMRC
+# VAT Notice 700/21) and GDPR Art. 20 portability does not lapse with payment,
+# so a customer's own invoices must stay reachable. A read-only account makes
+# no LLM calls, no voice minutes and no outbound sends — it costs storage.
+
+ACCESS_FULL = "full"
+ACCESS_READ_ONLY = "read_only"
+ACCESS_SUSPENDED = "suspended"
+
+FULL_ACCESS_STATUSES = frozenset({"active", "trialing", "past_due"})
+READ_ONLY_STATUSES = frozenset({"unpaid", "canceled"})
+# Keeps full access, but the customer must be told. A banner, not a silent
+# flag: surfaced by GET /v1/billing/status.
+WARNING_STATUSES = frozenset({"past_due"})
+
+# Stripe also sends `incomplete` and `incomplete_expired`: a subscription
+# whose FIRST payment never completed. Such a customer never had paid access
+# to lose, so those are deliberately in neither set — they fall through to the
+# trial and admin checks, which is where a never-paid account belongs.
+
+
+def resolve_access_level(business: Optional[Business]) -> str:
+    """`subscription_status` -> access level. The only place this is decided.
+
+    Precedence, and why:
+
+    1. **Admin suspension wins.** `is_active = False` is a human decision
+       about this business and a paid subscription must not overrule it.
+       (It does not override READ-ONLY, which is already the narrower state.)
+    2. Then `subscription_status` — Stripe's account of whether it is paid.
+    3. Only when Stripe has said nothing at all (no subscription: a business
+       the admin created, or one still in trial) does the trial window decide.
+
+    Fails closed: an unrecognised status falls to the trial/admin path rather
+    than being treated as paid.
+    """
+    if business is None:
+        return ACCESS_SUSPENDED
+
+    status_value = (business.subscription_status or "").strip().lower()
+
+    if status_value in READ_ONLY_STATUSES:
+        return ACCESS_READ_ONLY
+
+    # The admin switch. Kept ABSOLUTE deliberately: the old webhook wrote this
+    # column from the Stripe status, so rows written before BH-006 are
+    # ambiguous. They are repaired by runbook (audits/BH-006-PROD-RUNBOOK.md),
+    # not by guessing here — a guess would silently un-suspend a business an
+    # admin had switched off on purpose.
+    if not business.is_active:
+        if _is_trial_expired(business.trial_ends_at):
+            return ACCESS_SUSPENDED
+        return ACCESS_FULL
+
+    if status_value in FULL_ACCESS_STATUSES:
+        return ACCESS_FULL
+
+    if _is_trial_expired(business.trial_ends_at):
+        return ACCESS_SUSPENDED
+    return ACCESS_FULL
+
+
+def is_read_only(business: Optional[Business]) -> bool:
+    return resolve_access_level(business) == ACCESS_READ_ONLY
+
+
+def needs_payment_warning(business: Optional[Business]) -> bool:
+    """True when the customer keeps full access but must be told to pay."""
+    if business is None:
+        return False
+    return (business.subscription_status or "").strip().lower() in WARNING_STATUSES
 
 
 # ── ENTITLEMENT-SPEC PART B — the canonical plan -> feature table ────────────
@@ -366,6 +529,34 @@ def _is_feature_enabled(business: Business, feature_name: str) -> bool:
     return bool(plan_defaults.get(feature_name, False))
 
 
+# Features a read-only business may still use. DECISION 3 permits viewing and
+# exporting quotes, invoices and accounting; those reads are gated by the
+# feature that owns them, so the feature gate must let them through. What it
+# must NOT let through is any AI feature or outbound send — those are the
+# read-only refusals, and they are named here rather than inferred.
+READ_ONLY_PERMITTED_FEATURES = frozenset({
+    "quoting",      # viewing and exporting quotes
+    "invoicing",    # viewing and exporting invoices
+    "accounting",   # viewing accounting history (export of it is excluded by
+                    # the 8 Sep 2026 decision, which is about the export
+                    # endpoint's scope, not about read access)
+})
+
+# Every feature that costs money to serve or reaches a third party. A
+# read-only business is refused these outright. Listed explicitly so adding a
+# feature to PLAN_FEATURE_DEFAULTS cannot quietly become free-for-nonpayers.
+READ_ONLY_REFUSED_FEATURES = frozenset({
+    "email", "aria_chat", "aria_voice", "whatsapp", "board_meetings",
+    "calendar_booking", "calendar_sync", "receptionist", "outreach",
+})
+
+READ_ONLY_DETAIL = (
+    "Your subscription is not active, so this account is read-only. You can "
+    "still view and export your quotes and invoices. Update your payment "
+    "details in Billing to restore full access."
+)
+
+
 def require_feature(feature_name: str):
     async def _dependency(
         auth_ctx: dict = Depends(get_user_business_context),
@@ -378,11 +569,22 @@ def require_feature(feature_name: str):
         ).first()
         if not business:
             raise HTTPException(status_code=404, detail="Business not found")
-        if not business.is_active and _is_trial_expired(business.trial_ends_at):
+
+        # DECISION 3 / BH-006 defect 5. This used to read `is_active` alone,
+        # and the webhook wrote `is_active = status in ('active','trialing')`
+        # — so a `past_due` card set it False and `_is_trial_expired()`
+        # returns True for every customer who never had a trial
+        # (trial_ends_at IS NULL). A customer mid-dunning lost feature access
+        # on the next request. The resolver decides now, and past_due is FULL.
+        access = resolve_access_level(business)
+        if access == ACCESS_SUSPENDED:
             raise HTTPException(
                 status_code=403,
                 detail="Account inactive or trial expired"
             )
+        if access == ACCESS_READ_ONLY and feature_name not in READ_ONLY_PERMITTED_FEATURES:
+            raise HTTPException(status_code=403, detail=READ_ONLY_DETAIL)
+
         if not _is_feature_enabled(business, feature_name):
             raise HTTPException(
                 status_code=403,
