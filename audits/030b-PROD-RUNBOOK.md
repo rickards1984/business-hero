@@ -91,6 +91,20 @@ SELECT polname, polcmd, polpermissive,
   FROM pg_policy WHERE polrelid='public.businesses'::regclass ORDER BY 1;
 ```
 
+**Partly confirmed in production already, 24 Sep 2026.** BH-001's census
+(`audits/BH-001-FINDINGS.md`, branch `ticket/BH-001-live-rls-state`) exported
+Q6 from prod and it matches 0a exactly: `anon` holds `SELECT, TRIGGER`;
+`authenticated` holds `DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE`
+and **no table-level UPDATE**. So 0a's STOP IF is already known not to fire,
+and 033 SECTION 5 did land.
+
+What BH-001 could **not** confirm is 0b: its column-privileges export was
+truncated at 100 rows and never reached `businesses`, so the 26-column UPDATE
+grant is still unverified. **0b is therefore the one read in STEP 0 that
+decides whether this runbook proceeds** — if it shows 26 columns including
+`plan_tier`, the hole is open and Release 2 is what closes it; if it shows
+none, someone has already revoked it and STEP 4 will stop.
+
 **EXPECT** (this is the state 033 left and staging carries):
 
 - **0a:** `anon` → `SELECT, TRIGGER`. `authenticated` →
