@@ -669,13 +669,6 @@ def test_a_cancelled_business_still_reaches_the_read_only_surface(deliver):
 
 # ── Defect 2 — a redelivered event must apply once ───────────────────────────
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 2: the StripeEvent row is written at main.py:1026, "
-           "after the business commit at :1023, and is never read back. A "
-           "redelivered event applies twice. Remove this marker in the commit "
-           "that fixes it.",
-)
 def test_a_redelivered_event_applies_exactly_once(deliver):
     business = a_business(plan_tier="starter")
     session = WebhookSession(business)
@@ -695,11 +688,6 @@ def test_a_redelivered_event_applies_exactly_once(deliver):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 2: with no de-duplication, a stale replay overwrites "
-           "state that moved on after the first delivery.",
-)
 def test_a_replay_does_not_overwrite_state_that_moved_on(deliver):
     """The consequence that costs money.
 

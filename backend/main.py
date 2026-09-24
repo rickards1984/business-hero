@@ -1010,6 +1010,29 @@ async def stripe_webhook(
             session.add(business)
             session.commit()
 
+    # BH-006 defect 2 — de-duplicate BEFORE applying anything.
+    #
+    # The audit row used to be written after the business commit and was never
+    # read back, so a redelivered event applied twice. Stripe redelivers
+    # routinely, and did so for two months in 2026 (21 June - 20 August, a dead
+    # Replit URL). The consequence that costs money: upgrade to Pro, customer
+    # downgrades to Starter, Stripe redelivers the original event, and they are
+    # silently back on Pro while being billed for Starter.
+    #
+    # Keyed on the EVENT ID ALONE. Two events with identical payloads are two
+    # real events and both must apply; keying on payload or on
+    # subscription+price would suppress the second.
+    event_id = event_dict.get("id")
+    if event_id:
+        already_seen = session.exec(
+            select(StripeEvent).where(StripeEvent.event_id == event_id)
+        ).first()
+        if already_seen:
+            # 200, not an error: a replay is normal Stripe behaviour, and a
+            # non-2xx makes Stripe retry the event we have just told it we
+            # already have.
+            return {"received": True, "duplicate": True}
+
     if event_type in ("customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"):
         customer_id = event_data.get("customer")
         subscription_id = event_data.get("id")
@@ -1104,19 +1127,30 @@ async def stripe_webhook(
             # wrote before today are ambiguous and are repaired by runbook —
             # audits/BH-006-PROD-RUNBOOK.md.
             session.add(business)
-            session.commit()
 
-    try:
-        stripe_event = StripeEvent(
+    # The audit row is added in the SAME transaction as the business change and
+    # committed once, so "applied" and "recorded as applied" cannot disagree:
+    # the de-duplication check above reads this table, and a business write
+    # that committed without its audit row would be applied twice on
+    # redelivery. It used to be a second, separate commit whose failure was
+    # swallowed.
+    if event_id:
+        session.add(StripeEvent(
             business_id=business.id if business else None,
-            event_id=event_dict.get("id"),
+            event_id=event_id,
             type=event_type,
             payload=event_dict,
-        )
-        session.add(stripe_event)
+        ))
+    try:
         session.commit()
     except Exception:
+        # A concurrent delivery of the same event can lose the race on
+        # stripe_events.event_id UNIQUE. Rolling back is correct: the other
+        # transaction applied it exactly once. NOTE: that constraint is in
+        # migration 010 and present on the local replay, but is NOT verified
+        # in production — audits/BH-006-PROD-RUNBOOK.md STEP 2 checks it.
         session.rollback()
+        logger.warning("stripe webhook commit failed for event %s", event_id, exc_info=True)
 
     return {"received": True}
 
