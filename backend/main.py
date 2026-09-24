@@ -1019,12 +1019,45 @@ async def stripe_webhook(
             )
         ).first()
         if business:
-            plan_tier = None
-            items = event_data.get("items", {}).get("data", [])
-            if items:
-                price_id = items[0].get("price", {}).get("id")
-                plan_tier = _resolve_plan_from_price(price_id)
             status = event_data.get("status")
+
+            # BH-006 defect 1 — `plan_tier` is NEVER written by a payment
+            # event. ENTITLEMENT-SPEC DECISION 3: the column records WHAT WAS
+            # PURCHASED, and overwriting it destroys the record of the sale —
+            # "a payment blip would permanently lose the sale". The old code
+            # took the tier from whatever price the event carried, on every
+            # event type, so a `.deleted` carrying an old Pro price SET the
+            # business to Pro: cancelling upgraded you.
+            #
+            # Two events may write the tier, and only two:
+            #
+            #   `.created`  a subscription was just bought. The price IS what
+            #               they purchased — this is the only path that gives a
+            #               new paying customer their tier at all, because
+            #               `checkout.session.completed` writes only the Stripe
+            #               ids (see that branch above). Gating it out would
+            #               leave every new subscriber on `starter`.
+            #   `.updated`  ONLY when Stripe says the price itself changed.
+            #               Stripe reports what changed in
+            #               `data.previous_attributes`; on a plan change that
+            #               contains `items`, on a status transition it contains
+            #               `status`. An `.updated` that does not say `items`
+            #               moved is not a plan change and must not touch the
+            #               tier.
+            #
+            # `.deleted` NEVER writes it. A cancellation is not a purchase, and
+            # the price it carries is the plan they are leaving.
+            previous_attributes = event_dict.get("data", {}).get("previous_attributes") or {}
+            is_plan_change = (
+                event_type == "customer.subscription.created"
+                or (event_type == "customer.subscription.updated"
+                    and "items" in previous_attributes)
+            )
+            plan_tier = None
+            if is_plan_change:
+                items = event_data.get("items", {}).get("data", [])
+                if items:
+                    plan_tier = _resolve_plan_from_price(items[0].get("price", {}).get("id"))
             business.stripe_customer_id = customer_id or business.stripe_customer_id
             business.stripe_subscription_id = subscription_id or business.stripe_subscription_id
             business.subscription_status = status
@@ -1038,6 +1071,18 @@ async def stripe_webhook(
                 # did `{**defaults, **existing}` and stored the result, so a
                 # downgrade could never take anything away. Strip instead: keep
                 # the genuine exceptions, drop what the new plan already grants.
+                #
+                # BH-006 defect 4 — this now runs ONLY on a genuine plan
+                # change, and against the tier the business is actually moving
+                # to, because it sits inside `if plan_tier:` and `plan_tier` is
+                # now only set for a purchase. It used to run on every event
+                # against the event's price, so a cancellation carrying a Pro
+                # price stripped a hand-granted `receptionist: True` from a
+                # STARTER business: a real exception, destroyed silently,
+                # because Pro grants receptionist by default and the strip
+                # measured against Pro. Same root cause as defect 1, so the
+                # same change closes it — which is why defect 4's test loses
+                # its marker in this commit.
                 business.feature_flags = strip_plan_defaults(
                     business.feature_flags or {}, plan_tier
                 )

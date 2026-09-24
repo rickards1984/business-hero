@@ -326,13 +326,6 @@ def deliver(monkeypatch):
 
 # ── Defect 1 — a cancellation must not raise the tier ────────────────────────
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 1: main.py:989 handles .deleted like .updated and "
-           "takes the tier from the event's price, so cancelling a Pro "
-           "subscription SETS plan_tier='pro'. Remove this marker in the "
-           "commit that fixes it.",
-)
 def test_a_cancellation_leaves_the_tier_exactly_as_purchased(deliver):
     """DECISION 3: plan_tier is never changed by a payment event."""
     business = a_business(plan_tier="starter")
@@ -351,10 +344,6 @@ def test_a_cancellation_leaves_the_tier_exactly_as_purchased(deliver):
                           "cancellation carrying a Pro price")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 1: same root cause, from a higher tier.",
-)
 def test_a_cancellation_leaves_a_business_tier_exactly_as_purchased(deliver):
     business = a_business(plan_tier="business")
     session = WebhookSession(business)
@@ -400,12 +389,6 @@ def test_a_cancellation_still_records_the_status_it_carries(deliver):
     # here, which would have pinned that conflation in place. Codex caught it.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 1: on a cancellation the handler still calls "
-           "strip_plan_defaults with the CANCELLED plan's price, so genuine "
-           "per-business feature exceptions can be stripped on the way out.",
-)
 def test_a_cancellation_does_not_strip_a_genuine_feature_exception(deliver):
     """A hand-granted exception must survive a cancellation.
 
@@ -493,14 +476,6 @@ STATUS_TRANSITIONS = [
 ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 1, reached through a status transition: the "
-           "handler resolves the tier from the object's price on every "
-           "event, so a status-only update carrying a mismatched price "
-           "rewrites the tier. Remove this marker in the commit that fixes "
-           "defect 1.",
-)
 @pytest.mark.parametrize("status,previous_status", STATUS_TRANSITIONS)
 def test_a_status_transition_does_not_move_the_tier(deliver, status,
                                                    previous_status):
@@ -624,12 +599,6 @@ def test_the_status_the_event_carries_is_recorded(deliver, status):
     assert business.subscription_status == status
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 1, reached through the read-only statuses: the "
-           "tier is taken from the event's price regardless of status. Remove "
-           "this marker in the commit that fixes defect 1.",
-)
 @pytest.mark.parametrize("status", READ_ONLY_STATUSES)
 def test_a_read_only_status_does_not_move_the_tier(deliver, status):
     """DECISION 3: unpaid and canceled are read-only — a STATUS, not a tier."""
@@ -737,12 +706,20 @@ def test_a_replay_does_not_overwrite_state_that_moved_on(deliver):
     Upgrade to Pro, customer downgrades to Starter, Stripe redelivers the
     original event. Without de-duplication they are silently back on Pro while
     being billed for Starter.
+
+    FIXTURE STRENGTHENED while fixing defect 1. The event carried no
+    `previous_attributes`, so once defect 1 was fixed the first delivery no
+    longer moved the tier either — and the test passed while proving nothing
+    about de-duplication. It now sends a genuine plan change, so the first
+    delivery really does set Pro and the replay really is the thing under
+    test.
     """
     business = a_business(plan_tier="starter")
     session = WebhookSession(business)
     event = subscription_event(
         "customer.subscription.updated", PRICE_PRO,
         event_id="evt_stale", status="active",
+        previous_attributes={"items": {"data": [{"price": {"id": PRICE_STARTER}}]}},
     )
 
     deliver(event, session)
@@ -777,17 +754,77 @@ def test_deduplication_must_key_on_the_event_id_alone(deliver):
 
 
 def test_two_different_events_both_apply(deliver):
-    """De-duplication must not suppress everything. Passes today."""
+    """De-duplication must not suppress everything.
+
+    FIXTURE CORRECTED DURING IMPLEMENTATION, and the correction matters
+    enough to record here. Both events originally carried no
+    `previous_attributes` at all, and the test asserted the tier ended at
+    `business` — i.e. it asserted that an `.updated` moves the tier purely
+    because it carries a price. That is defect 1, and it contradicted
+    `test_a_status_transition_does_not_move_the_tier` fifteen lines earlier
+    in the same file. A real Stripe `.updated` ALWAYS carries
+    `previous_attributes` (it is the list of what changed), so an event
+    without one is not a thing Stripe sends.
+
+    Both events are now genuine plan changes, which keeps what this test is
+    FOR — two distinct event ids must both apply, de-duplication must not
+    swallow the second — and stops it asserting the defect.
+    """
     business = a_business(plan_tier="starter")
     session = WebhookSession(business)
 
-    deliver(subscription_event("customer.subscription.updated", PRICE_PRO,
-                               event_id="evt_one", status="active"), session)
-    deliver(subscription_event("customer.subscription.updated", PRICE_BUSINESS,
-                               event_id="evt_two", status="active"), session)
+    deliver(subscription_event(
+        "customer.subscription.updated", PRICE_PRO,
+        event_id="evt_one", status="active",
+        previous_attributes={"items": {"data": [{"price": {"id": PRICE_STARTER}}]}},
+    ), session)
+    deliver(subscription_event(
+        "customer.subscription.updated", PRICE_BUSINESS,
+        event_id="evt_two", status="active",
+        previous_attributes={"items": {"data": [{"price": {"id": PRICE_PRO}}]}},
+    ), session)
 
     assert business.plan_tier == "business"
     assert session.business_commits == 2
+
+
+def test_a_new_subscription_sets_the_tier_it_was_bought_at(deliver):
+    """`.created` is a purchase, and the only path that sets a new
+    customer's tier.
+
+    `checkout.session.completed` writes the Stripe ids and nothing else
+    (`main.py`, the branch above this one), so if `.created` did not write
+    `plan_tier` every new paying customer would sit on `starter` while being
+    billed for Pro. Added during implementation: gating the tier behind
+    `previous_attributes.items` alone would have caused exactly that, and
+    nothing in the file would have failed.
+    """
+    business = a_business(plan_tier="starter", subscription_status=None)
+    session = WebhookSession(business)
+
+    deliver(subscription_event(
+        "customer.subscription.created", PRICE_BUSINESS,
+        event_id="evt_created", status="active"), session)
+
+    assert business.plan_tier == "business", (
+        "a brand-new subscription did not set the tier it was bought at"
+    )
+    assert business.subscription_status == "active"
+
+
+def test_a_deleted_event_never_sets_the_tier_even_without_previous_attributes(deliver):
+    """The companion to the above: `.created` may write the tier, `.deleted`
+    may not, and neither carries `previous_attributes`. So the rule cannot be
+    "no previous_attributes means treat it as a purchase" — it is keyed on
+    the event type."""
+    business = a_business(plan_tier="starter")
+    session = WebhookSession(business)
+
+    deliver(subscription_event(
+        "customer.subscription.deleted", PRICE_BUSINESS,
+        event_id="evt_deleted_no_prev", status="canceled"), session)
+
+    assert_tier_unchanged(business, "starter", "cancellation with no previous_attributes")
 
 
 def test_an_event_for_an_unknown_customer_touches_nothing(deliver):
