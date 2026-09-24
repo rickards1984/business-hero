@@ -53,13 +53,22 @@ rollback's.
 
 | Group | Meaning | STEP 4 |
 |---|---|---|
-| `is_active = false` AND `subscription_status` IN (`active`,`trialing`,`past_due`) | **Locked out wrongly.** The old webhook did this. A paying customer cannot use the product. | **Repaired** |
-| `is_active = false` AND `subscription_status` IN (`unpaid`,`canceled`) | Correctly read-only. The resolver returns READ-ONLY for these regardless of `is_active`, so they already behave correctly. | Left alone |
-| `is_active = false` AND `subscription_status` IS NULL | Ambiguous, and most likely a genuine admin suspension (no Stripe subscription ever existed). | **Left alone — you decide, per row** |
+| `is_active = false` AND `subscription_status` IN (`active`,`trialing`,`past_due`) | **CANDIDATES for repair.** The old webhook wrote this for any non-active status, so most are wrongly locked out — but an admin suspension of a paying customer looks IDENTICAL, and no column distinguishes them. | **You name the ids** |
+| `is_active = false` AND `subscription_status` IN (`unpaid`,`canceled`) | Read-only today, correctly — the resolver returns READ-ONLY for these regardless of `is_active`. **But the stale `false` is still there**, so if they pay and Stripe sends `active`, they land in row 1's state and stay suspended. | **Repaired too — see STEP 4b** |
+| `is_active = false` AND `subscription_status` IS NULL | No Stripe subscription ever existed, so the old webhook never touched it. Almost certainly a genuine admin suspension. | Left alone |
 
-**STOP IF** the first group contains a business you know an admin suspended
-on purpose. The repair would un-suspend it. Tell me which and it comes out
-of the `WHERE` clause by id.
+**This is a judgement, not a query.** Codex's review corrected an earlier
+version of this table that called every row in group 1 "locked out wrongly":
+
+- Admin intent is **indistinguishable** from the webhook's writes. Only you
+  know which businesses an admin switched off deliberately.
+- A row with a **future `trial_ends_at`** may not have been locked out at all.
+
+**So STEP 4 repairs an EXPLICIT LIST OF IDS that you have read and approved**,
+not everything the predicate matches. Go through group 1 row by row. For each,
+decide: was this business switched off on purpose? If in doubt, leave it out —
+a wrongly-omitted row is a customer who calls support and gets fixed in a
+minute; a wrongly-included one is a suspension you have silently reversed.
 
 ---
 
@@ -76,9 +85,11 @@ SELECT count(*) AS locked_out_wrongly
 those customers are locked out of paid features right now** — that is the
 live failure BH-006 defect 5 describes, and STEP 4 is what ends it.
 
-**Note:** zero is a perfectly good answer. It means no customer has yet hit
-a payment blip, and the fix is preventative. It does **not** mean STEP 4 is
-unnecessary — the next `past_due` event would have caused it.
+**Note:** zero is a perfectly good answer, but it does **not** mean no
+customer has ever hit a payment blip — only that none is in that state right
+now. A business that went `past_due` and then paid would have had `is_active`
+set back to true by the same old webhook, leaving no trace here. What zero
+means is that there is nothing to repair in group 1 today.
 
 ---
 
@@ -147,14 +158,25 @@ Nothing to run. Read it, so the smoke test in STEP 5 has a prediction to
 check.
 
 After the deploy, for a business with `subscription_status = 'past_due'`
-and `is_active = true`: every paid feature keeps working, and
-`GET /v1/billing/status` returns `payment_warning: true` with
-`access_level: "full"`.
+and `is_active = true`: every paid feature keeps working, `GET /v1/me`
+returns `payment_warning: true` with `access_level: "full"`, and **a warning
+banner appears at the top of the app** (`SubscriptionBanner.tsx`, rendered in
+`AppShell`).
 
-For `unpaid` or `canceled`: `access_level: "read_only"`, every GET still
-works, every POST/PUT/PATCH/DELETE is refused with a 403 saying so — except
-`POST /v1/quotes/{id}/generate-pdf` and the two `/v1/billing/*` paths, which
-must keep working. **The customer must be able to pay their way out.**
+For `unpaid` or `canceled`: `access_level: "read_only"`, a read-only banner,
+and every POST/PUT/PATCH/DELETE refused with a 403 — **except**
+`POST /v1/quotes/{id}/generate-pdf` and `POST /v1/billing/{checkout-session,
+portal}`. The customer must be able to pay their way out.
+
+**What "every write refused" does and does not mean.** Enforcement sits in
+the three shared context dependencies, in the feature gate, and in the four
+paths that authenticate themselves (assistant chat, TTS, realtime voice, the
+inbound receptionist call). Codex enumerated the gaps in the first
+implementation and they are closed. What is NOT claimed: that no endpoint
+anywhere escapes it. Specifically still reachable for a read-only business:
+OAuth *callbacks* (deliberate — a connection already begun can finish; using
+it is refused), and provider callbacks that arrive with a valid provider
+signature. Those are recorded in `NOT_PINNED` rather than asserted closed.
 
 ---
 
@@ -169,45 +191,83 @@ This clears the `is_active = false` that the old webhook wrote for
 businesses whose subscription is in good standing. It touches **only** the
 first group from STEP 0.
 
+**Paste 4a FIRST, on its own.** It records exactly what is about to change,
+which is what makes the rollback exact. Codex's review found the earlier
+version of this step supplied one `BEGIN … COMMIT` block while telling you to
+inspect before committing — pasted as given, it committed before you looked.
+
 ```sql
--- Wrapped deliberately. Read the count, then COMMIT or ROLLBACK by hand.
-BEGIN;
-
-UPDATE public.businesses
-   SET is_active = true
- WHERE is_active = false
-   AND subscription_status IN ('active', 'trialing', 'past_due');
-
--- EXPECT: the exact count STEP 1 reported. If it differs, ROLLBACK.
-SELECT id, name, plan_tier, subscription_status, is_active
+-- 4a: capture the before-state of the ids YOU approved in STEP 0.
+--     Replace the id list. Nothing else in this runbook touches these rows.
+CREATE TABLE IF NOT EXISTS public.zz_bh006_is_active_before AS
+SELECT id, name, plan_tier, subscription_status, is_active, trial_ends_at,
+       now() AS captured_at
   FROM public.businesses
- WHERE subscription_status IN ('active', 'trialing', 'past_due')
- ORDER BY name;
+ WHERE id IN (
+   -- '00000000-0000-0000-0000-000000000000',   <- your approved ids, one per line
+ );
 
--- Only if the count matches STEP 1 and the rows are the ones you expect:
-COMMIT;
+SELECT count(*) AS rows_captured, count(*) FILTER (WHERE is_active) AS already_true
+  FROM public.zz_bh006_is_active_before;
 ```
 
-**EXPECT:** `UPDATE <n>` where `n` is exactly STEP 1's count, and every
-listed row now `is_active = true`.
+**EXPECT:** `rows_captured` equals the number of ids you listed, and
+`already_true` is **0**. If `already_true` is not 0 you have included a row
+that is not suspended — remove it and re-run 4a after
+`DROP TABLE public.zz_bh006_is_active_before;`.
 
-**STOP IF** the count differs from STEP 1 — something changed between the
-two reads, which means an event landed mid-runbook. `ROLLBACK`, re-run
-STEP 1, and start this step again.
-
-**STOP IF** any row in the list is a business an admin suspended on purpose.
-`ROLLBACK` and tell me; the statement gets an `AND id NOT IN (...)`.
-
-**ROLLBACK 4** (after COMMIT — from STEP 0's saved output, per id):
+**Then 4b, on its own.** It repairs exactly the captured rows, and it covers
+group 2 as well as group 1 — Codex's point: leaving the stale `false` on an
+`unpaid`/`canceled` row means that when the customer pays and Stripe sends
+`active`, the resolver sees `is_active = false` and suspends them. That breaks
+"pay to restore", which is the promise DECISION 3 turns on.
 
 ```sql
-UPDATE public.businesses SET is_active = false WHERE id IN (
-  -- the ids from STEP 0's first group, and ONLY those
-);
+-- 4b: the repair. Bounded by the captured table, so it cannot touch a row
+--     you did not approve, whatever has changed since.
+UPDATE public.businesses b
+   SET is_active = true
+  FROM public.zz_bh006_is_active_before z
+ WHERE b.id = z.id
+   AND b.is_active = false;
 ```
 
-This is why STEP 0's output must be saved before STEP 4 runs: it is the
-only record of which rows were false.
+**EXPECT:** `UPDATE <n>` where `n` = `rows_captured` from 4a.
+
+**STOP IF** `n` is smaller than `rows_captured`: a row changed between 4a and
+4b, which means a Stripe event or an admin landed mid-runbook. Nothing is
+broken — the repair is bounded — but find out which row and why before
+continuing.
+
+**Then 4c, to verify:**
+
+```sql
+SELECT z.id, z.name, z.subscription_status,
+       z.is_active AS was, b.is_active AS now
+  FROM public.zz_bh006_is_active_before z
+  JOIN public.businesses b ON b.id = z.id
+ ORDER BY z.name;
+```
+
+**EXPECT:** every row `was = false, now = true`. This compares **row by row**,
+not by count — an earlier version compared counts only, and equal counts do not
+prove the same rows were repaired.
+
+**ROLLBACK 4** — exact, from the captured table, and it restores only rows
+that are still in the state 4b left them:
+
+```sql
+UPDATE public.businesses b
+   SET is_active = z.is_active
+  FROM public.zz_bh006_is_active_before z
+ WHERE b.id = z.id
+   AND b.is_active = true;      -- do not stamp over a later deliberate change
+```
+
+Then `DROP TABLE public.zz_bh006_is_active_before;` once you are satisfied —
+**not before**, it is the only record of the pre-state. (The `zz_` prefix keeps
+it out of `scripts/dump-live-schema.sql`, which filters `zz\_%`, so it will not
+appear in the schema guard.)
 
 ---
 
@@ -218,13 +278,33 @@ only record of which rows were false.
    `payment_warning: false`.
 3. **The one that was broken:** if any business is `past_due`, confirm its
    paid features work and the banner state is `payment_warning: true`.
-4. Admin → set a test business's `subscription_status` to `canceled`
-   (admin UI, not SQL). Confirm: quotes and invoices still **view**; the
-   PDF export still works; creating a quote is refused with a message
-   naming Billing; Aria and email are refused. Then set it back to
-   `active` and confirm everything returns **without re-entering the plan**
-   — that is DECISION 3's payoff, and it works because `plan_tier` was
-   never overwritten.
+4. **Read-only, end to end.** The admin UI **cannot** set
+   `subscription_status` — `admin_business_api.py:49` excludes it from the
+   writable fields, so an earlier version of this step was unperformable
+   (Codex found it). Two ways to do it for real, in order of preference:
+
+   **(a) Through Stripe, on a test business** — the honest test, because it
+   exercises the webhook too. In the Stripe dashboard, cancel that business's
+   test subscription. Wait for `customer.subscription.deleted`, then confirm
+   in the product:
+   - quotes and invoices still **view**; the quote **PDF export still works**;
+   - the **banner** appears saying the account is read-only;
+   - creating or editing a quote is refused, with a message naming Billing;
+   - Aria chat, Aria voice and email are refused;
+   - `GET /v1/me` returns `access_level: "read_only"`.
+   Then resubscribe and confirm **everything returns without re-entering the
+   plan** — DECISION 3's payoff, and it works because `plan_tier` was never
+   overwritten. Confirm `plan_tier` is still what it was throughout.
+
+   **(b) By SQL on a test business, if (a) is not practical:**
+   ```sql
+   -- A TEST business only. Note the id first.
+   UPDATE public.businesses SET subscription_status = 'canceled' WHERE id = '<test-id>';
+   -- ... run the checks above ...
+   UPDATE public.businesses SET subscription_status = 'active'   WHERE id = '<test-id>';
+   ```
+   This skips the webhook, so it tests the resolver and the enforcement but
+   not the handler. Say which you did when you report.
 5. Stripe dashboard → send a test `customer.subscription.updated`. Confirm a
    new `stripe_events` row appears. **Send the same event again** (Stripe
    lets you resend): confirm **no second row**, and that nothing about the
@@ -262,4 +342,12 @@ de-duplication is not working, and that is the defect that cost money.
   records with the six-year HMRC retention obligation, so this is the more
   consequential half. Recorded in `MISSING_EXPORT_SURFACE` in
   `backend/tests/test_readonly_resolver.py`.
-- **The concurrent-delivery case**, if STEP 2 found no UNIQUE constraint.
+- **The concurrent-delivery case**, if STEP 2 found no UNIQUE constraint. Even
+  WITH it, two concurrent deliveries are safe only for the subscription
+  branch; `checkout.session.completed` is now inside the same transaction, so
+  it is covered too, but neither is proven under real concurrency by any test
+  here — that needs a real database and is in `NOT_PINNED`.
+- **OAuth and provider callbacks** for a read-only business (see STEP 3).
+- **A frontend end-to-end test of the banner.** It is rendered and typechecked;
+  nothing automated asserts it appears, because this repository has no frontend
+  test harness (`docs/TESTING.md`). STEP 5 is the manual check.

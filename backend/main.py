@@ -10,7 +10,7 @@ import logging
 import base64
 import httpx
 from email.mime.text import MIMEText
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 from cryptography.fernet import Fernet
@@ -22,6 +22,7 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel as PydanticBaseModel, ValidationError
 from sqlmodel import Session, select
 from sqlalchemy import text, func, or_
+from sqlalchemy.exc import IntegrityError
 import pytz
 import csv
 import io
@@ -69,6 +70,9 @@ from auth import (
     # DECISION 3's resolver. `/v1/billing/status` reports what the gate
     # enforces, rather than deriving access a second time in the client.
     is_read_only, needs_payment_warning, resolve_access_level,
+    # The feature gate, callable imperatively, for the three endpoints that
+    # verify the JWT themselves and so cannot use require_feature.
+    assert_feature_access,
 )
 from openai_utils import generate_call_summary
 from supabase_auth import verify_supabase_token
@@ -999,17 +1003,6 @@ async def stripe_webhook(
     event_data = event_dict["data"]["object"]
     business = None
 
-    if event_type == "checkout.session.completed":
-        business_id = event_data.get("metadata", {}).get("business_id")
-        if business_id:
-            business = session.exec(select(Business).where(Business.id == business_id)).first()
-        if business:
-            business.stripe_customer_id = event_data.get("customer") or business.stripe_customer_id
-            business.stripe_subscription_id = event_data.get("subscription") or business.stripe_subscription_id
-            business.last_stripe_event_at = datetime.utcnow()
-            session.add(business)
-            session.commit()
-
     # BH-006 defect 2 — de-duplicate BEFORE applying anything.
     #
     # The audit row used to be written after the business commit and was never
@@ -1032,6 +1025,20 @@ async def stripe_webhook(
             # non-2xx makes Stripe retry the event we have just told it we
             # already have.
             return {"received": True, "duplicate": True}
+
+    # Moved BELOW the de-duplication check. It used to sit above it and commit
+    # on its own, so the handler's "de-duplicate before applying anything" and
+    # "one transaction" claims were both false for this branch and a replayed
+    # checkout re-applied. Codex found it.
+    if event_type == "checkout.session.completed":
+        business_id = event_data.get("metadata", {}).get("business_id")
+        if business_id:
+            business = session.exec(select(Business).where(Business.id == business_id)).first()
+        if business:
+            business.stripe_customer_id = event_data.get("customer") or business.stripe_customer_id
+            business.stripe_subscription_id = event_data.get("subscription") or business.stripe_subscription_id
+            business.last_stripe_event_at = datetime.utcnow()
+            session.add(business)
 
     if event_type in ("customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"):
         customer_id = event_data.get("customer")
@@ -1071,16 +1078,58 @@ async def stripe_webhook(
             # `.deleted` NEVER writes it. A cancellation is not a purchase, and
             # the price it carries is the plan they are leaving.
             previous_attributes = event_dict.get("data", {}).get("previous_attributes") or {}
-            is_plan_change = (
-                event_type == "customer.subscription.created"
-                or (event_type == "customer.subscription.updated"
-                    and "items" in previous_attributes)
-            )
-            plan_tier = None
-            if is_plan_change:
-                items = event_data.get("items", {}).get("data", [])
-                if items:
-                    plan_tier = _resolve_plan_from_price(items[0].get("price", {}).get("id"))
+            new_tier = _resolve_plan_from_price(
+                ((_plan_item(event_data) or {}).get("price") or {}).get("id"))
+
+            if event_type == "customer.subscription.created":
+                plan_tier = new_tier
+            elif event_type == "customer.subscription.updated":
+                # `items` being PRESENT in previous_attributes is not proof the
+                # PRICE changed — Codex's review, with Stripe's own renewal
+                # guidance: a billing-period renewal, and a quantity or other
+                # item attribute change, can each put `items` in there. The
+                # first version treated any of those as a purchase, so a
+                # renewal carrying Pro would overwrite a tier an admin had
+                # deliberately set to Business, and strip the feature
+                # exceptions with it.
+                #
+                # So compare the PRICES. The tier moves only when the plan the
+                # event's price resolves to differs from the plan the previous
+                # price resolved to. A renewal carries the same price, resolves
+                # to the same plan, and is a no-op by construction.
+                old_tier = _resolve_plan_from_price(
+                    ((_plan_item(previous_attributes) or {}).get("price") or {}).get("id"))
+                plan_tier = new_tier if (
+                    "items" in previous_attributes
+                    and old_tier is not None
+                    and new_tier is not None
+                    and old_tier != new_tier
+                ) else None
+            else:
+                # `.deleted` never writes the tier. A cancellation is not a
+                # purchase, and the price it carries is the plan being left.
+                plan_tier = None
+
+            # Freshness. Stripe does not guarantee delivery ORDER, and event-id
+            # de-duplication cannot help with two DIFFERENT events arriving
+            # backwards — an old plan-change event landing after a newer one
+            # would re-apply a plan the customer has already left. The event's
+            # own `created` timestamp against the last one we processed is the
+            # only ordering signal available. Applied to the TIER only:
+            # `subscription_status` and the period are still taken from the
+            # newest event we see, because being slightly stale about a status
+            # is safer than ignoring a cancellation.
+            event_created = _epoch_to_utc(event_dict.get("created"))
+            last_seen = business.last_stripe_event_at
+            if plan_tier and event_created and last_seen:
+                if last_seen.tzinfo is None:
+                    last_seen = last_seen.replace(tzinfo=timezone.utc)
+                if event_created < last_seen:
+                    logger.warning(
+                        "stripe event %s is older than the last processed event "
+                        "(%s < %s); not moving plan_tier",
+                        event_dict.get("id"), event_created, last_seen)
+                    plan_tier = None
             business.stripe_customer_id = customer_id or business.stripe_customer_id
             business.stripe_subscription_id = subscription_id or business.stripe_subscription_id
             # `subscription_status` is Stripe's field, stored verbatim — not
@@ -1154,14 +1203,29 @@ async def stripe_webhook(
         ))
     try:
         session.commit()
-    except Exception:
-        # A concurrent delivery of the same event can lose the race on
-        # stripe_events.event_id UNIQUE. Rolling back is correct: the other
-        # transaction applied it exactly once. NOTE: that constraint is in
-        # migration 010 and present on the local replay, but is NOT verified
-        # in production — audits/BH-006-PROD-RUNBOOK.md STEP 2 checks it.
+    except IntegrityError:
+        # A concurrent delivery of the same event lost the race on
+        # stripe_events.event_id UNIQUE. Rolling back and reporting success is
+        # correct: the other transaction applied it exactly once.
+        #
+        # NOTE: that constraint is in migration 010 and present on the local
+        # replay, but is NOT verified in production, and staging has no
+        # constraints on the table at all — audits/BH-006-PROD-RUNBOOK.md
+        # STEP 2 is the read that settles it. Without the constraint this
+        # branch never fires and concurrent deliveries both apply.
         session.rollback()
-        logger.warning("stripe webhook commit failed for event %s", event_id, exc_info=True)
+        logger.warning("duplicate stripe event %s lost the write race", event_id)
+    except Exception:
+        # ANY OTHER failure must be retryable. The first version caught
+        # Exception here and returned 200, so a transient database error threw
+        # the event away while telling Stripe it had been processed — the
+        # webhook outage of 2026 with no outage to notice. Stripe retries a
+        # 5xx; that is what we want.
+        session.rollback()
+        logger.error("stripe webhook commit failed for event %s", event_id, exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not record the event; Stripe should retry.")
 
     return {"received": True}
 
@@ -1273,6 +1337,17 @@ async def get_my_profile(
             # every business the moment that section ran.
             "brand_color": getattr(business, "brand_color", None),
             "feature_flags": flags,
+            # DECISION 3's banner state, from the resolver the server enforces
+            # with — so the banner cannot disagree with what a request will
+            # actually be allowed to do. `/v1/me` is where the frontend already
+            # reads business context on every page, which is why the banner
+            # lives here rather than on /v1/billing/status: that endpoint is
+            # only fetched by the billing page, so a flag returned there was
+            # exactly the "silent flag" DECISION 3 rules out.
+            "subscription_status": getattr(business, "subscription_status", None),
+            "access_level": resolve_access_level(business),
+            "payment_warning": needs_payment_warning(business),
+            "read_only": is_read_only(business),
         })
     
     return response
@@ -2226,7 +2301,8 @@ async def get_today_briefing(
 async def assistant_chat(
     request: Request,
     data: ChatRequest,
-    token: str = Depends(get_access_token)
+    token: str = Depends(get_access_token),
+    session: Session = Depends(get_session),
 ):
     """AI Assistant chat endpoint.
     
@@ -2236,6 +2312,12 @@ async def assistant_chat(
     Authentication: Bearer token (Supabase access token) in Authorization header.
     """
     user = await verify_supabase_token(token)
+
+    # DECISION 3: a read-only business gets no AI. This endpoint verifies the
+    # JWT itself rather than using a shared context dependency, so it was
+    # reaching OpenAI with no subscription check at all — the most expensive
+    # thing a non-paying account can do. Codex found it.
+    _assert_ai_access(session, user.id, data.business_id, "aria_chat")
     
     result = await process_chat_message(
         user=user,
@@ -2261,11 +2343,33 @@ async def assistant_chat(
     )
 
 
+def _assert_ai_access(session, user_id, requested_business_id, feature_name):
+    """Resolve this user's business and apply the feature gate. Raises 403/404.
+
+    For the three endpoints that cannot use `require_feature` because they
+    verify the JWT themselves: assistant chat, TTS, and the realtime voice
+    WebSocket. Platform admins pass, as they do in `require_feature`.
+    """
+    if is_platform_admin_user(user_id, session):
+        return
+    try:
+        business_ctx = get_business_for_user(
+            user_id, requested_business_id=requested_business_id
+        ) if requested_business_id else get_business_for_user(user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    business = session.exec(
+        select(Business).where(Business.id == business_ctx.id)
+    ).first()
+    assert_feature_access(business, feature_name)
+
+
 @app.post("/v1/tts", tags=["Assistant"])
 @limiter.limit(LIMIT_TTS)
 async def text_to_speech(
     request: Request,
-    token: str = Depends(get_access_token)
+    token: str = Depends(get_access_token),
+    session: Session = Depends(get_session),
 ):
     """Convert text to speech using OpenAI TTS API.
     
@@ -2275,7 +2379,10 @@ async def text_to_speech(
     from openai import OpenAI
     
     # Verify user is authenticated
-    await verify_supabase_token(token)
+    user = await verify_supabase_token(token)
+
+    # DECISION 3: no AI for a read-only business. TTS spends money per call.
+    _assert_ai_access(session, user.id, None, "aria_voice")
     
     try:
         data = await request.json()
@@ -2564,16 +2671,68 @@ def _resolve_current_period_end(event_data: dict) -> Optional[datetime]:
     Reading only the subscription level is BH-006 defect 3, and it wiped the
     stored period on every event.
     """
-    items = (event_data.get("items") or {}).get("data") or []
-    for source in (items[0] if items else {}, event_data):
+    candidates = [_plan_item(event_data) or {}, event_data]
+    for source in candidates:
         raw = (source or {}).get("current_period_end")
-        if raw:
-            try:
-                return datetime.fromtimestamp(int(raw))
-            except (TypeError, ValueError, OSError, OverflowError):
-                logger.warning("unparseable current_period_end from Stripe: %r", raw)
-                return None
+        parsed = _epoch_to_utc(raw)
+        if parsed is not None:
+            return parsed
     return None
+
+
+def _epoch_to_utc(raw) -> Optional[datetime]:
+    """A Stripe epoch second -> an aware UTC datetime, or None.
+
+    Three corrections from Codex's review of the first version:
+
+      * `datetime.fromtimestamp(x)` with no tzinfo returns NAIVE LOCAL time.
+        Under Europe/London, 1782864000 became 2026-07-01 01:00:00 instead of
+        00:00 UTC — an hour out for half the year, silently. The test missed it
+        because it round-tripped through `.timestamp()`, which re-applies the
+        same local offset.
+      * `True` is an int in Python, so `int(True)` is 1 and a boolean became
+        1970-01-01. Booleans are rejected explicitly.
+      * A float was truncated by `int()`. Only whole numbers are accepted.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, float) and not raw.is_integer():
+        logger.warning("non-integral current_period_end from Stripe: %r", raw)
+        return None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw.lstrip("-").isdigit():
+            logger.warning("non-numeric current_period_end from Stripe: %r", raw)
+            return None
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("unparseable current_period_end from Stripe: %r", raw)
+        return None
+    if seconds <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        logger.warning("out-of-range current_period_end from Stripe: %r", raw)
+        return None
+
+
+def _plan_item(subscription: dict) -> Optional[dict]:
+    """The subscription item that carries OUR plan's price.
+
+    NOT `items.data[0]`. Codex's review: a subscription can hold several items
+    and the plan need not be the first — a metered add-on could be. This picks
+    the item whose price maps to a known plan and falls back to the first item
+    only when none does, so behaviour on today's single-item subscriptions is
+    unchanged while a multi-item one stops being read off the wrong row.
+    """
+    items = (subscription.get("items") or {}).get("data") or []
+    for item in items:
+        price_id = ((item or {}).get("price") or {}).get("id")
+        if _resolve_plan_from_price(price_id):
+            return item
+    return items[0] if items else None
 
 
 def _resolve_plan_from_price(price_id: str) -> Optional[str]:

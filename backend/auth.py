@@ -1,6 +1,7 @@
 """Authentication dependencies for FastAPI."""
 
 import os
+import re
 from typing import Any, Optional, Dict
 from datetime import datetime, timezone
 from fastapi import Header, HTTPException, Depends, Request, Query, status
@@ -125,15 +126,43 @@ async def get_user_auth_context(
 # POST/PUT/PATCH/DELETE" would break the two things the decision exists to
 # protect. Nothing else belongs in this list: it is the difference between
 # "read-only" and "locked out".
-READ_ONLY_ALLOWED_PATH_PREFIXES = (
-    "/v1/billing/checkout-session",  # pay to restore full access
-    "/v1/billing/portal",            # Stripe customer portal — update the card
-)
-# Exports. Suffix-matched because the quote id sits in the middle of the path.
-READ_ONLY_ALLOWED_PATH_SUFFIXES = (
-    "/generate-pdf",                 # POST /v1/quotes/{id}/generate-pdf
-)
+# EXACT paths, matched whole. The first version used startswith/endswith, and
+# Codex showed both were too loose: `POST /v1/billing/portal-anything` passed
+# the prefix, and `DELETE /v1/quotes/generate-pdf` passed the suffix and
+# matched the quote-delete route. Method is matched too — an export is a POST,
+# and nothing here needs DELETE.
+READ_ONLY_ALLOWED_EXACT = frozenset({
+    ("POST", "/v1/billing/checkout-session"),  # pay to restore full access
+    ("POST", "/v1/billing/portal"),            # Stripe portal — update the card
+})
+# The one templated path: POST /v1/quotes/{quote_id}/generate-pdf. Matched by
+# shape, not by suffix, so the id must look like an id and nothing may follow.
+_QUOTE_PDF = re.compile(r"^/v1/quotes/[^/]+/generate-pdf$")
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+# GET endpoints that MUTATE or spend money, so a read-only business must not
+# reach them either. "Read-only" is about effect, not about HTTP verb, and
+# Codex found five of these. Each is refused by exact path or by shape.
+#
+# The OAuth *callbacks* are deliberately NOT here: a read-only business can
+# still finish a connection it began, and refusing mid-flow would leave a
+# provider-side grant with no local record. What it cannot do is USE the
+# connection — every AI and outbound feature is refused by the feature gate.
+SIDE_EFFECTING_GET_EXACT = frozenset({
+    "/v1/integrations/awaz",                        # creates an integration row
+    "/v1/accounting/export/accountant-pack",        # DECISION 3 (8 Sep 2026):
+                                                    # read-only export is
+                                                    # quotes and invoices ONLY,
+                                                    # not accounting history —
+                                                    # that data lives in the
+                                                    # customer's own Xero /
+                                                    # QuickBooks subscription
+})
+_VOICE_PREVIEW_GET = re.compile(r"^/v1/receptionist/voices/[^/]+/preview$")  # paid TTS
+
+
+def _is_side_effecting_get(path: str) -> bool:
+    return path in SIDE_EFFECTING_GET_EXACT or bool(_VOICE_PREVIEW_GET.match(path))
 
 
 def _is_read_only_allowed_request(request: Optional[Request]) -> bool:
@@ -143,30 +172,56 @@ def _is_read_only_allowed_request(request: Optional[Request]) -> bool:
         # only happens in tests. Fail CLOSED: a caller that cannot say what it
         # is asking for does not get the exemption.
         return False
-    if request.method.upper() not in _MUTATING_METHODS:
-        return True
+    method = request.method.upper()
     path = request.url.path
-    if path.startswith(READ_ONLY_ALLOWED_PATH_PREFIXES):
+    if method not in _MUTATING_METHODS:
+        # A GET is normally fine — unless it writes or spends, which some do.
+        return not _is_side_effecting_get(path)
+    if (method, path) in READ_ONLY_ALLOWED_EXACT:
         return True
-    return path.endswith(READ_ONLY_ALLOWED_PATH_SUFFIXES)
+    return method == "POST" and bool(_QUOTE_PDF.match(path))
 
 
-def enforce_read_only(request: Optional[Request], business: Optional[Business]) -> None:
-    """Refuse a mutating request from a read-only business. Server-side.
+SUSPENDED_DETAIL = "Account inactive or trial expired"
+
+
+def enforce_access(request: Optional[Request], business: Optional[Business]) -> None:
+    """Refuse a mutating request that this business's access level forbids.
 
     DECISION 3: "enforced server-side, per PART D. Hiding the buttons is not
-    enforcement." This sits in the two shared context dependencies that every
-    authenticated endpoint resolves, so a new endpoint is covered the day it
-    is written rather than when someone remembers to add a decorator. It keys
+    enforcement." This sits in the THREE shared context dependencies that
+    authenticated endpoints resolve through, so a new endpoint is covered the
+    day it is written rather than when someone remembers a decorator. It keys
     on the HTTP METHOD, which is why it cannot be forgotten: a create or an
     edit is a POST/PUT/PATCH/DELETE by definition, and the exceptions are the
     short, stated list above.
+
+    SUSPENDED is refused too, and that was a gap in the first version: it
+    checked read-only only, so a business an admin had switched off — or one
+    with an unrecognised status and an expired trial — could still write
+    through any endpoint that had no separate feature gate. Codex found it.
+    A suspended business is refused the same mutations as a read-only one,
+    and also the export exemptions, because suspension is not the
+    statutory-retention case: it is an admin decision or a lapsed trial.
     """
-    if business is None or not is_read_only(business):
+    if business is None:
         return
-    if _is_read_only_allowed_request(request):
+    access = resolve_access_level(business)
+    if access == ACCESS_FULL:
         return
-    raise HTTPException(status_code=403, detail=READ_ONLY_DETAIL)
+    if access == ACCESS_READ_ONLY:
+        if _is_read_only_allowed_request(request):
+            return
+        raise HTTPException(status_code=403, detail=READ_ONLY_DETAIL)
+    # ACCESS_SUSPENDED: no mutation at all. Reads are left to the feature
+    # gate, which refuses them with the same message.
+    if request is not None and request.method.upper() not in _MUTATING_METHODS:
+        return
+    raise HTTPException(status_code=403, detail=SUSPENDED_DETAIL)
+
+
+# Kept as the old name so existing call sites and tests read naturally.
+enforce_read_only = enforce_access
 
 
 def _load_business(session: Session, business_id) -> Optional[Business]:
@@ -231,7 +286,7 @@ async def get_user_business_context(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     request.state.user_email = user.email
-    enforce_read_only(request, _load_business(session, business_ctx.id))
+    enforce_access(request, _load_business(session, business_ctx.id))
     return {"user_id": user.id, "business_id": business_ctx.id, "is_platform_admin": False}
 
 
@@ -377,22 +432,38 @@ def resolve_access_level(business: Optional[Business]) -> str:
 
     status_value = (business.subscription_status or "").strip().lower()
 
+    # 1. READ-ONLY first, and this is an EXCEPTION TO SUSPENSION, not a
+    #    narrowing of it. Codex's review of the first version corrected the
+    #    reasoning here: read-only is MORE permissive than suspended, so
+    #    putting it first means a suspended business that later cancels gains
+    #    read access. That is deliberate and it is the statutory-retention
+    #    argument in DECISION 3 — a customer's own VAT records and invoices
+    #    must stay reachable, and a lockout is the thing the decision exists
+    #    to prevent. It is stated here rather than implied, because it is the
+    #    one case where `is_active = false` does not mean "no access".
     if status_value in READ_ONLY_STATUSES:
         return ACCESS_READ_ONLY
 
-    # The admin switch. Kept ABSOLUTE deliberately: the old webhook wrote this
-    # column from the Stripe status, so rows written before BH-006 are
-    # ambiguous. They are repaired by runbook (audits/BH-006-PROD-RUNBOOK.md),
-    # not by guessing here — a guess would silently un-suspend a business an
-    # admin had switched off on purpose.
+    # 2. The admin switch, ABSOLUTE for every other status. The first version
+    #    fell through to the trial window here, so `is_active = false` plus a
+    #    future `trial_ends_at` returned FULL — an admin suspension silently
+    #    overruled by a trial date, which is exactly what the docstring
+    #    claimed could not happen. Codex reproduced it.
+    #
+    #    Rows the OLD webhook wrote are ambiguous (it set this column from the
+    #    Stripe status), and they are repaired by runbook —
+    #    audits/BH-006-PROD-RUNBOOK.md — not by guessing here. A guess would
+    #    silently un-suspend a business an admin switched off on purpose.
     if not business.is_active:
-        if _is_trial_expired(business.trial_ends_at):
-            return ACCESS_SUSPENDED
-        return ACCESS_FULL
+        return ACCESS_SUSPENDED
 
+    # 3. Stripe's payment state.
     if status_value in FULL_ACCESS_STATUSES:
         return ACCESS_FULL
 
+    # 4. No usable Stripe status: the trial window decides. An unrecognised
+    #    status is treated as "Stripe has told us nothing", so a live trial
+    #    still works and an expired one does not.
     if _is_trial_expired(business.trial_ends_at):
         return ACCESS_SUSPENDED
     return ACCESS_FULL
@@ -557,6 +628,39 @@ READ_ONLY_DETAIL = (
 )
 
 
+def assert_feature_access(business: Optional[Business], feature_name: str) -> None:
+    """The feature gate, callable imperatively. Raises HTTPException or returns.
+
+    `require_feature` is the FastAPI dependency around this; several endpoints
+    cannot use a dependency because they verify the JWT themselves and resolve
+    the business from the request body (assistant chat, TTS) or from a
+    WebSocket handshake (realtime voice). Codex found those three reaching
+    OpenAI with no subscription check at all — the most expensive thing a
+    non-paying account can do. They call this.
+
+    DECISION 3 / BH-006 defect 5: the check used to read `is_active` alone,
+    and the webhook wrote `is_active = status in ('active','trialing')` — so a
+    `past_due` card set it False and `_is_trial_expired()` returns True for
+    every customer who never had a trial (`trial_ends_at IS NULL`). A customer
+    mid-dunning lost feature access on their next request. The resolver decides
+    now, and past_due is FULL.
+    """
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    access = resolve_access_level(business)
+    if access == ACCESS_SUSPENDED:
+        raise HTTPException(status_code=403, detail=SUSPENDED_DETAIL)
+    if access == ACCESS_READ_ONLY and feature_name not in READ_ONLY_PERMITTED_FEATURES:
+        raise HTTPException(status_code=403, detail=READ_ONLY_DETAIL)
+
+    if not _is_feature_enabled(business, feature_name):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Feature '{feature_name}' not enabled for your plan"
+        )
+
+
 def require_feature(feature_name: str):
     async def _dependency(
         auth_ctx: dict = Depends(get_user_business_context),
@@ -567,29 +671,7 @@ def require_feature(feature_name: str):
         business = session.exec(
             select(Business).where(Business.id == auth_ctx["business_id"])
         ).first()
-        if not business:
-            raise HTTPException(status_code=404, detail="Business not found")
-
-        # DECISION 3 / BH-006 defect 5. This used to read `is_active` alone,
-        # and the webhook wrote `is_active = status in ('active','trialing')`
-        # — so a `past_due` card set it False and `_is_trial_expired()`
-        # returns True for every customer who never had a trial
-        # (trial_ends_at IS NULL). A customer mid-dunning lost feature access
-        # on the next request. The resolver decides now, and past_due is FULL.
-        access = resolve_access_level(business)
-        if access == ACCESS_SUSPENDED:
-            raise HTTPException(
-                status_code=403,
-                detail="Account inactive or trial expired"
-            )
-        if access == ACCESS_READ_ONLY and feature_name not in READ_ONLY_PERMITTED_FEATURES:
-            raise HTTPException(status_code=403, detail=READ_ONLY_DETAIL)
-
-        if not _is_feature_enabled(business, feature_name):
-            raise HTTPException(
-                status_code=403,
-                detail=f"Feature '{feature_name}' not enabled for your plan"
-            )
+        assert_feature_access(business, feature_name)
         return True
 
     return _dependency

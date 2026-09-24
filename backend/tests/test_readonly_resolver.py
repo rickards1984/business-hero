@@ -139,9 +139,16 @@ class TestTheResolver:
     @pytest.mark.parametrize("status", ["incomplete", "incomplete_expired",
                                        "paused", "", None, "something_new"])
     def test_an_unrecognised_status_falls_to_the_trial_window_not_to_paid(self, status):
-        """Fails closed. A status nobody has taught this resolver about must
-        not be treated as paid: an expired trial with a junk status is
-        suspended, and a live trial keeps access."""
+        """Fail-closed, and PRECISELY what that means: a status nobody has
+        taught this resolver about is treated as "Stripe has said nothing", so
+        an expired or absent trial is SUSPENDED and a live trial still works.
+
+        Codex's review called the fail-closed claim "qualified at best",
+        because a future trial date plus an unknown status yields FULL. That is
+        intended — a business mid-trial has no subscription yet and an unknown
+        status must not cut its trial short — and it is why the claim is
+        written out here rather than asserted in one word.
+        """
         expired = a_business(subscription_status=status, trial_ends_at=None)
         assert auth.resolve_access_level(expired) == auth.ACCESS_SUSPENDED
 
@@ -150,22 +157,107 @@ class TestTheResolver:
             trial_ends_at=datetime.now(timezone.utc) + timedelta(days=3))
         assert auth.resolve_access_level(in_trial) == auth.ACCESS_FULL
 
-    def test_admin_suspension_beats_a_paid_subscription(self):
-        """`is_active` is the admin's switch. A paying customer an admin has
-        switched off stays off — the subscription must not overrule a human
-        decision about this business."""
-        assert auth.resolve_access_level(
-            a_business(subscription_status="active", is_active=False)) \
-            == auth.ACCESS_SUSPENDED
+    @pytest.mark.parametrize("status", ["active", "trialing", "past_due",
+                                       "incomplete", "", None, "junk"])
+    @pytest.mark.parametrize("trial", ["past", "future", "none"])
+    def test_admin_suspension_is_absolute_for_every_non_read_only_status(
+            self, status, trial):
+        """`is_active` is the admin's switch, and NOTHING but read-only
+        overrides it.
 
-    def test_read_only_beats_admin_suspension(self):
-        """The narrower state wins, so a cancelled-and-suspended business
-        still reaches its own VAT records. Lockout is the thing DECISION 3
-        exists to prevent, and it must not be reachable by combining two
-        states that are each individually survivable."""
-        assert auth.resolve_access_level(
-            a_business(subscription_status="canceled", is_active=False)) \
-            == auth.ACCESS_READ_ONLY
+        The first version fell through to the trial window here, so
+        `is_active=False` plus a FUTURE `trial_ends_at` returned FULL — an
+        admin suspension silently overruled by a trial date, while the
+        docstring claimed that could not happen. Codex reproduced it with
+        `subscription_status='active'`. Parametrised over the whole matrix so
+        it cannot come back one status at a time.
+        """
+        trial_ends_at = {
+            "past": datetime.now(timezone.utc) - timedelta(days=1),
+            "future": datetime.now(timezone.utc) + timedelta(days=30),
+            "none": None,
+        }[trial]
+        business = a_business(subscription_status=status, is_active=False,
+                              trial_ends_at=trial_ends_at)
+        assert auth.resolve_access_level(business) == auth.ACCESS_SUSPENDED
+
+    @pytest.mark.parametrize("status", ["unpaid", "canceled"])
+    @pytest.mark.parametrize("trial", ["past", "future", "none"])
+    def test_read_only_is_the_one_exception_to_suspension(self, status, trial):
+        """Read-only is MORE permissive than suspended, so ordering it first is
+        an EXCEPTION to the admin switch, not a narrowing of it — Codex
+        corrected the first version's reasoning on that.
+
+        It is deliberate: DECISION 3's whole argument for read-only rather than
+        lockout is statutory. UK VAT records must be kept six years and GDPR
+        Art. 20 portability does not lapse, so a cancelled customer reaches
+        their own invoices even if an admin also switched them off.
+        """
+        trial_ends_at = {
+            "past": datetime.now(timezone.utc) - timedelta(days=1),
+            "future": datetime.now(timezone.utc) + timedelta(days=30),
+            "none": None,
+        }[trial]
+        assert auth.resolve_access_level(a_business(
+            subscription_status=status, is_active=False,
+            trial_ends_at=trial_ends_at)) == auth.ACCESS_READ_ONLY
+
+    @pytest.mark.parametrize("status", ["active", "trialing", "past_due"])
+    @pytest.mark.parametrize("trial", ["past", "future", "none"])
+    def test_a_paid_business_keeps_access_whatever_its_trial_date_says(
+            self, status, trial):
+        """The mutation Codex wrote that passed all 113 tests:
+
+            if status_value in FULL_ACCESS_STATUSES:
+                return ACCESS_SUSPENDED if business.trial_ends_at is not None \
+                       else ACCESS_FULL
+
+        — which suspends every paying customer who has ever had a trial date,
+        past or future. Nothing in the suite noticed, because no test combined
+        a full-access status with a non-null trial. This is that test.
+        """
+        trial_ends_at = {
+            "past": datetime.now(timezone.utc) - timedelta(days=1),
+            "future": datetime.now(timezone.utc) + timedelta(days=30),
+            "none": None,
+        }[trial]
+        business = a_business(subscription_status=status, is_active=True,
+                              trial_ends_at=trial_ends_at)
+        assert auth.resolve_access_level(business) == auth.ACCESS_FULL
+
+    def test_the_whole_access_matrix_is_pinned(self):
+        """Every (status, is_active, trial) combination, in one table, so a
+        wrong resolver has nowhere to hide. Written after Codex demonstrated
+        that a deliberately incorrect resolver passed all 113 tests."""
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        future = datetime.now(timezone.utc) + timedelta(days=30)
+        F, R, S = auth.ACCESS_FULL, auth.ACCESS_READ_ONLY, auth.ACCESS_SUSPENDED
+        matrix = {
+            # (status, is_active, trial) -> expected
+            ("active",    True,  None):   F, ("active",    True,  past): F,
+            ("active",    True,  future): F, ("active",    False, None): S,
+            ("active",    False, past):   S, ("active",    False, future): S,
+            ("trialing",  True,  None):   F, ("trialing",  True,  future): F,
+            ("trialing",  False, future): S,
+            ("past_due",  True,  None):   F, ("past_due",  True,  past): F,
+            ("past_due",  False, None):   S,
+            ("unpaid",    True,  None):   R, ("unpaid",    False, None): R,
+            ("unpaid",    False, future): R,
+            ("canceled",  True,  None):   R, ("canceled",  False, past): R,
+            (None,        True,  None):   S, (None,        True,  future): F,
+            (None,        True,  past):   S, (None,        False, future): S,
+            ("junk",      True,  None):   S, ("junk",      True,  future): F,
+            ("incomplete", True, None):   S, ("incomplete", True, future): F,
+        }
+        wrong = []
+        for (status, active, trial), expected in matrix.items():
+            got = auth.resolve_access_level(a_business(
+                subscription_status=status, is_active=active,
+                trial_ends_at=trial))
+            if got != expected:
+                wrong.append(f"({status!r}, is_active={active}, trial={trial!r}): "
+                             f"expected {expected}, got {got}")
+        assert wrong == [], "\n".join(wrong)
 
     def test_no_business_is_suspended_not_permitted(self):
         assert auth.resolve_access_level(None) == auth.ACCESS_SUSPENDED
@@ -263,21 +355,53 @@ class TestReadOnlyRefusesWrites:
         endpoint is covered the day it is written."""
         business = a_business(subscription_status=status)
         with pytest.raises(HTTPException) as caught:
-            auth.enforce_read_only(FakeRequest(method, "/v1/quotes"), business)
+            auth.enforce_access(FakeRequest(method, "/v1/quotes"), business)
         assert caught.value.status_code == 403
         assert "read-only" in caught.value.detail.lower()
+
+    @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+    def test_a_SUSPENDED_business_is_refused_every_mutation(self, method):
+        """The gap a mutation found: `enforce_access` returned early for
+        ACCESS_SUSPENDED and nothing failed. A business an admin switched off,
+        or one whose trial lapsed with no subscription, could still write
+        through any endpoint with no separate feature gate."""
+        for business in (a_business(subscription_status="active", is_active=False),
+                         a_business(subscription_status=None, trial_ends_at=None)):
+            assert auth.resolve_access_level(business) == auth.ACCESS_SUSPENDED
+            with pytest.raises(HTTPException) as caught:
+                auth.enforce_access(FakeRequest(method, "/v1/tasks"), business)
+            assert caught.value.status_code == 403
+            assert caught.value.detail == auth.SUSPENDED_DETAIL
+
+    def test_a_SUSPENDED_business_is_refused_even_the_export_exemptions(self):
+        """Suspension is not the statutory-retention case — it is an admin
+        decision or a lapsed trial — so the read-only export and billing
+        exemptions do not apply to it."""
+        business = a_business(subscription_status="active", is_active=False)
+        for method, path in (("POST", "/v1/billing/portal"),
+                             ("POST", "/v1/quotes/q-1/generate-pdf")):
+            with pytest.raises(HTTPException):
+                auth.enforce_access(FakeRequest(method, path), business)
+
+    def test_a_SUSPENDED_business_may_still_GET(self):
+        """Reads are left to the feature gate, which refuses them with the same
+        message — so a suspended business sees one consistent 403 rather than
+        being silently shown an empty product."""
+        business = a_business(subscription_status="active", is_active=False)
+        auth.enforce_access(FakeRequest("GET", "/v1/quotes"), business)
+        assert call_gate(business, "quoting") == auth.SUSPENDED_DETAIL
 
     def test_a_request_with_no_request_object_fails_closed(self):
         """`enforce_read_only(None, business)` must refuse, not exempt. A
         caller that cannot say what it is asking for does not get the
         export exemption."""
         with pytest.raises(HTTPException):
-            auth.enforce_read_only(None, a_business(subscription_status="unpaid"))
+            auth.enforce_access(None, a_business(subscription_status="unpaid"))
 
     def test_a_full_access_business_is_never_refused(self):
         for status in ("active", "trialing", "past_due"):
             for method in ("POST", "PUT", "PATCH", "DELETE"):
-                auth.enforce_read_only(FakeRequest(method, "/v1/quotes"),
+                auth.enforce_access(FakeRequest(method, "/v1/quotes"),
                                        a_business(subscription_status=status))
 
     def test_the_refusal_names_the_way_back(self):
@@ -304,17 +428,46 @@ class TestReadOnlyPermitsReads:
     @pytest.mark.parametrize("status", ["unpaid", "canceled"])
     @pytest.mark.parametrize("path", ["/v1/quotes", "/v1/invoices",
                                       "/v1/accounting/transactions",
-                                      "/v1/accounting/export/accountant-pack"])
-    def test_every_GET_is_permitted(self, status, path):
-        auth.enforce_read_only(FakeRequest("GET", path),
-                               a_business(subscription_status=status))
+                                      "/v1/business/settings"])
+    def test_an_ordinary_GET_is_permitted(self, status, path):
+        auth.enforce_access(FakeRequest("GET", path),
+                            a_business(subscription_status=status))
+
+    @pytest.mark.parametrize("status", ["unpaid", "canceled"])
+    @pytest.mark.parametrize("path", [
+        "/v1/accounting/export/accountant-pack",
+        "/v1/integrations/awaz",
+        "/v1/receptionist/voices/alloy/preview",
+    ])
+    def test_a_GET_THAT_WRITES_OR_SPENDS_is_refused(self, status, path):
+        """Read-only is about EFFECT, not about the HTTP verb.
+
+        Codex found five GETs that write or spend money, and the first version
+        of this file waved all three of these through because they are GETs —
+        it even asserted the accounting export was permitted, which contradicts
+        DECISION 3's own scope decision:
+
+          * /v1/accounting/export/accountant-pack — the 8 Sep 2026 decision
+            limits read-only export to QUOTES AND INVOICES. Accounting history
+            reaches Business Hero from the customer's own Xero/QuickBooks
+            subscription and stays available to them there; the statutory
+            retention argument is about records this product ORIGINATES.
+          * /v1/integrations/awaz — creates an integration row and a webhook
+            secret on a cache miss. A write behind a GET.
+          * /v1/receptionist/voices/{id}/preview — generates paid OpenAI
+            speech on a cache miss. A non-paying account spending our money.
+        """
+        with pytest.raises(HTTPException) as caught:
+            auth.enforce_access(FakeRequest("GET", path),
+                                a_business(subscription_status=status))
+        assert caught.value.status_code == 403
 
     @pytest.mark.parametrize("status", ["unpaid", "canceled"])
     def test_the_pdf_export_is_permitted_though_it_is_a_POST(self, status):
         """`POST /v1/quotes/{id}/generate-pdf` is an export, not a write. A
         blanket method rule would have broken the one thing DECISION 3
         promises a non-paying customer."""
-        auth.enforce_read_only(
+        auth.enforce_access(
             FakeRequest("POST", "/v1/quotes/q-123/generate-pdf"),
             a_business(subscription_status=status))
 
@@ -324,27 +477,40 @@ class TestReadOnlyPermitsReads:
     def test_paying_to_restore_access_is_permitted(self, status, path):
         """If the route back through billing were refused, read-only would be
         a trap: the customer could not pay to get out of it."""
-        auth.enforce_read_only(FakeRequest("POST", path),
+        auth.enforce_access(FakeRequest("POST", path),
                                a_business(subscription_status=status))
 
-    def test_the_allowlist_is_exactly_exports_and_billing(self):
+    def test_the_allowlist_is_exactly_two_billing_posts(self):
         """A guard on the allowlist itself: anything added to it is a hole in
-        the write refusal, so the list stays short and every entry is one of
-        the two things DECISION 3 names."""
-        assert auth.READ_ONLY_ALLOWED_PATH_PREFIXES == (
-            "/v1/billing/checkout-session", "/v1/billing/portal")
-        assert auth.READ_ONLY_ALLOWED_PATH_SUFFIXES == ("/generate-pdf",)
+        the write refusal, so it stays short and every entry is one of the two
+        things DECISION 3 names. Method is part of the key."""
+        assert auth.READ_ONLY_ALLOWED_EXACT == frozenset({
+            ("POST", "/v1/billing/checkout-session"),
+            ("POST", "/v1/billing/portal"),
+        })
 
-    def test_a_write_that_merely_mentions_an_allowed_word_is_still_refused(self):
-        """The allowlist is matched on the path, not searched for anywhere in
-        it — so a create endpoint cannot smuggle itself through by containing
-        `billing` or `generate-pdf`."""
-        for path in ("/v1/quotes/generate-pdf/delete",
-                     "/v1/admin/billing/portal/reset",
-                     "/v1/quotes?note=/v1/billing/portal"):
-            with pytest.raises(HTTPException):
-                auth.enforce_read_only(FakeRequest("POST", path),
-                                       a_business(subscription_status="unpaid"))
+    @pytest.mark.parametrize("method,path", [
+        # Codex defeated the first version's startswith/endswith matching with
+        # the first two of these. The third would have matched the quote-DELETE
+        # route while passing the guard.
+        ("POST",   "/v1/billing/portal-anything"),
+        ("POST",   "/v1/billing/checkout-session/../../admin/businesses"),
+        ("DELETE", "/v1/quotes/generate-pdf"),
+        ("DELETE", "/v1/billing/portal"),
+        ("POST",   "/v1/quotes/generate-pdf/delete"),
+        ("POST",   "/v1/admin/billing/portal/reset"),
+        ("POST",   "/v1/quotes/q-1/generate-pdf/extra"),
+        ("PUT",    "/v1/quotes/q-1/generate-pdf"),
+    ])
+    def test_a_near_miss_on_the_allowlist_is_refused(self, method, path):
+        with pytest.raises(HTTPException):
+            auth.enforce_access(FakeRequest(method, path),
+                                a_business(subscription_status="unpaid"))
+
+    def test_the_real_pdf_path_still_passes(self):
+        auth.enforce_access(
+            FakeRequest("POST", "/v1/quotes/8f14e45f-ceea-467a-9f5b-000000000001/generate-pdf"),
+            a_business(subscription_status="unpaid"))
 
 
 # ── platform admins, and getting back in ─────────────────────────────────────
