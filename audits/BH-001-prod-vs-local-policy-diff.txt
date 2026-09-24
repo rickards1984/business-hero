@@ -1,0 +1,48 @@
+# BH-001 §2.1 — production policy state vs the migration-defined local replay
+#
+# Produced 24 Sep 2026 by comparing:
+#   PROD  audits/BH-001-prod-Q2-policies-2026-09-24.csv  (Supabase SQL editor,
+#         project oxblcmwhuwtobdhsfgyi, read-only)
+#   LOCAL a fresh `scripts/rls-local.sh up` (BH-003 / PR #9): Supabase's own
+#         Postgres image, this repository's migrations replayed, the 24
+#         pre-baseline ghost policies pruned against the 5 July 2026 capture,
+#         the 031/032 rollback snapshots dropped per their runbooks.
+#
+# Both sides normalised identically: whitespace collapsed, roles sorted, the
+# CSV's literal "null" mapped to SQL NULL. Comparison is on the FULL
+# definition — command, roles, USING, WITH CHECK — not on names.
+
+prod: 87 policies
+local (replay + prune): 87 policies
+byte-identical definitions: 87
+
+in PROD, absent locally:        0
+LOCAL only, absent in prod:     0
+DEFINITION DIFFERS:             0
+
+RLS-enabled / policy-count comparison across all 58 public tables: 0 differences
+  (prod tables: 58, local: 58, no table present in one and not the other)
+
+`businesses` table grants, prod vs local:
+  anon           SELECT, TRIGGER                                          IDENTICAL
+  authenticated  DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE    IDENTICAL
+  postgres       DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE   IDENTICAL
+  service_role   DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE   IDENTICAL
+
+WHAT THIS LICENSES
+  BH-003's RLS suite runs against the local replay. Because the replay's
+  policy and RLS state is byte-identical to production's, a green run there
+  now supports a statement about production's POLICIES, not merely about the
+  migration files — which is the gap test_tenant_isolation_rls_path.py's own
+  docstring and UNCOVERED registry flagged, and the reason this comparison
+  was the first thing done with the CSVs.
+
+WHAT IT DOES NOT LICENSE
+  * Grants beyond `businesses` — the Q3 export is truncated at 100 rows.
+  * Column-level grants — the Q4 export is truncated and never reached
+    `businesses`. This is what RC1 P0-3 turns on.
+  * Constraints — no export covers pg_constraint.
+  * VIEWS — a view cannot carry RLS and Q1 filters relkind='r'. Production
+    has two (receptionist_call_stats, support_stats) that the replay does not
+    create; see BH-001-FINDINGS.md §5. The replay is NOT equivalent there.
+  * The `auth` and `storage` schemas.
