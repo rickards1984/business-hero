@@ -24,17 +24,25 @@ event means what the field says.
      `items.data[0].current_period_end`. The top-level read yields None, so
      every subscription event WIPES the stored billing period.
 
-### Why these are marked xfail(strict=True) rather than left red
+### The xfail markers are gone, and that is the record of the fix
 
-The pre-push hook refuses a red tree, so a genuinely failing test cannot be
-pushed or reviewed. `xfail(strict=True)` keeps the gate honest in both
-directions: while the defect exists the suite is green and the test documents
-it; the moment the behaviour is fixed the test XPASSes, and `strict=True`
-turns an unexpected pass into a FAILURE.
+Every test here was written first, as `xfail(strict=True)`: while the defect
+existed the suite was green and the test documented it, and the moment the
+behaviour was fixed `strict=True` turned the unexpected pass into a FAILURE —
+so the marker had to come off in the same commit as the fix. That is what
+happened; `git log` for this file shows one commit per defect, each removing
+its own markers next to the change that earned it.
 
-**That is deliberate.** The implementer cannot quietly satisfy these tests —
-they must delete the `xfail` marker in the same commit that fixes the
-behaviour, which is the point at which a reviewer sees both.
+Two things changed in this file DURING implementation rather than before it,
+and both are called out where they happen rather than here:
+
+  * `test_two_different_events_both_apply` asserted that an `.updated`
+    carrying a price moves the tier — which is defect 1, and contradicted
+    `test_a_status_transition_does_not_move_the_tier` in the same file. Its
+    fixture now carries `previous_attributes`, as a real Stripe event does.
+  * Two tests were ADDED because the fix would otherwise have introduced a
+    worse bug than it closed: `.created` must set the tier, or no new
+    subscriber ever gets one.
 
 ### The cancellation policy IS decided, and these tests assert it exactly
 
@@ -53,11 +61,12 @@ RESOLVER and the Twilio release — see NOT_PINNED at the bottom.
 """
 
 import asyncio
+import uuid
 from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import literal, text
 from sqlmodel import select
 
 import main
@@ -122,7 +131,47 @@ class WebhookSession:
         self._pending_business = False
 
     @staticmethod
-    def _evaluate(clause, row):
+    def _column_of(entity, side):
+        """The real mapped column this expression refers to, or raise.
+
+        THIS IS CODEX'S REMAINING BLOCKER, CLOSED. Review 2 accepted the file
+        with one hole open: the evaluator read `.key` off whatever was on the
+        left of the comparison, and `.key` is set by anything with a label —
+        so `literal("wrong").label("stripe_customer_id")` claimed to be the
+        `stripe_customer_id` column and matched. A lookup that never touched
+        the table could pass for one that did.
+
+        The fix is identity, not naming: resolve the expression against the
+        SELECTED ENTITY's own mapper and require that it IS one of that
+        entity's columns. A label, a literal, a function call, a column of
+        some other table, or a name the entity does not map all raise.
+        """
+        from sqlalchemy import inspect as sa_inspect
+        from sqlalchemy.schema import Column
+
+        mapper = sa_inspect(entity)
+        # `Business.stripe_customer_id` arrives as an InstrumentedAttribute;
+        # `.expression` is the Column the mapper owns — but in an ORM query it
+        # is an ANNOTATED copy, so `is` against the mapper's own object fails.
+        # `_deannotate()` returns the original, which makes identity exact.
+        expression = getattr(side, "expression", side)
+        if not isinstance(expression, Column):
+            raise UnsupportedQuery(
+                f"{side!r} is not a table column, so it cannot be a column of "
+                f"{entity.__name__} (a label over a literal lands here)")
+        target = expression._deannotate()
+
+        for attribute in mapper.column_attrs:
+            for mapped in attribute.columns:
+                if mapped._deannotate() is target:
+                    return attribute.key
+        raise UnsupportedQuery(
+            f"{expression!r} is not a mapped column of {entity.__name__} — a "
+            f"label, a literal or another table's column cannot stand in for "
+            f"one")
+
+    @staticmethod
+    def _evaluate(clause, row, entity):
         """Evaluate the query's real WHERE clause against a candidate row.
 
         The first version compared the set of BOUND VALUES against the row's
@@ -133,13 +182,15 @@ class WebhookSession:
 
         This walks the clause instead, so the fake answers what was actually
         asked — and anything it does not understand raises rather than
-        guessing.
+        guessing. `entity` is the selected entity, so each side of a
+        comparison can be checked for being one of ITS columns rather than
+        merely having a matching name (`_column_of`).
         """
         from sqlalchemy.sql import operators
         from sqlalchemy.sql.elements import BinaryExpression, BooleanClauseList
 
         if isinstance(clause, BooleanClauseList):
-            parts = [WebhookSession._evaluate(c, row) for c in clause.clauses]
+            parts = [WebhookSession._evaluate(c, row, entity) for c in clause.clauses]
             if clause.operator is operators.or_:
                 return any(parts)
             if clause.operator is operators.and_:
@@ -150,16 +201,27 @@ class WebhookSession:
             if clause.operator is not operators.eq:
                 raise UnsupportedQuery(
                     f"only equality is supported, got {clause.operator}")
-            column = getattr(clause.left, "key", None)
-            if column is None:
-                raise UnsupportedQuery(f"cannot identify column in {clause}")
+            column = WebhookSession._column_of(entity, clause.left)
             if not hasattr(row, column):
                 raise UnsupportedQuery(
                     f"query filters on {column!r}, which this row does not have")
             expected = getattr(clause.right, "value", _UNSET)
             if expected is _UNSET:
                 raise UnsupportedQuery(f"cannot read bound value in {clause}")
-            return getattr(row, column) == expected
+            actual = getattr(row, column)
+            # Postgres coerces a string literal to uuid when comparing against a
+            # uuid column, and the handler relies on it:
+            # `checkout.session.completed` reads `metadata.business_id` as a
+            # STRING and compares it to `Business.id`, a UUID. Python's `==`
+            # says False, so a fake comparing strictly reported "no such
+            # business" for a query the database answers — a false negative in
+            # the fake, not a defect in the handler. Modelled explicitly rather
+            # than loosening the comparison in general.
+            if isinstance(actual, uuid.UUID) and isinstance(expected, str):
+                return str(actual) == expected
+            if isinstance(expected, uuid.UUID) and isinstance(actual, str):
+                return actual == str(expected)
+            return actual == expected
 
         raise UnsupportedQuery(f"unsupported clause: {clause!r}")
 
@@ -171,12 +233,12 @@ class WebhookSession:
 
         if entity is StripeEvent:
             for recorded in self.committed_events:
-                if self._evaluate(where, recorded):
+                if self._evaluate(where, recorded, entity):
                     return FakeResult(recorded)
             return FakeResult(None)
 
         if entity is Business:
-            if self._evaluate(where, self.business):
+            if self._evaluate(where, self.business, entity):
                 return FakeResult(self.business)
             return FakeResult(None)
 
@@ -326,13 +388,6 @@ def deliver(monkeypatch):
 
 # ── Defect 1 — a cancellation must not raise the tier ────────────────────────
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 1: main.py:989 handles .deleted like .updated and "
-           "takes the tier from the event's price, so cancelling a Pro "
-           "subscription SETS plan_tier='pro'. Remove this marker in the "
-           "commit that fixes it.",
-)
 def test_a_cancellation_leaves_the_tier_exactly_as_purchased(deliver):
     """DECISION 3: plan_tier is never changed by a payment event."""
     business = a_business(plan_tier="starter")
@@ -351,10 +406,6 @@ def test_a_cancellation_leaves_the_tier_exactly_as_purchased(deliver):
                           "cancellation carrying a Pro price")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 1: same root cause, from a higher tier.",
-)
 def test_a_cancellation_leaves_a_business_tier_exactly_as_purchased(deliver):
     business = a_business(plan_tier="business")
     session = WebhookSession(business)
@@ -400,12 +451,6 @@ def test_a_cancellation_still_records_the_status_it_carries(deliver):
     # here, which would have pinned that conflation in place. Codex caught it.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 1: on a cancellation the handler still calls "
-           "strip_plan_defaults with the CANCELLED plan's price, so genuine "
-           "per-business feature exceptions can be stripped on the way out.",
-)
 def test_a_cancellation_does_not_strip_a_genuine_feature_exception(deliver):
     """A hand-granted exception must survive a cancellation.
 
@@ -493,14 +538,6 @@ STATUS_TRANSITIONS = [
 ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 1, reached through a status transition: the "
-           "handler resolves the tier from the object's price on every "
-           "event, so a status-only update carrying a mismatched price "
-           "rewrites the tier. Remove this marker in the commit that fixes "
-           "defect 1.",
-)
 @pytest.mark.parametrize("status,previous_status", STATUS_TRANSITIONS)
 def test_a_status_transition_does_not_move_the_tier(deliver, status,
                                                    previous_status):
@@ -564,7 +601,7 @@ class GateSession:
         where = statement.whereclause
         if where is None:
             raise UnsupportedQuery("an unfiltered gate lookup would match anything")
-        if WebhookSession._evaluate(where, self.business):
+        if WebhookSession._evaluate(where, self.business, Business):
             return FakeResult(self.business)
         return FakeResult(None)
 
@@ -586,6 +623,59 @@ def has_access(business, feature_name="email"):
         return True
     except _HTTPException:
         return False
+
+
+class TestTheFakeCannotBeFooledIntoMatching:
+    """Codex's remaining blocker from review 2, now closed and proven closed.
+
+    Review 2 shipped with one hole open and said so: the evaluator read `.key`
+    off the left-hand side of the comparison, and `.key` is set by anything
+    carrying a label — so a predicate that never touched the table could claim
+    to be a column of it and match. Codex's own example is the first test
+    below. `WebhookSession._column_of` now resolves each side against the
+    selected entity's mapper and requires column IDENTITY, so a name is no
+    longer enough.
+    """
+
+    def _business(self):
+        return a_business(plan_tier="starter")
+
+    def test_a_labelled_literal_claiming_a_column_name_is_refused(self):
+        """`literal("wrong").label("stripe_customer_id")` — Codex's example,
+        verbatim. It used to match; it must now raise."""
+        session = WebhookSession(self._business())
+        statement = select(Business).where(
+            literal("cus_synthetic").label("stripe_customer_id") == "cus_synthetic")
+        with pytest.raises(UnsupportedQuery, match="not a table column"):
+            session.exec(statement)
+
+    def test_another_tables_column_of_the_same_name_is_refused(self):
+        """A query filtering on `StripeEvent.business_id` while selecting
+        `Business` is not a lookup of the business, however familiar the name
+        looks."""
+        session = WebhookSession(self._business())
+        statement = select(Business).where(
+            StripeEvent.business_id == self._business().id)
+        with pytest.raises(UnsupportedQuery, match="not a mapped column"):
+            session.exec(statement)
+
+    def test_a_real_column_still_matches(self):
+        """The control. Tightening the fake must not make it refuse the real
+        query the handler makes."""
+        business = self._business()
+        session = WebhookSession(business)
+        found = session.exec(select(Business).where(
+            (Business.stripe_customer_id == "cus_synthetic")
+            | (Business.stripe_subscription_id == "sub_synthetic"))).first()
+        assert found is business
+
+    def test_the_wrong_column_still_fails_to_match(self):
+        """Review 1's finding, still closed: a correct VALUE against the wrong
+        COLUMN must not match."""
+        business = self._business()
+        session = WebhookSession(business)
+        assert session.exec(select(Business).where(
+            Business.name == "cus_synthetic")).first() is None
 
 
 def test_the_gate_fake_refuses_a_business_it_was_not_asked_about():
@@ -624,12 +714,6 @@ def test_the_status_the_event_carries_is_recorded(deliver, status):
     assert business.subscription_status == status
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 1, reached through the read-only statuses: the "
-           "tier is taken from the event's price regardless of status. Remove "
-           "this marker in the commit that fixes defect 1.",
-)
 @pytest.mark.parametrize("status", READ_ONLY_STATUSES)
 def test_a_read_only_status_does_not_move_the_tier(deliver, status):
     """DECISION 3: unpaid and canceled are read-only — a STATUS, not a tier."""
@@ -644,18 +728,6 @@ def test_a_read_only_status_does_not_move_the_tier(deliver, status):
     assert business.subscription_status == status
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 5: main.py:1021 sets is_active = status in "
-           "('active','trialing'), so past_due sets is_active=False. The gate "
-           "at auth.py:381 then refuses when _is_trial_expired() is also true "
-           "— and that returns True whenever trial_ends_at is None, which is "
-           "every customer who never had a trial. DECISION 3 requires past_due "
-           "to keep FULL access. Remove this marker in the commit that fixes "
-           "it. Either the webhook must stop marking past_due inactive, or the "
-           "gate must consult subscription_status — the fix is open, the "
-           "outcome is not.",
-)
 def test_a_past_due_business_keeps_full_access(deliver):
     """The one that takes the receptionist off the phones.
 
@@ -712,13 +784,6 @@ def test_a_cancelled_business_still_reaches_the_read_only_surface(deliver):
 
 # ── Defect 2 — a redelivered event must apply once ───────────────────────────
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 2: the StripeEvent row is written at main.py:1026, "
-           "after the business commit at :1023, and is never read back. A "
-           "redelivered event applies twice. Remove this marker in the commit "
-           "that fixes it.",
-)
 def test_a_redelivered_event_applies_exactly_once(deliver):
     business = a_business(plan_tier="starter")
     session = WebhookSession(business)
@@ -738,23 +803,26 @@ def test_a_redelivered_event_applies_exactly_once(deliver):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 2: with no de-duplication, a stale replay overwrites "
-           "state that moved on after the first delivery.",
-)
 def test_a_replay_does_not_overwrite_state_that_moved_on(deliver):
     """The consequence that costs money.
 
     Upgrade to Pro, customer downgrades to Starter, Stripe redelivers the
     original event. Without de-duplication they are silently back on Pro while
     being billed for Starter.
+
+    FIXTURE STRENGTHENED while fixing defect 1. The event carried no
+    `previous_attributes`, so once defect 1 was fixed the first delivery no
+    longer moved the tier either — and the test passed while proving nothing
+    about de-duplication. It now sends a genuine plan change, so the first
+    delivery really does set Pro and the replay really is the thing under
+    test.
     """
     business = a_business(plan_tier="starter")
     session = WebhookSession(business)
     event = subscription_event(
         "customer.subscription.updated", PRICE_PRO,
         event_id="evt_stale", status="active",
+        previous_attributes={"items": {"data": [{"price": {"id": PRICE_STARTER}}]}},
     )
 
     deliver(event, session)
@@ -789,17 +857,77 @@ def test_deduplication_must_key_on_the_event_id_alone(deliver):
 
 
 def test_two_different_events_both_apply(deliver):
-    """De-duplication must not suppress everything. Passes today."""
+    """De-duplication must not suppress everything.
+
+    FIXTURE CORRECTED DURING IMPLEMENTATION, and the correction matters
+    enough to record here. Both events originally carried no
+    `previous_attributes` at all, and the test asserted the tier ended at
+    `business` — i.e. it asserted that an `.updated` moves the tier purely
+    because it carries a price. That is defect 1, and it contradicted
+    `test_a_status_transition_does_not_move_the_tier` fifteen lines earlier
+    in the same file. A real Stripe `.updated` ALWAYS carries
+    `previous_attributes` (it is the list of what changed), so an event
+    without one is not a thing Stripe sends.
+
+    Both events are now genuine plan changes, which keeps what this test is
+    FOR — two distinct event ids must both apply, de-duplication must not
+    swallow the second — and stops it asserting the defect.
+    """
     business = a_business(plan_tier="starter")
     session = WebhookSession(business)
 
-    deliver(subscription_event("customer.subscription.updated", PRICE_PRO,
-                               event_id="evt_one", status="active"), session)
-    deliver(subscription_event("customer.subscription.updated", PRICE_BUSINESS,
-                               event_id="evt_two", status="active"), session)
+    deliver(subscription_event(
+        "customer.subscription.updated", PRICE_PRO,
+        event_id="evt_one", status="active",
+        previous_attributes={"items": {"data": [{"price": {"id": PRICE_STARTER}}]}},
+    ), session)
+    deliver(subscription_event(
+        "customer.subscription.updated", PRICE_BUSINESS,
+        event_id="evt_two", status="active",
+        previous_attributes={"items": {"data": [{"price": {"id": PRICE_PRO}}]}},
+    ), session)
 
     assert business.plan_tier == "business"
     assert session.business_commits == 2
+
+
+def test_a_new_subscription_sets_the_tier_it_was_bought_at(deliver):
+    """`.created` is a purchase, and the only path that sets a new
+    customer's tier.
+
+    `checkout.session.completed` writes the Stripe ids and nothing else
+    (`main.py`, the branch above this one), so if `.created` did not write
+    `plan_tier` every new paying customer would sit on `starter` while being
+    billed for Pro. Added during implementation: gating the tier behind
+    `previous_attributes.items` alone would have caused exactly that, and
+    nothing in the file would have failed.
+    """
+    business = a_business(plan_tier="starter", subscription_status=None)
+    session = WebhookSession(business)
+
+    deliver(subscription_event(
+        "customer.subscription.created", PRICE_BUSINESS,
+        event_id="evt_created", status="active"), session)
+
+    assert business.plan_tier == "business", (
+        "a brand-new subscription did not set the tier it was bought at"
+    )
+    assert business.subscription_status == "active"
+
+
+def test_a_deleted_event_never_sets_the_tier_even_without_previous_attributes(deliver):
+    """The companion to the above: `.created` may write the tier, `.deleted`
+    may not, and neither carries `previous_attributes`. So the rule cannot be
+    "no previous_attributes means treat it as a purchase" — it is keyed on
+    the event type."""
+    business = a_business(plan_tier="starter")
+    session = WebhookSession(business)
+
+    deliver(subscription_event(
+        "customer.subscription.deleted", PRICE_BUSINESS,
+        event_id="evt_deleted_no_prev", status="canceled"), session)
+
+    assert_tier_unchanged(business, "starter", "cancellation with no previous_attributes")
 
 
 def test_an_event_for_an_unknown_customer_touches_nothing(deliver):
@@ -828,14 +956,6 @@ def test_an_event_for_an_unknown_customer_touches_nothing(deliver):
 
 # ── Defect 3 — current_period_end lives on the item ──────────────────────────
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 3: main.py:1008 reads current_period_end from the "
-           "subscription object. Current Stripe API versions put it on the "
-           "item, items.data[0].current_period_end, so the read yields None "
-           "and every event wipes the stored period. Remove this marker in "
-           "the commit that fixes it.",
-)
 def test_current_period_end_is_read_from_the_subscription_item(deliver):
     period_end = int(datetime(2026, 12, 1, tzinfo=timezone.utc).timestamp())
     business = a_business()
@@ -857,11 +977,6 @@ def test_current_period_end_is_read_from_the_subscription_item(deliver):
     assert int(business.current_period_end.timestamp()) == period_end
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 3: an event carrying no period anywhere must leave "
-           "the stored value alone rather than nulling it.",
-)
 def test_an_event_without_a_period_preserves_the_exact_stored_value(deliver):
     """Exact equality, not merely non-null.
 
@@ -908,6 +1023,286 @@ def test_the_subscription_level_period_is_still_honoured(deliver):
     assert int(business.current_period_end.timestamp()) == period_end
 
 
+# ── Codex's review of the implementation: seven more ways to get it wrong ────
+#
+# Every test below exists because the FIRST implementation passed this file
+# while getting something material wrong. They are grouped by what was wrong.
+
+
+class TestOnlyARealPriceChangeMovesTheTier:
+    """`items` in previous_attributes is not proof the PRICE changed.
+
+    Stripe puts `items` in `previous_attributes` on a billing-period renewal,
+    and on a quantity or other item-attribute change. The first implementation
+    treated any of those as a purchase, so a renewal carrying Pro would
+    overwrite a tier an admin had deliberately set — and strip the feature
+    exceptions against the wrong plan on the way through.
+    """
+
+    def test_a_renewal_carrying_the_same_price_does_not_move_the_tier(self, deliver):
+        """The one that would have hurt: an admin set Business by hand, Stripe
+        still bills Pro, and the monthly renewal quietly demotes them."""
+        business = a_business(plan_tier="business", subscription_status="active",
+                              feature_flags={"receptionist": True})
+        session = WebhookSession(business)
+
+        deliver(subscription_event(
+            "customer.subscription.updated", PRICE_PRO,
+            event_id="evt_renewal", status="active",
+            previous_attributes={"items": {"data": [{"price": {"id": PRICE_PRO}}]}},
+        ), session)
+
+        assert_tier_unchanged(business, "business", "a renewal")
+        assert business.feature_flags.get("receptionist") is True, (
+            "a renewal stripped a hand-granted feature exception")
+
+    def test_a_quantity_change_does_not_move_the_tier(self, deliver):
+        business = a_business(plan_tier="business")
+        session = WebhookSession(business)
+
+        deliver(subscription_event(
+            "customer.subscription.updated", PRICE_PRO,
+            event_id="evt_quantity", status="active",
+            previous_attributes={"items": {"data": [
+                {"price": {"id": PRICE_PRO}, "quantity": 1}]}},
+        ), session)
+
+        assert_tier_unchanged(business, "business", "a quantity change")
+
+    def test_a_real_price_change_still_moves_the_tier(self, deliver):
+        """The control: prices differ, so this IS a purchase."""
+        business = a_business(plan_tier="starter")
+        session = WebhookSession(business)
+
+        deliver(subscription_event(
+            "customer.subscription.updated", PRICE_BUSINESS,
+            event_id="evt_real_change", status="active",
+            previous_attributes={"items": {"data": [{"price": {"id": PRICE_STARTER}}]}},
+        ), session)
+
+        assert business.plan_tier == "business"
+
+    def test_an_update_whose_previous_price_is_unknown_does_not_move_the_tier(self, deliver):
+        """Fails closed. If we cannot resolve what they were on, we cannot know
+        the price changed, so we do not touch the record of what they bought."""
+        business = a_business(plan_tier="business")
+        session = WebhookSession(business)
+
+        deliver(subscription_event(
+            "customer.subscription.updated", PRICE_PRO,
+            event_id="evt_unknown_prev", status="active",
+            previous_attributes={"items": {"data": [{"price": {"id": "price_retired"}}]}},
+        ), session)
+
+        assert_tier_unchanged(business, "business", "an unresolvable previous price")
+
+
+class TestTheTierIsReadFromTheRightSubscriptionItem:
+    """`items.data[0]` is not necessarily the plan.
+
+    A subscription can carry several items — a metered add-on, a seat charge —
+    and the plan need not be first. The first implementation read `[0]`.
+    """
+
+    def _multi_item_event(self, event_id, plan_price, *, previous=None):
+        event = subscription_event(
+            "customer.subscription.created", plan_price,
+            event_id=event_id, status="active", previous_attributes=previous)
+        # An add-on whose price maps to no plan, placed FIRST.
+        event["data"]["object"]["items"]["data"].insert(
+            0, {"price": {"id": "price_metered_addon"}})
+        return event
+
+    def test_the_plan_item_is_found_behind_an_add_on(self, deliver):
+        business = a_business(plan_tier="starter", subscription_status=None)
+        session = WebhookSession(business)
+
+        deliver(self._multi_item_event("evt_multi", PRICE_BUSINESS), session)
+
+        assert business.plan_tier == "business", (
+            "the tier was read from the add-on item instead of the plan item")
+
+    def test_the_period_is_read_from_the_plan_item_not_the_first(self, deliver):
+        plan_period = int(datetime(2026, 12, 1, tzinfo=timezone.utc).timestamp())
+        event = self._multi_item_event("evt_multi_period", PRICE_BUSINESS)
+        event["data"]["object"]["items"]["data"][0]["current_period_end"] = 1
+        event["data"]["object"]["items"]["data"][1]["current_period_end"] = plan_period
+
+        business = a_business(subscription_status=None)
+        session = WebhookSession(business)
+        deliver(event, session)
+
+        assert int(business.current_period_end.timestamp()) == plan_period
+
+
+class TestThePeriodIsStoredInUTC:
+    """`datetime.fromtimestamp(x)` with no tzinfo is NAIVE LOCAL time.
+
+    Under Europe/London that is an hour out for half the year. The original
+    assertion round-tripped through `.timestamp()`, which re-applies the same
+    local offset and hides it — so this asserts the WALL CLOCK, in UTC.
+    """
+
+    def test_the_stored_period_is_the_right_instant_in_utc(self, deliver):
+        # 2026-07-01 00:00:00 UTC — inside British Summer Time, so a local
+        # reading of this timestamp is 01:00, and the bug is visible.
+        period_end = int(datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp())
+        business = a_business()
+        session = WebhookSession(business)
+
+        deliver(subscription_event(
+            "customer.subscription.updated", PRICE_PRO,
+            event_id="evt_utc", status="active", item_period_end=period_end), session)
+
+        stored = business.current_period_end
+        assert stored.tzinfo is not None, "the period was stored without a timezone"
+        assert stored.astimezone(timezone.utc).replace(tzinfo=None) == \
+            datetime(2026, 7, 1, 0, 0, 0), (
+            f"stored {stored!r}; a naive local parse gives 01:00 in BST")
+
+    @pytest.mark.parametrize("raw", [True, False, "not-a-number", "", 0, -1, 1.5, None])
+    def test_a_nonsense_period_leaves_the_stored_value_alone(self, deliver, raw):
+        """`int(True)` is 1, so a boolean used to become 1970-01-01, and a
+        float was silently truncated."""
+        known = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        business = a_business(current_period_end=known)
+        session = WebhookSession(business)
+
+        event = subscription_event(
+            "customer.subscription.updated", PRICE_PRO,
+            event_id=f"evt_bad_period_{raw!r}", status="active")
+        event["data"]["object"]["items"]["data"][0]["current_period_end"] = raw
+
+        deliver(event, session)
+
+        assert business.current_period_end == known, (
+            f"a period of {raw!r} overwrote a known date")
+
+
+class TestCheckoutIsDeduplicatedToo:
+    """`checkout.session.completed` used to commit ABOVE the de-duplication
+    check, in its own transaction — so the handler's two headline claims were
+    both false for it, and a replayed checkout re-applied."""
+
+    def _checkout(self, event_id, business_id):
+        return {
+            "id": event_id,
+            "type": "checkout.session.completed",
+            "created": 1_780_000_000,
+            "data": {"object": {
+                "metadata": {"business_id": str(business_id)},
+                "customer": "cus_checkout", "subscription": "sub_checkout",
+            }},
+        }
+
+    def test_a_replayed_checkout_applies_once(self, deliver):
+        business = a_business(stripe_customer_id=None, stripe_subscription_id=None)
+        session = WebhookSession(business)
+        event = self._checkout("evt_checkout", business.id)
+
+        first = deliver(event, session)
+        second = deliver(event, session)
+
+        assert first.status_code == 200 and second.status_code == 200
+        assert session.business_commits == 1, (
+            f"the checkout applied {session.business_commits} times")
+        assert business.stripe_customer_id == "cus_checkout"
+
+    def test_a_checkout_is_recorded_in_the_audit_table(self, deliver):
+        business = a_business(stripe_customer_id=None)
+        session = WebhookSession(business)
+        deliver(self._checkout("evt_checkout_audit", business.id), session)
+        assert [e.event_id for e in session.committed_events] == ["evt_checkout_audit"]
+
+
+class TestAStaleEventDoesNotResurrectAnOldPlan:
+    """Stripe does not guarantee delivery ORDER, and de-duplication by event id
+    cannot help with two DIFFERENT events arriving backwards."""
+
+    def test_an_older_plan_change_arriving_late_is_ignored(self, deliver):
+        business = a_business(plan_tier="starter")
+        session = WebhookSession(business)
+
+        newer = subscription_event(
+            "customer.subscription.updated", PRICE_STARTER,
+            event_id="evt_newer", status="active",
+            previous_attributes={"items": {"data": [{"price": {"id": PRICE_BUSINESS}}]}})
+        newer["created"] = 1_790_000_000
+        deliver(newer, session)
+        assert business.plan_tier == "starter"
+
+        older = subscription_event(
+            "customer.subscription.updated", PRICE_BUSINESS,
+            event_id="evt_older", status="active",
+            previous_attributes={"items": {"data": [{"price": {"id": PRICE_STARTER}}]}})
+        older["created"] = 1_780_000_000          # a day earlier
+        deliver(older, session)
+
+        assert business.plan_tier == "starter", (
+            "an out-of-order event resurrected a plan the customer had left")
+
+    def test_a_stale_event_still_records_its_status(self, deliver):
+        """Freshness gates the TIER only. Being slightly stale about a status is
+        safer than ignoring a cancellation that arrived out of order."""
+        business = a_business(plan_tier="pro", subscription_status="active")
+        session = WebhookSession(business)
+
+        newer = subscription_event("customer.subscription.updated", PRICE_PRO,
+                                   event_id="evt_fresh", status="active")
+        newer["created"] = 1_790_000_000
+        deliver(newer, session)
+
+        older = subscription_event("customer.subscription.deleted", PRICE_PRO,
+                                   event_id="evt_stale_cancel", status="canceled")
+        older["created"] = 1_780_000_000
+        deliver(older, session)
+
+        assert business.subscription_status == "canceled"
+        assert_tier_unchanged(business, "pro", "a stale cancellation")
+
+
+class TestATransientFailureIsRetryable:
+    """The first implementation caught `Exception` around the commit and
+    returned 200, so a transient database error threw the event away while
+    telling Stripe it had been processed — a silent webhook outage, which this
+    product has already had once for two months."""
+
+    class _FailingSession(WebhookSession):
+        def __init__(self, business, error):
+            super().__init__(business)
+            self._error = error
+
+        def commit(self):
+            raise self._error
+
+    def test_a_database_error_returns_5xx_so_stripe_retries(self, deliver):
+        from sqlalchemy.exc import OperationalError
+        business = a_business(plan_tier="starter")
+        session = self._FailingSession(
+            business, OperationalError("SELECT 1", {}, Exception("connection lost")))
+
+        response = deliver(subscription_event(
+            "customer.subscription.updated", PRICE_PRO,
+            event_id="evt_db_down", status="active"), session)
+
+        assert response.status_code >= 500, (
+            "a failed commit reported success; Stripe will never retry it")
+
+    def test_a_duplicate_conflict_returns_200(self, deliver):
+        """The one failure that IS success: the other transaction applied it."""
+        from sqlalchemy.exc import IntegrityError
+        business = a_business(plan_tier="starter")
+        session = self._FailingSession(
+            business,
+            IntegrityError("INSERT", {}, Exception("duplicate key value")))
+
+        response = deliver(subscription_event(
+            "customer.subscription.updated", PRICE_PRO,
+            event_id="evt_race", status="active"), session)
+
+        assert response.status_code == 200
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # NOT PINNED HERE — named so the implementer knows what is still open.
 # From Codex's review of the first version of this file.
@@ -938,25 +1333,77 @@ NOT_PINNED = {
         "Shares the same audit-after-commit problem and links the customer "
         "and subscription ids, but has no coverage here at all."
     ),
-    "ENFORCEMENT of read-only (P0-6's resolver, not the webhook)": (
-        "DECISION 3 is now fully pinned on the webhook side: the tier never "
-        "moves and the status is recorded faithfully. What is NOT tested here "
-        "is the resolver that turns `unpaid`/`canceled` into an actually "
-        "read-only surface — refusing every create, edit, AI call and "
-        "outbound send while still permitting login, viewing and export. That "
-        "is P0-6 and it needs its own tests; a faithful status with no "
-        "resolver behind it enforces nothing."
+    "ENFORCEMENT of read-only — CLOSED, in its own file": (
+        "This entry asked for the resolver that turns `unpaid`/`canceled` into "
+        "an actually read-only surface. It exists: `auth.resolve_access_level` "
+        "plus `auth.enforce_read_only`, tested in "
+        "backend/tests/test_readonly_resolver.py — refusals for every AI and "
+        "outbound feature and every mutating HTTP method, permissions for "
+        "views, the PDF export and the billing paths. What remains untested "
+        "there is HTTP-level: those tests call the real dependency directly, "
+        "so FastAPI routing and a real JWT are not exercised."
     ),
     "releasing the Twilio number on cancellation": (
         "DECISION 3 says the number releases when a business goes read-only. "
         "Nothing here or anywhere else tests that, and it is the one "
-        "read-only consequence that costs real money every month if missed."
+        "read-only consequence that costs real money every month if missed. "
+        "Deliberately deferred to its own ticket (Mike, 24 Sep 2026), so it is "
+        "STILL OPEN: a cancelled business keeps its number and its monthly "
+        "cost until that ticket lands."
+    ),
+    "the stale `is_active` rows this fix leaves behind": (
+        "The old handler wrote `is_active = status in ('active','trialing')`, "
+        "so every business that has ever been past_due, unpaid or canceled "
+        "carries a False this code can no longer distinguish from a deliberate "
+        "admin suspension. The resolver keeps admin suspension absolute, so "
+        "those rows stay suspended until repaired — audits/BH-006-PROD-RUNBOOK.md, "
+        "which is prod SQL and therefore Mike's to run. Nothing in this suite "
+        "can detect that the repair has not happened."
     ),
     "unknown price ids and empty items": (
         "An event whose price maps to no plan, or which carries no items at "
-        "all. Today `plan_tier` is simply left alone, which is probably "
-        "right, but nothing asserts it — so a fix that defaults an unknown "
-        "price to a tier would pass. Cheap to pin once the policy is stated."
+        "all. `plan_tier` is left alone — `_resolve_plan_from_price` returns "
+        "None and the write is behind `if plan_tier:` — but nothing here "
+        "asserts it, so a change that defaulted an unknown price to a tier "
+        "would still pass. Cheap to pin once the policy is stated."
+    ),
+    "the fake's column-identity check is exact; three other holes are NOT": (
+        "Codex's review-2 blocker is closed: `_column_of` requires column "
+        "IDENTITY against the selected entity's mapper, so a labelled literal "
+        "or another table's column raises instead of matching "
+        "(TestTheFakeCannotBeFooledIntoMatching). Reviewing the implementation, "
+        "Codex then demonstrated three holes that remain OPEN, listed here "
+        "rather than fixed because each needs the fake to model more of "
+        "SQLAlchemy than a fake should:\n"
+        "  - a callable `bindparam` whose `.value` matches while its "
+        "`effective_value` is a different customer: the evaluator reads "
+        "`.value`\n"
+        "  - `.limit(0)` returns the business: query modifiers are ignored\n"
+        "  - `rollback()` clears the fake's bookkeeping but not mutations "
+        "already made to the shared Business object, so a handler that wrote "
+        "the business and then rolled back looks the same as one that did not\n"
+        "The handler uses none of those shapes. They are false-GREEN routes "
+        "for a hypothetical wrong implementation, not defects in this one, and "
+        "the real answer to all three is the executed-against-Postgres suite "
+        "the atomicity entry above asks for."
+    ),
+    "endpoints a read-only business can still reach": (
+        "Enforcement covers the three shared context dependencies, the feature "
+        "gate, and the four self-authenticating paths (assistant chat, TTS, "
+        "realtime voice, inbound receptionist call). NOT covered, and "
+        "deliberately: OAuth callbacks (a connection already begun may finish; "
+        "USING it is refused by the feature gate) and provider callbacks "
+        "arriving with a valid provider signature (Twilio media-stream "
+        "continuation, WhatsApp actions). Those need per-path decisions about "
+        "what a half-finished external interaction should do, which is a "
+        "product question, not a gate."
+    ),
+    "the Twilio media-stream continuation and WhatsApp callbacks": (
+        "The inbound call is refused now, so a read-only business's "
+        "receptionist stops answering. But a call already in progress, and a "
+        "WhatsApp callback carrying a valid signature, are not re-checked "
+        "mid-flow. Low value to close before the number-release ticket lands, "
+        "since that removes the number and with it the inbound path entirely."
     ),
 }
 
