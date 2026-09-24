@@ -24,17 +24,25 @@ event means what the field says.
      `items.data[0].current_period_end`. The top-level read yields None, so
      every subscription event WIPES the stored billing period.
 
-### Why these are marked xfail(strict=True) rather than left red
+### The xfail markers are gone, and that is the record of the fix
 
-The pre-push hook refuses a red tree, so a genuinely failing test cannot be
-pushed or reviewed. `xfail(strict=True)` keeps the gate honest in both
-directions: while the defect exists the suite is green and the test documents
-it; the moment the behaviour is fixed the test XPASSes, and `strict=True`
-turns an unexpected pass into a FAILURE.
+Every test here was written first, as `xfail(strict=True)`: while the defect
+existed the suite was green and the test documented it, and the moment the
+behaviour was fixed `strict=True` turned the unexpected pass into a FAILURE —
+so the marker had to come off in the same commit as the fix. That is what
+happened; `git log` for this file shows one commit per defect, each removing
+its own markers next to the change that earned it.
 
-**That is deliberate.** The implementer cannot quietly satisfy these tests —
-they must delete the `xfail` marker in the same commit that fixes the
-behaviour, which is the point at which a reviewer sees both.
+Two things changed in this file DURING implementation rather than before it,
+and both are called out where they happen rather than here:
+
+  * `test_two_different_events_both_apply` asserted that an `.updated`
+    carrying a price moves the tier — which is defect 1, and contradicted
+    `test_a_status_transition_does_not_move_the_tier` in the same file. Its
+    fixture now carries `previous_attributes`, as a real Stripe event does.
+  * Two tests were ADDED because the fix would otherwise have introduced a
+    worse bug than it closed: `.created` must set the tier, or no new
+    subscriber ever gets one.
 
 ### The cancellation policy IS decided, and these tests assert it exactly
 
@@ -57,7 +65,7 @@ from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import literal, text
 from sqlmodel import select
 
 import main
@@ -122,7 +130,47 @@ class WebhookSession:
         self._pending_business = False
 
     @staticmethod
-    def _evaluate(clause, row):
+    def _column_of(entity, side):
+        """The real mapped column this expression refers to, or raise.
+
+        THIS IS CODEX'S REMAINING BLOCKER, CLOSED. Review 2 accepted the file
+        with one hole open: the evaluator read `.key` off whatever was on the
+        left of the comparison, and `.key` is set by anything with a label —
+        so `literal("wrong").label("stripe_customer_id")` claimed to be the
+        `stripe_customer_id` column and matched. A lookup that never touched
+        the table could pass for one that did.
+
+        The fix is identity, not naming: resolve the expression against the
+        SELECTED ENTITY's own mapper and require that it IS one of that
+        entity's columns. A label, a literal, a function call, a column of
+        some other table, or a name the entity does not map all raise.
+        """
+        from sqlalchemy import inspect as sa_inspect
+        from sqlalchemy.schema import Column
+
+        mapper = sa_inspect(entity)
+        # `Business.stripe_customer_id` arrives as an InstrumentedAttribute;
+        # `.expression` is the Column the mapper owns — but in an ORM query it
+        # is an ANNOTATED copy, so `is` against the mapper's own object fails.
+        # `_deannotate()` returns the original, which makes identity exact.
+        expression = getattr(side, "expression", side)
+        if not isinstance(expression, Column):
+            raise UnsupportedQuery(
+                f"{side!r} is not a table column, so it cannot be a column of "
+                f"{entity.__name__} (a label over a literal lands here)")
+        target = expression._deannotate()
+
+        for attribute in mapper.column_attrs:
+            for mapped in attribute.columns:
+                if mapped._deannotate() is target:
+                    return attribute.key
+        raise UnsupportedQuery(
+            f"{expression!r} is not a mapped column of {entity.__name__} — a "
+            f"label, a literal or another table's column cannot stand in for "
+            f"one")
+
+    @staticmethod
+    def _evaluate(clause, row, entity):
         """Evaluate the query's real WHERE clause against a candidate row.
 
         The first version compared the set of BOUND VALUES against the row's
@@ -133,13 +181,15 @@ class WebhookSession:
 
         This walks the clause instead, so the fake answers what was actually
         asked — and anything it does not understand raises rather than
-        guessing.
+        guessing. `entity` is the selected entity, so each side of a
+        comparison can be checked for being one of ITS columns rather than
+        merely having a matching name (`_column_of`).
         """
         from sqlalchemy.sql import operators
         from sqlalchemy.sql.elements import BinaryExpression, BooleanClauseList
 
         if isinstance(clause, BooleanClauseList):
-            parts = [WebhookSession._evaluate(c, row) for c in clause.clauses]
+            parts = [WebhookSession._evaluate(c, row, entity) for c in clause.clauses]
             if clause.operator is operators.or_:
                 return any(parts)
             if clause.operator is operators.and_:
@@ -150,9 +200,7 @@ class WebhookSession:
             if clause.operator is not operators.eq:
                 raise UnsupportedQuery(
                     f"only equality is supported, got {clause.operator}")
-            column = getattr(clause.left, "key", None)
-            if column is None:
-                raise UnsupportedQuery(f"cannot identify column in {clause}")
+            column = WebhookSession._column_of(entity, clause.left)
             if not hasattr(row, column):
                 raise UnsupportedQuery(
                     f"query filters on {column!r}, which this row does not have")
@@ -171,12 +219,12 @@ class WebhookSession:
 
         if entity is StripeEvent:
             for recorded in self.committed_events:
-                if self._evaluate(where, recorded):
+                if self._evaluate(where, recorded, entity):
                     return FakeResult(recorded)
             return FakeResult(None)
 
         if entity is Business:
-            if self._evaluate(where, self.business):
+            if self._evaluate(where, self.business, entity):
                 return FakeResult(self.business)
             return FakeResult(None)
 
@@ -539,7 +587,7 @@ class GateSession:
         where = statement.whereclause
         if where is None:
             raise UnsupportedQuery("an unfiltered gate lookup would match anything")
-        if WebhookSession._evaluate(where, self.business):
+        if WebhookSession._evaluate(where, self.business, Business):
             return FakeResult(self.business)
         return FakeResult(None)
 
@@ -561,6 +609,59 @@ def has_access(business, feature_name="email"):
         return True
     except _HTTPException:
         return False
+
+
+class TestTheFakeCannotBeFooledIntoMatching:
+    """Codex's remaining blocker from review 2, now closed and proven closed.
+
+    Review 2 shipped with one hole open and said so: the evaluator read `.key`
+    off the left-hand side of the comparison, and `.key` is set by anything
+    carrying a label — so a predicate that never touched the table could claim
+    to be a column of it and match. Codex's own example is the first test
+    below. `WebhookSession._column_of` now resolves each side against the
+    selected entity's mapper and requires column IDENTITY, so a name is no
+    longer enough.
+    """
+
+    def _business(self):
+        return a_business(plan_tier="starter")
+
+    def test_a_labelled_literal_claiming_a_column_name_is_refused(self):
+        """`literal("wrong").label("stripe_customer_id")` — Codex's example,
+        verbatim. It used to match; it must now raise."""
+        session = WebhookSession(self._business())
+        statement = select(Business).where(
+            literal("cus_synthetic").label("stripe_customer_id") == "cus_synthetic")
+        with pytest.raises(UnsupportedQuery, match="not a table column"):
+            session.exec(statement)
+
+    def test_another_tables_column_of_the_same_name_is_refused(self):
+        """A query filtering on `StripeEvent.business_id` while selecting
+        `Business` is not a lookup of the business, however familiar the name
+        looks."""
+        session = WebhookSession(self._business())
+        statement = select(Business).where(
+            StripeEvent.business_id == self._business().id)
+        with pytest.raises(UnsupportedQuery, match="not a mapped column"):
+            session.exec(statement)
+
+    def test_a_real_column_still_matches(self):
+        """The control. Tightening the fake must not make it refuse the real
+        query the handler makes."""
+        business = self._business()
+        session = WebhookSession(business)
+        found = session.exec(select(Business).where(
+            (Business.stripe_customer_id == "cus_synthetic")
+            | (Business.stripe_subscription_id == "sub_synthetic"))).first()
+        assert found is business
+
+    def test_the_wrong_column_still_fails_to_match(self):
+        """Review 1's finding, still closed: a correct VALUE against the wrong
+        COLUMN must not match."""
+        business = self._business()
+        session = WebhookSession(business)
+        assert session.exec(select(Business).where(
+            Business.name == "cus_synthetic")).first() is None
 
 
 def test_the_gate_fake_refuses_a_business_it_was_not_asked_about():
@@ -938,25 +1039,49 @@ NOT_PINNED = {
         "Shares the same audit-after-commit problem and links the customer "
         "and subscription ids, but has no coverage here at all."
     ),
-    "ENFORCEMENT of read-only (P0-6's resolver, not the webhook)": (
-        "DECISION 3 is now fully pinned on the webhook side: the tier never "
-        "moves and the status is recorded faithfully. What is NOT tested here "
-        "is the resolver that turns `unpaid`/`canceled` into an actually "
-        "read-only surface — refusing every create, edit, AI call and "
-        "outbound send while still permitting login, viewing and export. That "
-        "is P0-6 and it needs its own tests; a faithful status with no "
-        "resolver behind it enforces nothing."
+    "ENFORCEMENT of read-only — CLOSED, in its own file": (
+        "This entry asked for the resolver that turns `unpaid`/`canceled` into "
+        "an actually read-only surface. It exists: `auth.resolve_access_level` "
+        "plus `auth.enforce_read_only`, tested in "
+        "backend/tests/test_readonly_resolver.py — refusals for every AI and "
+        "outbound feature and every mutating HTTP method, permissions for "
+        "views, the PDF export and the billing paths. What remains untested "
+        "there is HTTP-level: those tests call the real dependency directly, "
+        "so FastAPI routing and a real JWT are not exercised."
     ),
     "releasing the Twilio number on cancellation": (
         "DECISION 3 says the number releases when a business goes read-only. "
         "Nothing here or anywhere else tests that, and it is the one "
-        "read-only consequence that costs real money every month if missed."
+        "read-only consequence that costs real money every month if missed. "
+        "Deliberately deferred to its own ticket (Mike, 24 Sep 2026), so it is "
+        "STILL OPEN: a cancelled business keeps its number and its monthly "
+        "cost until that ticket lands."
+    ),
+    "the stale `is_active` rows this fix leaves behind": (
+        "The old handler wrote `is_active = status in ('active','trialing')`, "
+        "so every business that has ever been past_due, unpaid or canceled "
+        "carries a False this code can no longer distinguish from a deliberate "
+        "admin suspension. The resolver keeps admin suspension absolute, so "
+        "those rows stay suspended until repaired — audits/BH-006-PROD-RUNBOOK.md, "
+        "which is prod SQL and therefore Mike's to run. Nothing in this suite "
+        "can detect that the repair has not happened."
     ),
     "unknown price ids and empty items": (
         "An event whose price maps to no plan, or which carries no items at "
-        "all. Today `plan_tier` is simply left alone, which is probably "
-        "right, but nothing asserts it — so a fix that defaults an unknown "
-        "price to a tier would pass. Cheap to pin once the policy is stated."
+        "all. `plan_tier` is left alone — `_resolve_plan_from_price` returns "
+        "None and the write is behind `if plan_tier:` — but nothing here "
+        "asserts it, so a change that defaulted an unknown price to a tier "
+        "would still pass. Cheap to pin once the policy is stated."
+    ),
+    "the fake's column-identity check is now exact, but the fake is still a fake": (
+        "Codex's review-2 blocker is closed: `_column_of` resolves each side "
+        "of a predicate against the selected entity's mapper and requires "
+        "column identity, so a labelled literal or another table's column "
+        "raises instead of matching (TestTheFakeCannotBeFooledIntoMatching). "
+        "What a fake still cannot prove is anything about the DATABASE: the "
+        "UNIQUE constraint on stripe_events.event_id that makes concurrent "
+        "de-duplication safe is assumed here, not verified — see the "
+        "atomicity entry above, and the runbook's check for it."
     ),
 }
 

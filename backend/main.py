@@ -1083,6 +1083,9 @@ async def stripe_webhook(
                     plan_tier = _resolve_plan_from_price(items[0].get("price", {}).get("id"))
             business.stripe_customer_id = customer_id or business.stripe_customer_id
             business.stripe_subscription_id = subscription_id or business.stripe_subscription_id
+            # `subscription_status` is Stripe's field, stored verbatim — not
+            # derived, not normalised into a local vocabulary. It is what
+            # `auth.resolve_access_level` reads.
             business.subscription_status = status
             # BH-006 defect 3 — the period lives on the ITEM in current API
             # versions (`items.data[0].current_period_end`). Reading the
