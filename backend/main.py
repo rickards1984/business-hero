@@ -1084,7 +1084,15 @@ async def stripe_webhook(
             business.stripe_customer_id = customer_id or business.stripe_customer_id
             business.stripe_subscription_id = subscription_id or business.stripe_subscription_id
             business.subscription_status = status
-            business.current_period_end = datetime.fromtimestamp(event_data.get("current_period_end")) if event_data.get("current_period_end") else None
+            # BH-006 defect 3 — the period lives on the ITEM in current API
+            # versions (`items.data[0].current_period_end`). Reading the
+            # subscription-level field yielded None, so EVERY subscription
+            # event wiped the stored billing period. Read the item first, fall
+            # back to the subscription for older API versions, and if neither
+            # carries one, LEAVE THE STORED VALUE ALONE rather than nulling it.
+            period_end = _resolve_current_period_end(event_data)
+            if period_end is not None:
+                business.current_period_end = period_end
             business.cancel_at_period_end = bool(event_data.get("cancel_at_period_end", False))
             business.last_stripe_event_at = datetime.utcnow()
             if plan_tier:
@@ -2541,6 +2549,28 @@ def _get_frontend_base_url(request: Request) -> str:
     if base_url:
         return str(base_url).rstrip("/")
     return str(request.base_url).rstrip("/")
+
+
+def _resolve_current_period_end(event_data: dict) -> Optional[datetime]:
+    """Where Stripe actually puts `current_period_end`.
+
+    Current API versions carry it on the subscription ITEM
+    (`items.data[0].current_period_end`); older ones carry it on the
+    subscription object. Returns None when NEITHER has it, which the caller
+    must treat as "leave the stored value alone" — not as "set it to null".
+    Reading only the subscription level is BH-006 defect 3, and it wiped the
+    stored period on every event.
+    """
+    items = (event_data.get("items") or {}).get("data") or []
+    for source in (items[0] if items else {}, event_data):
+        raw = (source or {}).get("current_period_end")
+        if raw:
+            try:
+                return datetime.fromtimestamp(int(raw))
+            except (TypeError, ValueError, OSError, OverflowError):
+                logger.warning("unparseable current_period_end from Stripe: %r", raw)
+                return None
+    return None
 
 
 def _resolve_plan_from_price(price_id: str) -> Optional[str]:

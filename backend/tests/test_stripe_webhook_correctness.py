@@ -841,14 +841,6 @@ def test_an_event_for_an_unknown_customer_touches_nothing(deliver):
 
 # ── Defect 3 — current_period_end lives on the item ──────────────────────────
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 3: main.py:1008 reads current_period_end from the "
-           "subscription object. Current Stripe API versions put it on the "
-           "item, items.data[0].current_period_end, so the read yields None "
-           "and every event wipes the stored period. Remove this marker in "
-           "the commit that fixes it.",
-)
 def test_current_period_end_is_read_from_the_subscription_item(deliver):
     period_end = int(datetime(2026, 12, 1, tzinfo=timezone.utc).timestamp())
     business = a_business()
@@ -870,11 +862,6 @@ def test_current_period_end_is_read_from_the_subscription_item(deliver):
     assert int(business.current_period_end.timestamp()) == period_end
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BH-006 defect 3: an event carrying no period anywhere must leave "
-           "the stored value alone rather than nulling it.",
-)
 def test_an_event_without_a_period_preserves_the_exact_stored_value(deliver):
     """Exact equality, not merely non-null.
 
