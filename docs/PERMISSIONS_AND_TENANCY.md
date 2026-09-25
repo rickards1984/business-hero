@@ -9,12 +9,20 @@ Analysis is in `docs/CURRENT_STATE.md` §4. The essential points:
 - Admin and customer are the **same** Postgres role (`authenticated`), and
   grants are evaluated before RLS — so a column grant to an admin is a grant
   to every customer
-- `authenticated` retains table-wide UPDATE on `businesses` until `030b`
-  Release 2 lands (`docs/RC1_SCOPE.md` P0-3)
+- `authenticated` holds **no table-level UPDATE** on `businesses` (BH-001 Q6,
+  24 Sep 2026). `033` SECTION 5 replaced it with a **26-column grant** that
+  still contains `plan_tier`, `is_active`, `feature_flags`, `limits` and
+  `subscription_status` — the same hole, one layer down, and invisible to
+  `role_table_grants`. **The column grant itself is unverified in production**
+  (BH-001's column export was truncated before reaching the table), so P0-3 is
+  open-pending-one-query, not confirmed. `audits/BH-001-FINDINGS.md` §3.1
 
-## RC1 P0-8 — ANSWERED, 24 Sep 2026
+## RC1 P0-8 — policy inventory COMPLETE; grant coverage INCOMPLETE (24 Sep 2026)
 
-**Live RLS and policy state is established.** Six read-only exports from
+**Live RLS and policy state is established. Grant state is not, and three
+access findings came out of the data.** P0-8 asked for RLS, policy *and* grant
+state; two of the three are answered. Full interpretation, including what is
+still unverified, in **`audits/BH-001-FINDINGS.md`**. Six read-only exports from
 `oxblcmwhuwtobdhsfgyi`, committed as `audits/BH-001-prod-Q*-2026-09-24.csv`;
 full interpretation in **`audits/BH-001-FINDINGS.md`**. Summary:
 
@@ -23,24 +31,51 @@ full interpretation in **`audits/BH-001-FINDINGS.md`**. Summary:
   `authenticated`, so unreachable) and `stripe_events` (RLS on with zero
   policies, which is deny-all on the client path and exactly what `030a`
   SECTION 4 did on purpose).
-- **No table is RLS-off while a client role holds a grant.** That is the
-  invariant, and production holds it.
-- **87 policies, complete** (Q1's per-table counts sum to 87). 77 gate on
-  membership; the remaining ten are self-scoped on `auth.uid()`, catalogue
-  reads, or a published-only article read — enumerated in FINDINGS §2.
+- **No table Q3 covers is RLS-off while a client role holds a grant.** The one
+  RLS-off table, `zz_033_flags_backup`, sorts *beyond* Q3's truncation point,
+  so its grants are **unverified** — the invariant cannot yet be stated
+  database-wide (FINDINGS §1).
+- **87 policies, complete** (every per-table count matches Q1, not just the
+  total). 77 **reference** `is_business_member` / `business_members` /
+  `is_platform_admin` — which is a text match, not proof of enforcement: one of
+  the 77 (`support_articles_member_read`) requires no membership at all. The
+  remaining ten are self-scoped on `auth.uid()`, catalogue reads, or a
+  published-article read — enumerated in FINDINGS §2.
 - **Three `USING (true)` policies exist; all three are on catalogue tables
   with no `business_id`.** Review 001 finding 6 was right that a permissive
   `true` defeats isolation while satisfying a count — so each one was checked
   individually, and none is on a tenant table.
-- **No INSERT or UPDATE policy anywhere lacks a `WITH CHECK`**, so there is no
-  table a tenant can write into and then not read back.
+- **One policy has no explicit `WITH CHECK`** —
+  `businesses."Platform admins can manage all businesses"`, which is `ALL`, and
+  PostgreSQL falls back to its `USING` expression, so it is not a defect. (The
+  first reading of this said "none", because the export writes NULL as the
+  literal string `null`.) No policy permits a write it cannot also authorise.
 - **The July audit's SEC-02 and SEC-03 are closed.** The `USING (true) FOR ALL`
   policies on `xero_connections` and `accounting_connections` — the OAuth token
   tables — are gone from production.
-- **Production's policy state is byte-identical to the migration-defined local
-  replay** BH-003's RLS suite runs against: 87 of 87 policies match on command,
-  roles, `USING` and `WITH CHECK`; zero differences across all 58 tables.
-  Evidence: `audits/BH-001-prod-vs-local-policy-diff.txt`.
+- **Production's policy TEXT matches the migration-defined local replay**
+  BH-003's RLS suite runs against — 87 of 87 on command, roles, permissive,
+  `USING` and `WITH CHECK`, identical after documented normalisation; zero
+  differences across all 58 tables. Evidence:
+  `audits/BH-001-prod-vs-local-policy-diff.txt`. **Text equivalence is not
+  behavioural equivalence:** every membership policy is a call into
+  `is_business_member()`, and `030a` changed that function's behaviour without
+  changing one policy expression. FINDINGS §2.1 states the limits.
+
+### Three access findings from the data (FINDINGS §6)
+
+1. **Inactive members can still read `calls` and `tasks`.** Each table carries
+   two permissive SELECT policies, and the older one omits `bm.is_active`.
+   Permissive policies OR together, so the stricter one cannot narrow it: a
+   deactivated member — an employee who left — keeps reading. Two `DROP POLICY`
+   statements fix it; the stricter policies already exist.
+2. **`TRUNCATE` is granted to `anon` on 46 tables** and `authenticated` on 48.
+   **RLS does not constrain `TRUNCATE`**, so for those tables the row policies
+   are not a second gate. No exposed route to it is known; the grant is still
+   real authority on the public key.
+3. **`oauth_tokens` is member-accessible**, where the July audit recorded it
+   `deny-auth`. Any member of the owning business has `ALL` on its OAuth token
+   rows. Possibly deliberate; materially different from the documented posture.
 
 ### Still open, and the two that matter
 

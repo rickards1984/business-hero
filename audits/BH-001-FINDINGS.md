@@ -5,185 +5,270 @@ project **`oxblcmwhuwtobdhsfgyi`**, committed beside this file as
 `audits/BH-001-prod-Q*-2026-09-24.csv`, parsed as CSV (never grepped — policy
 expressions contain commas; `AGENTS.md` §3.10).
 
-**Status: RLS coverage is no longer unknown.** `docs/CURRENT_STATE.md` §4 and
-`audits/AUDIT-2026-07-04.md` Appendix B both described a database with ~30
-RLS-off tables. That is no longer what production looks like. The headline:
+**Status: the POLICY inventory is complete and clean. GRANT coverage is not,
+and three access findings came out of the data that the ticket's own queries
+were not designed to surface.** P0-8 asked "what is the live RLS, policy and
+grant state" — two of those three are answered.
 
 | Question | Answer |
 |---|---|
-| Does `authenticated` still hold UPDATE on `businesses`? | **Not at table level.** Column level is **unverified — Q4's export is truncated.** See §3. |
-| Is every table RLS-enabled with policies referencing `is_business_member`? | **Effectively yes**, with two documented exceptions and ten benign self-scoped/catalogue policies. See §2. |
-| Anything that reorders RC1? | **Yes — one item.** Two **views** carry `SELECT` for `anon` and cannot have RLS. See §5. |
+| Does `authenticated` still hold UPDATE on `businesses`? | **Not at table level** (Q6, complete). Column level is **unverified — Q4's export is truncated.** §3 |
+| Is every table RLS-enabled with policies referencing `is_business_member`? | **Yes for 56 of 58 tables**, and the two exceptions are each correct. But "referencing" is not "enforcing" — see §2 and §6. |
+| Anything that reorders RC1? | **Three things.** Two views readable by `anon` (§5); inactive members still reading `calls` and `tasks` (§6.1); `TRUNCATE` granted to `anon` on 46 tables (§6.2). |
+
+**A note on how this file is written.** Codex's review of its first version
+found five claims that went further than the CSVs support, and two findings
+sitting in the data that the first version missed entirely. Both classes are
+corrected below, and where evidence is absent it now says so rather than
+reasoning from the migration files — `AGENTS.md` §3.4 exists because this
+repository has made that mistake before.
 
 ---
 
 ## 1 · Q1 — the census
 
 58 tables in `public`. **56 have RLS on with at least one policy.** The other
-two are both fine, and each for a different reason:
+two:
 
 | Table | State | Verdict |
 |---|---|---|
-| `zz_033_flags_backup` | **RLS off** | Safe. `033_entitlement.sql:1142` revoked `anon` and `authenticated` outright, and Q3 confirms neither holds any grant on it. RLS off matters only where a grant exists (`AGENTS.md` §3.8). It is 033's rollback route, deliberately retained (033 STEP 26). |
-| `stripe_events` | **RLS on, zero policies** | Correct by design. RLS on with no policy denies everyone on the client path, and `030a_pre_billing_security.sql` SECTION 4 did exactly that — dropped the member policy and revoked both client roles — so the webhook's idempotency ledger is backend-only. Q3 confirms no grants. A member could otherwise delete a row and replay a processed webhook, or forge an `event_id` so a real cancellation was skipped. |
+| `zz_033_flags_backup` | **RLS off** | **Grants UNVERIFIED.** `033_entitlement.sql:1142` revokes `anon` and `authenticated`, but a migration file is not evidence of live state, and this table sorts **beyond Q3's truncation point** (`support_stats`), so the grant export does not cover it. If those revokes did not land, an RLS-off table holding a snapshot of every business's `plan_tier` and `feature_flags` is client-readable. **One query settles it — §3.1.** |
+| `stripe_events` | **RLS on, zero policies** | Correct by design, and this one IS evidenced: the table sorts *inside* Q3's covered range and appears nowhere in it, so `anon` and `authenticated` hold no direct grant. RLS on with no policy denies the client path outright, which is what `030a` SECTION 4 did — dropped the member policy and revoked both client roles. A member could otherwise delete a row and replay a processed webhook, or forge an `event_id` so a real cancellation was skipped. |
 
-`rls_forced` is false everywhere. That matters only for table owners, and the
-owner here is `postgres`, which is the backend's own connection — it is
-*supposed* to bypass RLS (`AGENTS.md` §4).
+`rls_forced` is false on all 58. That matters only for table owners. **Q1 does
+not export ownership**, so the natural next sentence — "and the owner is
+`postgres`, which is supposed to bypass RLS" — is inference from
+`AGENTS.md` §4, not from this packet.
 
-**No table is RLS-off with a client-role grant.** That is the invariant that
-matters, and production holds it.
+**The invariant I want to claim here is "no table is RLS-off while a client
+role holds a grant", and I cannot claim it yet.** It holds for every table Q3
+covers. `zz_033_flags_backup` is the one table that is both RLS-off and
+outside Q3's range, which is an unfortunate coincidence rather than a
+conclusion.
 
 ---
 
 ## 2 · Q2 — what the policies actually say
 
-**87 policies, and Q1's per-table counts sum to exactly 87, so this export is
-complete.** 77 of them gate on membership (`is_business_member`, a
-`business_members` subquery, or `is_platform_admin` / `platform_admins`).
+**87 policies. Q1's per-table counts sum to 87, and Codex independently
+confirmed every per-table count matches, not merely the total — so this export
+is complete.**
 
-The other ten are each justified:
+**77 policies REFERENCE `is_business_member`, a `business_members` subquery,
+`is_platform_admin` or `platform_admins`.** The first version of this file said
+those 77 "gate on membership". That is a text match, not a semantic claim, and
+at least one of the 77 does not require membership at all:
+`support_articles_member_read` is `(is_published = true) OR
+is_platform_admin(auth.uid())` — a published help article, readable by any
+authenticated user. Correct behaviour; wrong description.
 
-| Policy | Why it does not reference membership |
+The ten that reference neither:
+
+| Policy | Why |
 |---|---|
-| `business_members.users_view_own` (SELECT) | The membership table cannot gate on membership without recursion. Scoped to `user_id = auth.uid() OR invited_email = auth.email()`. |
-| `business_members.users_link_self` (UPDATE) | An invitee accepting an invite, `user_id IS NULL` and their own email. **Safe only alongside 030a's two-column grant** (`user_id`, `accepted_at`) — with a table-wide UPDATE this becomes a cross-tenant pivot. Q4 must confirm that grant; see §3. |
-| `platform_admins.platform_admins_read_own` (SELECT) | `user_id = auth.uid()`. Self-scoped. |
-| `profiles.{select,insert,update}_own` | `id = auth.uid()`. Self-scoped. |
-| `accounting_providers_public_read`, `plan_definitions_public_read`, `automation_rule_templates_member_read` | `USING (true)` on **catalogue** tables — no `business_id` column, nothing tenant-specific. |
-| `support_articles_public_read` (anon) | `is_published = true`. A published help article. |
+| `business_members.users_view_own` (SELECT) | The membership table cannot gate on membership without recursion. `user_id = auth.uid() OR invited_email = auth.email()`. |
+| `business_members.users_link_self` (UPDATE) | An invitee accepting an invite. **See §6.3 — it does not pin the new `user_id`.** |
+| `platform_admins.platform_admins_read_own` (SELECT) | `user_id = auth.uid()`. |
+| `profiles.{select,insert,update}_own` | `id = auth.uid()`. |
+| `accounting_providers_public_read`, `plan_definitions_public_read`, `automation_rule_templates_member_read` | `USING (true)` on catalogue tables. |
+| `support_articles_public_read` (anon) | `is_published = true`. |
 
-**Three `USING (true)` policies exist and all three are catalogues.** None is
-on a table with a `business_id`.
+**Three `USING (true)` policies, all on catalogue tables.** That none of those
+three tables has a `business_id` column is true, and it comes from the schema
+dump — Q2 cannot establish it.
 
-**No INSERT or UPDATE policy anywhere lacks a `WITH_CHECK`** — so there is no
-table a tenant can write into and then not read back, which was the specific
-trap the ticket asked about.
+**On `WITH CHECK`:** the first version claimed no INSERT or UPDATE policy
+anywhere lacks one. That was wrong twice over, and the way it was wrong is
+worth recording because it is the CSV trap this ticket was written to avoid.
+The export writes a NULL `with_check_expression` as the **literal string
+`null`**, so a check for "empty" matched nothing and the claim looked
+confirmed. Handling the sentinel, there is exactly one:
+`businesses."Platform admins can manage all businesses"` is `ALL` with no
+explicit `WITH CHECK`. **That is not a defect** — PostgreSQL falls back to the
+`USING` expression for the check — and the inherited packet's framing ("writes
+are not constrained") is wrong for this case. The real statement is: no policy
+here permits a write it cannot also authorise.
 
-**SEC-02 and SEC-03 are closed in production.** The July 2026 audit's two
-CRITICALs were `USING (true) FOR ALL` policies with no role restriction on
-`xero_connections` and `accounting_connections` — the tables holding OAuth
-token ciphertext. Neither `xero_connections_service_policy` nor
-`accounting_connections_service` appears in this export. Both tables now carry
-only `*_member_access` with `is_business_member(...) OR is_platform_admin(...)`
-on both `USING` and `WITH CHECK`.
+**SEC-02 and SEC-03 are closed as POLICY DEFECTS.** The July audit's two
+CRITICALs were `USING (true) FOR ALL` with no role restriction on
+`xero_connections` and `accounting_connections`. Neither policy appears in this
+export; both tables now carry only `*_member_access` with
+`is_business_member(...) OR is_platform_admin(...)` on both sides. That is the
+policy fixed. It is **not** a statement that the token ciphertext in those
+tables is confidential — see §6.4.
 
-### 2.1 · Production matches the migration-defined state exactly
+### 2.1 · Production's policy TEXT matches the migration-defined replay
 
-Compared against the local Supabase replay built by
-`scripts/rls-local.sh` (BH-003, PR #9), which replays this repository's
-migrations and prunes the pre-baseline ghost policies against the 5 July 2026
-capture:
+Compared against the local Supabase replay built by `scripts/rls-local.sh`
+(BH-003, PR #9, census committed at `5e1aaf7`):
 
 ```
 prod: 87 policies   local (replay + prune): 87
-byte-identical definitions: 87
+identical after normalisation: 87   (command, roles, permissive, USING, WITH CHECK)
 in prod, absent locally: 0      local only, absent in prod: 0
-RLS-enabled / policy-count differences across 58 tables: 0
-businesses table grants: identical for anon, authenticated, postgres, service_role
+RLS-enabled / policy-count across all 58 tables: 0 differences
+businesses table grants: identical for all four roles
 ```
 
-**This is the single most useful result in the ticket.** It means the BH-003
-RLS harness is a faithful model of production's policy and RLS state, so its
-green run now supports a claim about production and not merely about the
-migration files — closing the gap that file's own docstring and `UNCOVERED`
-registry flagged. It also independently confirms the prune step was right:
-the 24 ghost policies it drops are genuinely absent from production.
+Normalisation, stated so it can be argued with: whitespace collapsed, roles
+sorted, the export's literal `null` mapped to SQL NULL. Codex reproduced the
+comparison independently and confirmed `permissive` matches too. **Not
+"byte-identical"** — identical after that normalisation. Whitespace collapsing
+is not generally safe, because it also rewrites quoted literals; no production
+literal here contains runs of whitespace, but the raw captures are committed so
+the comparison can be redone strictly.
 
-It does **not** extend to grants beyond `businesses` (Q3 is truncated), to
-constraints (no CSV covers them), or to views (§5).
+**What this licenses, narrowly.** BH-003's RLS suite runs against the replay.
+Because the replay's policy *text* and RLS state match production's, a green
+run there supports a claim about production's **policy text** — which is more
+than "the migration files say so", and is the gap that suite's own docstring
+flagged.
+
+**What it does not license, and Codex's example is the decisive one.**
+Identical calls to `is_business_member()` do not establish identical *function
+bodies*, security settings, ownership or execute privileges — and `030a`
+changed membership behaviour **without changing a single policy expression**.
+Two databases can therefore match on all 87 policies and still behave
+differently. Also outside the comparison: grants beyond `businesses` (Q3
+truncated), column grants (Q4 truncated), constraints (no export), views (the
+replay creates none — §5), role attributes and membership, and the `auth` and
+`storage` schemas. **BH-003 supports production conclusions subject to those
+dependencies, not unconditionally.**
 
 ---
 
-## 3 · Q4 and Q3 — TRUNCATED. Must be re-run.
+## 3 · Q3 and Q4 — TRUNCATED. Must be re-run.
 
 **Both exports stop at exactly 100 data rows.**
 
-- **Q4 (column privileges)** covers only `accounting_categories` through
-  `accounting_transactions` — five tables of 58. **`businesses` is not in it
-  at all.**
-- **Q3 (table grants)** stops alphabetically at `support_stats`, so
-  `support_tickets`, `tasks`, `usage_meters`, `whatsapp_*`, `xero_connections`
-  and `zz_033_flags_backup` are missing.
+- **Q4 (column privileges)** ends mid-table at
+  `accounting_transactions.amount / authenticated`. Five tables appear; four
+  are complete and the fifth is partial, so **54 of 58 tables lack complete
+  column-grant coverage**. **`businesses` does not appear at all.**
+- **Q3 (table grants)** ends at `support_stats / anon`. Everything sorting
+  after it is missing: `support_tickets`, `tasks`, `usage_meters`,
+  `whatsapp_*`, `xero_connections`, `zz_033_flags_backup`.
 
-Q1, Q2, Q5 and Q6 are complete (Q2 verified against Q1's counts; Q6 is a
-single-table query).
+Q1, Q2, Q5 and Q6 are complete (Q2 verified against Q1's counts row by row;
+Q6 is a single-table query).
 
 **This is the trap the ticket was written to avoid, and it nearly worked.**
 Read naively, Q4 says *no column of `businesses` is UPDATE-able by
-`authenticated`* — which reads as "the paywall hole is already closed". It
-says no such thing: the query never reached the table.
+`authenticated`* — which reads as "the paywall hole is already closed". It says
+no such thing: the query never reached the table.
 
 **What Q6 does establish:** `authenticated` holds
 `DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE` on `businesses` and
-**no table-level UPDATE**. That is consistent with `033_entitlement.sql`
-SECTION 5 having run, which replaced the table-level UPDATE with a
-**26-column list** that still contains `plan_tier`, `is_active`,
-`feature_flags`, `limits` and `subscription_status`. Column grants are
-invisible to `role_table_grants`; only `column_privileges` sees them.
+**no table-level UPDATE** — consistent with `033` SECTION 5 having replaced the
+table grant with a **26-column list** that still contains `plan_tier`,
+`is_active`, `feature_flags`, `limits` and `subscription_status`. Column grants
+are invisible to `role_table_grants`.
 
-**So the paywall hole (RC1 P0-3) is neither confirmed nor refuted by this
-packet.** The one query that settles it is 30 seconds of work:
+**So RC1 P0-3 is neither confirmed nor refuted by this packet.**
+
+### 3.1 · The three queries that close the gaps
 
 ```sql
--- Q4b — THE DECISIVE QUERY FOR P0-3. Run it and send the result.
-SELECT privilege_type,
-       count(*) AS columns,
+-- Q4b — THE DECISIVE QUERY FOR P0-3. Aggregated, so the 100-row limit
+-- cannot truncate it.
+SELECT privilege_type, count(*) AS columns,
        string_agg(column_name, ', ' ORDER BY column_name) AS cols
   FROM information_schema.column_privileges
  WHERE table_schema = 'public' AND table_name = 'businesses'
    AND grantee = 'authenticated'
  GROUP BY privilege_type ORDER BY privilege_type;
+
+-- Q3b — the grants Q3 could not reach, including the RLS-off table.
+SELECT table_name, grantee,
+       string_agg(privilege_type, ', ' ORDER BY privilege_type) AS privileges
+  FROM information_schema.role_table_grants
+ WHERE table_schema = 'public' AND grantee IN ('anon','authenticated')
+   AND table_name > 'support_stats'
+ GROUP BY table_name, grantee ORDER BY table_name, grantee;
+
+-- Q3c — business_members' column grants, which §6.3 turns on.
+SELECT privilege_type, count(*) AS columns,
+       string_agg(column_name, ', ' ORDER BY column_name) AS cols
+  FROM information_schema.column_privileges
+ WHERE table_schema = 'public' AND table_name = 'business_members'
+   AND grantee = 'authenticated'
+ GROUP BY privilege_type ORDER BY privilege_type;
 ```
 
-**EXPECT, if 033 ran as recorded:** `UPDATE | 26 | api_key, brand_color, …`
-including `plan_tier`, `is_active`, `feature_flags`, `limits`,
-`subscription_status`, and excluding `metered_usage_enabled` and
-`monthly_spend_cap_gbp`. That is what the local replay and staging both show,
-and it is the state `audits/030b-PROD-RUNBOOK.md` STEP 0 expects.
+**EXPECT — Q4b, if 033 ran as recorded:** `UPDATE | 26 | …` including
+`plan_tier`, `is_active`, `feature_flags`, `limits`, `subscription_status`, and
+excluding `metered_usage_enabled` and `monthly_spend_cap_gbp`. That is what the
+local replay and staging both show, and what `audits/030b-PROD-RUNBOOK.md`
+STEP 0 expects.
 
-If the 26 columns are there, **030b Release 2 is ready to run and P0-3 is
-open.** If UPDATE returns zero rows, someone has already revoked it and that
-runbook's STEP 4 ("prove the hole exists before closing it") would stop —
-which is the correct outcome, and the runbook says so.
+If the 26 columns are there, **030b Release 2 is ready and P0-3 is open.** If
+UPDATE returns nothing, it has already been revoked — and Q4b cannot say by
+whom or when, so check the git log and the runbook's own records before
+concluding Release 2 has run.
 
-Re-run Q3 and Q4 in full as well. To avoid the truncation: the Supabase editor
-exports what the grid holds, so either add an explicit high `LIMIT`, or split
-by table prefix, or use the aggregate form above which returns one row per
-privilege instead of one per column.
+**EXPECT — Q3b:** `zz_033_flags_backup` absent (033's revokes landed). If it
+appears with any privilege, §1's finding is live.
+
+**EXPECT — Q3c:** `UPDATE | 2 | accepted_at, user_id` — 030a's narrowing. If it
+shows the whole table, §6.3 becomes a cross-tenant membership pivot.
+
+Re-run Q3 and Q4 in full as well. The editor exports what the grid holds, so
+either aggregate (as above), split by table prefix, or add an explicit high
+`LIMIT`.
 
 ---
 
-## 4 · Q5 — what a new table inherits
+## 4 · Q5 — what a new table inherits, and the remedy that does not work
 
 ```
-public | r (table) | postgres        | anon=arwdDxtm, authenticated=arwdDxtm, service_role=arwdDxtm
-public | r (table) | supabase_admin  | anon=arwdDxtm, authenticated=arwdDxtm, service_role=arwdDxtm
+public | r (tables)    | postgres        | anon=arwdDxtm, authenticated=arwdDxtm, service_role=arwdDxtm
+public | r (tables)    | supabase_admin  | anon=arwdDxtm, authenticated=arwdDxtm, service_role=arwdDxtm
+public | S (sequences) | postgres        | anon=rwU, authenticated=rwU, service_role=rwU
+public | S (sequences) | supabase_admin  | anon=rwU, authenticated=rwU, service_role=rwU
+public | f (functions) | postgres        | anon=X, authenticated=X, service_role=X
+public | f (functions) | supabase_admin  | anon=X, authenticated=X, service_role=X
 ```
 
-`arwdDxtm` is SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER —
-**everything**. So the `create_all()` trap (`AGENTS.md` §3.3) is **confirmed
-live, in production, as written**: a new SQLModel class creates a table with
-RLS **off** and full privileges for `anon` and `authenticated`, which means a
-publicly readable and writable table from the moment the process boots.
+`arwdDxtm` is SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+**and MAINTAIN** (`m`, PostgreSQL 17) — the first version's decoding omitted
+MAINTAIN. So the **`create_all()` trap is confirmed live**: a new SQLModel
+class creates a table with RLS **off** and full privileges for `anon` and
+`authenticated`, publicly readable and writable from the moment the process
+boots — **when the creating role is `postgres` or `supabase_admin`**, which
+covers both the backend connection and the dashboard.
 
-It is not theoretical and it is not historical. It is the current default, and
-it applies to the next model anyone adds. The only reason the database is
-currently clean is that someone went and fixed every table by hand
-(029, 030a).
+`create_all()` runs at every boot (`AGENTS.md` §3.3), so this is the current
+default and applies to the next model anyone adds.
 
-**This deserves a ticket of its own:**
-`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM anon, authenticated;`
-would make the trap fail safe instead of fail open — new tables would arrive
-unreachable rather than public, and adding a grant would become a deliberate
-act. It is one statement, it is RED, and it needs its own rehearsal because it
-changes what every future migration and every `create_all()` produces.
+**Two corrections to the first version's remedy**, both Codex's:
+
+1. `ALTER DEFAULT PRIVILEGES … REVOKE …` **only changes defaults for the role
+   that executes it.** Q5 shows two creator roles, so the statement must name
+   them:
+
+   ```sql
+   ALTER DEFAULT PRIVILEGES FOR ROLE postgres, supabase_admin
+     IN SCHEMA public REVOKE ALL ON TABLES FROM anon, authenticated;
+   ```
+
+   Whether the runbook's connection may alter `supabase_admin`'s defaults is
+   itself something to establish before writing that runbook.
+2. **Sequences (`rwU`) and functions (`X`) have client-role defaults too**, and
+   a TABLES-only revoke leaves both. A new sequence is writable by `anon`; a
+   new function is executable by `anon`. Worth interpreting; not proven
+   exploitable here.
+
+This changes **future** objects only — existing grants are untouched, which is
+why it is additive and still RED. The first version added "the database is
+currently clean only because someone fixed every table by hand"; that is
+removed, because §1 and §3 show grant coverage is incomplete and §6 shows it
+is not clean.
 
 ---
 
-## 5 · THE ONE THING THAT REORDERS RC1 — two views, readable by `anon`
+## 5 · Two views readable by `anon`, which cannot carry RLS
 
-Q3 lists two objects that are **not tables**:
+Q3 lists two objects that are **not in Q1's 58 tables**:
 
 ```
 receptionist_call_stats   anon -> DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
@@ -191,122 +276,226 @@ receptionist_call_stats   anon -> DELETE, INSERT, REFERENCES, SELECT, TRIGGER, T
 support_stats             anon -> DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
 ```
 
-Both appear in the 3 Sep 2026 schema dump (`audits/live-schema-public.txt`)
-and **no migration in this repository creates either**. Both exist on staging,
-where their definitions are:
+Both appear in the 3 Sep 2026 schema dump and **no migration in this repository
+creates either.** The `anon` SELECT grant is established by Q3, from
+production.
 
-```sql
--- receptionist_call_stats
-SELECT business_id, count(*) FILTER (WHERE source = 'receptionist') AS total_receptionist_calls,
-       today_calls, this_week_calls, handled_calls, transferred_calls,
-       voicemail_calls, missed_calls, avg_duration_seconds, last_receptionist_call
-  FROM calls GROUP BY business_id;
+**Why Q1 could not see this:** Q1 filters `relkind = 'r'`. A view cannot have
+RLS enabled on it, and an ordinary view's access to its base tables normally
+runs with the **view owner's** privileges unless it was created with
+`security_invoker = on` (PostgreSQL 15+). An owner who owns the base table
+bypasses that table's RLS.
 
--- support_stats
-SELECT open_tickets, awaiting_admin, in_progress, awaiting_reply, resolved_total,
-       ai_resolved_total, created_today, resolved_today, ai_resolution_rate
-  FROM support_conversations;          -- platform-wide, no business_id
-```
+**What is NOT established by this packet, and the first version overstated
+it.** These CSVs carry no view definitions, owners, `reloptions`, dependencies,
+or `INSTEAD OF` triggers. The definitions the first version quoted came from
+**staging**, and staging cannot establish what production's views return. So
+the honest statement is: **two views are client-readable, they cannot be
+protected by RLS, and on staging they aggregate `calls` and
+`support_conversations` with `receptionist_call_stats` grouped by
+`business_id`. If production's definitions match staging's, `anon` can read
+every tenant's receptionist call profile** — counts, missed calls, average
+duration, last call — with a key that ships in the frontend bundle. That is the
+same class of exposure as BH-002, without authenticating.
 
-**Why this is a finding, and why BH-001's own Q1 cannot see it:**
+`support_stats` has no `business_id` on staging: a platform-wide aggregate, so
+it would leak our own support volumes rather than a customer's data.
 
-1. **A view cannot have RLS.** `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` is
-   not a thing for views. Q1 filters `relkind = 'r'` — tables only — so both
-   views are absent from the 58-table census and from every RLS count in this
-   packet.
-2. **A view runs with its OWNER's privileges** unless it was created with
-   `security_invoker = on` (PostgreSQL 15+). On staging both are owned by
-   `postgres` with no options set. `postgres` owns `calls`, and an owner
-   bypasses RLS on their own tables.
-3. **So `receptionist_call_stats` returns every business's rows to whoever can
-   read the view** — and `anon` can. `anon` is the public key shipped in the
-   frontend bundle.
+The write grants are **probably** inert: an aggregating view is not
+automatically updatable. But an `INSTEAD OF` trigger or rule can make one
+writable, and none of that is exported — so "writes fail" is not evidenced
+either. `TRUNCATE` does not apply to ordinary views at all.
 
-**Severity.** `receptionist_call_stats` is grouped **by `business_id`**, so it
-discloses, per tenant, to anyone on the internet holding a key that ships in
-the JavaScript: the business's UUID, its total receptionist call volume,
-today's and this week's counts, how many calls were handled, transferred, sent
-to voicemail and **missed**, the average call duration, and the timestamp of
-the most recent call. That is a per-customer operational profile. It is the
-same class of finding as BH-002 (the accounting-category leak), reachable
-without authenticating at all.
+### 5.1 · The query that settles it
 
-`support_stats` has no `business_id` — it is a platform-wide aggregate, so it
-leaks our own support volumes rather than a customer's data. Lower severity,
-same root cause, same fix.
-
-The write privileges (`INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`) are noise:
-both views aggregate with `GROUP BY` or bare aggregates, so neither is
-auto-updatable and writes through them fail. **The `SELECT` is the leak.**
-
-### 5.1 · The one check that confirms it in production
-
-Read-only, and it is the only thing between "very likely" and "certain":
+Read-only:
 
 ```sql
 SELECT c.relname,
-       pg_get_userbyid(c.relowner)                            AS owner,
-       coalesce(array_to_string(c.reloptions, ','), '(none)')  AS options,
-       has_table_privilege('anon', c.oid, 'SELECT')           AS anon_can_select
+       c.relkind,                                              -- v or m
+       pg_get_userbyid(c.relowner)                    AS owner,
+       coalesce(array_to_string(c.reloptions, ','), '(none)') AS options,
+       has_table_privilege('anon', c.oid, 'SELECT')   AS anon_can_select,
+       pg_get_viewdef(c.oid, true)                    AS definition
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
  WHERE n.nspname = 'public' AND c.relkind IN ('v','m')
  ORDER BY 1;
+
+-- and, for each view returned, what it reads and whether any of that is
+-- itself SECURITY DEFINER:
+SELECT DISTINCT dependent.relname AS view_name, base.relname AS reads,
+       base.relrowsecurity       AS base_has_rls
+  FROM pg_depend d
+  JOIN pg_rewrite r  ON r.oid = d.objid
+  JOIN pg_class dependent ON dependent.oid = r.ev_class
+  JOIN pg_class base ON base.oid = d.refobjid
+ WHERE dependent.relkind IN ('v','m') AND base.relkind = 'r'
+   AND dependent.oid <> base.oid
+ ORDER BY 1, 2;
+
+SELECT n.nspname||'.'||p.proname AS func, p.prosecdef AS security_definer,
+       pg_get_userbyid(p.proowner) AS owner
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+ WHERE n.nspname = 'public'
+   AND (has_function_privilege('anon', p.oid, 'EXECUTE')
+        OR has_function_privilege('authenticated', p.oid, 'EXECUTE'))
+ ORDER BY 1;
 ```
 
-- `options` containing `security_invoker=on` → **no leak**; the view runs as
-  the caller and `calls`' RLS applies. Record it and close this finding.
-- `options` `(none)` and `owner` `postgres` → **leak confirmed**, as staging.
+Reading it: `options` containing `security_invoker=on` means the view runs as
+the caller and the base table's RLS applies — **but check the third query
+anyway**, because an invoker view can still call a SECURITY DEFINER function.
+`(none)` plus an owner who owns the base table means the exposure is real. A
+`relkind` of `m` is a materialized view, which holds its own copy of the rows
+and is not affected by base-table RLS at read time at all. And read
+`pg_get_viewdef` rather than trusting the staging definitions quoted above.
 
-### 5.2 · The fix, when you want it
+### 5.2 · The fix, when confirmed
 
-Either revoke (`REVOKE ALL ON public.receptionist_call_stats FROM anon,
-authenticated;` — the backend reads as `postgres` and is unaffected), or set
-`ALTER VIEW ... SET (security_invoker = on);` so the base tables' RLS applies
-to the caller. Revoking is the stronger and simpler of the two. **Check
-whether the frontend reads either view first** — if it does, `security_invoker`
-is the option that keeps the page working. Both are RED; this file does not
-change them.
+`REVOKE ALL ON public.receptionist_call_stats, public.support_stats FROM anon,
+authenticated;` — the backend reads as `postgres` and is unaffected. Or
+`ALTER VIEW … SET (security_invoker = on)`, which keeps the view usable by a
+member while applying the base table's RLS. **Check whether the frontend reads
+either view first**; if it does, `security_invoker` is the option that keeps
+the page working. Both RED; nothing here changes them.
 
-### 5.3 · Why the ticket missed it, and what to change
+### 5.3 · What to change in the ticket
 
-BH-001's Q1 was written as `relkind = 'r'`. Nothing in the packet asks about
-views, so nothing in the packet could have found this — it surfaced only
-because Q3 lists relations by name and two of them turned out not to be
-tables. **The census query in `scripts/rls-local.sh` has carried a `Q1b` views
-section since BH-003 for exactly this reason; BH-001's own SQL should adopt
-it.**
+BH-001's Q1 was written `relkind = 'r'`, so nothing in the packet could have
+found this. `scripts/rls-local.sh census` has carried a views section since
+BH-003 for exactly this reason, and BH-001's own SQL should adopt it.
 
 ---
 
-## 6 · What this packet still does not establish
+## 6 · Findings that came out of the data, not the questions
 
-- **Constraints.** No CSV covers `pg_constraint`. In particular the UNIQUE on
+The first version of this file did not contain §6.1–§6.4. All four are in the
+CSVs; Codex found the first two by reading the data independently.
+
+### 6.1 · Inactive members can still read `calls` and `tasks`
+
+Q2 shows **two permissive SELECT policies on each of `calls` and `tasks`**:
+
+| Table | Policy | Requires `bm.is_active`? |
+|---|---|---|
+| `calls` | `Members can select calls for their businesses` | **No** |
+| `calls` | `calls_select_if_member` | Yes |
+| `tasks` | `Members can select tasks for their businesses` | **No** |
+| `tasks` | `tasks_select_if_member` | Yes |
+
+**PostgreSQL combines permissive policies with OR**, so the newer, stricter
+policy cannot narrow the older one. A `business_members` row with
+`is_active = false` satisfies the broader policy, and the member reads the
+tenant's calls and tasks.
+
+Concretely: **a member who has been deactivated — an employee who left — can
+still read that business's call records and tasks** through the anon key, for
+as long as their `business_members` row exists. `business_members.users_view_own`
+also lets them see their own inactive membership, so the row is discoverable.
+
+Evidence quality differs between the two: Q3 confirms `authenticated` holds
+SELECT on `calls`; `tasks` sorts beyond Q3's truncation, so its grant is
+unverified (Q3b above covers it).
+
+These two policies are `028_baseline_live_state.sql`'s captured live state —
+the duplicates its own header flags as "no consolidation of the duplicate
+policies on businesses/tasks/calls … cleanup is a separate, later migration".
+That cleanup never happened. **Dropping the two `is_active`-less policies is a
+small RED migration and it is the highest-value one in this file** — one
+`DROP POLICY` each, and the stricter policy is already there to take over.
+
+### 6.2 · `TRUNCATE` is granted to `anon` on 46 tables, and RLS does not constrain it
+
+Q3, within its covered range: `TRUNCATE` is held by **`anon` on 46 tables** and
+**`authenticated` on 48** (plus the views, where it does not apply). Q6
+independently confirms it on `businesses`; Q3 shows it on `business_members`.
+
+**PostgreSQL excludes `TRUNCATE` and `REFERENCES` from row-level security.**
+RLS filters rows for SELECT/INSERT/UPDATE/DELETE; `TRUNCATE` is a table-level
+operation and a policy cannot restrict it. So for these tables, the row
+policies that this file spends §2 confirming are **not the second gate** —
+there is no second gate.
+
+**This is not a demonstrated exploit.** PostgREST does not expose `TRUNCATE`,
+and reaching it needs an executable SQL or RPC route that has not been shown to
+exist. What it does mean is that the reassurance "broad grants are fine because
+RLS is the gate" (`AGENTS.md` §3.8) **does not hold for TRUNCATE**, and the
+grant is real authority sitting on the public key. `030a` revoked
+`INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES` from `anon` on three tables; the
+same revoke has not been applied to the other 46. Worth its own ticket, and
+worth stating separately from reachability.
+
+### 6.3 · `users_link_self` does not pin the new `user_id`
+
+```
+USING       (invited_email = auth.email()) AND (user_id IS NULL)
+WITH CHECK  (invited_email = auth.email())
+```
+
+The `USING` clause restricts which row may be updated — an unclaimed invite
+addressed to the caller. The `WITH CHECK` constrains the row *after* the
+update, and it checks only the email. **It never requires the new `user_id` to
+be `auth.uid()`.** So the policy permits claiming your own invitation on behalf
+of an arbitrary UUID.
+
+030a's two-column grant (`user_id`, `accepted_at`) is what stops this being
+worse — the tenant and role cannot be changed — but it does not make the policy
+"link *self*". Whether anything else prevents it (a trigger, a FK to
+`auth.users`, a constraint) is not in these exports. Q3c above confirms the
+grant is still two columns; the policy's `WITH CHECK` should gain
+`AND user_id = auth.uid()` regardless, since that is what its name claims.
+
+### 6.4 · `oauth_tokens` is member-accessible, which contradicts the July audit
+
+`audits/AUDIT-2026-07-04.md` Appendix B lists `oauth_tokens` under "Enabled +
+correct" as **`(deny-auth)`**. Today Q2 shows
+`oauth_tokens_member_access`, `ALL`, `{authenticated}`,
+`is_business_member(...) OR is_platform_admin(...)`, and Q3 shows `anon` and
+`authenticated` both holding SELECT/INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES.
+The July capture's `deny_authenticated_oauth_tokens` policy is **not** in
+production's 87.
+
+So the table went from "no authenticated access at all" to "any member of the
+owning business has full access to its OAuth token rows". That may well be
+deliberate — some feature presumably needs it — but it is a material change
+from the documented security posture and it is the table holding third-party
+access tokens. It should be stated and owned, not absorbed into "56 tables have
+member policies". **This is also why §2's SEC-02/SEC-03 closure is scoped to
+"those policy defects are gone" rather than "token confidentiality is
+verified".**
+
+---
+
+## 7 · What this packet still does not establish
+
+- **Column grants on 54 of 58 tables** (§3), including `businesses` — P0-3 —
+  and `business_members` (§6.3).
+- **Table grants for everything sorting after `support_stats`** (§3),
+  including the RLS-off `zz_033_flags_backup` (§1).
+- **Constraints.** No export covers `pg_constraint`. The UNIQUE on
   `stripe_events.event_id`, which BH-006's webhook de-duplication depends on
-  under concurrent delivery, is **unverified in production** — migration 010
-  declares it, but `models.py` declares that field `index=True`, so whether it
-  exists depends on which created the table. `audits/BH-006-PROD-RUNBOOK.md`
-  STEP 2 is the read that settles it.
-- **Column grants on 53 of 58 tables**, including `businesses` and
-  `business_members` (§3). The `business_members` two-column UPDATE grant that
-  makes `users_link_self` safe is among them.
-- **Whether any policy is *effective*.** These are static rules. Executed
-  two-tenant negative tests are BH-003 (PR #9), and they now stand on the
-  policy equivalence established in §2.1.
-- **`storage` and `auth` schemas.** `public` only.
-- **Functions.** No SECURITY DEFINER inventory. Staging has one
-  client-callable (`public.whoami`, read-only identity); production is
-  unconfirmed.
+  under concurrent delivery, is unverified in production —
+  `audits/BH-006-PROD-RUNBOOK.md` STEP 2 is that read.
+- **Helper function bodies, ownership and security settings** — the §2.1 limit
+  that matters most, since every membership policy is a call into one.
+- **View definitions, owners and options** (§5).
+- **Whether any policy is EFFECTIVE.** These are static rules. Executed
+  two-tenant negative tests are BH-003 (PR #9), subject to §2.1's limits.
+- **Ownership of anything** (§1), and role attributes or role membership.
+- **`storage` and `auth` schemas**, and `public` sequences and functions (§4).
 
 ---
 
-## 7 · Recommended order after this
+## 8 · Recommended order
 
-1. **Run Q4b (§3).** Thirty seconds, and it decides whether 030b Release 2
-   runs tonight.
-2. **Run the views check (§5.1).** One query. If it confirms, the view fix
-   goes ahead of the remaining RC1 items — it is an unauthenticated
-   cross-tenant read.
-3. **Re-run Q3 and Q4 in full.**
-4. Then `030b` Release 2 (PR #10) and BH-003 (PR #9) as already queued.
-5. Raise the default-privileges ticket (§4) so the `create_all()` trap fails
-   safe.
+1. **Q4b (§3.1).** Thirty seconds, and it decides whether 030b Release 2 runs.
+2. **The views check (§5.1).** If it confirms, that fix goes ahead of the rest
+   — it is an unauthenticated cross-tenant read.
+3. **Drop the two `is_active`-less policies on `calls` and `tasks` (§6.1).**
+   Two `DROP POLICY` statements, the stricter policies already exist, and until
+   it runs a deactivated member keeps reading.
+4. **Q3b and Q3c (§3.1)**, then re-run Q3 and Q4 in full.
+5. Then `030b` Release 2 (PR #10) and BH-003 (PR #9) as queued.
+6. Raise tickets for: the default-privileges change (§4), the `anon` TRUNCATE
+   revoke (§6.2), `users_link_self`'s `WITH CHECK` (§6.3), and a decision on
+   `oauth_tokens` member access (§6.4).
