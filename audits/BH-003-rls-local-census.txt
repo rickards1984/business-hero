@@ -1,0 +1,316 @@
+# BH-003 — census of the LOCAL, migration-defined RLS state
+#
+# Produced by scripts/rls-local.sh census on 2026-09-18 against a fresh
+# replay (see the script header for the replay order, the prune step and
+# the 029 assumption). NOT PRODUCTION. Compare with BH-001's six CSVs:
+# every difference is either drift or a wrong assumption here.
+#
+-- Q1 inventory: table, rls_enabled, rls_forced, policy_count
+zz_033_flags_backup|f|f|0
+accounting_categories|t|f|1
+accounting_connections|t|f|1
+accounting_imports|t|f|1
+accounting_providers|t|f|2
+accounting_transactions|t|f|1
+assistant_conversations|t|f|1
+assistant_messages|t|f|1
+automation_executions|t|f|1
+automation_rule_templates|t|f|2
+automation_rules|t|f|1
+booking_settings|t|f|1
+briefing_snapshots|t|f|1
+business_members|t|f|3
+business_settings|t|f|1
+businesses|t|f|3
+calendar_events|t|f|2
+calendar_sync_state|t|f|2
+calls|t|f|2
+email_accounts|t|f|2
+email_briefings|t|f|2
+email_connections|t|f|1
+email_drafts|t|f|2
+email_messages|t|f|2
+email_outbox|t|f|2
+email_sync_states|t|f|1
+executive_meeting_action_items|t|f|1
+executive_meeting_decisions|t|f|1
+executive_meeting_goals|t|f|1
+executive_meeting_messages|t|f|1
+executive_meeting_settings|t|f|1
+executive_meetings|t|f|1
+financial_summary_cache|t|f|1
+integrations|t|f|1
+invoice_line_items|t|f|1
+invoices|t|f|5
+knowledge_base_items|t|f|1
+oauth_tokens|t|f|1
+onboarding_checklist|t|f|1
+onboarding_sessions|t|f|1
+plan_definitions|t|f|2
+platform_admins|t|f|1
+profiles|t|f|4
+quote_line_items|t|f|1
+quote_settings|t|f|1
+quotes|t|f|1
+receptionist_configs|t|f|1
+stripe_events|t|f|0
+support_articles|t|f|3
+support_conversations|t|f|1
+support_messages|t|f|1
+support_tickets|t|f|4
+tasks|t|f|5
+usage_meters|t|f|1
+whatsapp_configs|t|f|1
+whatsapp_messages|t|f|1
+whatsapp_pending_actions|t|f|1
+xero_connections|t|f|1
+-- Q1b views: relkind, owner, security_invoker, grants to client roles
+--     (BH-001's Q1 has relkind='r' and cannot see these; a view owned by
+--      postgres runs as postgres and bypasses the RLS on its base tables)
+-- Q2 policies
+accounting_categories|accounting_categories_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+accounting_connections|accounting_connections_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+accounting_imports|accounting_imports_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+accounting_providers|accounting_providers_admin_write|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+accounting_providers|accounting_providers_public_read|r|t|authenticated, anon|true|
+accounting_transactions|accounting_transactions_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+assistant_conversations|assistant_conversations_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+assistant_messages|assistant_messages_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+automation_executions|automation_executions_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+automation_rule_templates|automation_rule_templates_admin_write|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+automation_rule_templates|automation_rule_templates_member_read|r|t|authenticated|true|
+automation_rules|automation_rules_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+booking_settings|booking_settings_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+briefing_snapshots|briefing_snapshots_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+business_members|admins_full_access|*|t|authenticated|(auth.uid() IN ( SELECT platform_admins.user_id FROM platform_admins))|(auth.uid() IN ( SELECT platform_admins.user_id FROM platform_admins))
+business_members|users_link_self|w|t|authenticated|((invited_email = auth.email()) AND (user_id IS NULL))|(invited_email = auth.email())
+business_members|users_view_own|r|t|authenticated|((user_id = auth.uid()) OR (invited_email = auth.email()))|
+business_settings|business_settings_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+businesses|Platform admins can manage all businesses|*|t|authenticated|(EXISTS ( SELECT 1 FROM platform_admins WHERE (platform_admins.user_id = auth.uid())))|
+businesses|biz_select_if_member|r|t|authenticated|(EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))|
+businesses|biz_update_if_owner|w|t|authenticated|(EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.role = 'owner'::text) AND (bm.is_active = true))))|(EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.role = 'owner'::text) AND (bm.is_active = true))))
+calendar_events|business_members_read_calendar_events|r|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|
+calendar_events|platform_admins_full_access_calendar_events|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+calendar_sync_state|business_members_read_calendar_sync_state|r|t|authenticated|(is_platform_admin(auth.uid()) OR (EXISTS ( SELECT 1 FROM email_accounts ea WHERE ((ea.id = calendar_sync_state.email_account_id) AND is_business_member(auth.uid(), ea.business_id)))))|
+calendar_sync_state|platform_admins_full_access_calendar_sync_state|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+calls|Members can select calls for their businesses|r|t|authenticated|(EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = calls.business_id) AND (bm.user_id = auth.uid()))))|
+calls|calls_select_if_member|r|t|authenticated|(EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = calls.business_id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))|
+email_accounts|business_members_read_email_accounts|r|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|
+email_accounts|platform_admins_full_access_email_accounts|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+email_briefings|business_members_read_email_briefings|r|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|
+email_briefings|platform_admins_full_access_email_briefings|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+email_connections|email_connections_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+email_drafts|business_members_read_email_drafts|r|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|
+email_drafts|platform_admins_full_access_email_drafts|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+email_messages|business_members_read_email_messages|r|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|
+email_messages|platform_admins_full_access_email_messages|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+email_outbox|business_members_read_email_outbox_v2|r|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|
+email_outbox|platform_admins_full_access_email_outbox_v2|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+email_sync_states|email_sync_states_member_access|*|t|authenticated|(EXISTS ( SELECT 1 FROM email_accounts ea WHERE ((ea.id = email_sync_states.email_account_id) AND (is_business_member(auth.uid(), ea.business_id) OR is_platform_admin(auth.uid())))))|(EXISTS ( SELECT 1 FROM email_accounts ea WHERE ((ea.id = email_sync_states.email_account_id) AND (is_business_member(auth.uid(), ea.business_id) OR is_platform_admin(auth.uid())))))
+executive_meeting_action_items|executive_meeting_action_items_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+executive_meeting_decisions|executive_meeting_decisions_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+executive_meeting_goals|executive_meeting_goals_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+executive_meeting_messages|executive_meeting_messages_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+executive_meeting_settings|executive_meeting_settings_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+executive_meetings|executive_meetings_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+financial_summary_cache|financial_summary_cache_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+integrations|integrations_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+invoice_line_items|invoice_line_items_member_access|r|t|authenticated|(EXISTS ( SELECT 1 FROM invoices i WHERE ((i.id = invoice_line_items.invoice_id) AND (is_business_member(auth.uid(), i.business_id) OR is_platform_admin(auth.uid())))))|
+invoices|business_members_delete_invoices|d|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|
+invoices|business_members_insert_invoices|a|t|authenticated||(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+invoices|business_members_read_invoices|r|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|
+invoices|business_members_update_invoices|w|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+invoices|platform_admins_full_access_invoices|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+knowledge_base_items|knowledge_base_items_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+oauth_tokens|oauth_tokens_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+onboarding_checklist|onboarding_checklist_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+onboarding_sessions|onboarding_sessions_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+plan_definitions|plan_definitions_admin_write|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+plan_definitions|plan_definitions_public_read|r|t|authenticated, anon|true|
+platform_admins|platform_admins_read_own|r|t|authenticated|(user_id = auth.uid())|
+profiles|profiles_admin_all|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+profiles|profiles_insert_own|a|t|authenticated||(id = auth.uid())
+profiles|profiles_select_own|r|t|authenticated|(id = auth.uid())|
+profiles|profiles_update_own|w|t|authenticated|(id = auth.uid())|(id = auth.uid())
+quote_line_items|quote_line_items_member_access|*|t|authenticated|(EXISTS ( SELECT 1 FROM quotes q WHERE ((q.id = quote_line_items.quote_id) AND (is_business_member(auth.uid(), q.business_id) OR is_platform_admin(auth.uid())))))|(EXISTS ( SELECT 1 FROM quotes q WHERE ((q.id = quote_line_items.quote_id) AND (is_business_member(auth.uid(), q.business_id) OR is_platform_admin(auth.uid())))))
+quote_settings|quote_settings_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+quotes|quotes_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+receptionist_configs|receptionist_configs_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+support_articles|support_articles_admin_write|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+support_articles|support_articles_member_read|r|t|authenticated|((is_published = true) OR is_platform_admin(auth.uid()))|
+support_articles|support_articles_public_read|r|t|anon|(is_published = true)|
+support_conversations|support_conversations_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+support_messages|support_messages_member_access|*|t|authenticated|(EXISTS ( SELECT 1 FROM support_conversations sc WHERE ((sc.id = support_messages.conversation_id) AND (is_business_member(auth.uid(), sc.business_id) OR is_platform_admin(auth.uid())))))|(EXISTS ( SELECT 1 FROM support_conversations sc WHERE ((sc.id = support_messages.conversation_id) AND (is_business_member(auth.uid(), sc.business_id) OR is_platform_admin(auth.uid())))))
+support_tickets|business_members_insert_support_tickets|a|t|authenticated||(is_business_member(auth.uid(), business_id) AND (user_id = auth.uid()))
+support_tickets|business_members_select_support_tickets|r|t|authenticated|is_business_member(auth.uid(), business_id)|
+support_tickets|business_members_update_support_tickets|w|t|authenticated|(is_business_member(auth.uid(), business_id) AND (user_id = auth.uid()))|(is_business_member(auth.uid(), business_id) AND (user_id = auth.uid()) AND (status = 'closed'::text))
+support_tickets|platform_admins_full_access_support_tickets|*|t|authenticated|is_platform_admin(auth.uid())|is_platform_admin(auth.uid())
+tasks|Members can select tasks for their businesses|r|t|authenticated|(EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = tasks.business_id) AND (bm.user_id = auth.uid()))))|
+tasks|tasks_delete_if_owner|d|t|authenticated|(EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = tasks.business_id) AND (bm.user_id = auth.uid()) AND (bm.role = 'owner'::text) AND (bm.is_active = true))))|
+tasks|tasks_insert_if_member|a|t|authenticated||(EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = tasks.business_id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))
+tasks|tasks_select_if_member|r|t|authenticated|(EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = tasks.business_id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))|
+tasks|tasks_update_if_member|w|t|authenticated|(EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = tasks.business_id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))|(EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = tasks.business_id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))
+usage_meters|usage_meters_member_read|r|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|
+whatsapp_configs|whatsapp_configs_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+whatsapp_messages|whatsapp_messages_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+whatsapp_pending_actions|whatsapp_pending_actions_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+xero_connections|xero_connections_member_access|*|t|authenticated|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))|(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))
+-- Q3 table grants to anon/authenticated
+accounting_categories|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+accounting_categories|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+accounting_connections|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+accounting_connections|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+accounting_imports|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+accounting_imports|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+accounting_providers|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+accounting_providers|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+accounting_transactions|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+accounting_transactions|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+assistant_conversations|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+assistant_conversations|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+assistant_messages|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+assistant_messages|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+automation_executions|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+automation_executions|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+automation_rule_templates|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+automation_rule_templates|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+automation_rules|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+automation_rules|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+booking_settings|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+booking_settings|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+briefing_snapshots|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+briefing_snapshots|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+business_members|anon|SELECT, TRIGGER
+business_members|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE
+business_settings|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+business_settings|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+businesses|anon|SELECT, TRIGGER
+businesses|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE
+calendar_events|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+calendar_events|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+calendar_sync_state|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+calendar_sync_state|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+calls|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+calls|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_accounts|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_accounts|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_briefings|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_briefings|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_connections|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_connections|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_drafts|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_drafts|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_messages|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_messages|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_outbox|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_outbox|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_sync_states|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+email_sync_states|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+executive_meeting_action_items|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+executive_meeting_action_items|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+executive_meeting_decisions|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+executive_meeting_decisions|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+executive_meeting_goals|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+executive_meeting_goals|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+executive_meeting_messages|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+executive_meeting_messages|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+executive_meeting_settings|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+executive_meeting_settings|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+executive_meetings|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+executive_meetings|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+financial_summary_cache|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+financial_summary_cache|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+integrations|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+integrations|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+invoice_line_items|authenticated|SELECT
+invoices|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+invoices|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+knowledge_base_items|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+knowledge_base_items|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+oauth_tokens|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+oauth_tokens|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+onboarding_checklist|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+onboarding_checklist|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+onboarding_sessions|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+onboarding_sessions|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+plan_definitions|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+plan_definitions|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+platform_admins|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+platform_admins|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+profiles|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+profiles|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+quote_line_items|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+quote_line_items|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+quote_settings|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+quote_settings|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+quotes|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+quotes|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+receptionist_configs|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+receptionist_configs|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+support_articles|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+support_articles|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+support_conversations|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+support_conversations|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+support_messages|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+support_messages|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+support_tickets|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+support_tickets|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+tasks|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+tasks|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+usage_meters|authenticated|SELECT
+whatsapp_configs|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+whatsapp_configs|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+whatsapp_messages|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+whatsapp_messages|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+whatsapp_pending_actions|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+whatsapp_pending_actions|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+xero_connections|anon|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+xero_connections|authenticated|DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+-- Q5 default privileges
+auth|S|supabase_auth_admin|{postgres=rwU/supabase_auth_admin,dashboard_user=rwU/supabase_auth_admin}
+auth|f|supabase_auth_admin|{postgres=X/supabase_auth_admin,dashboard_user=X/supabase_auth_admin}
+auth|r|supabase_auth_admin|{postgres=arwdDxtm/supabase_auth_admin,dashboard_user=arwdDxtm/supabase_auth_admin}
+extensions|S|supabase_admin|{postgres=r*w*U*/supabase_admin}
+extensions|f|supabase_admin|{postgres=X*/supabase_admin}
+extensions|r|supabase_admin|{postgres=a*r*w*d*D*x*t*m*/supabase_admin}
+graphql|S|supabase_admin|{postgres=rwU/supabase_admin,anon=rwU/supabase_admin,authenticated=rwU/supabase_admin,service_role=rwU/supabase_admin}
+graphql|f|supabase_admin|{postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin,service_role=X/supabase_admin}
+graphql|r|supabase_admin|{postgres=arwdDxtm/supabase_admin,anon=arwdDxtm/supabase_admin,authenticated=arwdDxtm/supabase_admin,service_role=arwdDxtm/supabase_admin}
+graphql_public|S|supabase_admin|{postgres=rwU/supabase_admin,anon=rwU/supabase_admin,authenticated=rwU/supabase_admin,service_role=rwU/supabase_admin}
+graphql_public|f|supabase_admin|{postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin,service_role=X/supabase_admin}
+graphql_public|r|supabase_admin|{postgres=arwdDxtm/supabase_admin,anon=arwdDxtm/supabase_admin,authenticated=arwdDxtm/supabase_admin,service_role=arwdDxtm/supabase_admin}
+public|S|supabase_admin|{postgres=rwU/supabase_admin,anon=rwU/supabase_admin,authenticated=rwU/supabase_admin,service_role=rwU/supabase_admin}
+public|S|postgres|{postgres=rwU/postgres,anon=rwU/postgres,authenticated=rwU/postgres,service_role=rwU/postgres}
+public|f|supabase_admin|{postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin,service_role=X/supabase_admin}
+public|f|postgres|{postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}
+public|r|postgres|{postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,authenticated=arwdDxtm/postgres,service_role=arwdDxtm/postgres}
+public|r|supabase_admin|{postgres=arwdDxtm/supabase_admin,anon=arwdDxtm/supabase_admin,authenticated=arwdDxtm/supabase_admin,service_role=arwdDxtm/supabase_admin}
+realtime|S|supabase_admin|{postgres=rwU/supabase_admin,dashboard_user=rwU/supabase_admin}
+realtime|f|supabase_admin|{postgres=X/supabase_admin,dashboard_user=X/supabase_admin}
+realtime|r|supabase_admin|{postgres=arwdDxtm/supabase_admin,dashboard_user=arwdDxtm/supabase_admin}
+storage|S|postgres|{postgres=rwU/postgres,anon=rwU/postgres,authenticated=rwU/postgres,service_role=rwU/postgres}
+storage|f|postgres|{postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}
+storage|r|postgres|{postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,authenticated=arwdDxtm/postgres,service_role=arwdDxtm/postgres}
+-- Q6 businesses grants
+anon|SELECT
+anon|TRIGGER
+authenticated|DELETE
+authenticated|INSERT
+authenticated|REFERENCES
+authenticated|SELECT
+authenticated|TRIGGER
+authenticated|TRUNCATE
+postgres|DELETE
+postgres|INSERT
+postgres|REFERENCES
+postgres|SELECT
+postgres|TRIGGER
+postgres|TRUNCATE
+postgres|UPDATE
+service_role|DELETE
+service_role|INSERT
+service_role|REFERENCES
+service_role|SELECT
+service_role|TRIGGER
+service_role|TRUNCATE
+service_role|UPDATE
