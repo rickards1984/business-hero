@@ -1,0 +1,68 @@
+# BH-001 §2.1 — production policy state vs the migration-defined local replay
+#
+# Produced 24 Sep 2026 by comparing:
+#   PROD  audits/BH-001-prod-Q2-policies-2026-09-24.csv  (Supabase SQL editor,
+#         project oxblcmwhuwtobdhsfgyi, read-only)
+#   LOCAL a fresh `scripts/rls-local.sh up` (BH-003 / PR #9): Supabase's own
+#         Postgres image, this repository's migrations replayed, the 24
+#         pre-baseline ghost policies pruned against the 5 July 2026 capture,
+#         the 031/032 rollback snapshots dropped per their runbooks.
+#
+# Both sides normalised identically: whitespace collapsed, roles sorted, the
+# CSV's literal "null" mapped to SQL NULL. Comparison is on the FULL
+# definition — command, roles, permissive, USING, WITH CHECK — not on names.
+# Local evidence pinned at commit 5e1aaf7 (BH-003 / PR #9), whose census file
+# audits/BH-003-rls-local-census.txt is the captured local state.
+#
+# NOT "byte-identical": identical AFTER that normalisation. Collapsing
+# whitespace is not safe in general — it rewrites quoted literals too — and no
+# production literal here contains runs of whitespace, but both raw captures
+# are committed so a stricter comparison can be redone.
+
+prod: 87 policies
+local (replay + prune): 87 policies
+identical after normalisation: 87
+
+in PROD, absent locally:        0
+LOCAL only, absent in prod:     0
+DEFINITION DIFFERS:             0
+
+RLS-enabled / policy-count comparison across all 58 public tables: 0 differences
+  (prod tables: 58, local: 58, no table present in one and not the other)
+
+`businesses` table grants, prod vs local:
+  anon           SELECT, TRIGGER                                          IDENTICAL
+  authenticated  DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE    IDENTICAL
+  postgres       DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE   IDENTICAL
+  service_role   DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE   IDENTICAL
+
+WHAT THIS LICENSES
+  BH-003's RLS suite runs against the local replay. Because the replay's
+  policy TEXT and RLS state match production's, a green run there supports a
+  statement about production's POLICY TEXT, not merely about the migration
+  files — the gap test_tenant_isolation_rls_path.py's own docstring and
+  UNCOVERED registry flagged, and the reason this comparison was the first
+  thing done with the CSVs.
+
+  TEXT EQUIVALENCE IS NOT BEHAVIOURAL EQUIVALENCE, and the counterexample is
+  in this repository: 030a changed what membership MEANS — it narrowed the
+  business_members UPDATE grant and rewrote is_business_member() — without
+  changing a single policy expression. Two databases can therefore match on
+  all 87 policies and behave differently. Every membership policy here is a
+  call into is_business_member() or is_platform_admin(), and this comparison
+  says nothing about those functions' bodies, ownership, security settings or
+  execute privileges.
+
+WHAT IT DOES NOT LICENSE
+  * Grants beyond `businesses` — the Q3 export is truncated at 100 rows.
+  * Column-level grants — the Q4 export is truncated and never reached
+    `businesses`. This is what RC1 P0-3 turns on.
+  * Constraints — no export covers pg_constraint.
+  * VIEWS — a view cannot carry RLS and Q1 filters relkind='r'. Production
+    has two (receptionist_call_stats, support_stats) that the replay does not
+    create; see BH-001-FINDINGS.md §5. The replay is NOT equivalent there.
+  * The `auth` and `storage` schemas.
+  * Helper FUNCTION bodies, ownership and security settings — the limit that
+    matters most, per the paragraph above.
+  * Role attributes and role membership.
+  * Object ownership of anything: Q1 does not export relowner.

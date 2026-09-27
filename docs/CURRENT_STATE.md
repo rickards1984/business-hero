@@ -213,15 +213,77 @@ name and colour. Tracked as **P0-9a** in `docs/RC1_SCOPE.md`. Production
 exploitability is unverified — it needs authorised inspection of live
 constraints — but the application-layer defect is confirmed in code.
 
-### RLS coverage — **unknown**
+### RLS coverage — **policies established, grants not** (24 Sep 2026; was: unknown)
 
-The July audit listed ~30 tables with RLS off. Migrations since then
-(`030a`, `031`, `033`) enabled RLS on some. **The current live state cannot
-be determined from this repository** — the schema dump has no policy data and
-migration files are not evidence (`AGENTS.md` §3.4).
+Six read-only exports from prod, committed as
+`audits/BH-001-prod-Q*-2026-09-24.csv`; interpretation in
+`audits/BH-001-FINDINGS.md`. The July audit's ~30 RLS-off tables are gone:
 
-Resolving this needs one query against prod. It is the first thing RC1
-security work should establish.
+- **58 tables in `public`; 56 have RLS on with at least one policy.**
+- The two that do not are each explicable, but only one is EVIDENCED.
+  `stripe_events` has RLS on with zero policies, which denies the client path
+  entirely — `030a` SECTION 4's intent — and it sits inside the grant export's
+  covered range and appears nowhere in it, so no client grant exists.
+  `zz_033_flags_backup` has RLS off, and `033` says it revoked both client
+  roles, but that table sorts **beyond the grant export's truncation point**,
+  so its grants are **unverified**. One query settles it (FINDINGS §3.1).
+- **No table the grant export covers is RLS-off with a client-role grant.** The
+  invariant cannot yet be stated database-wide, for the reason above.
+- **87 policies, complete** (every per-table count matches, not just the
+  total). 77 **reference** membership or admin helpers — a text match, not
+  proof of enforcement: one of them requires no membership. The other ten are
+  self-scoped, catalogue reads (`USING (true)` on three tables with no
+  `business_id`), or a published-article read. One `ALL` policy has no explicit
+  `WITH CHECK`, which PostgreSQL fills from its `USING` clause.
+- **The July audit's SEC-02 and SEC-03 are closed in prod.** The
+  `USING (true) FOR ALL` policies on `xero_connections` and
+  `accounting_connections` — the OAuth token tables — are gone; both now
+  carry only member access.
+- **Production's policy TEXT matches the migration-defined local replay** used
+  by BH-003's RLS suite: 87 of 87 on command, roles, permissive, `USING` and
+  `WITH CHECK`, identical after documented normalisation; zero differences
+  across all 58 tables. Evidence:
+  `audits/BH-001-prod-vs-local-policy-diff.txt`. So that suite's green run says
+  something about production's policy TEXT — **not about behaviour**: every
+  membership policy calls `is_business_member()`, and `030a` changed that
+  function without changing any policy expression. Function bodies, ownership,
+  grants beyond `businesses`, constraints and views are outside the
+  comparison.
+
+**Three access findings came out of the data** (`audits/BH-001-FINDINGS.md`
+§6): **inactive members can still read `calls` and `tasks`** — two permissive
+SELECT policies on each, the older omitting `is_active`, and permissive
+policies OR together, so a deactivated employee keeps reading;
+**`TRUNCATE` is granted to `anon` on 46 tables**, which RLS does not constrain;
+and **`oauth_tokens` is member-accessible** where the July audit recorded it
+`deny-auth`.
+
+**Three things this did NOT establish, and two of them matter:**
+
+1. **Q3 and Q4 are truncated at 100 rows.** Q4 (column privileges) never
+   reached `businesses`, so **whether `authenticated` still holds the
+   26-column UPDATE grant — RC1 P0-3, the paywall hole — is unresolved.**
+   Q6 shows no *table-level* UPDATE, which is consistent with 033 SECTION 5
+   having converted it to a column list; column grants are invisible to
+   `role_table_grants`. One query settles it (FINDINGS §3).
+2. **Two VIEWS carry `SELECT` for `anon` and cannot have RLS.**
+   `receptionist_call_stats` groups by `business_id`, so it plausibly
+   discloses per-tenant call volumes to anyone holding the public anon key.
+   Q1 filters `relkind='r'` and could not have seen it. One read-only query
+   confirms or clears it (FINDINGS §5.1). **This is the item that reorders
+   RC1.**
+3. Constraints are covered by no export — including the UNIQUE on
+   `stripe_events.event_id` that BH-006's de-duplication needs.
+
+**The `create_all()` trap is confirmed live.** Q5: default privileges in
+`public` grant `arwdDxtm` — everything, including MAINTAIN — to `anon` and
+`authenticated`, for tables created by **either** `postgres` or
+`supabase_admin`. A new SQLModel class therefore creates a table that is
+publicly readable *and writable* from the moment the process boots. Sequences
+(`rwU`) and functions (`X`) carry client-role defaults too. The fix must name
+both creator roles (`ALTER DEFAULT PRIVILEGES FOR ROLE …`); a bare statement
+changes only the executing role's defaults, which FINDINGS §4 first got
+wrong.
 
 ### Audit logging — **absent**
 
@@ -451,7 +513,14 @@ Evidence-backed only.
 1. Paid surfaces have no server-side entitlement check (§5).
 2. No metering — an allowance cannot be enforced, so voice spend is unbounded (§5).
 3. `businesses` UPDATE grant still open to owners (§5).
-4. RLS coverage on ~30 tables is **unknown** (§4).
+4. ~~RLS coverage on ~30 tables is unknown~~ — **policy inventory established
+   24 Sep 2026** (§4, `audits/BH-001-FINDINGS.md`). Replaced by five narrower
+   items: **(a)** the `businesses` column-level UPDATE grant is unverified, so
+   P0-3 is neither confirmed nor refuted; **(b)** two views are readable by
+   `anon` and cannot carry RLS — an unauthenticated cross-tenant read pending
+   one query; **(c)** inactive members can still read `calls` and `tasks`;
+   **(d)** `TRUNCATE` is granted to `anon` on 46 tables, which RLS does not
+   constrain; **(e)** grant coverage for 54 of 58 tables is unexported.
 
 **High**
 
