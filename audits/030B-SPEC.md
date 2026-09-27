@@ -175,6 +175,39 @@ Today `AdminDashboard.tsx:380` mints the key in the browser:
 
 ## PART E — The migration
 
+> **APPLIED TO PRODUCTION 27 SEP 2026. Both sections.** Runbook:
+> `audits/030b-PROD-RUNBOOK.md`. Evidence: `audits/030b-prod-before.txt`,
+> `audits/030b-prod-after.txt`. Staging rehearsal:
+> `audits/030b-STAGING-REHEARSAL.md`.
+>
+> Every box below is met, including the two that were left conditional:
+>
+> * **`REVOKE INSERT, UPDATE` — done**, and not column-level: the whole
+>   privilege went. Verified that a table-level `REVOKE UPDATE` also clears
+>   the 26 column grants 033 SECTION 5 had created (26 → 0), rather than
+>   trusting the documentation for it.
+> * **`SELECT` retained — confirmed**, as the role, and the four frontend
+>   pages were smoke-tested.
+> * **The verify asserting `authenticated` holds `SELECT` and `TRIGGER` only
+>   — met.** This needed SECTION 2 (`DELETE, TRUNCATE, REFERENCES`), which was
+>   outside the instruction given to the builder and so was written as a
+>   separate, optional step requiring explicit approval. **Mike approved and
+>   applied it on the night**, so the spec's target state is met exactly
+>   rather than approximately.
+> * **`anon` unchanged — confirmed** at `SELECT, TRIGGER` from 030a.
+> * **`biz_update_if_owner` DROPPED — done**, in the same transaction as the
+>   revoke, so no window existed with neither.
+> * **Rehearsed on staging with a proven rollback — done**, 18 Sep, and the
+>   rollback's recreated policy was additionally compared against the LIVE
+>   policy text on the night (STEP 0's 0c) and found identical.
+>
+> One thing the spec did not anticipate, worth recording: the revoke also
+> closes a route to **`api_key`**, which was in the 26-column list. PART D
+> moved api_key *generation* server-side, but the grant still permitted a
+> direct browser write of an authentication credential that
+> `get_current_business` accepts as bearer auth. Only the revoke closed that.
+
+
 - [ ] **`REVOKE INSERT, UPDATE ON businesses FROM authenticated`.** Not
       column-level. After PART A there are zero frontend writes to this table,
       so the whole privilege goes — stronger and simpler than 030a's

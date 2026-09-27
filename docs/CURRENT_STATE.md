@@ -150,7 +150,7 @@ grants) and **never** columns.
 | `031` money engine schema | **complete and verified** | `audits/031-PROD-RUNBOOK.md`, rehearsed |
 | `033` entitlement, **through Section 7** | **complete and verified** | Mike confirmed post-strip flag state; schema dump shows `usage_meters` (7 cols) and both Section 4 columns present |
 | `033` STEP 21 — remove stopgap flags | **absent** | Blocked; see §8 |
-| `030b` Release 2 — the revoke | **absent** | See §5 |
+| `030b` Release 2 — the revoke | **applied 27 Sep 2026** | `audits/030b-PROD-RUNBOOK.md`, before/after snapshots in `audits/030b-prod-{before,after}.txt` |
 
 ### Schema truth
 
@@ -260,12 +260,15 @@ and **`oauth_tokens` is member-accessible** where the July audit recorded it
 
 **Three things this did NOT establish, and two of them matter:**
 
-1. **Q3 and Q4 are truncated at 100 rows.** Q4 (column privileges) never
-   reached `businesses`, so **whether `authenticated` still holds the
-   26-column UPDATE grant — RC1 P0-3, the paywall hole — is unresolved.**
-   Q6 shows no *table-level* UPDATE, which is consistent with 033 SECTION 5
-   having converted it to a column list; column grants are invisible to
-   `role_table_grants`. One query settles it (FINDINGS §3).
+1. **Q3 and Q4 were truncated at 100 rows**, and Q4 never reached
+   `businesses` — so P0-3 was unresolved by the original packet. **Settled
+   27 Sep 2026 by Q4b, and CLOSED the same day.** Q4b found `authenticated`
+   holding UPDATE on exactly the 26 columns 033 SECTION 5 declares — including
+   `plan_tier`, `subscription_status`, `feature_flags`, `limits`, `is_active`
+   and `api_key` — which confirmed RC1 P0-3 open with production evidence
+   (`audits/BH-001-Q4b-RESULT.md`). `030b` Release 2 was then applied the same
+   day and revoked it; see §8. Q3's remaining gap (everything sorting after
+   `support_stats`) still stands.
 2. **Two VIEWS carry `SELECT` for `anon` and cannot have RLS.**
    `receptionist_call_stats` groups by `business_id`, so it plausibly
    discloses per-tenant call volumes to anyone holding the public anon key.
@@ -397,15 +400,48 @@ Missing:
 - `billing_exempt` column: **absent**.
 - Founder accounts on real subscriptions with a 100% coupon: **absent**.
 
-### The `businesses` UPDATE grant — **partial**
+### The `businesses` UPDATE grant — **CLOSED, 27 Sep 2026**
 
-`030b` Release 1 shipped: four admin endpoints, server-side `api_key`
-generation, narrowed reads. **Release 2 — the revoke — has not been applied.**
-Until it is, `authenticated` retains table-wide UPDATE on `businesses` behind
-a column-blind policy, so an owner can still set their own `plan_tier` and
-`feature_flags` from the browser.
+`030b` Release 1 shipped first: four admin endpoints, server-side `api_key`
+generation, narrowed reads. **Release 2 — the revoke — was applied to
+production on 27 Sep 2026**, following `audits/030b-PROD-RUNBOOK.md` step by
+step. Both sections were applied.
 
-This is the paywall hole. It is documented, understood, and open.
+`authenticated` now holds **`SELECT, TRIGGER` only** on `businesses`. That is
+the spec's PART E target verbatim. What went:
+
+| | Was | Now |
+|---|---|---|
+| Table-level | `DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE` | `SELECT, TRIGGER` |
+| Column-level UPDATE | 26 columns, incl. `plan_tier`, `is_active`, `feature_flags`, `limits`, `subscription_status`, `api_key` | **none** |
+| Column-level INSERT | 28 (table-level, reported per column) | **none** |
+| `biz_update_if_owner` | present | **dropped** (spec PART E, RULED) |
+
+**RC1 P0-3 is closed.** An owner can no longer set their own tier — or their
+own `subscription_status`, which after BH-006 is the column
+`auth.resolve_access_level` reads, so writing `active` there was a route to
+full access without paying.
+
+Verified three ways on the night, all recorded in
+`audits/030b-prod-after.txt`: the catalog (`information_schema`, 0 rows), the
+*effective* privilege (`has_column_privilege`, `0 | 0 | 0 | 28` — so nothing
+survived through `PUBLIC` or role inheritance), and **as the role itself** —
+all five entitlement columns and INSERT raise `permission denied`, while
+`SELECT` still works, which is what keeps the four frontend pages alive.
+
+The protection now lives in exactly one place: **the absence of the grant.**
+`biz_update_if_owner` was dropped in the same change rather than left behind,
+because a policy that reads as live protection while enforcing nothing would
+mislead the next person to restore an UPDATE grant for some feature that
+seemed to need one.
+
+`backend/tests/test_tenant_isolation_rls_path.py` asserts this state against a
+local replay that now includes Release 2. The four
+`test_an_owner_cannot_raise_their_own_entitlement` cases carried
+`xfail(strict=True)` while the hole was open; the markers came off in the
+commit that recorded the runbook as applied. Seven regressions were
+mutation-tested against the suite — including a grant restored to `PUBLIC`
+rather than to `authenticated` — and all seven fail it.
 
 ---
 
@@ -515,8 +551,9 @@ Evidence-backed only.
 3. `businesses` UPDATE grant still open to owners (§5).
 4. ~~RLS coverage on ~30 tables is unknown~~ — **policy inventory established
    24 Sep 2026** (§4, `audits/BH-001-FINDINGS.md`). Replaced by five narrower
-   items: **(a)** the `businesses` column-level UPDATE grant is unverified, so
-   P0-3 is neither confirmed nor refuted; **(b)** two views are readable by
+   items: **(a)** ~~the `businesses` column-level UPDATE grant is unverified~~ —
+   verified 27 Sep, found open, and **CLOSED the same day by `030b` Release 2**
+   (§8); **(b)** two views are readable by
    `anon` and cannot carry RLS — an unauthenticated cross-tenant read pending
    one query; **(c)** inactive members can still read `calls` and `tasks`;
    **(d)** `TRUNCATE` is granted to `anon` on 46 tables, which RLS does not
