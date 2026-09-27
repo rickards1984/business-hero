@@ -1,0 +1,88 @@
+# 030b Release 2 — PRODUCTION BEFORE-SNAPSHOT
+# Project: oxblcmwhuwtobdhsfgyi   Captured: 27 Sep 2026, read-only, STEP 0.
+# This is the reference ROLLBACK 1 and ROLLBACK 2 restore to.
+
+-- 0a: table-level grants on businesses
+grantee        | privileges
+anon           | SELECT, TRIGGER
+authenticated  | DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE
+postgres       | DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+service_role   | DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+
+-- 0b: column-level grants on businesses to the client roles
+anon          | SELECT     | 28 | api_key, brand_color, cancel_at_period_end, ceo_briefing_enabled, created_at, current_period_end, feature_flags, id, is_active, last_stripe_event_at, limits, logo_url, metered_usage_enabled, monthly_spend_cap_gbp, name, onboarded_by, onboarding_completed, onboarding_completed_at, owner_whatsapp, plan_tier, region, stripe_customer_id, stripe_subscription_id, subscription_status, tax_number, tax_registered, timezone, trial_ends_at
+authenticated | INSERT     | 28 | (same 28 columns)
+authenticated | REFERENCES | 28 | (same 28 columns)
+authenticated | SELECT     | 28 | (same 28 columns)
+authenticated | UPDATE     | 26 | api_key, brand_color, cancel_at_period_end, ceo_briefing_enabled, created_at, current_period_end, feature_flags, id, is_active, last_stripe_event_at, limits, logo_url, name, onboarded_by, onboarding_completed, onboarding_completed_at, owner_whatsapp, plan_tier, region, stripe_customer_id, stripe_subscription_id, subscription_status, tax_number, tax_registered, timezone, trial_ends_at
+#
+# The UPDATE list is 033 SECTION 5's, verified character for character against
+# backend/migrations/033_entitlement.sql and against the local replay. It is
+# ALPHABETICAL here because 0b sorts with ORDER BY column_name; ROLLBACK 1's
+# GRANT lists the same 26 in 033's declaration order. GRANT UPDATE (a,b) is
+# identical in effect to GRANT UPDATE (b,a), so this is presentation only.
+#
+# metered_usage_enabled and monthly_spend_cap_gbp are ABSENT from UPDATE and
+# PRESENT in INSERT. Both correct: 033 SECTION 5 converted only UPDATE to a
+# column list, and a table-level grant covers columns added later.
+
+-- 0c: every policy on businesses, with expressions
+polname                                   | polcmd | permissive | using_expr / check_expr
+Platform admins can manage all businesses | *      | true       | USING  (EXISTS ( SELECT 1 FROM platform_admins WHERE (platform_admins.user_id = auth.uid())))
+                                          |        |            | CHECK  null   (PostgreSQL falls back to USING for the check)
+biz_select_if_member                      | r      | true       | USING  (EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))
+                                          |        |            | CHECK  null
+biz_update_if_owner                       | w      | true       | USING  (EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.role = 'owner'::text) AND (bm.is_active = true))))
+                                          |        |            | CHECK  (EXISTS ( SELECT 1 FROM business_members bm WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.role = 'owner'::text) AND (bm.is_active = true))))
+#
+# biz_update_if_owner's USING and WITH CHECK were compared against the policy
+# ROLLBACK 1 recreates (runbook STEP 6) and are IDENTICAL after normalising
+# whitespace and the public. schema prefix. The rollback path is therefore
+# proven against live state, not only against staging.
+
+-- 0d: EFFECTIVE column privileges (has_column_privilege: sees PUBLIC,
+--     inherited and column grants alike)
+auth_update_cols | auth_insert_cols | anon_write_cols | total_cols
+26               | 28               | 0               | 28
+#
+# The decisive read of the three BH-001 could not settle. No PUBLIC or
+# inherited privilege existed behind the direct grants, so STEP 5's revoke —
+# which names `authenticated` only — reached everything.
+
+-- 0e: SECURITY DEFINER functions a client role can call whose body mentions
+--     businesses
+(0 rows)
+
+-- 0f: views or matviews over businesses reachable by a client role
+(0 rows)
+#
+# 0e and 0f are why the revoke is sufficient: no function running as its owner
+# and no view reaches this table, so nothing survives the grant removal by
+# another route. (The two views BH-001 found — receptionist_call_stats,
+# support_stats — read `calls` and `support_conversations`, not `businesses`.
+# They remain an open finding of their own: BH-001-FINDINGS.md §5.)
+
+-- STEP 1: right database
+current_database | businesses | members
+postgres         | 8          | 5
+#
+# Not staging (3 and 0). `members = 5` matches 030a's 17 Aug 2026 evidence
+# exactly; `businesses = 8` against the 6 recorded at 033 time is a month's
+# growth, and Mike confirmed it matches the admin dashboard.
+
+-- STEP 2: table owner
+tableowner
+postgres
+#
+# The backend writes as OWNER, and owner privilege is not a grant, so
+# REVOKE ... FROM authenticated cannot reach onboarding_api.py,
+# admin_business_api.py or the Stripe webhook.
+
+-- STEP 4: the hole, proven open before closing it
+BEGIN; SET LOCAL ROLE authenticated; UPDATE public.businesses SET plan_tier = plan_tier; ROLLBACK;
+-> Success (no permission error)
+#
+# The Supabase editor renders the LAST statement's result and the last
+# statement is ROLLBACK, so the `UPDATE 0` line is not visible. The absence of
+# `permission denied` is the finding, per the runbook's own ground rule. 0d
+# proved the same thing from the catalog independently: 26 UPDATE-able columns.

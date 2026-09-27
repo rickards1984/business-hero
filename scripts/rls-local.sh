@@ -83,6 +83,11 @@ ORDER=(
   backend/migrations/031_money_engine.sql
   backend/migrations/032_nullable_line_tax.sql
   backend/migrations/033_entitlement.sql
+  # 030b Release 2, APPLIED TO PRODUCTION 27 Sep 2026 (audits/030b-PROD-RUNBOOK.md,
+  # audits/030b-prod-after.txt). Added here so the replay models the database
+  # production actually has: without it the RLS suite would keep asserting that
+  # an owner CAN raise their own entitlement, which stopped being true.
+  backend/migrations/030b_release2_revoke.sql
 )
 
 psql_in() { docker exec -i "$CONTAINER" psql -U postgres -v ON_ERROR_STOP=0 -q "$@"; }

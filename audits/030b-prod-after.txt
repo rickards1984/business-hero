@@ -1,0 +1,52 @@
+# 030b Release 2 — PRODUCTION AFTER-SNAPSHOT
+# Project: oxblcmwhuwtobdhsfgyi   Captured: 27 Sep 2026, STEP 6 and STEP 8.
+# SECTION 1 AND SECTION 2 WERE BOTH APPLIED.
+
+-- 1a: table-level grants (after SECTION 1 and SECTION 2)
+grantee        | privileges
+anon           | SELECT, TRIGGER
+authenticated  | SELECT, TRIGGER
+#
+# This is the spec's PART E target state verbatim: "a verify asserts
+# `authenticated` holds `SELECT` and `TRIGGER` only". Section 1 removed INSERT
+# and UPDATE; Section 2 removed DELETE, TRUNCATE and REFERENCES.
+# `anon` is unchanged from 030a.
+
+-- 1b: column-level INSERT/UPDATE for authenticated — THE ONE THAT MATTERS
+(0 rows)
+#
+# Was `UPDATE | 26` and `INSERT | 28`. Confirms that REVOKE at table level
+# clears column-level grants too — the behaviour the whole runbook depends on,
+# checked directly rather than trusted from the documentation.
+
+-- 1c: policies on businesses
+polname                                   | polcmd
+Platform admins can manage all businesses | *
+biz_select_if_member                      | r
+#
+# biz_update_if_owner is gone (spec PART E, RULED: dropped in the same
+# migration as the revoke, because a policy that reads as protection while
+# enforcing nothing would mislead the next person to restore a grant).
+# biz_select_if_member SURVIVES, which is what keeps the four frontend pages
+# working.
+
+-- 1d: EFFECTIVE column privileges (re-run of 0d)
+auth_update_cols | auth_insert_cols | anon_write_cols | total_cols
+0                | 0               | 0               | 28
+#
+# Was 26 | 28 | 0 | 28. Nothing reachable through PUBLIC or role inheritance
+# survived.
+
+-- STEP 7: proven as the role. THE ERRORS ARE THE PASS.
+BEGIN; SET LOCAL ROLE authenticated; UPDATE businesses SET plan_tier = 'business';        ROLLBACK;  -> permission denied
+BEGIN; SET LOCAL ROLE authenticated; UPDATE businesses SET feature_flags = '{}'::jsonb;   ROLLBACK;  -> permission denied
+BEGIN; SET LOCAL ROLE authenticated; UPDATE businesses SET is_active = true;              ROLLBACK;  -> permission denied
+BEGIN; SET LOCAL ROLE authenticated; UPDATE businesses SET "limits" = '{}'::jsonb;        ROLLBACK;  -> permission denied
+BEGIN; SET LOCAL ROLE authenticated; UPDATE businesses SET subscription_status='active';  ROLLBACK;  -> permission denied
+BEGIN; SET LOCAL ROLE authenticated; INSERT INTO businesses (name, api_key) VALUES (..);  ROLLBACK;  -> permission denied
+BEGIN; SET LOCAL ROLE authenticated; SELECT count(*) FROM businesses;                     ROLLBACK;  -> permitted, no error
+#
+# All five entitlement columns and INSERT refused; SELECT retained. RC1 P0-3 is
+# CLOSED. `subscription_status` is the one to note: after BH-006 it is the
+# column `auth.resolve_access_level` reads, so writing 'active' there was a way
+# to restore full access without paying.

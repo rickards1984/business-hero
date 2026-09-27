@@ -194,6 +194,38 @@ def rows(cur, sql, params=None):
     return cur.fetchall()
 
 
+def assert_write_did_not_happen(cur, sql, params, what):
+    """A cross-tenant write must not happen. There are TWO ways it can be
+    stopped, and after 030b Release 2 they are both in play on `businesses`:
+
+      * **refused by the GRANT** — `permission denied for table …`. The
+        privilege is absent, so the statement never runs. This is the stronger
+        of the two: it does not depend on a policy being correct.
+      * **filtered by the POLICY** — the statement runs and matches 0 rows.
+
+    Before 030b, `authenticated` held UPDATE and DELETE on `businesses`, so a
+    cross-tenant write was stopped by RLS filtering and these tests asserted
+    `rowcount == 0`. Release 2 revoked the grants, so the same statements now
+    raise instead — and a test that only understood the second route began
+    failing on a security IMPROVEMENT. Accepting either is correct; asserting
+    only one confuses "the rule changed" with "the rule broke".
+
+    The transaction is left usable: a raised statement aborts it, so each
+    attempt runs inside its own savepoint.
+    """
+    cur.execute("SAVEPOINT attempt")
+    try:
+        cur.execute(sql, params)
+    except psycopg2.errors.InsufficientPrivilege:
+        cur.execute("ROLLBACK TO SAVEPOINT attempt")
+        return "refused by grant"
+    assert cur.rowcount == 0, (
+        f"{what}: the statement was permitted AND matched {cur.rowcount} row(s) — "
+        "a cross-tenant write succeeded")
+    cur.execute("RELEASE SAVEPOINT attempt")
+    return "filtered by policy"
+
+
 def assert_no_b_data(payload, what):
     blob = repr(payload)
     for marker in B_MARKERS:
@@ -319,6 +351,11 @@ def test_no_tenant_table_has_an_unscoped_permissive_policy(db):
 # by the migration that did it. A July policy absent from the database
 # must be one of these; a July policy present must match its definition.
 DROPPED_SINCE_JULY = {
+    # 030b Release 2, applied to production 27 Sep 2026. Dropped in the same
+    # migration as the revoke (spec PART E, RULED): with the grant gone the
+    # policy is unreachable, and a policy that reads as live protection while
+    # enforcing nothing would mislead the next person to restore a grant.
+    ("businesses", "biz_update_if_owner"):                      "030b Release 2",
     ("businesses", "Members can select their own businesses"):  "030a",
     ("businesses", "Members can view their business"):          "030a",
     ("businesses", "Users can view their businesses"):          "030a",
@@ -373,7 +410,8 @@ def test_every_policy_matches_its_reviewed_definition(db):
         f"\nUNAPPROVED policies present: {sorted(unexpected)}"
         f"\nAPPROVED policies missing:   {sorted(missing)}"
         f"\nDEFINITION CHANGED:          {changed}")
-    assert len(live) == len(approved) == 87
+    # 87 before 030b Release 2 dropped biz_update_if_owner.
+    assert len(live) == len(approved) == 86
 
 
 def test_no_policy_negates_membership_or_short_circuits_to_true(db):
@@ -510,25 +548,41 @@ def test_a_sees_only_its_own_membership(db):
 def test_a_cannot_update_bs_rows(db):
     _, s = db
     with as_member_of_a() as cur:
-        cur.execute("UPDATE public.businesses SET name = 'pwned' WHERE id = %s", (BIZ_B,))
-        assert cur.rowcount == 0, "A updated B's business row"
-        cur.execute("UPDATE public.accounting_transactions SET description = 'pwned' "
-                    "WHERE id = %s", (s["txn_b"],))
-        assert cur.rowcount == 0, "A updated B's transaction"
-        cur.execute("UPDATE public.quotes SET customer_name = 'pwned' WHERE id = %s",
-                    (s["quote_b"],))
-        assert cur.rowcount == 0, "A updated B's quote"
+        how = {}
+        how["businesses"] = assert_write_did_not_happen(
+            cur, "UPDATE public.businesses SET name = 'pwned' WHERE id = %s",
+            (BIZ_B,), "A updating B's business row")
+        how["accounting_transactions"] = assert_write_did_not_happen(
+            cur, "UPDATE public.accounting_transactions SET description = 'pwned' "
+                 "WHERE id = %s", (s["txn_b"],), "A updating B's transaction")
+        how["quotes"] = assert_write_did_not_happen(
+            cur, "UPDATE public.quotes SET customer_name = 'pwned' WHERE id = %s",
+            (s["quote_b"],), "A updating B's quote")
+
+    # After 030b Release 2, `businesses` is refused at the GRANT — the stronger
+    # route, because it does not depend on a policy being right. The other two
+    # tables still rely on their policies, which is the documented design: the
+    # revoke was scoped to `businesses`, the table that carries entitlement.
+    assert how["businesses"] == "refused by grant", (
+        f"businesses was {how['businesses']} — 030b Release 2's revoke is not "
+        "in effect on this database")
+    assert how["accounting_transactions"] == "filtered by policy"
+    assert how["quotes"] == "filtered by policy"
 
 
 def test_a_cannot_delete_bs_rows(db):
     _, s = db
     with as_member_of_a() as cur:
-        cur.execute("DELETE FROM public.accounting_transactions WHERE id = %s", (s["txn_b"],))
-        assert cur.rowcount == 0
-        cur.execute("DELETE FROM public.tasks WHERE id = %s", (s["task_b"],))
-        assert cur.rowcount == 0
-        cur.execute("DELETE FROM public.businesses WHERE id = %s", (BIZ_B,))
-        assert cur.rowcount == 0
+        assert assert_write_did_not_happen(
+            cur, "DELETE FROM public.accounting_transactions WHERE id = %s",
+            (s["txn_b"],), "A deleting B's transaction") == "filtered by policy"
+        assert assert_write_did_not_happen(
+            cur, "DELETE FROM public.tasks WHERE id = %s",
+            (s["task_b"],), "A deleting B's task") == "filtered by policy"
+        # DELETE on `businesses` went with 030b Release 2's SECTION 2.
+        assert assert_write_did_not_happen(
+            cur, "DELETE FROM public.businesses WHERE id = %s",
+            (BIZ_B,), "A deleting B's business") == "refused by grant"
 
 
 @pytest.mark.parametrize("table,columns,values", [
@@ -569,8 +623,9 @@ def test_the_reverse_direction_holds(db):
         got = rows(cur, "SELECT id::text FROM public.accounting_transactions "
                         "WHERE business_id IN (%s, %s)", (BIZ_A, BIZ_B))
         assert got == [(s["txn_b"],)]
-        cur.execute("UPDATE public.businesses SET name = 'pwned' WHERE id = %s", (BIZ_A,))
-        assert cur.rowcount == 0
+        assert assert_write_did_not_happen(
+            cur, "UPDATE public.businesses SET name = 'pwned' WHERE id = %s",
+            (BIZ_A,), "B updating A's business row") == "refused by grant"
 
 
 def test_a_member_of_no_business_sees_nothing(db):
@@ -608,31 +663,82 @@ ENTITLEMENT_COLUMNS = ("plan_tier", "is_active", "feature_flags", "limits",
                        "subscription_status")
 
 
-def test_which_entitlement_columns_authenticated_may_update(db):
-    """Not an assertion of policy — a RECORD of the migration-defined grant,
-    so that the runbook for 030b Release 2 starts from evidence."""
+ENTITLEMENT_COLUMNS_ONCE_WRITABLE = (
+    "plan_tier", "is_active", "feature_flags", "limits", "subscription_status",
+    "api_key",
+)
+
+
+def test_authenticated_may_update_no_column_of_businesses(db):
+    """030b Release 2, applied to production 27 Sep 2026.
+
+    This test used to assert the OPPOSITE — that the grant existed — and its
+    failure message said: "no column grant at all … if that is 030b Release 2,
+    update this test to assert emptiness". That is what happened, so this is
+    that update.
+
+    What was true until 27 Sep: `033` SECTION 5 had narrowed a table-level
+    UPDATE to a 26-column list, and the list still contained `plan_tier`,
+    `is_active`, `feature_flags`, `limits`, `subscription_status` and
+    `api_key`. With `biz_update_if_owner` authorising the row, an owner could
+    set their own tier from the browser with the public anon key. That was
+    RC1 P0-3, and `audits/BH-001-Q4b-RESULT.md` is the production evidence
+    that it was open.
+
+    What is true now: no column, and no table-level grant either. Asserting
+    emptiness rather than "not the six" is deliberate — a future partial
+    re-grant for some ordinary column would be a decision someone should have
+    to make against this test, not a change it waves through.
+    """
     conn, _ = db
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT column_name FROM information_schema.column_privileges
+            SELECT privilege_type, column_name
+              FROM information_schema.column_privileges
              WHERE table_schema = 'public' AND table_name = 'businesses'
-               AND grantee = 'authenticated' AND privilege_type = 'UPDATE'
-             ORDER BY 1""")
-        granted = {r[0] for r in cur.fetchall()}
-    print(f"\nauthenticated may UPDATE businesses columns: {sorted(granted)}")
-    # Both possible states are legitimate at different times; what is not
-    # legitimate is the test silently agreeing with whichever it finds.
-    assert granted, "no column grant at all — 033's column list is gone; " \
-                    "if that is 030b Release 2, update this test to assert emptiness"
+               AND grantee = 'authenticated'
+               AND privilege_type IN ('UPDATE', 'INSERT')
+             ORDER BY 1, 2""")
+        writable = cur.fetchall()
+        # EFFECTIVE privilege, not only the direct grant: has_column_privilege
+        # also sees PUBLIC and grants inherited through role membership, which
+        # a revoke naming `authenticated` would not have removed.
+        cur.execute("""
+            SELECT count(*) FILTER (WHERE has_column_privilege(
+                       'authenticated','public.businesses',column_name,'UPDATE')),
+                   count(*) FILTER (WHERE has_column_privilege(
+                       'authenticated','public.businesses',column_name,'INSERT'))
+              FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = 'businesses'""")
+        effective_update, effective_insert = cur.fetchone()
+
+    assert writable == [], (
+        f"authenticated can still write columns of businesses: {writable}")
+    assert (effective_update, effective_insert) == (0, 0), (
+        f"EFFECTIVE privilege survives the revoke — UPDATE on "
+        f"{effective_update} columns, INSERT on {effective_insert}. A grant to "
+        "PUBLIC or one inherited through role membership would do this, and a "
+        "REVOKE naming `authenticated` does not remove it.")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="RC1 P0-3, 030b Release 2 not yet applied: 033's column-level "
-           "UPDATE grant plus biz_update_if_owner lets an owner set their own "
-           "plan_tier from the browser. Remove this marker in the commit that "
-           "lands Release 2's revoke.",
-)
+def test_the_entitlement_columns_are_specifically_unwritable(db):
+    """The six that made P0-3 what it was, named individually so the failure
+    says which one came back rather than only that something did."""
+    conn, _ = db
+    with conn.cursor() as cur:
+        back = []
+        for column in ENTITLEMENT_COLUMNS_ONCE_WRITABLE:
+            cur.execute("""SELECT has_column_privilege(
+                             'authenticated','public.businesses',%s,'UPDATE')""",
+                        (column,))
+            if cur.fetchone()[0]:
+                back.append(column)
+    assert back == [], (
+        f"an owner can write these from the browser again: {back}. RC1 P0-3 was "
+        "closed on 27 Sep 2026 by audits/030b-PROD-RUNBOOK.md; if this fails, "
+        "either ROLLBACK 1 was run or a grant has been restored.")
+
+
 @pytest.mark.parametrize("column,value", [
     ("plan_tier", "'business'"),
     ("is_active", "true"),
@@ -640,22 +746,34 @@ def test_which_entitlement_columns_authenticated_may_update(db):
     ("subscription_status", "'active'"),
 ])
 def test_an_owner_cannot_raise_their_own_entitlement(db, column, value):
+    """RC1 P0-3, CLOSED in production 27 Sep 2026.
+
+    These four carried `xfail(strict=True)` until Release 2 ran: the defect was
+    real, the tests documented it, and strict xfail meant the marker had to come
+    off in the same change that fixed it. This is that change — the markers are
+    gone and the tests now assert the closure.
+
+    `subscription_status` is the one worth naming. After BH-006 it is the column
+    `auth.resolve_access_level` reads, so writing `'active'` here was a way to
+    restore full access without paying — the webhook work and the paywall hole
+    met at this column.
+
+    Refusal must come from the GRANT, not from the policy. Release 2 dropped
+    `biz_update_if_owner` precisely so that protection lives in one place — the
+    absence of the grant — rather than reading as if a policy enforced it.
+    """
     with as_member_of_a() as cur:
-        try:
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege):
             cur.execute(f"UPDATE public.businesses SET {column} = {value} "
                         f"WHERE id = %s", (BIZ_A,))
-        except psycopg2.errors.InsufficientPrivilege:
-            return    # refused by grant — the desired outcome
-        assert cur.rowcount == 0, (
-            f"an owner updated their own businesses.{column} through the "
-            f"client path — entitlement is self-service")
 
 
 def test_an_owner_cannot_insert_a_business_from_the_client(db):
-    """Today: no INSERT policy on businesses for non-admins, so RLS refuses
-    even though the table grant exists. Passes now; 030b Release 2's revoke
-    of INSERT makes it belt-and-braces. If this ever fails, business
-    creation from the browser has been opened."""
+    """Was: refused by RLS while the table grant existed. Now: refused by the
+    absence of the grant, since 030b Release 2 revoked INSERT too — which
+    closes the business-creation hole the 030b spec's scope note 1 flagged
+    (`AdminDashboard.tsx:380` was an INSERT, not an update, so `REVOKE UPDATE`
+    alone would have left it open)."""
     with as_member_of_a() as cur:
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
             cur.execute("INSERT INTO public.businesses (name, api_key) "
