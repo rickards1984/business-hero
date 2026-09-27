@@ -10,12 +10,13 @@ Analysis is in `docs/CURRENT_STATE.md` §4. The essential points:
   grants are evaluated before RLS — so a column grant to an admin is a grant
   to every customer
 - `authenticated` holds **no table-level UPDATE** on `businesses` (BH-001 Q6,
-  24 Sep 2026). `033` SECTION 5 replaced it with a **26-column grant** that
-  still contains `plan_tier`, `is_active`, `feature_flags`, `limits` and
-  `subscription_status` — the same hole, one layer down, and invisible to
-  `role_table_grants`. **The column grant itself is unverified in production**
-  (BH-001's column export was truncated before reaching the table), so P0-3 is
-  open-pending-one-query, not confirmed. `audits/BH-001-FINDINGS.md` §3.1
+  24 Sep 2026) but **UPDATE on 26 columns** (Q4b, 27 Sep 2026) — exactly the
+  list `033` SECTION 5 declares, and it contains `plan_tier`, `is_active`,
+  `feature_flags`, `limits`, `subscription_status` and **`api_key`**. The same
+  hole, one layer down, and invisible to `role_table_grants`. **RC1 P0-3 is
+  CONFIRMED OPEN with production evidence** — an owner can set their own tier,
+  and their own `subscription_status`, from the browser. `030b` Release 2
+  closes it. `audits/BH-001-Q4b-RESULT.md`
 
 ## RC1 P0-8 — policy inventory COMPLETE; grant coverage INCOMPLETE (24 Sep 2026)
 
@@ -79,12 +80,13 @@ full interpretation in **`audits/BH-001-FINDINGS.md`**. Summary:
 
 ### Still open, and the two that matter
 
-1. **Column grants are unverified.** The Q3 and Q4 exports were both truncated
-   at 100 rows, and Q4 never reached `businesses` — so **whether
-   `authenticated` still holds 033's 26-column UPDATE grant (RC1 P0-3, the
-   paywall hole) is unresolved.** Q6 shows no *table-level* UPDATE, which is
-   consistent with 033 having converted it to a column list; `role_table_grants`
-   cannot see column grants. FINDINGS §3 has the one query that settles it.
+1. **Column grants are mostly unverified — but not the one that mattered.**
+   The Q3 and Q4 exports were truncated at 100 rows and Q4 never reached
+   `businesses`. **Q4b settled it on 27 Sep: P0-3 is CONFIRMED OPEN**, 26
+   columns including `plan_tier`, `subscription_status` and `api_key`
+   (`audits/BH-001-Q4b-RESULT.md`). Still unexported: column grants for 53 of
+   58 tables, `business_members` among them (FINDINGS §6.3), and table grants
+   for everything sorting after `support_stats`.
 2. **Two views are readable by `anon` and cannot carry RLS.**
    `receptionist_call_stats` groups by `business_id`, so it plausibly discloses
    per-tenant call volumes to anyone holding the public anon key. The inventory
