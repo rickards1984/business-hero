@@ -98,12 +98,32 @@ Q6 from prod and it matches 0a exactly: `anon` holds `SELECT, TRIGGER`;
 and **no table-level UPDATE**. So 0a's STOP IF is already known not to fire,
 and 033 SECTION 5 did land.
 
-What BH-001 could **not** confirm is 0b: its column-privileges export was
-truncated at 100 rows and never reached `businesses`, so the 26-column UPDATE
-grant is still unverified. **0b is therefore the one read in STEP 0 that
-decides whether this runbook proceeds** — if it shows 26 columns including
-`plan_tier`, the hole is open and Release 2 is what closes it; if it shows
-none, someone has already revoked it and STEP 4 will stop.
+**0b is confirmed too, as of 27 Sep 2026** (`audits/BH-001-Q4b-RESULT.md`).
+`authenticated` holds UPDATE on exactly the 26 columns 033 SECTION 5 declares —
+verified character for character against the migration file and against the
+local replay — and the list contains `plan_tier`, `is_active`, `feature_flags`,
+`limits`, `subscription_status` and `api_key`. `metered_usage_enabled` and
+`monthly_spend_cap_gbp` are absent, so 033 achieved its purpose.
+
+**So all three STEP 0 grant/policy expectations are pre-confirmed against
+production — 0a and 0c by the 24 Sep census, 0b by Q4b on 27 Sep — and none of
+their STOP IFs fires. RC1 P0-3 is confirmed open, and this runbook is what
+closes it.**
+
+**Run STEP 0 anyway, on the night.** It is read-only, it takes a minute, and
+its output is the before-snapshot that ROLLBACK 1 is checked against. A
+pre-confirmation from three days earlier is not a substitute for the snapshot
+you will need if something goes wrong at 1am. What has changed is that you are
+no longer looking for a reason to stop — you are recording the state you are
+about to alter.
+
+One thing BH-001 could not settle and STEP 0 still must: **0d, 0e and 0f.**
+Q4b reads grants made to `authenticated` directly. A grant to `PUBLIC` or one
+inherited through role membership would not appear in it and **would survive
+the revoke in STEP 5**, which names `authenticated` only. Same for a
+client-callable SECURITY DEFINER function or a writable view over `businesses`
+— a grant revoke does not reach either. Those three reads are the ones that
+could still stop the night.
 
 **EXPECT** (this is the state 033 left and staging carries):
 
