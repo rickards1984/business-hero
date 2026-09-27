@@ -8,7 +8,7 @@ import json
 import asyncio
 import logging
 import base64
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
 
 router = APIRouter()
 _logger = logging.getLogger("realtime_voice")
@@ -670,6 +670,33 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         except Exception as e:
             _logger.error(f"Business lookup failed: {e}")
             await websocket.close(code=4002, reason="No business found")
+            return
+
+        # DECISION 3 / BH-006: no AI for a business that is not paying. This
+        # socket proxies to OpenAI's Realtime API and bills per minute, and it
+        # authenticates in its own handshake rather than through a shared
+        # dependency — so it had no subscription check at all. A 403 is not
+        # available on a WebSocket, so the socket is closed with a policy code
+        # and a reason the client can show.
+        try:
+            from db import get_session_context
+            from auth import assert_feature_access
+            from models import Business as _Business
+            from sqlmodel import select as _select
+            with get_session_context() as _session:
+                _fresh = _session.exec(
+                    _select(_Business).where(_Business.id == business.id)).first()
+                assert_feature_access(_fresh, "aria_voice")
+        except HTTPException as exc:
+            _logger.info("realtime voice refused for business %s: %s",
+                         business_id, exc.detail)
+            await websocket.close(code=4003, reason=str(exc.detail)[:110])
+            return
+        except Exception as e:
+            # Fail CLOSED: if the gate cannot be evaluated we do not open a
+            # metered OpenAI connection.
+            _logger.error(f"Access check failed, refusing voice session: {e}")
+            await websocket.close(code=4003, reason="Access check failed")
             return
         
         user_name = getattr(user, 'user_metadata', {}).get('full_name', 'there') if hasattr(user, 'user_metadata') else 'there'

@@ -13,6 +13,7 @@ import SupportHelpButton from './SupportHelpButton';
 import SupportPanel from './SupportPanel';
 import ThemeToggle from '@/components/ThemeToggle';
 import SectionErrorBoundary from './SectionErrorBoundary';
+import SubscriptionBanner from './SubscriptionBanner';
 
 type Section = 'dashboard' | 'comms' | 'finance' | 'quotes' | 'ai';
 
@@ -96,6 +97,7 @@ export default function AppShell() {
           </div>
         )}
         <SectionErrorBoundary>
+          <SubscriptionBanner />
           <Outlet />
         </SectionErrorBoundary>
       </main>

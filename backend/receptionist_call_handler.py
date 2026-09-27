@@ -512,6 +512,46 @@ async def receptionist_incoming_call(request: Request):
     business_id = str(cfg.business_id)
     logger.info(f"[Receptionist] Matched to business: {business_id}")
 
+    # DECISION 3 / BH-006: a business that is not paying does not keep the
+    # receptionist. `enabled` on the config says the CUSTOMER wants it on; it
+    # says nothing about whether they are paying, and this path never consulted
+    # the subscription — so an unpaid or cancelled business kept answering
+    # calls, at our Twilio and OpenAI cost, on a number DECISION 3 says should
+    # have been released. Number release is a separate ticket; refusing to
+    # SERVE the call is this one, and it is the half that stops the spend.
+    #
+    # The caller hears a neutral message. They are a member of the public who
+    # dialled a business, and our billing dispute is not their business — so
+    # nothing here mentions payment.
+    try:
+        from auth import resolve_access_level, ACCESS_FULL
+        from models import Business as _Business
+        with Session(engine) as _session:
+            _business = _session.exec(
+                select(_Business).where(_Business.id == cfg.business_id)).first()
+            _access = resolve_access_level(_business)
+    except Exception as e:
+        # Fail OPEN here, deliberately, and it is the one place in BH-006 that
+        # does. This is a live phone call from a member of the public: if the
+        # access check itself errors we answer the call rather than hang up on
+        # a paying customer's client. The cost of a wrong answer here is one
+        # call; the cost of a wrong refusal is a missed customer.
+        logger.error(f"[Receptionist] Access check failed, answering anyway: {e}")
+        _access = ACCESS_FULL
+
+    if _access != ACCESS_FULL:
+        logger.warning(
+            "[Receptionist] Refusing call for business %s: access=%s",
+            business_id, _access)
+        vr = VoiceResponse()
+        vr.say(
+            "I'm sorry, this number is not currently accepting calls. "
+            "Please try again later.",
+            voice="alice",
+        )
+        vr.hangup()
+        return Response(content=str(vr), media_type="application/xml")
+
     host = request.headers.get("host", "")
     if not host:
         host = str(request.base_url).replace("http://", "").replace("https://", "").rstrip("/")

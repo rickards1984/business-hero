@@ -44,6 +44,13 @@ class TestFeatureGating(unittest.TestCase):
             id="biz-1",
             is_active=True,
             trial_ends_at=None,
+            # BH-006: `require_feature` resolves access from
+            # `subscription_status` now (DECISION 3), so the stand-in needs the
+            # column a real Business always has. `active` keeps these two tests
+            # about what they are about — the feature flag, not the payment
+            # state; the payment state has its own suite in
+            # test_readonly_resolver.py.
+            subscription_status="active",
             plan_tier="starter",
             feature_flags={"email": False},
         )
@@ -58,6 +65,13 @@ class TestFeatureGating(unittest.TestCase):
             id="biz-1",
             is_active=True,
             trial_ends_at=None,
+            # BH-006: `require_feature` resolves access from
+            # `subscription_status` now (DECISION 3), so the stand-in needs the
+            # column a real Business always has. `active` keeps these two tests
+            # about what they are about — the feature flag, not the payment
+            # state; the payment state has its own suite in
+            # test_readonly_resolver.py.
+            subscription_status="active",
             plan_tier="starter",
             feature_flags={"email": True},
         )
@@ -71,6 +85,13 @@ class TestFeatureGating(unittest.TestCase):
             id="biz-1",
             is_active=True,
             trial_ends_at=None,
+            # BH-006: `require_feature` resolves access from
+            # `subscription_status` now (DECISION 3), so the stand-in needs the
+            # column a real Business always has. `active` keeps these two tests
+            # about what they are about — the feature flag, not the payment
+            # state; the payment state has its own suite in
+            # test_readonly_resolver.py.
+            subscription_status="active",
             plan_tier="starter",
             feature_flags={"email": False},
         )
