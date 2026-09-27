@@ -260,12 +260,16 @@ and **`oauth_tokens` is member-accessible** where the July audit recorded it
 
 **Three things this did NOT establish, and two of them matter:**
 
-1. **Q3 and Q4 are truncated at 100 rows.** Q4 (column privileges) never
-   reached `businesses`, so **whether `authenticated` still holds the
-   26-column UPDATE grant — RC1 P0-3, the paywall hole — is unresolved.**
-   Q6 shows no *table-level* UPDATE, which is consistent with 033 SECTION 5
-   having converted it to a column list; column grants are invisible to
-   `role_table_grants`. One query settles it (FINDINGS §3).
+1. **Q3 and Q4 were truncated at 100 rows**, and Q4 never reached
+   `businesses` — so P0-3 was unresolved by the original packet. **Settled
+   27 Sep 2026 by Q4b: `authenticated` holds UPDATE on exactly the 26 columns
+   033 SECTION 5 declares, including `plan_tier`, `subscription_status`,
+   `feature_flags`, `limits`, `is_active` and `api_key`. RC1 P0-3 is CONFIRMED
+   OPEN with production evidence** — `audits/BH-001-Q4b-RESULT.md`. An owner
+   can set their own tier, and their own `subscription_status`, from the
+   browser with the anon key. `030b` Release 2 (PR #10) is what closes it, and
+   its STEP 0 expectations are now pre-confirmed against production. Q3's
+   remaining gap (everything sorting after `support_stats`) still stands.
 2. **Two VIEWS carry `SELECT` for `anon` and cannot have RLS.**
    `receptionist_call_stats` groups by `business_id`, so it plausibly
    discloses per-tenant call volumes to anyone holding the public anon key.
@@ -515,8 +519,9 @@ Evidence-backed only.
 3. `businesses` UPDATE grant still open to owners (§5).
 4. ~~RLS coverage on ~30 tables is unknown~~ — **policy inventory established
    24 Sep 2026** (§4, `audits/BH-001-FINDINGS.md`). Replaced by five narrower
-   items: **(a)** the `businesses` column-level UPDATE grant is unverified, so
-   P0-3 is neither confirmed nor refuted; **(b)** two views are readable by
+   items: **(a)** ~~the `businesses` column-level UPDATE grant is unverified~~ —
+   **verified 27 Sep; P0-3 CONFIRMED OPEN** (26 columns incl. `plan_tier`,
+   `subscription_status`, `api_key`), closed by `030b` Release 2; **(b)** two views are readable by
    `anon` and cannot carry RLS — an unauthenticated cross-tenant read pending
    one query; **(c)** inactive members can still read `calls` and `tasks`;
    **(d)** `TRUNCATE` is granted to `anon` on 46 tables, which RLS does not

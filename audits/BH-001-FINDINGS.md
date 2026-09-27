@@ -12,7 +12,7 @@ grant state" — two of those three are answered.
 
 | Question | Answer |
 |---|---|
-| Does `authenticated` still hold UPDATE on `businesses`? | **Not at table level** (Q6, complete). Column level is **unverified — Q4's export is truncated.** §3 |
+| Does `authenticated` still hold UPDATE on `businesses`? | **Yes — on 26 columns, including `plan_tier`, `subscription_status`, `feature_flags`, `limits`, `is_active` and `api_key`.** Not at table level (Q6). Confirmed 27 Sep by Q4b: **`audits/BH-001-Q4b-RESULT.md`**. RC1 P0-3 is **open**. |
 | Is every table RLS-enabled with policies referencing `is_business_member`? | **Yes for 56 of 58 tables**, and the two exceptions are each correct. But "referencing" is not "enforcing" — see §2 and §6. |
 | Anything that reorders RC1? | **Three things.** Two views readable by `anon` (§5); inactive members still reading `calls` and `tasks` (§6.1); `TRUNCATE` granted to `anon` on 46 tables (§6.2). |
 
@@ -164,7 +164,17 @@ table grant with a **26-column list** that still contains `plan_tier`,
 `is_active`, `feature_flags`, `limits` and `subscription_status`. Column grants
 are invisible to `role_table_grants`.
 
-**So RC1 P0-3 is neither confirmed nor refuted by this packet.**
+**So RC1 P0-3 was neither confirmed nor refuted by this packet — and Q4b has
+since settled it.** Run 27 Sep 2026: `authenticated` holds UPDATE on exactly
+the 26 columns `033` SECTION 5 declares, character for character, including
+`plan_tier`, `subscription_status`, `feature_flags`, `limits`, `is_active` and
+`api_key`. **P0-3 is CONFIRMED OPEN with production evidence.** Result, the
+three verification checks, and what it still does not establish:
+**`audits/BH-001-Q4b-RESULT.md`**; raw output
+`audits/BH-001-prod-Q4b-businesses-column-grants-2026-09-27.csv`.
+
+The rest of this section is kept as written, because the truncation trap it
+describes is the reason the question was open at all.
 
 ### 3.1 · The three queries that close the gaps
 
@@ -468,8 +478,8 @@ verified".**
 
 ## 7 · What this packet still does not establish
 
-- **Column grants on 54 of 58 tables** (§3), including `businesses` — P0-3 —
-  and `business_members` (§6.3).
+- **Column grants on 53 of 58 tables** (§3) — `businesses` is now covered by
+  Q4b, `business_members` is not (§6.3, query Q3c).
 - **Table grants for everything sorting after `support_stats`** (§3),
   including the RLS-off `zz_033_flags_backup` (§1).
 - **Constraints.** No export covers `pg_constraint`. The UNIQUE on
@@ -488,7 +498,9 @@ verified".**
 
 ## 8 · Recommended order
 
-1. **Q4b (§3.1).** Thirty seconds, and it decides whether 030b Release 2 runs.
+1. ~~Q4b (§3.1)~~ — **DONE, 27 Sep 2026. P0-3 confirmed open; 030b Release 2's
+   STEP 0 expectations are pre-confirmed and nothing in it blocks.**
+   `audits/BH-001-Q4b-RESULT.md`.
 2. **The views check (§5.1).** If it confirms, that fix goes ahead of the rest
    — it is an unauthenticated cross-tenant read.
 3. **Drop the two `is_active`-less policies on `calls` and `tasks` (§6.1).**
