@@ -1,0 +1,28 @@
+# 030b Release 2 — staging before-snapshot, gzcrsrqmygublveuzqyg, 2026-09-18
+# STEP 0 of audits/030b-PROD-RUNBOOK.md, run read-only before any change.
+
+-- 0a
+anon | SELECT, TRIGGER
+authenticated | DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE
+postgres | DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+service_role | DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE
+
+-- 0b
+anon | SELECT | 28 | api_key, brand_color, cancel_at_period_end, ceo_briefing_enabled, created_at, current_period_end, feature_flags, id, is_active, last_stripe_event_at, limits, logo_url, metered_usage_enabled, monthly_spend_cap_gbp, name, onboarded_by, onboarding_completed, onboarding_completed_at, owner_whatsapp, plan_tier, region, stripe_customer_id, stripe_subscription_id, subscription_status, tax_number, tax_registered, timezone, trial_ends_at
+authenticated | INSERT | 28 | api_key, brand_color, cancel_at_period_end, ceo_briefing_enabled, created_at, current_period_end, feature_flags, id, is_active, last_stripe_event_at, limits, logo_url, metered_usage_enabled, monthly_spend_cap_gbp, name, onboarded_by, onboarding_completed, onboarding_completed_at, owner_whatsapp, plan_tier, region, stripe_customer_id, stripe_subscription_id, subscription_status, tax_number, tax_registered, timezone, trial_ends_at
+authenticated | REFERENCES | 28 | api_key, brand_color, cancel_at_period_end, ceo_briefing_enabled, created_at, current_period_end, feature_flags, id, is_active, last_stripe_event_at, limits, logo_url, metered_usage_enabled, monthly_spend_cap_gbp, name, onboarded_by, onboarding_completed, onboarding_completed_at, owner_whatsapp, plan_tier, region, stripe_customer_id, stripe_subscription_id, subscription_status, tax_number, tax_registered, timezone, trial_ends_at
+authenticated | SELECT | 28 | api_key, brand_color, cancel_at_period_end, ceo_briefing_enabled, created_at, current_period_end, feature_flags, id, is_active, last_stripe_event_at, limits, logo_url, metered_usage_enabled, monthly_spend_cap_gbp, name, onboarded_by, onboarding_completed, onboarding_completed_at, owner_whatsapp, plan_tier, region, stripe_customer_id, stripe_subscription_id, subscription_status, tax_number, tax_registered, timezone, trial_ends_at
+authenticated | UPDATE | 26 | api_key, brand_color, cancel_at_period_end, ceo_briefing_enabled, created_at, current_period_end, feature_flags, id, is_active, last_stripe_event_at, limits, logo_url, name, onboarded_by, onboarding_completed, onboarding_completed_at, owner_whatsapp, plan_tier, region, stripe_customer_id, stripe_subscription_id, subscription_status, tax_number, tax_registered, timezone, trial_ends_at
+
+-- 0c
+Platform admins can manage all businesses | * | True | (EXISTS ( SELECT 1
+   FROM platform_admins
+  WHERE (platform_admins.user_id = auth.uid()))) | 
+biz_select_if_member | r | True | (EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true)))) | 
+biz_update_if_owner | w | True | (EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.role = 'owner'::text) AND (bm.is_active = true)))) | (EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.role = 'owner'::text) AND (bm.is_active = true))))
