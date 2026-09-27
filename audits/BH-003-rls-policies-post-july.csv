@@ -1,0 +1,43 @@
+# Policies present after replaying 029, 031 and 033 that were NOT in the
+# 5 July 2026 production capture (audits/live-policies-2026-07-05.csv).
+# Rendered by pg_policies on the local replay, same columns and NULL
+# convention as the July export. Reviewed line by line on 18 Sep 2026:
+# 13 member_access FOR ALL (is_business_member OR is_platform_admin, USING
+# and WITH CHECK), 2 member reads (usage_meters; invoice_line_items via its
+# invoice), 5 admin_write (is_platform_admin), 3 catalogue reads (USING true
+# on accounting_providers, plan_definitions, automation_rule_templates — no
+# business_id column), 2 support_articles published-only reads, 3 profiles
+# self-scoped (id = auth.uid()).
+# The RLS suite asserts every live policy matches EXACTLY one of these
+# two files; change a policy and this file must change with it, on purpose.
+tablename,policyname,cmd,roles,qual,with_check
+accounting_providers,accounting_providers_admin_write,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+accounting_providers,accounting_providers_public_read,SELECT,"{anon,authenticated}",true,null
+automation_executions,automation_executions_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+automation_rule_templates,automation_rule_templates_admin_write,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+automation_rule_templates,automation_rule_templates_member_read,SELECT,{authenticated},true,null
+automation_rules,automation_rules_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+briefing_snapshots,briefing_snapshots_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+business_settings,business_settings_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+executive_meeting_action_items,executive_meeting_action_items_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+executive_meeting_decisions,executive_meeting_decisions_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+executive_meeting_goals,executive_meeting_goals_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+executive_meeting_messages,executive_meeting_messages_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+executive_meeting_settings,executive_meeting_settings_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+executive_meetings,executive_meetings_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+integrations,integrations_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+invoice_line_items,invoice_line_items_member_access,SELECT,{authenticated},"(EXISTS ( SELECT 1
+   FROM invoices i
+  WHERE ((i.id = invoice_line_items.invoice_id) AND (is_business_member(auth.uid(), i.business_id) OR is_platform_admin(auth.uid())))))",null
+onboarding_checklist,onboarding_checklist_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+onboarding_sessions,onboarding_sessions_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+plan_definitions,plan_definitions_admin_write,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+plan_definitions,plan_definitions_public_read,SELECT,"{anon,authenticated}",true,null
+profiles,profiles_admin_all,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+profiles,profiles_insert_own,INSERT,{authenticated},null,(id = auth.uid())
+profiles,profiles_select_own,SELECT,{authenticated},(id = auth.uid()),null
+profiles,profiles_update_own,UPDATE,{authenticated},(id = auth.uid()),(id = auth.uid())
+support_articles,support_articles_admin_write,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+support_articles,support_articles_member_read,SELECT,{authenticated},((is_published = true) OR is_platform_admin(auth.uid())),null
+support_articles,support_articles_public_read,SELECT,{anon},(is_published = true),null
+usage_meters,usage_meters_member_read,SELECT,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))",null

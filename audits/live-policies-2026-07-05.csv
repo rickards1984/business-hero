@@ -1,0 +1,119 @@
+tablename,policyname,cmd,roles,qual,with_check
+accounting_categories,accounting_categories_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+accounting_connections,accounting_connections_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+accounting_imports,accounting_imports_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+accounting_transactions,accounting_transactions_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+assistant_conversations,assistant_conversations_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+assistant_messages,assistant_messages_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+booking_settings,booking_settings_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+business_members,admins_full_access,ALL,{authenticated},"(auth.uid() IN ( SELECT platform_admins.user_id
+   FROM platform_admins))","(auth.uid() IN ( SELECT platform_admins.user_id
+   FROM platform_admins))"
+business_members,users_link_self,UPDATE,{authenticated},((invited_email = auth.email()) AND (user_id IS NULL)),(invited_email = auth.email())
+business_members,users_view_own,SELECT,{authenticated},((user_id = auth.uid()) OR (invited_email = auth.email())),null
+businesses,Members can select their own businesses,SELECT,{authenticated},"(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()))))",null
+businesses,Members can view their business,SELECT,{authenticated},"(id IN ( SELECT business_members.business_id
+   FROM business_members
+  WHERE (business_members.user_id = auth.uid())))",null
+businesses,Platform admins can manage all businesses,ALL,{authenticated},"(EXISTS ( SELECT 1
+   FROM platform_admins
+  WHERE (platform_admins.user_id = auth.uid())))",null
+businesses,Platform admins can view all businesses,SELECT,{authenticated},"(EXISTS ( SELECT 1
+   FROM platform_admins
+  WHERE (platform_admins.user_id = auth.uid())))",null
+businesses,Platform admins full access to businesses,ALL,{authenticated},"(EXISTS ( SELECT 1
+   FROM platform_admins
+  WHERE (platform_admins.user_id = auth.uid())))",null
+businesses,Users can view their businesses,SELECT,{authenticated},"(id IN ( SELECT business_members.business_id
+   FROM business_members
+  WHERE (business_members.user_id = auth.uid())))",null
+businesses,biz_select_if_member,SELECT,{authenticated},"(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))",null
+businesses,biz_update_if_owner,UPDATE,{authenticated},"(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.role = 'owner'::text) AND (bm.is_active = true))))","(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.role = 'owner'::text) AND (bm.is_active = true))))"
+businesses,members can read their businesses,SELECT,{authenticated},"(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = businesses.id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))",null
+calendar_events,business_members_read_calendar_events,SELECT,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))",null
+calendar_events,platform_admins_full_access_calendar_events,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+calendar_sync_state,business_members_read_calendar_sync_state,SELECT,{authenticated},"(is_platform_admin(auth.uid()) OR (EXISTS ( SELECT 1
+   FROM email_accounts ea
+  WHERE ((ea.id = calendar_sync_state.email_account_id) AND is_business_member(auth.uid(), ea.business_id)))))",null
+calendar_sync_state,platform_admins_full_access_calendar_sync_state,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+calls,Members can select calls for their businesses,SELECT,{authenticated},"(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = calls.business_id) AND (bm.user_id = auth.uid()))))",null
+calls,calls_select_if_member,SELECT,{authenticated},"(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = calls.business_id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))",null
+email_accounts,business_members_read_email_accounts,SELECT,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))",null
+email_accounts,platform_admins_full_access_email_accounts,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+email_briefings,business_members_read_email_briefings,SELECT,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))",null
+email_briefings,platform_admins_full_access_email_briefings,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+email_connections,email_connections_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+email_drafts,business_members_read_email_drafts,SELECT,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))",null
+email_drafts,platform_admins_full_access_email_drafts,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+email_messages,business_members_read_email_messages,SELECT,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))",null
+email_messages,platform_admins_full_access_email_messages,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+email_outbox,business_members_read_email_outbox_v2,SELECT,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))",null
+email_outbox,platform_admins_full_access_email_outbox_v2,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+email_sync_states,email_sync_states_member_access,ALL,{authenticated},"(EXISTS ( SELECT 1
+   FROM email_accounts ea
+  WHERE ((ea.id = email_sync_states.email_account_id) AND (is_business_member(auth.uid(), ea.business_id) OR is_platform_admin(auth.uid())))))","(EXISTS ( SELECT 1
+   FROM email_accounts ea
+  WHERE ((ea.id = email_sync_states.email_account_id) AND (is_business_member(auth.uid(), ea.business_id) OR is_platform_admin(auth.uid())))))"
+financial_summary_cache,financial_summary_cache_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+invoices,business_members_delete_invoices,DELETE,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))",null
+invoices,business_members_insert_invoices,INSERT,{authenticated},null,"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+invoices,business_members_read_invoices,SELECT,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))",null
+invoices,business_members_update_invoices,UPDATE,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+invoices,platform_admins_full_access_invoices,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+knowledge_base_items,knowledge_base_items_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+oauth_tokens,oauth_tokens_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+platform_admins,platform_admins_read_own,SELECT,{authenticated},(user_id = auth.uid()),null
+quote_line_items,quote_line_items_member_access,ALL,{authenticated},"(EXISTS ( SELECT 1
+   FROM quotes q
+  WHERE ((q.id = quote_line_items.quote_id) AND (is_business_member(auth.uid(), q.business_id) OR is_platform_admin(auth.uid())))))","(EXISTS ( SELECT 1
+   FROM quotes q
+  WHERE ((q.id = quote_line_items.quote_id) AND (is_business_member(auth.uid(), q.business_id) OR is_platform_admin(auth.uid())))))"
+quote_settings,quote_settings_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+quotes,quotes_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+receptionist_configs,receptionist_configs_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+stripe_events,stripe_events_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+support_conversations,support_conversations_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+support_messages,support_messages_member_access,ALL,{authenticated},"(EXISTS ( SELECT 1
+   FROM support_conversations sc
+  WHERE ((sc.id = support_messages.conversation_id) AND (is_business_member(auth.uid(), sc.business_id) OR is_platform_admin(auth.uid())))))","(EXISTS ( SELECT 1
+   FROM support_conversations sc
+  WHERE ((sc.id = support_messages.conversation_id) AND (is_business_member(auth.uid(), sc.business_id) OR is_platform_admin(auth.uid())))))"
+support_tickets,business_members_insert_support_tickets,INSERT,{authenticated},null,"(is_business_member(auth.uid(), business_id) AND (user_id = auth.uid()))"
+support_tickets,business_members_select_support_tickets,SELECT,{authenticated},"is_business_member(auth.uid(), business_id)",null
+support_tickets,business_members_update_support_tickets,UPDATE,{authenticated},"(is_business_member(auth.uid(), business_id) AND (user_id = auth.uid()))","(is_business_member(auth.uid(), business_id) AND (user_id = auth.uid()) AND (status = 'closed'::text))"
+support_tickets,platform_admins_full_access_support_tickets,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
+tasks,Members can select tasks for their businesses,SELECT,{authenticated},"(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = tasks.business_id) AND (bm.user_id = auth.uid()))))",null
+tasks,tasks_delete_if_owner,DELETE,{authenticated},"(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = tasks.business_id) AND (bm.user_id = auth.uid()) AND (bm.role = 'owner'::text) AND (bm.is_active = true))))",null
+tasks,tasks_insert_if_member,INSERT,{authenticated},null,"(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = tasks.business_id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))"
+tasks,tasks_select_if_member,SELECT,{authenticated},"(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = tasks.business_id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))",null
+tasks,tasks_update_if_member,UPDATE,{authenticated},"(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = tasks.business_id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))","(EXISTS ( SELECT 1
+   FROM business_members bm
+  WHERE ((bm.business_id = tasks.business_id) AND (bm.user_id = auth.uid()) AND (bm.is_active = true))))"
+whatsapp_configs,whatsapp_configs_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+whatsapp_messages,whatsapp_messages_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+whatsapp_pending_actions,whatsapp_pending_actions_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
+xero_connections,xero_connections_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
