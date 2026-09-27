@@ -1305,38 +1305,71 @@ async def update_support_ticket_admin(
 @app.get("/v1/me", tags=["Business"])
 async def get_my_profile(
     auth_ctx=Depends(get_user_auth_context),
+    session: Session = Depends(get_session),
 ):
-    """Get current user info and business profile for UI bootstrapping."""
-    business = None
+    """Get current user info and business profile for UI bootstrapping.
+
+    HOTFIX, 27 Sep 2026 — this endpoint returned 500 for every logged-in
+    customer, which is a total outage of the app: the frontend calls `/v1/me`
+    on every page to bootstrap. Two bugs, one introduced and one uncovered.
+
+    THE 500: `get_business_for_user()` returns a `BusinessContext`, which is a
+    four-field dataclass (`id`, `name`, `timezone`, `logo_url`) — NOT the
+    `Business` ORM row. BH-006 added `resolve_access_level(business)` here on
+    the assumption it was the row, and the resolver reads
+    `business.subscription_status`, so every request raised
+    `AttributeError: 'BusinessContext' object has no attribute
+    'subscription_status'`.
+
+    THE OLDER BUG THAT HID BEHIND IT: the lines above it read the same
+    non-existent attributes through `getattr(..., default)`, so they never
+    raised — they silently returned the DEFAULT. `/v1/me` has therefore been
+    reporting `plan_tier: "starter"`, `feature_flags: {}` and
+    `brand_color: null` for EVERY business regardless of what they actually
+    have. `AppShell` gates the Quotes nav on those values
+    (`isFeatureEnabled(me?.plan_tier, me?.feature_flags, …)`), so the UI has
+    been resolving entitlement against `starter` for everyone. That is a
+    presentation bug rather than an access one — PART D's server-side gate is
+    the enforcement and it reads the real row — but it is why a silent
+    `getattr` default is worse than a crash: the crash was found in hours.
+
+    The fix is to load the real row and read it. `getattr` defaults are gone;
+    if a column is missing now, that is a schema problem and it should say so.
+    """
+    business_ctx = None
     try:
-        business = get_business_for_user(auth_ctx["user_id"])
+        business_ctx = get_business_for_user(auth_ctx["user_id"])
     except ValueError as exc:
         args = exc.args
         if not (len(args) >= 2 and args[0] == "NO_BUSINESS"):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    business = None
+    if business_ctx is not None:
+        business = session.exec(
+            select(Business).where(Business.id == business_ctx.id)
+        ).first()
 
     # Build response with user info and business profile
     response = {
         "user_id": auth_ctx["user_id"],
         "email": auth_ctx.get("email"),
         "is_platform_admin": auth_ctx.get("is_platform_admin", False),
-        "business_id": str(business.id) if business else None,
+        "business_id": str(business_ctx.id) if business_ctx else None,
     }
-    
-    # Include business profile fields for the frontend
-    if business:
-        flags = getattr(business, "feature_flags", None) or {}
+
+    if business is not None:
         response.update({
             "id": str(business.id),
             "name": business.name,
             "timezone": business.timezone,
-            "logo_url": getattr(business, "logo_url", None),
-            "plan_tier": getattr(business, "plan_tier", "starter"),
+            "logo_url": business.logo_url,
+            "plan_tier": business.plan_tier,
             # Reads the COLUMN. Migration 033 SECTION 6 moved brand_color
             # out of feature_flags; reading the flag here returned null for
             # every business the moment that section ran.
-            "brand_color": getattr(business, "brand_color", None),
-            "feature_flags": flags,
+            "brand_color": business.brand_color,
+            "feature_flags": business.feature_flags or {},
             # DECISION 3's banner state, from the resolver the server enforces
             # with — so the banner cannot disagree with what a request will
             # actually be allowed to do. `/v1/me` is where the frontend already
@@ -1344,12 +1377,27 @@ async def get_my_profile(
             # lives here rather than on /v1/billing/status: that endpoint is
             # only fetched by the billing page, so a flag returned there was
             # exactly the "silent flag" DECISION 3 rules out.
-            "subscription_status": getattr(business, "subscription_status", None),
+            "subscription_status": business.subscription_status,
             "access_level": resolve_access_level(business),
             "payment_warning": needs_payment_warning(business),
             "read_only": is_read_only(business),
         })
-    
+    elif business_ctx is not None:
+        # The membership named a business the `businesses` table does not have.
+        # Should not happen, and it must NOT 500 the whole app if it does —
+        # that is the failure this hotfix exists to remove. Serve what the
+        # membership knows and omit anything that needs the row, so the client
+        # degrades rather than dies.
+        logger.error(
+            "GET /v1/me: business_members points at %s but no businesses row exists",
+            business_ctx.id)
+        response.update({
+            "id": str(business_ctx.id),
+            "name": business_ctx.name,
+            "timezone": business_ctx.timezone,
+            "logo_url": business_ctx.logo_url,
+        })
+
     return response
 
 
