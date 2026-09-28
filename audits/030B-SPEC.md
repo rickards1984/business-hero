@@ -273,13 +273,70 @@ time.
 | Gap | Evidence | Why it matters |
 |---|---|---|
 | **`name` and `timezone` cannot be changed after creation** | `admin_business_api.py` `OVERVIEW_FIELDS`; timezone is explicitly disabled in `AdminBusinessDetail.tsx:802` | An admin cannot rename a business or correct its timezone. The customer-facing settings endpoints resolve the CALLER's own business, so they cannot be used on someone else's. |
-| **`subscription_status` and `current_period_end` are readable but not writable** | `ADMIN_COLUMNS` includes them, `OVERVIEW_FIELDS` does not | `auth.resolve_access_level` gives `unpaid`/`canceled` precedence over `is_active` and over a trial extension, so an admin **cannot** restore a customer whose Stripe state is wrong using the controls they have. This is the one that will generate support tickets. A remedy needs a deliberate billing workflow, not an unrestricted status field — writing it by hand would re-create the conflation DECISION 3 removed. |
+| **`subscription_status` and `current_period_end` are readable but not writable** | `ADMIN_COLUMNS` includes them, `OVERVIEW_FIELDS` does not | `auth.resolve_access_level` gives `unpaid`/`canceled` precedence over `is_active` and over a trial extension, so an admin **cannot** restore a customer whose Stripe state is wrong using the controls they have. This is the one that will generate support tickets. **RULED (Mike, 28 Sep 2026): these stay read-only — see the ruling below.** |
 | **No cross-business admin surface for settings, logo, brand colour, integrations** | `dependencies.py:38` and `:82` resolve only the caller's own business and take no target id; the platform-admin exemption applies only AFTER business selection | An admin cannot fix a customer's integration or branding on their behalf. |
 | **Onboarding does not create the owner's account** | `onboarding_api.py:373` records the owner's details and ticks the checklist item | The wizard reports an owner as "created" when no account exists and no invitation has been sent. |
 | **Connection diagnostics are read-only** | the admin detail page shows email/calendar state without repair controls; accounting explicitly requires owner action | OAuth consent genuinely must come from the customer, so this cannot be fully autonomous — but the boundary should be stated in the UI rather than looking broken. |
 
 Each needs its own ticket. They are deliberately **not** folded into a
 validator fix.
+
+### RULING — Mike, 28 Sep 2026: what admin functionality is in scope
+
+> An admin should have the functionality needed, but **not functionality that
+> conflicts with Stripe payments and subscriptions**. Just the relevant
+> functionality to onboard and assist customers, plus edit whatever is
+> needed/relevant.
+
+So the table above splits in two, and the split is the ruling:
+
+**IN SCOPE — build these.** None of them touches money.
+
+- `name` and `timezone`, editable after creation.
+- A cross-business surface for settings, logo, brand colour and integrations,
+  so an admin can fix a customer's configuration on their behalf.
+- Owner-account creation and invitation, so the onboarding checklist stops
+  claiming something it has not done.
+- Connection diagnostics stating plainly where the customer's own OAuth consent
+  is required, rather than looking broken.
+
+**OUT OF SCOPE — deliberately not built.** `subscription_status`,
+`current_period_end`, `stripe_customer_id` and `stripe_subscription_id` stay
+**read-only to the admin UI**, permanently.
+
+The reason is DECISION 3's, and it is the reason BH-006 exists: these columns
+are a MIRROR OF STRIPE, not our own state. `subscription_status` is "written
+from Stripe's value verbatim, not derived or normalised". An admin writing it
+by hand would produce exactly the condition DECISION 3 was created to remove —
+local state that disagrees with what the customer is actually paying — and
+after BH-006 it is the column `resolve_access_level` reads, so a hand-edit
+grants or removes paid access directly. A support ticket is not a reason to
+put a hand on that.
+
+**What to build instead, for the same support case.** The admin's problem is
+real: a customer is locked out or over-entitled because our mirror is wrong.
+The honest remedy acts on the SOURCE, not the mirror:
+
+1. **A reconcile action** — "re-read this business's subscription from the
+   Stripe API and update the mirror". This fixes the actual cause, because the
+   mirror only drifts when a webhook is missed, and
+   `docs/CURRENT_STATE.md` records webhooks silently stopping for two months in
+   2026 (21 June – 20 August) with nothing surfacing it. Reconciliation is
+   already listed as missing there; this is the same work, and it serves both
+   the support case and the monitoring gap.
+2. **A link out to the Stripe dashboard** for that customer, so an admin fixes
+   billing in the system of record.
+3. The controls an admin already has and should keep using: `is_active` (their
+   own switch, and `resolve_access_level` honours it absolutely) and
+   `trial_ends_at`.
+
+A reconcile action is also strictly safer than a status field: it can only ever
+set what Stripe actually says, so it cannot invent a state, and it leaves an
+audit trail in `stripe_events`.
+
+**`billing_exempt` remains the answer for founder accounts** (ENTITLEMENT-SPEC
+DECISION 4) — a named column, not an admin writing `active` into a Stripe
+mirror. `docs/CURRENT_STATE.md` records it as absent.
 
 ## Scope notes — things I read differently from the brief
 
