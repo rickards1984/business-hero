@@ -9,6 +9,25 @@ marked unknown.
 This document **consolidates** `audits/`; it does not repeat it. Where an
 audit document already holds the detail, this links rather than duplicates.
 
+## North Star — adopted 28 September 2026
+
+Michael adopted `docs/NORTH_STAR.md` as the end goal on **28 September
+2026**: Business Hero is Aria, an AI business partner who knows the whole
+business. All work is judged against it from that date (`AGENTS.md`
+§ North Star; `docs/DEFINITION_OF_DONE.md` Gate 7). The security sequence is
+unchanged — **030b Release 2 is still next.**
+
+| Artefact | Status |
+|---|---|
+| `docs/ARIA_GAP_ANALYSIS.md` — the code at `2cc2b62` against the North Star | **awaiting Codex review** (`docs/reviews/REVIEW_REQUEST_aria-gap-analysis.md`) |
+| `docs/RC1_SCOPE_PROPOSAL.md` — which Phase 1 items could join RC1 | **awaiting Codex review, then Michael's decision.** `docs/RC1_SCOPE.md` is unchanged |
+
+Until Codex has reviewed it, treat the gap analysis as a claim, not evidence.
+One of its findings bears on this document: Aria chat and realtime voice
+have been gated server-side since BH-006 (`main.py:2346`,
+`realtime_voice.py:689`), so the "none" entries for them in §5's ungated
+table predate that merge. §5 has not been reconciled here.
+
 ## Status vocabulary
 
 | Status | Means |
