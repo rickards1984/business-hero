@@ -1,6 +1,8 @@
 # Aria gap analysis — the code against the North Star
 
-**Status:** draft, **awaiting Codex review** (`docs/reviews/REVIEW_REQUEST_aria-gap-analysis.md`).
+**Status:** revised after Codex review 1 (REQUEST-CHANGES,
+`docs/reviews/aria-gap-analysis-codex-review.md`). Every finding taken; the
+response is recorded at the end of that file.
 **Written:** 28 September 2026, by Claude Code.
 **Code audited:** `main` at `2cc2b62` (after BH-006 and the 030b Release 2 PR
 merged). Line numbers refer to that commit.
@@ -33,39 +35,46 @@ settle it. §D collects them.
 ## Headline findings
 
 1. **Aria is closer than the North Star implies — and further.** A tool layer
-   already exists: `backend/assistant_tools.py` defines **27 tools** and one
-   dispatcher (`execute_tool`, `:532`) shared by chat and voice. Every tool's
-   SQL filters on `business_id`. That is a real foundation. But **seven of
-   those tools act outside the app today, with no approval step** — Aria can
-   send an email, send an invoice chase and book a calendar event on the
-   model's own decision. Confirmation is requested in the prompt, not
-   enforced in code. That is live in production now, and it contradicts P4
-   and Phase 1's "Aria takes no write actions yet".
+   already exists: `backend/assistant_tools.py` defines **27 tools** and a
+   shared executor (`execute_tool`, `:532`) used by chat and voice — though
+   chat's async wrapper (`assistant_chat.py:19`) handles four of them
+   itself. Every tool's SQL filters on `business_id`. That is a real
+   foundation. But **three tools act outside the app with no approval
+   step** — Aria can send an email, send an invoice chase and book a
+   calendar event on the model's own decision — and **two more write inside
+   it** (`create_task`, `delete_task`). Confirmation is requested in the
+   prompt, not enforced in code. That is the deployed code (its production
+   behaviour was not exercised), and it contradicts P4 and Phase 1's "Aria
+   takes no write actions yet".
 2. **There are three Arias, not one.** Chat (`assistant_chat.py:209`) is not
    called Aria at all — it is "a friendly, professional AI executive
    assistant". Voice (`realtime_voice.py:421`) is "Aria, the AI Admin
    assistant". The board meeting (`services/executive_meeting_prompts.py:22`)
    is "Aria, the AI executive business advisor". Three prompts, three tool
    lists, two model protocols (P3).
-3. **Aria voice is very probably broken in production.** `realtime_voice.py`
+3. **Aria voice is suspected broken in production.** `realtime_voice.py`
    still speaks the Realtime **Beta** protocol (`"OpenAI-Beta": "realtime=v1"`,
    `:721`; Beta session shape `:751-766`). The receptionist's own code records
    that **OpenAI permanently removed the Beta interface on 12 May 2026**
    (`receptionist_call_handler.py:48`) and was migrated to GA. Voice was not.
-   **UNVERIFIED** in production — one test call settles it — but the code
-   gives no reason to expect it to connect.
-4. **Every model call is a direct OpenAI call.** 12 modules, 19 call sites,
-   10 distinct models, no routing layer, no metering (§A7). P7 starts from zero.
-5. **Aria's reads bypass RLS, by construction.** The tools use the backend's
-   elevated `engine` (`assistant_tools.py:12`). Isolation is application-layer
+   **UNVERIFIED** in production — the removal date is asserted in a comment,
+   not demonstrated by code — and one test call settles it.
+4. **Every model call is a direct OpenAI call.** 19 grouped operations (24
+   invocation expressions) across 12 modules, 10 distinct models, no routing
+   layer, no platform metering (§A7). P7 starts from zero.
+5. **Aria's reads bypass RLS on the documented backend connection.** The
+   tools use `db.engine` (`assistant_tools.py:12`), whose URL comes from the
+   environment (`db.py:14`); `AGENTS.md` §4 records that role as elevated, and
+   the code supplies no caller-role or JWT database context. Isolation is application-layer
    `WHERE business_id = :bid` on every query — consistently present, but
-   **no test covers any Aria tool** (§A8). P9's "enforced by RLS" is not true
-   of this path and cannot be made true cheaply.
+   **no test covers any Aria tool** (§A8). P9's "enforced by RLS" does not
+   describe this path, and making it do so is an architectural decision.
 6. **The snapshot exists three times over.** Board meeting `prep_data`
    (`services/executive_meeting_prep.py:52`), the WhatsApp briefing's
-   `gather_business_data` (`services/briefing_data.py:17`), and chat's
-   `get_today_briefing` / `get_business_overview` tools each aggregate the
-   business independently. Only `prep_data` carries `data_quality`.
+   `gather_business_data` (`services/briefing_data.py:17`), chat's
+   `get_today_briefing` / `get_business_overview` tools, and
+   `GET /v1/briefing/today` (`main.py:2194`) each aggregate the business
+   independently. Only `prep_data` carries `data_quality`.
 7. **Aria can already state figures nobody computed on the server.**
    Accounting's "Aria's Financial Insights" falls back to insights **built in
    the browser** when the backend call fails (`frontend/client/src/pages/Accounting.tsx:393-405`),
@@ -85,7 +94,7 @@ settle it. §D collects them.
 | Chat (text, and "voice mode" over TTS) | `backend/assistant_chat.py:207` `build_system_prompt` | none — "AI executive assistant for {business}" (`:209`) | `gpt-5`, hard-coded (`:759`, `:826`) |
 | Realtime voice | `backend/realtime_voice.py:401` `build_system_instructions` | "Aria, the AI Admin assistant" (`:421`) | `ARIA_REALTIME_MODEL`, default `gpt-realtime` (`:18`) |
 | Board meeting | `backend/services/executive_meeting_prompts.py:22` `EXECUTIVE_MEETING_SYSTEM_PROMPT` | "Aria, the AI executive business advisor" | `EXECUTIVE_MEETING_AI_MODEL`, default `gpt-5` (`executive_meeting_orchestrator.py:39`) |
-| WhatsApp pulse / weekly briefing | `backend/services/briefing_generator.py:38`, `:137` | UNVERIFIED whether it names Aria (not read in full) | `gpt-4o`, hard-coded |
+| WhatsApp pulse / weekly briefing | `backend/services/briefing_generator.py:38`, `:137` | none — and both prompts explicitly ask for emoji (`:40`, `:142`) (Codex review 1) | `gpt-4o`, hard-coded |
 | Accounting insights | `backend/accounting.py:931` `get_ai_insights` | "Aria" in the UI only | **no model** — templated text, with emoji (`accounting.py:1014`) |
 
 What already matches P3: the voice prompt specifies "naturally British … £,
@@ -152,7 +161,8 @@ daily pulse still discards its model output** and sends templated values
 are written to `briefing_snapshots` (`:631`, `:868`).
 
 There is also `GET /v1/briefing/today` (`backend/main.py:2194`), a tasks-and-calls
-summary, and chat's own `get_today_briefing` tool (`assistant_tools.py:717`).
+summary already exposed as an in-app briefing source, and chat's own
+`get_today_briefing` tool (`assistant_tools.py:717`).
 
 **Gap:** Home's "short briefing" (§2, §5) has no in-app source today. The
 North Star's "builds on CEO Briefing" is really "builds on
@@ -170,6 +180,15 @@ Two task systems exist, and neither has an assignee concept that means
 | `executive_meeting_action_items` | `business_id, meeting_id, title, description, status, priority, due_date, assignee_name, assignee_email, success_criteria, rationale, times_reviewed, last_reviewed_at, completed_at` | board-meeting `extract-actions` (`executive_meeting_api.py:955`) | `GET/PUT /v1/executive-meeting/action-items` (`:249`, `:298`); `goals_actions` and `last_meeting` loaders |
 | `executive_meeting_goals` | `business_id, title, category, horizon, kpi_name, kpi_target_value, kpi_current_value, progress_history, set_in_meeting_id, status, target_date` | board meeting | `GET/PUT …/goals` (`:333`, `:380`) |
 
+**Status vocabularies already disagree** (Codex review 1): the backend
+completes tasks as `done` (`main.py:1749`), the frontend as `completed`
+(`TasksPanel.tsx:120`), and the prep loader counts only `completed` as done
+(`executive_meeting_data_loaders/tasks.py:73`) — so a task completed through
+the API is never counted as completed in a board meeting. Action items use
+`open`, `in_progress`, `blocked`, `deferred` as outstanding
+(`goals_actions.py:190`). This is a present correctness defect, not only a
+design issue.
+
 `source='assistant'` marks a task **Aria created for the owner**, not a task
 Aria owns. `assignee_name` on action items is free text, defaulting to the
 owner. The board meeting already reviews last time's commitments
@@ -182,7 +201,10 @@ reads `tasks` and `calls` directly through supabase-js. A unified task view
 built on that path inherits the defect.
 
 **Gap:** a unified task view (Phase 1) can be a **read-only union served by
-the backend**, with no schema change. "Aria's tasks vs yours, told apart by
+the backend**, with no schema change — provided it normalises the status
+vocabularies above, filters deleted tasks, returns a source discriminator
+plus source id, and keeps the board-meeting entitlement that the action-item
+endpoint enforces today (`require_tier_feature`, `executive_meeting_api.py:257`). "Aria's tasks vs yours, told apart by
 assignee" (the Tasks pillar) needs an assignee column on `tasks` or a new
 table — **a migration, therefore RED**, and subject to the one-migration-in-flight
 rule (`AGENTS.md` §7) while 030b Release 2 is in flight.
@@ -198,7 +220,19 @@ rule (`AGENTS.md` §7) while 030b Release 2 is in flight.
   keys `modalities`, `input_audio_format`, `input_audio_transcription`,
   `temperature` (`:751-766`). Compare the receptionist's GA shape and its
   comment that Beta was removed on 12 May 2026 (`receptionist_call_handler.py:48`,
-  `:720-733`). **Production status UNVERIFIED; expected broken.**
+  `:720-733`). **Production status UNVERIFIED; suspected broken** — the
+  removal is asserted in a comment, not demonstrated by code.
+- **The client can drive the model session.** Any client message that is not
+  a `config` message is forwarded to OpenAI verbatim (`:838-840`), and the
+  executor accepts unmapped tool names (`tool_name_map.get(name, name)`,
+  `:310`) with no allowed-tool check. Removing a tool from `REALTIME_TOOLS`
+  is therefore not an execution boundary (Codex review 1, finding 1). Scoped
+  to the member's own business, but it means an authenticated member can
+  steer Aria's session and tools directly.
+- **Per-tool membership re-check fails open.** The executor re-resolves the
+  business per tool call and, on any exception, proceeds with a fallback
+  timezone (`:373-377`) — a membership revoked mid-session is not refused
+  there.
 - **Its own tool list** (`REALTIME_TOOLS`, 18 tools, `:29-275`) with a
   name-mapping table onto `assistant_tools.execute_tool` (`:289-308`). It
   includes `send_email_reply` → `send_email` and `send_chase` →
@@ -273,11 +307,18 @@ All are OpenAI. No other provider is called anywhere; the frontend calls none.
 | 18 | `support_api.py:143` | `_get_ai_support_response` | `gpt-4o` | SDK async |
 | 19 | `support_api.py:661` | `admin_ai_draft_response` | `gpt-4o` | SDK async |
 
-Each constructs its own client (`timeout=30, max_retries=1` where it uses
-the SDK). Four models are configurable by environment variable; the other
-fifteen call sites hard-code theirs. There are **two** independent AI quote
-generators with different models and prompts (#2 and #17). Nothing records
-tokens, minutes or cost; `usage_meters` is referenced by no code
+Rows #6 and #7 each make up to three TTS calls (`gpt-4o-mini-tts`,
+`tts-1-hd`, then `tts-1`; `receptionist_api.py:614`, `:624`, `:633`, `:741`,
+`:755`, `:764`), and #1 makes two, so the 19 grouped operations are **24
+invocation expressions** (Codex review 1 corrected the count). Each
+constructs its own client (`timeout=30, max_retries=1` where it uses the SDK).
+Four model settings are configurable by environment variable; the rest
+hard-code theirs. There are **two** independent AI quote
+generators with different models and prompts (#2 and #17). **Board meetings
+do account tokens** — they read provider usage (`executive_meeting_orchestrator.py:447`),
+persist a running total (`:899`) and refuse turns past a per-meeting cap
+(`:145`). Nothing else records tokens, minutes or cost, and there is no
+platform-wide monetary metering: `usage_meters` is referenced by no code
 (`admin_business_api.py:116` is a comment).
 
 ### A8 · How Aria reads business data, and whether it respects RLS and business scoping
@@ -291,9 +332,12 @@ reaches the same `execute_tool` through its name map. **`business_id` is
 always the server-resolved one; no tool accepts `business_id` from the
 model.** That is the property that matters most, and it holds.
 
-**RLS: bypassed.** Tools run on `db.engine` — the backend's elevated
-connection (`assistant_tools.py:12`, `AGENTS.md` §4). RLS plays no part.
-Isolation is application-layer only.
+**RLS: bypassed on the documented connection.** Tools run on `db.engine`
+(`assistant_tools.py:12`), whose URL is environment-supplied (`db.py:14`).
+`AGENTS.md` §4 records that role as elevated and RLS-bypassing; the code
+supplies no caller-role or JWT database context, so isolation on this path is
+application-layer only. The live role's privileges are not established by
+the repository.
 
 **Business scoping: present on every tool query.** A pass over every SQL
 string in `assistant_tools.py` found `business_id` in each tool's primary
@@ -318,6 +362,11 @@ for the chat itself (`assistant_chat.py:705`). For a user in two businesses
 who sends a `conversation_id` from one and no `business_id`, the gate and the
 chat can see different businesses. Membership is still enforced on both, so
 this is an entitlement question, not an isolation one.
+
+**External providers.** Email and calendar tools reach Gmail, Microsoft
+and Google Calendar with the business's stored OAuth account. Selecting that
+account by `business_id` does not by itself prove the business owns every
+shared resource the account can reach (Codex review 1).
 
 **Platform admins** can resolve any business and read any conversation
 (`assistant_chat.py:465`, `:595`). By design; out of scope here.
@@ -371,6 +420,13 @@ exactly one place so the router can replace it. Tool layer (B2).
 `delete_task` (`:802`). `send_quote` (`:2838`) only points the user at the
 Send button — already the right shape.
 
+Tools fall into three classes, which need different tests (Codex review
+1): **database reads** (tasks, calls, invoices, quotes, transactions),
+**external-provider reads** (Gmail, Microsoft, Google Calendar, Xero — tested
+with deterministic fixtures, not database comparison), and **generative
+tools** (`generate_ai_quote`, `draft_email_reply` — model output, which P2
+must treat as an estimate, never as a business fact).
+
 Coverage by department (§4 names eight): money ✓, invoices ✓, quotes ✓
 (list only), jobs/calendar ✓ (Google only), comms ✓ (email only — **no
 WhatsApp**), calls ✓, tasks ✓ (`tasks` only — **no board-meeting action items
@@ -388,18 +444,23 @@ or goals**), compliance ✗ (module absent, by design).
 - Missing entirely: a registry that declares each tool read or write, its
   department, and its citation shape — which the DoD Gate 7 test needs.
 
-**Effort.** Remove or gate the three external-action tools: **S** (and it
-should happen first — see §C of the proposal). Typed registry + citation ids
+**Effort.** Refuse the external-action tools at both execution boundaries:
+S; replace them with draft-and-approve plus chat/voice regression tests: **M**
+(Codex review 1). It should happen first. Typed registry + citation ids
 across existing read tools: L. Two-business isolation tests over every read
 tool, extending BH-003: M–L. New read tools (action items, goals, quote
 events, WhatsApp): M each.
 
 **Risks.** This is where P9 lives. Every new tool is a new `WHERE business_id`
 that can be forgotten on one join; the BH-003 harness must cover each tool
-before it ships (Gate 7). Quote "opened" tracking may not exist — **UNVERIFIED**
-whether any quote-view event is recorded (no column observed in the live
-dump's `quotes` table was read for this; check before promising §2's first
-example).
+before it ships (Gate 7). **Quote-view tracking does not work today:**
+`quotes.viewed_at` exists (live dump) and is serialised
+(`quoting_api.py:232`), but no code writes it and nothing counts repeat
+opens, so §2's "opened twice but not accepted" is unsupported (Codex review 1).
+Also: removing a tool from the advertised lists is not enough — chat
+dispatches whatever name the model returns (`assistant_chat.py:802`) and
+voice accepts unmapped names (§A5). Refusal must happen at both execution
+boundaries.
 
 **Dependencies.** None to start. Citation ids precede the "tap a figure to
 see the records" UX.
@@ -412,14 +473,20 @@ chat's `get_today_briefing` / `get_business_overview`. `briefing_snapshots`
 and `financial_summary_cache` tables exist. None is cached for Aria's use or
 loaded into chat.
 
+**Freshness.** Decision 0001 D8 requires every source to be refreshed when
+the app opens; today only financials have a staleness check (§A2).
+
 **Gap.** One snapshot builder, refreshed on a schedule, stored per business,
 loaded into Core, carrying `data_quality` with freshness for every source
 (today only financials). Reuse the `prep_data` loaders rather than write a
 fourth aggregator.
 
-**Effort.** L. Storage needs a table or a column → migration → RED, unless
-an existing table (`briefing_snapshots`) fits — **UNVERIFIED**; its columns
-were not examined for fit.
+**Effort.** L. Storage need not require a migration: `briefing_snapshots`
+already has `business_id`, `created_at`, period bounds, `snapshot_type` and a
+`full_data` JSONB column, and the scheduler already writes aggregate data into
+it (`briefing_scheduler.py:631`). Reuse is structurally plausible; retention,
+read/write semantics, live constraints and isolation still need validating
+(Codex review 1).
 
 **Risks.** A cached snapshot is a stored copy of a business's data: it must
 be keyed and read by `business_id` only, and a new table created via
@@ -459,11 +526,14 @@ it across a boundary. It must be keyed by `business_id` (and probably
 returning `tasks` ∪ open `executive_meeting_action_items`, scoped by
 `business_id`, with no schema change.
 
-**Effort.** Unified read view: M. Real unification with assignee: L + RED
-migration.
+**Effort.** Unified read view with normalised statuses, preserved
+entitlement, an Aria read tool and two-tenant tests: **L** (Codex review 1;
+was M). Real unification with assignee: L + RED migration.
 
 **Risks.** Serve it from the backend, not supabase-js, so it does not inherit
-the inactive-member `tasks` policy defect (BH-001 §6). Action items and tasks
+the inactive-member `tasks` policy defect (BH-001 §6). Serving it from the backend does
+not repair that policy or the other direct client readers; BH-001's
+remediation is still needed. Action items and tasks
 have different status vocabularies — **UNVERIFIED** exact values; map them
 explicitly rather than assume.
 
@@ -473,20 +543,28 @@ explicitly rather than assume.
 
 **Current state.** Absent. There is no proposed-action queue, no approval
 card, no per-action-type permission, no audit trail (`docs/CURRENT_STATE.md`
-§4: audit logging absent). `whatsapp_pending_actions` exists for WhatsApp
-reply actions — **UNVERIFIED** whether it is a reusable pattern.
+§4: audit logging absent). `whatsapp_pending_actions` is a precedent: a
+numbered WhatsApp reply selects a business-scoped pending action and executes
+it (`whatsapp_briefing_api.py:516`, `:544`). It is not ready to reuse as an
+approval service — selection has no expiry check, and execution happens
+before the action is marked executed (`:551`), so a repeat can run it twice
+(Codex review 1).
 
 **Gap.** All of it. For Phase 1 the North Star only needs the *negative*:
-Aria takes no write actions. That means disabling the three external-action
-tools in chat and voice (§B2) — the only Phase 1 work in this pillar.
+Aria takes no write actions — which means refusing **five** implemented
+mutations (three external, two task writes), not three (Codex review 1).
+Decision 0001 D9 then brings one approval path forward: a stored draft,
+approved by a tap, sent once.
 
-**Effort.** Phase 1 part: S. Full pillar: L × 3 + RED migration (queue and
-audit tables). **Risks.** Removing `send_email` / `send_invoice_chase` from
-Aria removes a capability MSC may use — Michael's call (proposal §D).
+**Effort.** Refusal: S–M. D9 approve-and-send over `email_drafts` /
+`email_outbox`: L. Full pillar: L × 3 + RED migration (queue and audit
+tables).
 
 ### B7 · Model router
 
-**Current state.** Absent (§A7). RC1 already carries it as **P1-1**.
+**Current state.** Absent (§A7), apart from board-meeting token accounting.
+RC1 already carries it as **P1-1**. The router must preserve the meeting
+token cap and is the natural place for P0-2's metering hooks.
 
 **Gap.** One module that owns clients, model choice per task (by name, from
 config), fallback, timeouts, and metering hooks. Migrate the 19 call sites.
@@ -540,13 +618,13 @@ WhatsApp from one source.
 
 ### B10 · Evals
 
-**Current state.** The test harness is strong for money and entitlement and
+**Current state.** No test imports the five Aria modules named below (the
+precise claim; there may be other AI-adjacent tests). The test harness is
+strong for money and entitlement and
 now has a two-tenant backend harness (BH-003,
 `test_tenant_isolation_backend_path.py`) and an RLS harness
 (`test_tenant_isolation_rls_path.py`, local Supabase, not in `check.sh`).
-**No test imports `assistant_tools`, `assistant_chat`, `realtime_voice`,
-`executive_meeting_prep` or `briefing_data`.** There is no seeded business
-with known answers and no grounding test.
+There is no seeded business with known answers and no grounding test.
 
 **Gap.** A seeded test business; grounding tests asserting each tool's
 figures equal database-computed values (Gate 7); two-tenant tests for each
@@ -607,14 +685,16 @@ default sub-tab. **Gap.** A home entry point and a nav item. **Effort.** S.
 **Current.** Five sub-tabs (§A6). **Gap.** Receptionist → Calls (Comms);
 Booking → Calendar; CEO Briefing (WhatsApp settings) → Comms or Settings;
 Aria → home/dock; Board Meeting → own nav item. **Effort.** M, mostly moves.
-**Risk.** `AIHubPage.tsx:87` passes `me.id` as `businessId` to
-`ReceptionistTab` — **UNVERIFIED** whether `me.id` is the business id or the
-user id; check before moving the component.
+**Risk.** Low. (An earlier draft questioned `AIHubPage.tsx:87` passing
+`me.id` as `businessId`; Codex review 1 settled it — `/v1/me` sets `id` to the
+business id, `main.py:1330`.)
 
 ### C6 · Alive, not gimmicky
-**Current.** No streaming anywhere: chat is one POST returning the full reply
-after up to five tool rounds (`assistant_chat.py:752`). `RealtimeVoice.tsx`
-has a UI for voice; waveform/presence **UNVERIFIED** (not inspected).
+**Current.** No text streaming: chat is one POST returning the full reply
+after up to five tool rounds (`assistant_chat.py:752`). Voice does stream
+audio and transcript deltas (`realtime_voice.py:902`). `RealtimeVoice.tsx`
+has a presence orb and connection/listening/speaking indicators (`:324`,
+`:355`, `:386`); there is no audio-amplitude waveform.
 **Gap.** Streamed replies (SSE) through Core; presence indicator.
 **Effort.** M once Core exists; retrofitting streaming into the current loop
 is wasted work. **Risk.** Railway proxy and streaming — `main.py:338` notes a
@@ -636,38 +716,42 @@ per B8. **Risk.** No frontend tests exist; Mike is the browser test
 | Item | What would settle it |
 |---|---|
 | Aria voice is broken in production (Beta protocol) | One voice session on a Pro test account, or Railway logs for `/v1/realtime/voice` |
-| `ARIA_REALTIME_MODEL`, `QUOTE_AI_MODEL`, `EXECUTIVE_MEETING_AI_MODEL` production values | Railway environment |
+| `ARIA_REALTIME_MODEL`, `RECEPTIONIST_REALTIME_MODEL`, `QUOTE_AI_MODEL`, `EXECUTIVE_MEETING_AI_MODEL` production values | Railway environment |
+| The live privileges of the backend's database role | `pg_roles` / `rolbypassrls` on prod, read-only |
 | Whether OpenAI's terms in force cover UK customer financial and email data (P9) | Legal review — North Star open question 5 |
-| Whether any quote-view ("opened twice") event is recorded | Read `quotes` columns and `quoting_api.py` send/view path |
-| Whether `briefing_snapshots` can hold a business snapshot | Its columns in `audits/live-schema-public.txt` |
-| Whether `whatsapp_pending_actions` is a reusable approval pattern | Read `whatsapp_briefing_api.py` action path |
-| Task / action-item status vocabularies | Read the writers of both tables |
-| `AIHubPage.tsx:87` `me.id` as `businessId` | Read `hooks/useMe.ts` |
-| Whether WhatsApp briefings name Aria | Read `briefing_generator.py` prompts |
-| Voice UI presence/waveform | Read `RealtimeVoice.tsx` |
+| ~~Quote-view tracking~~ | **Settled by Codex review 1:** `viewed_at` exists, nothing writes it (§B2) |
+| ~~`briefing_snapshots` fit~~ | **Settled:** structurally plausible (§B3) |
+| ~~`whatsapp_pending_actions` reuse~~ | **Settled:** a precedent with two defects (§B6) |
+| ~~Status vocabularies~~ | **Settled:** they disagree (§A4) |
+| ~~`me.id` as `businessId`~~ | **Settled:** it is the business id (§C5) |
+| ~~WhatsApp briefings name Aria~~ | **Settled:** they do not, and ask for emoji (§A1) |
+| ~~Voice presence/waveform~~ | **Settled:** presence yes, waveform no (§C6) |
 | That no Aria tool leaks across tenants | Two-business tests per tool (B10) — text inspection is not proof |
 
 ---
 
 ## E · Where this analysis sits uneasily with the North Star
 
-Raised for Michael, not edited into `NORTH_STAR.md`.
+Raised for Michael, not edited into `NORTH_STAR.md`. Qualified after Codex
+review 1; none of these authorises changing the adopted North Star.
 
-1. **P9 says "enforced by RLS"; the backend path cannot be.** Aria's tools run
-   as the elevated role and RLS never applies. Making it apply means running
-   each request under the caller's JWT claims (`SET LOCAL role authenticated`
-   plus `request.jwt.claims`) — an architectural change to the backend's
-   database access, far beyond Phase 1. The honest RC1 position is
-   application-layer scoping **proven by two-tenant tests**. Suggest P9 read
-   "enforced by business scoping, tested per tool, and by RLS on the client
-   path".
-2. **Phase 1 says Aria takes no write actions; she already takes three.**
+1. **P9 says "enforced by RLS"; the backend path, as documented, is not.**
+   Aria's tools run on the documented elevated connection and RLS does not
+   apply. Making it apply is an architectural and security decision — running
+   requests under the caller's claims (`SET LOCAL role` plus
+   `request.jwt.claims`) is one option, not the only one. Two-tenant tests are
+   a different mechanism from RLS, not an equivalent. Decision 0001 D5 records
+   Michael's intent to amend P9's wording; the amendment is his to make.
+2. **Phase 1 says Aria takes no write actions; she already takes five** —
+   three outside the app and two task writes.
    Phase 1 therefore *removes* capability from live customers. It is the
    right call for P4, but it is a product change, not a non-event.
-3. **"Builds on CEO Briefing"** points at a WhatsApp settings page. The real
-   foundation is `gather_business_data` and the scheduler.
+3. **"Builds on CEO Briefing"** points at a WhatsApp settings page, though
+   reusable backend machinery sits behind it: `gather_business_data`, the
+   scheduler, and `GET /v1/briefing/today`.
 4. **The Tasks pillar implies a migration** that the North Star's phase plan
    does not flag, and migrations queue behind 030b Release 2.
-5. **Voice is a live defect, not a Phase 2 feature.** If it is sold on Pro and
-   broken, the GA migration is a stability prerequisite, not North Star work —
-   the North Star's own prerequisite rule puts it ahead of Phase 1 features.
+5. **Voice is a suspected stability defect, not only a Phase 2 feature.** If
+   it is sold on Pro and broken, the GA migration is a stability
+   prerequisite — the North Star's own prerequisite rule puts it ahead of
+   Phase 1 features. Production failure is unverified.
