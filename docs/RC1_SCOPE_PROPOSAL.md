@@ -309,6 +309,6 @@ open → B11), D9 (approve-then-send → B10), D10 (name, voice, avatar → B9).
 | # | Decision | Recommendation |
 |---|---|---|
 | D11 | Aria's `create_task` / `delete_task`: refuse them in Phase 1 as the North Star says, or grant an exception | **Refuse `delete_task`. Route `create_task` through B10's approval card** — §2's "Aria adds it to their list" then works with a tap, and no unapproved write remains |
-| D12 | Does the email sign-off say "AI assistant" explicitly? | **Yes.** e.g. "Aria (AI assistant) for Mike Rickards, Multi Skilled Contractors" |
+| ~~D12~~ | Sign-off says "AI assistant" | **Decided by Mike, 28 Sep:** yes. Confident, and says she passes messages on to the owner (ADR 0001 D9) |
 | D13 | Accept revision 2's larger estimates (A1, B1, B5, B7) and the conditions on B5 and B7 | **Yes.** If the design-partner date is tight, B7 and B8 are the first to drop; A1, B1 and B10 are not |
-| D14 | Does the phone receptionist use the owner's chosen Aria name (open question 1)? | **No, not in RC1.** Keep the receptionist's own configured identity until B9 has shipped and been used |
+| ~~D14~~ | Receptionist takes Aria's chosen name | **Decided by Mike, 28 Sep:** no, not in RC1. Rename-the-receptionist option added once there are users (backlog) |

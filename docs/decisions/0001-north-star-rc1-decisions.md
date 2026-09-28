@@ -81,10 +81,15 @@ forward into RC1. Serves P4.
   interpreting "yes" — or voice mishearing one — is not an approval.
 - **Each draft sends once.** The draft id is the idempotency key; chase-send
   has none today (`CURRENT_STATE.md` §7).
-- **The sign-off does not pass Aria off as a person.** Recommended form:
-  "Aria, assistant to Mike Rickards, Multi Skilled Contractors" — or the
-  owner's chosen name (D10). Whether it says "AI assistant" explicitly is
-  Mike's call; recommendation is yes, per P8 and `AGENTS.md` §9.
+- **The sign-off says she is an AI assistant — decided by Mike, 28 Sep 2026
+  (proposal D12).** It should sound confident in what she can do and make
+  clear that she passes everything on to the owner. It is a template —
+  `{assistant_name}`, `{owner_name}`, `{business_name}` — so the D10 name
+  flows in. Every line in it must be something the product actually does
+  (P8, `AGENTS.md` §9). "Your reply reaches the owner" is true because Aria
+  sends from the owner's own connected mailbox. Promises the product does not
+  keep yet — reply tracking, response times, "24/7" — stay out. The final
+  wording is Mike's choice from the drafts in the B10 ticket.
 - Every send is recorded in `email_outbox` (it exists) against the draft and
   the approving user.
 
@@ -108,8 +113,10 @@ images. Doing nothing leaves Aria, her default voice and default avatar.
   moderation or cross-tenant file-path risk). Illustrated rather than
   photographs of real people, so none implies a real employee.
 - Onboarding step is skippable with "Keep Aria" as the default action.
-- Still open: whether the phone receptionist takes the owner's chosen name
-  (open question 1).
+- **The phone receptionist keeps its own identity in RC1 — decided by Mike,
+  28 Sep 2026 (proposal D14).** It does not take Aria's name. An option to
+  rename the AI receptionist is to be added once there are users asking for
+  it. That is post-RC1 and logged in `docs/BACKLOG.md`.
 
 ## Consequences
 
