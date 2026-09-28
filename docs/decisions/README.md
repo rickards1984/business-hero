@@ -23,6 +23,7 @@ decisions stay where they are; **new ones land here.**
 | Compliance ships after launch, marketed at launch | `COMPLIANCE-MODULE-BRIEF.md` D1 |
 | Compliance is a separately purchasable module, one codebase | `COMPLIANCE-MODULE-BRIEF.md` D4 |
 | The product manages evidence and never certifies compliance | `COMPLIANCE-MODULE-BRIEF.md` D7 |
+| North Star RC1 decisions; approved sending; fresh data on open; Aria's identity | `0001-north-star-rc1-decisions.md` |
 
 ## Format
 
