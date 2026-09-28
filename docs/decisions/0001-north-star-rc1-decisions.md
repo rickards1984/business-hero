@@ -24,8 +24,11 @@ changes the evidence reopens the decision it rests on.
   become draft-and-approve, not draft-only. *After Codex review 1:* refusal is
   enforced at the server's execution boundaries in chat and voice, not by
   removing tools from the advertised lists, and it also covers the two task
-  writes (`create_task`, `delete_task`) — whose treatment is open decision
-  D11 in `RC1_SCOPE_PROPOSAL.md` §E.
+  writes. **D11, decided by Mike 28 Sep 2026:** `delete_task` is refused;
+  `create_task` goes through the same tap-to-approve card as D9.
+- **D13, decided by Mike 28 Sep 2026:** revision 2's larger estimates are
+  accepted. The Aria-centred home (proposal B7) is worth the extra time to
+  him and is not a casual drop.
 - **D2** If Aria voice is broken in production, it is turned off for RC1 and
   repaired (Realtime GA migration) after P0-2 metering. *After Codex review
   1:* "off" means refused server-side before the provider connection opens,

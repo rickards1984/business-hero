@@ -3,9 +3,9 @@
 **Status:** revision 2, after Codex review 1 (REQUEST-CHANGES,
 `docs/reviews/aria-gap-analysis-codex-review.md`) and Michael's decisions of
 28 September 2026 (`docs/decisions/0001-north-star-rc1-decisions.md`).
-**This does not change `docs/RC1_SCOPE.md`.** Michael accepted revision 1's
-recommendations; revision 2 raises several estimates and adds his three new
-items, so it comes back to him once before `RC1_SCOPE.md` is edited.
+**Accepted by Michael, 28 September 2026, including D11–D14.** Folded into
+`docs/RC1_SCOPE.md` § North Star Phase 1 stream, which is now the
+authoritative scope; this file keeps the reasoning.
 **Evidence:** `docs/ARIA_GAP_ANALYSIS.md` (cited as GA §x).
 **Serves:** Phase 0 — "write an RC1 scope proposal for Michael to decide on".
 
@@ -304,11 +304,11 @@ briefing), D5 (amend P9's wording — Michael's to make), D6 (OpenAI only until
 legal review), D7 (remaining isolation work is BH-001 §6), D8 (fresh data on
 open → B11), D9 (approve-then-send → B10), D10 (name, voice, avatar → B9).
 
-### Still open
+### Decided after revision 2
 
 | # | Decision | Recommendation |
 |---|---|---|
-| D11 | Aria's `create_task` / `delete_task`: refuse them in Phase 1 as the North Star says, or grant an exception | **Refuse `delete_task`. Route `create_task` through B10's approval card** — §2's "Aria adds it to their list" then works with a tap, and no unapproved write remains |
+| ~~D11~~ | Aria's task writes | **Decided by Mike, 28 Sep:** `delete_task` refused; `create_task` goes through B10's tap-to-approve card |
 | ~~D12~~ | Sign-off says "AI assistant" | **Decided by Mike, 28 Sep:** yes. Confident, and says she passes messages on to the owner (ADR 0001 D9) |
-| D13 | Accept revision 2's larger estimates (A1, B1, B5, B7) and the conditions on B5 and B7 | **Yes.** If the design-partner date is tight, B7 and B8 are the first to drop; A1, B1 and B10 are not |
+| ~~D13~~ | Revision 2's estimates and conditions | **Decided by Mike, 28 Sep:** accepted. Mike rates the Aria-centred UI (B7) as worth the doubled time — it is not a casual drop; only B8 is optional |
 | ~~D14~~ | Receptionist takes Aria's chosen name | **Decided by Mike, 28 Sep:** no, not in RC1. Rename-the-receptionist option added once there are users (backlog) |

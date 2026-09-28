@@ -236,6 +236,43 @@ VAT applied.
 
 ---
 
+## North Star Phase 1 stream — **accepted by Mike, 28 September 2026**
+
+Added under `docs/NORTH_STAR.md` (adopted 28 Sep 2026). Reasoning, evidence
+and Codex review 1's conditions are in `docs/RC1_SCOPE_PROPOSAL.md` (revision
+2); decisions in `docs/decisions/0001-north-star-rc1-decisions.md`. Only this
+section is accepted — the rest of this document's boundary is unchanged, and
+still subject to the review 001 challenges below.
+
+**Rules for the stream.** It runs *beside* the P0 list, never ahead of it,
+and never takes the migration slot. Its entry test: no migration, no new
+model-provider operation, no new unscoped data path. Where it shares a file
+or interface with a P0 ticket (`backend/main.py`, the model-call interface
+P0-2 needs, `assistant_tools.py`), the P0 ticket goes first.
+
+| Item | What | Effort |
+|---|---|---|
+| **NS-A1** | Aria stops acting on her own: all five model-triggered mutations refused **server-side**, at both chat and voice execution boundaries; voice stops forwarding arbitrary client messages | M |
+| **NS-A2** | Voice: confirm broken, then disable server-side before the provider connection opens; GA repair after P0-2 | S |
+| **NS-B1** | Two-tenant and grounding tests over Aria's tools, by tool class | L |
+| **NS-B2** | Tool registry and citation contracts | L |
+| **NS-B3** | Model router, request/response calls — this *is* P1-1 | L |
+| **NS-B4** | One Aria persona across chat, voice, board meeting | M |
+| **NS-B9** | Owner can rename Aria, choose her voice with preview, pick an avatar; Aria default; settings and onboarding | M |
+| **NS-B10** | Aria drafts (email reply, invoice chase, task); owner approves with a tap; sent/created once; signed as an AI assistant | L |
+| **NS-B11** | Opening the app refreshes email, accounting and calendar in the background; every figure shows its age | M |
+| **NS-B5** | Unified task view, with Codex's conditions (entitlement, status normalisation, Aria read tool) | L |
+| **NS-B6** | Board Meeting one tap from home, out of AI Hub | S |
+| **NS-B7** | Aria home v1 — the Aria-centred UI. Mike rates it worth the extra time | L × 2 |
+| NS-B8 | Text dock — optional | M |
+
+Order: NS-A2 and NS-A1 first; NS-B10 after NS-A1; NS-B1 → NS-B2 → NS-B4 →
+NS-B9 with NS-B3 before NS-B4; NS-B11, NS-B5 and NS-B6 feed NS-B7; NS-B8
+last. **NS-A1 and NS-B10 are RED-tier for testing purposes** — customer
+contact about money — so their tests are written first and reviewed by Mike.
+
+---
+
 ## Explicitly out of RC1
 
 | Out | Why |
@@ -326,3 +363,9 @@ Every P0 item complete under `docs/DEFINITION_OF_DONE.md`, plus:
 - [ ] Tenant isolation is proven by test on both DB paths
 - [ ] Live RLS state is documented in `docs/PERMISSIONS_AND_TENANCY.md`
 - [ ] No P0 item is "apparently complete but unverified"
+- [ ] Aria cannot send, book, chase or write a task without a tap on an
+      approval card — proven by tests that call each tool directly, on both
+      chat and voice paths
+- [ ] Every figure on Aria's home and in her tool results shows its age, and
+      a failed sync is visible
+- [ ] Each Aria tool is covered by a two-tenant test
