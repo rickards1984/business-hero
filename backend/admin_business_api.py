@@ -23,7 +23,11 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Session
 
-from auth import get_platform_admin_context, strip_plan_defaults
+from auth import (
+    PLAN_FEATURE_DEFAULTS,
+    get_platform_admin_context,
+    strip_plan_defaults,
+)
 from db import get_session
 
 # `business_id` is typed UUID on every route so a non-UUID path segment is
@@ -31,6 +35,12 @@ from db import get_session
 # depth, not the fix for route shadowing — the fix is registration order, and
 # it lives at the bottom of main.py.
 logger = logging.getLogger("admin_business_api")
+
+# ENTITLEMENT-SPEC PART B's canonical plan -> feature table lives in `auth` and
+# is "THE ONLY COPY IN PYTHON". Deriving the vocabulary from it means this
+# validator cannot drift from the gate it protects: add a feature there and it
+# is boolean-enforced here on the same commit.
+PLAN_FEATURE_VOCABULARY = frozenset(PLAN_FEATURE_DEFAULTS["business"])
 router = APIRouter(prefix="/v1/admin/businesses", tags=["Admin"])
 
 
@@ -52,11 +62,49 @@ CREATE_FIELDS = ("name", "timezone") + OVERVIEW_FIELDS
 # RULING (030B-SPEC, 20 Aug 2026) — feature_flags option (a): structure-only
 # validation, with `brand_color` permitted as a NAMED TEMPORARY EXCEPTION.
 #
-# Both real businesses hold a colour string here today, so a strict boolean
-# validator would reject live data. When ENTITLEMENT-SPEC PART B moves it to
-# its own column in 033, DELETE THIS CONSTANT and the branch that reads it —
-# the validator then tightens with no other change.
-_TEMPORARY_STRING_FLAGS = ("brand_color",)
+# REVISED 28 Sep 2026 (BH-007), because the named-exception shape was the wrong
+# one and it took the admin editor down for a real business.
+#
+# WHAT HAPPENED. The named list held `brand_color` only. `feature_flags` also
+# carries `industry`, a STRING the onboarding wizard writes and
+# `quoting_api.py` reads to build the AI quoting prompt ("expert quantity
+# surveyor for the {industry} industry"). So a business that had been through
+# the wizard could not be saved through the admin editor AT ALL — the UI posts
+# the whole flags object back, so changing `plan_tier` alone returned
+# 400 `feature_flags.industry must be true or false`. Reported from the ZZ test
+# business on 28 Sep.
+#
+# WHY A NAMED LIST IS THE WRONG SHAPE. It fails CLOSED against live data, and
+# the thing it closes is the admin's ability to edit and support a customer.
+# Every key anyone adds to `feature_flags` anywhere in the product becomes a
+# latent admin outage until someone remembers to add it here. That is the wrong
+# trade: an admin who cannot edit a business cannot onboard one or resolve a
+# support ticket either.
+#
+# THE RULE NOW. Strictness is placed where it actually protects something:
+#
+#   * A key in the CANONICAL FEATURE VOCABULARY must be a boolean. Those keys
+#     are what `auth._is_feature_enabled` consults to grant or refuse access,
+#     so a string there is a real defect — `bool("false")` is True, and a
+#     feature would be granted by a typo'd value.
+#   * Any OTHER key is metadata and may hold any scalar. `_validate_flat_object`
+#     still rejects nested objects and arrays, so the column stays flat.
+#     Metadata cannot grant anything: `_is_feature_enabled` looks up the exact
+#     canonical key, so an unrecognised key is inert by construction.
+#
+# The vocabulary is imported from `auth`, the single source of truth
+# (ENTITLEMENT-SPEC PART B — "THE ONLY COPY IN PYTHON"), so this validator
+# cannot drift from the gate it is protecting.
+#
+# KNOWN_METADATA_FLAGS is documentation, not a gate: the non-canonical keys we
+# know about today, logged when something else turns up so drift is visible
+# rather than silent.
+KNOWN_METADATA_FLAGS = (
+    "brand_color",   # 033 SECTION 6 moved this to its own column; live rows may
+                     # still carry the flag, and SECTION 7's strip only removed
+                     # keys that restated a plan default. Harmless either way.
+    "industry",      # the onboarding wizard writes it; quoting_api.py reads it
+)
 
 
 def _bad_request(detail: str):
@@ -96,18 +144,34 @@ def _validate_flat_object(value: Any, field: str) -> dict:
 
 
 def _validate_feature_flags(value: Any) -> dict:
+    """Canonical feature keys must be booleans; everything else is metadata.
+
+    See the KNOWN_METADATA_FLAGS comment above for why this is not a named
+    allowlist any more.
+    """
     flags = _validate_flat_object(value, "feature_flags")
+    unknown = []
     for key, item in flags.items():
-        if key in _TEMPORARY_STRING_FLAGS:
-            if not isinstance(item, str):
-                raise _bad_request(f"feature_flags.{key} must be a string")
+        if key in PLAN_FEATURE_VOCABULARY:
+            if not isinstance(item, bool):
+                raise _bad_request(
+                    f"feature_flags.{key} must be true or false — got "
+                    f"{type(item).__name__}. {key!r} is a feature gate, and a "
+                    f"non-boolean there would grant or deny access by accident "
+                    f"(bool('false') is True). Keys outside the feature "
+                    f"vocabulary may hold any scalar."
+                )
             continue
-        if not isinstance(item, bool):
-            raise _bad_request(
-                f"feature_flags.{key} must be true or false — got "
-                f"{type(item).__name__}. Only {', '.join(_TEMPORARY_STRING_FLAGS)} "
-                f"may hold a string, pending migration 033."
-            )
+        if key not in KNOWN_METADATA_FLAGS:
+            unknown.append(key)
+    if unknown:
+        # Accepted, and recorded. A key nobody has documented is not a reason
+        # to stop an admin editing a business, but it is worth knowing about.
+        logger.info(
+            "feature_flags carries undocumented metadata keys %s — accepted as "
+            "metadata; add to KNOWN_METADATA_FLAGS if intended",
+            sorted(unknown),
+        )
     return flags
 
 
