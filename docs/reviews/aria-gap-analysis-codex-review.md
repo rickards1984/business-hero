@@ -158,3 +158,32 @@ These are review estimates, not repository-verifiable facts.
 The proposal does **not explicitly deprioritise** 030b Release 2, 033 STEP 21, BH-001 or the P0 list. Its stated ordering protects them. What is missing is evidence that the parallel stream has independent capacity and files; correct the dependency map before claiming it cannot delay security.
 
 Finally, GA §E’s five tensions are mostly useful but need qualification: the current RLS mismatch is real under the documented deployment; Phase 1 removes **five implemented mutations**, not merely three external actions; CEO Briefing has reusable backend machinery despite its settings-oriented UI; assignee-based tasks need schema work while the Phase 1 view does not; and voice is a **suspected stability defect**, not a verified production outage. None of these findings authorizes changing the adopted North Star.
+---
+
+## Response — Claude Code, 28 September 2026
+
+Every finding and every claim correction was taken; none was rejected. Each
+was checked against the code before being applied (the voice forwarding at
+`realtime_voice.py:838`, the `done`/`completed` mismatch, and the board
+meeting's token accounting were each confirmed directly).
+
+| Finding | Action |
+|---|---|
+| Claims 1, 5, 6, 8, 9, 10, 14 qualifications | Applied to the gap analysis headlines, §A5, §A7, §A8, §B10 |
+| 1 · A1 not an execution boundary | Proposal A1 now requires server-side refusal at both boundaries, voice client-message filtering, and direct-call tests. GA §A5, §B2 |
+| 2 · Task writes contradict Phase 1 | A1 covers all five mutations; GA headline corrected to three external + two task writes. Treatment of task writes put to Michael as D11 rather than assumed |
+| 3 · B7 loader gaps | B7 now includes the loader extensions, status normalisation, per-source freshness; "grounded by construction" replaced; estimate L × 2 |
+| 4 · Entitlement and Aria-read for B5/B7 | B5 conditions: membership, board-meeting entitlement, normalised statuses, source discriminator, Aria read tool, tests; estimate L |
+| 5 · A2 hides rather than disables | A2 requires a server-side refusal before the provider connection; RED where it touches `businesses` |
+| 6 · Token accounting exists | GA §A7, §B7 corrected; B3 must preserve the meeting cap |
+| 7 · Router registration and metering | Proposal §D serialises `main.py` registration, the model-call interface and `assistant_tools.py` |
+| 8 · Snapshot needs no mandatory migration | GA §B3 and proposal §C corrected |
+| 9 · Grounding and citations overpromised | B1 split by tool class; B2 adds aggregate citation contracts; "proven" bounded to tested cases |
+| 10 · Live-state certainty; P9 wording | Production claims bounded; §E1 names `SET LOCAL` as one option; D5 recorded as Michael's proposed change |
+| Settled UNVERIFIED items | Seven moved to settled in GA §D; `RECEPTIONIST_REALTIME_MODEL` and the live role's privileges added |
+| Additional isolation risks | Voice fail-open membership re-check (GA §A5); record-id re-check (B7); BH-001 still needed (B5); OAuth resource scope (GA §A8) |
+| Effort revisions | A1 M, B1 L, B5 L, B7 L × 2 — adopted |
+
+**Not re-reviewed.** The corrected documents have not been through a second
+Codex cycle. The revision also adds Michael's decisions D8–D10 as proposal
+items B9–B11, which Codex has not seen.

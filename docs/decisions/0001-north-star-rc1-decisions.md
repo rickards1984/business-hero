@@ -21,9 +21,15 @@ changes the evidence reopens the decision it rests on.
 - **D1** Aria stops acting outside the app on her own decision. `send_email`,
   `send_invoice_chase` and `create_calendar_event` stop executing directly
   (`assistant_tools.py:1391`, `:2431`, `:1904`). **D9 amends this:** they
-  become draft-and-approve, not draft-only.
+  become draft-and-approve, not draft-only. *After Codex review 1:* refusal is
+  enforced at the server's execution boundaries in chat and voice, not by
+  removing tools from the advertised lists, and it also covers the two task
+  writes (`create_task`, `delete_task`) — whose treatment is open decision
+  D11 in `RC1_SCOPE_PROPOSAL.md` §E.
 - **D2** If Aria voice is broken in production, it is turned off for RC1 and
-  repaired (Realtime GA migration) after P0-2 metering.
+  repaired (Realtime GA migration) after P0-2 metering. *After Codex review
+  1:* "off" means refused server-side before the provider connection opens,
+  not a hidden button.
 - **D3** Phase 1 items A1, A2 and B1–B8 of the proposal may enter RC1, with
   the entry test: no migration, no new provider call site, never ahead of the
   security sequence.

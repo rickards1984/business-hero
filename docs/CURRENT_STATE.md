@@ -19,10 +19,15 @@ unchanged — **030b Release 2 is still next.**
 
 | Artefact | Status |
 |---|---|
-| `docs/ARIA_GAP_ANALYSIS.md` — the code at `2cc2b62` against the North Star | **awaiting Codex review** (`docs/reviews/REVIEW_REQUEST_aria-gap-analysis.md`) |
-| `docs/RC1_SCOPE_PROPOSAL.md` — which Phase 1 items could join RC1 | **awaiting Codex review, then Michael's decision.** `docs/RC1_SCOPE.md` is unchanged |
+| `docs/ARIA_GAP_ANALYSIS.md` — the code at `2cc2b62` against the North Star | **Codex review 1: REQUEST-CHANGES; every finding taken** (`docs/reviews/aria-gap-analysis-codex-review.md`). Not re-reviewed |
+| `docs/RC1_SCOPE_PROPOSAL.md` — which Phase 1 items could join RC1 | **Revision 2, awaiting Michael's decision on D11–D14.** `docs/RC1_SCOPE.md` is unchanged |
+| `docs/decisions/0001-north-star-rc1-decisions.md` | Michael's decisions D1–D10, accepted 28 Sep 2026 |
 
-Until Codex has reviewed it, treat the gap analysis as a claim, not evidence.
+Codex review 1 also surfaced two present defects, both existing code, neither
+fixed yet: the voice WebSocket forwards arbitrary client messages to the model
+and executes unmapped tool names (`realtime_voice.py:838`, `:310`), and task
+completion is written as `done` by the API but counted only as `completed` by
+the board-meeting loader (`main.py:1749`, `executive_meeting_data_loaders/tasks.py:73`).
 One of its findings bears on this document: Aria chat and realtime voice
 have been gated server-side since BH-006 (`main.py:2346`,
 `realtime_voice.py:689`), so the "none" entries for them in §5's ungated
