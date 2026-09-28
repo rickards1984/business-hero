@@ -23,7 +23,12 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Session
 
-from auth import get_platform_admin_context, strip_plan_defaults
+from auth import (
+    FEATURE_FLAG_VOCABULARY,
+    get_platform_admin_context,
+    strip_plan_defaults,
+    validate_feature_flags,
+)
 from db import get_session
 
 # `business_id` is typed UUID on every route so a non-UUID path segment is
@@ -31,6 +36,14 @@ from db import get_session
 # depth, not the fix for route shadowing — the fix is registration order, and
 # it lives at the bottom of main.py.
 logger = logging.getLogger("admin_business_api")
+
+# ENTITLEMENT-SPEC PART B's canonical plan -> feature table lives in `auth` and
+# is "THE ONLY COPY IN PYTHON". Deriving the vocabulary from it means this
+# validator cannot drift from the gate it protects: add a feature there and it
+# is boolean-enforced here on the same commit.
+# Re-exported for the tests and for readers of this module; the authority is
+# `auth`, which is also where the validator lives.
+PLAN_FEATURE_VOCABULARY = FEATURE_FLAG_VOCABULARY
 router = APIRouter(prefix="/v1/admin/businesses", tags=["Admin"])
 
 
@@ -49,16 +62,10 @@ ADMIN_COLUMNS = (
 OVERVIEW_FIELDS = ("plan_tier", "is_active", "trial_ends_at", "feature_flags", "limits")
 CREATE_FIELDS = ("name", "timezone") + OVERVIEW_FIELDS
 
-# RULING (030B-SPEC, 20 Aug 2026) — feature_flags option (a): structure-only
-# validation, with `brand_color` permitted as a NAMED TEMPORARY EXCEPTION.
-#
-# Both real businesses hold a colour string here today, so a strict boolean
-# validator would reject live data. When ENTITLEMENT-SPEC PART B moves it to
-# its own column in 033, DELETE THIS CONSTANT and the branch that reads it —
-# the validator then tightens with no other change.
-_TEMPORARY_STRING_FLAGS = ("brand_color",)
-
-
+# feature_flags validation lives in `auth.validate_feature_flags` — the same
+# function every writer of the column uses, next to the vocabulary it enforces.
+# See BH-007: this file and `onboarding_api` disagreed, and the gap granted a
+# feature from a string.
 def _bad_request(detail: str):
     return HTTPException(status_code=400, detail=detail)
 
@@ -96,19 +103,8 @@ def _validate_flat_object(value: Any, field: str) -> dict:
 
 
 def _validate_feature_flags(value: Any) -> dict:
-    flags = _validate_flat_object(value, "feature_flags")
-    for key, item in flags.items():
-        if key in _TEMPORARY_STRING_FLAGS:
-            if not isinstance(item, str):
-                raise _bad_request(f"feature_flags.{key} must be a string")
-            continue
-        if not isinstance(item, bool):
-            raise _bad_request(
-                f"feature_flags.{key} must be true or false — got "
-                f"{type(item).__name__}. Only {', '.join(_TEMPORARY_STRING_FLAGS)} "
-                f"may hold a string, pending migration 033."
-            )
-    return flags
+    """Delegates to the shared validator. See `auth.validate_feature_flags`."""
+    return validate_feature_flags(value, "feature_flags")
 
 
 def _validate_limits(value: Any) -> dict:
@@ -116,6 +112,15 @@ def _validate_limits(value: Any) -> dict:
     # `usage_meters`, which will define the real schema. Nothing reads this
     # column for enforcement today, so a strict validator would invent a
     # contract no consumer has asked for.
+    #
+    # BUT NOT UNCONDITIONALLY PERMISSIVE, and BH-007's first commit message got
+    # this wrong: values are unconstrained, STRUCTURE is not. A stored `limits`
+    # that is nested, or not an object, would fail here and block a whole-form
+    # admin save — the same class of failure as the feature_flags bug. Nothing
+    # establishes that no such row exists: the schema snapshot records JSONB,
+    # which permits any shape. Q-style evidence would be
+    #   SELECT id, limits FROM businesses WHERE jsonb_typeof(limits) <> 'object';
+    # and it is read-only. Recorded rather than assumed.
     return _validate_flat_object(value, "limits")
 
 

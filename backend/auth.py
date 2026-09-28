@@ -1,5 +1,6 @@
 """Authentication dependencies for FastAPI."""
 
+import logging
 import os
 import re
 from typing import Any, Optional, Dict
@@ -590,6 +591,97 @@ def strip_plan_defaults(
         for key, value in (flags or {}).items()
         if not (isinstance(value, bool) and defaults.get(key) is value)
     }
+
+
+# ── The feature_flags contract, enforced in ONE place ────────────────────────
+#
+# BH-007. Every writer of this column must validate through here. Two did not
+# agree before: `admin_business_api` allowed one named string and rejected the
+# rest, and `onboarding_api.save_wizard_step` validated NOTHING — it takes an
+# untyped dict and passed `feature_flags` straight to `strip_plan_defaults`.
+#
+# WHY THAT SECOND ONE MATTERS, demonstrated rather than asserted:
+#
+#     business.feature_flags = {"receptionist": "false"}   # a STRING
+#     _is_feature_enabled(business, "receptionist")        # -> True
+#
+# `bool("false")` is True, so a string spelled like a denial GRANTS the
+# feature — on a `starter` plan whose own default is False. The wizard could
+# persist that, and then the admin editor refused every subsequent save
+# because the value was not a boolean. One missing validator, two bugs: a
+# silent entitlement escalation and a blocked admin.
+#
+# FEATURE_FLAG_VOCABULARY is derived from PLAN_FEATURE_DEFAULTS above, so a new
+# feature is boolean-enforced on the commit that adds it. The derivation holds
+# only while every tier declares the same keys; `test_entitlement_defaults.py`
+# is what keeps that true, and this comment is the reason it matters.
+FEATURE_FLAG_VOCABULARY = frozenset(PLAN_FEATURE_DEFAULTS["business"])
+
+# Non-canonical keys we know about. DOCUMENTATION, not a gate — an
+# undocumented key is accepted and logged, because refusing one would stop an
+# admin editing a business, and an admin who cannot edit cannot onboard a
+# customer or resolve a support ticket either.
+KNOWN_METADATA_FLAGS = (
+    "brand_color",   # 033 SECTION 6 moved this to its own column; live rows may
+                     # still carry the flag. Harmless either way.
+    "industry",      # the onboarding wizard writes it; quoting_api.py reads it
+                     # to build the AI quoting prompt
+)
+
+_logger = logging.getLogger("auth.feature_flags")
+
+
+def validate_feature_flags(value: Any, field: str = "feature_flags") -> dict:
+    """The only correct way to validate this column. Raises HTTPException(400).
+
+    THE RULE, and where the strictness is placed:
+
+      * a key in FEATURE_FLAG_VOCABULARY MUST be a boolean. Those keys are what
+        `_is_feature_enabled` consults to grant access, and a non-boolean there
+        changes entitlement by accident (see the module comment above).
+      * any other key is metadata and may hold any SCALAR — string, number,
+        boolean or null. Nested objects and arrays are refused so the column
+        stays flat and queryable.
+
+    On metadata being harmless: `_is_feature_enabled` looks up the exact name
+    it was asked for, and every caller asks for a canonical feature — so a
+    metadata key, including a typo of a canonical one, grants nothing TODAY.
+    Note what that argument rests on: the lookup does NOT restrict itself to
+    the vocabulary, so `_is_feature_enabled(b, "receptionis")` on
+    `{"receptionis": True}` returns True. It is inert because no caller passes
+    a non-canonical name, not because the lookup would refuse one. If a caller
+    ever takes a feature name from user input, that changes and this comment is
+    the place it was written down.
+    """
+    if not isinstance(value, dict):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} must be a JSON object — got {type(value).__name__}")
+
+    unknown = []
+    for key, item in value.items():
+        if isinstance(item, (dict, list)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field}.{key} must be a single value — nested objects "
+                       f"and arrays are not accepted")
+        if key in FEATURE_FLAG_VOCABULARY:
+            if not isinstance(item, bool):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{field}.{key} must be true or false — got "
+                           f"{type(item).__name__}. {key!r} is a feature gate, "
+                           f"and a non-boolean there grants or denies access by "
+                           f"accident (bool('false') is True). Keys outside the "
+                           f"feature vocabulary may hold any scalar.")
+            continue
+        if key not in KNOWN_METADATA_FLAGS:
+            unknown.append(key)
+    if unknown:
+        _logger.info(
+            "%s carries undocumented metadata keys %s — accepted as metadata; "
+            "add to KNOWN_METADATA_FLAGS if intended", field, sorted(unknown))
+    return value
 
 
 def _is_feature_enabled(business: Business, feature_name: str) -> bool:

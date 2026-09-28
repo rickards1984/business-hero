@@ -17,8 +17,10 @@ behind a table-wide UPDATE grant. Any owner can set their own `plan_tier`,
 makes revoking that grant possible.
 
 RULINGS ENCODED HERE (audits/030B-SPEC.md, 20 Aug 2026):
-  * feature_flags — option (a): structure-only validation, `brand_color`
-    permitted as a named temporary exception pending 033
+  * feature_flags — option (a): structure-only validation. REVISED by BH-007
+    (28 Sep 2026): the named exception became "canonical feature keys must be
+    boolean, other keys are metadata and may hold any scalar". See
+    TestFeatureFlagsValidation for why the named list was the wrong shape.
   * limits — kept, accepted opaquely, structure-only
   * api_key — server-side `secrets.token_urlsafe(32)` only, never accepted
   * is_active — explicit state, never a toggle
@@ -269,9 +271,16 @@ class TestPlanTierValidation(unittest.TestCase):
 
 class TestFeatureFlagsValidation(unittest.TestCase):
     """
-    Criterion (RULING: option (a)): structure-only — object, flat, boolean
-    values — with `brand_color` permitted as a NAMED temporary exception
-    pending 033. Not a general strings-allowed loophole.
+    RULE (BH-007, 28 Sep 2026, superseding 030B-SPEC's named exception):
+
+      * a key in the canonical feature vocabulary MUST be a boolean — those are
+        what `auth._is_feature_enabled` consults to grant access;
+      * any other key is metadata and may hold any SCALAR;
+      * nested objects and arrays are refused for every key.
+
+    Enforced by `auth.validate_feature_flags`, which every writer of the column
+    uses. This class tests it through the admin endpoints; the onboarding
+    writer has its own regression test in test_onboarding_flags.py.
     """
 
     def test_flat_booleans_are_accepted(self):
@@ -301,8 +310,8 @@ class TestFeatureFlagsValidation(unittest.TestCase):
                 expect_400(self, overview, AdminSession(), feature_flags=bad)
 
     def test_brand_color_string_is_permitted(self):
-        # The named exception. Both real businesses hold this today, so a
-        # strict boolean validator would reject live data.
+        # Still permitted, now because `brand_color` is not a canonical feature
+        # key rather than because it is on a named list.
         session = AdminSession()
         overview(session, feature_flags={"email": True, "brand_color": "#3B82F6"})
         self.assertEqual(
@@ -310,15 +319,175 @@ class TestFeatureFlagsValidation(unittest.TestCase):
             "#3B82F6",
         )
 
-    def test_the_exemption_covers_brand_color_and_nothing_else(self):
-        # If any other key may hold a string, the exemption has become a
-        # loophole and tightening it after 033 will silently break callers.
-        expect_400(self, overview, AdminSession(),
-                   feature_flags={"industry": "construction"})
+    # ── BH-007, 28 Sep 2026 ──────────────────────────────────────────────────
+    #
+    # THIS CLASS PREVIOUSLY ASSERTED THE BUG. The test that stood here was:
+    #
+    #     def test_the_exemption_covers_brand_color_and_nothing_else(self):
+    #         # If any other key may hold a string, the exemption has become a
+    #         # loophole and tightening it after 033 will silently break callers.
+    #         expect_400(self, overview, AdminSession(),
+    #                    feature_flags={"industry": "construction"})
+    #
+    # It required `industry: "construction"` to be REJECTED — and `industry` is
+    # a live string the onboarding wizard writes and `quoting_api.py` reads to
+    # build the AI quoting prompt. So a business that had been through the
+    # wizard could not be saved through the admin editor at all: the UI posts
+    # the whole flags object back, so changing `plan_tier` alone returned
+    # 400 `feature_flags.industry must be true or false`. Reported from the ZZ
+    # test business.
+    #
+    # The reasoning in that comment was sound about `brand_color`'s lifecycle
+    # and simply did not account for a second, permanent string key. Removed
+    # rather than softened, and replaced by tests for the rule that puts
+    # strictness where it protects something.
 
-    def test_a_non_string_brand_color_is_still_rejected(self):
-        expect_400(self, overview, AdminSession(),
-                   feature_flags={"brand_color": {"hex": "#000"}})
+    def test_the_wizard_s_industry_string_is_accepted(self):
+        """THE REGRESSION. This is the 400 an admin hit in production."""
+        session = AdminSession()
+        overview(session, feature_flags={"email": True, "industry": "construction"})
+        self.assertEqual(
+            session.params_for("UPDATE businesses")["feature_flags"]["industry"],
+            "construction",
+        )
+
+    def test_a_business_carrying_both_metadata_strings_can_be_saved(self):
+        """The realistic shape of a live row: canonical booleans plus the two
+        metadata strings. An admin must be able to save this, because otherwise
+        they cannot onboard a business or resolve its support tickets."""
+        session = AdminSession()
+        overview(session, feature_flags={
+            "receptionist": True, "email": True, "aria_voice": False,
+            "brand_color": "#3B82F6", "industry": "construction",
+        })
+        saved = session.params_for("UPDATE businesses")["feature_flags"]
+        self.assertEqual(saved["industry"], "construction")
+        self.assertEqual(saved["brand_color"], "#3B82F6")
+        self.assertIs(saved["receptionist"], True)
+        self.assertIs(saved["aria_voice"], False)
+
+    def test_every_canonical_feature_key_must_be_a_boolean(self):
+        """Strictness where it matters. These keys are what
+        `auth._is_feature_enabled` consults to grant access, and
+        `bool("false")` is True — so a string here would grant a feature by
+        accident. Parametrised over the whole vocabulary so a new feature is
+        covered the day it is added."""
+        module = api()
+        for key in sorted(module.PLAN_FEATURE_VOCABULARY):
+            for bad in ("true", "false", "yes", 1, 0, 1.5, None):
+                with self.subTest(key=key, bad=bad):
+                    expect_400(self, overview, AdminSession(),
+                               feature_flags={key: bad})
+
+    def test_the_vocabulary_is_derived_from_auth_not_copied(self):
+        """ENTITLEMENT-SPEC PART B: auth holds THE ONLY COPY IN PYTHON. If this
+        validator kept its own list the two could drift, and a new feature
+        would be unenforced here until someone noticed."""
+        module = api()
+        from auth import PLAN_FEATURE_DEFAULTS
+        self.assertEqual(module.PLAN_FEATURE_VOCABULARY,
+                         frozenset(PLAN_FEATURE_DEFAULTS["business"]))
+        self.assertIn("receptionist", module.PLAN_FEATURE_VOCABULARY)
+        self.assertNotIn("industry", module.PLAN_FEATURE_VOCABULARY)
+        self.assertNotIn("brand_color", module.PLAN_FEATURE_VOCABULARY)
+
+    def test_metadata_may_hold_ANY_scalar_not_just_a_string(self):
+        """Codex's review: the first version of these tests only ever put
+        STRINGS in metadata keys, so a validator that accepted `str` and `bool`
+        and rejected numbers or null would have passed them while violating the
+        stated "any scalar" rule."""
+        for value in ("a string", 42, 3.5, True, False, None):
+            with self.subTest(value=value):
+                session = AdminSession()
+                overview(session, feature_flags={"some_metadata": value})
+                self.assertEqual(
+                    session.params_for("UPDATE businesses")["feature_flags"],
+                    {"some_metadata": value},
+                )
+
+    def test_every_canonical_key_accepts_BOTH_booleans(self):
+        """The other half of the vocabulary check. The rejection test covers
+        every key, but acceptance was only exercised for a few — so a validator
+        that rejected `False` (or both values) for an unexercised key could have
+        passed."""
+        module = api()
+        for key in sorted(module.PLAN_FEATURE_VOCABULARY):
+            for value in (True, False):
+                with self.subTest(key=key, value=value):
+                    session = AdminSession()
+                    overview(session, feature_flags={key: value})
+                    self.assertIs(
+                        session.params_for("UPDATE businesses")["feature_flags"][key],
+                        value,
+                    )
+
+    def test_create_preserves_metadata_and_strips_only_plan_defaults(self):
+        """The create path runs `strip_plan_defaults` after validating, so
+        metadata must survive that too — otherwise a wizard-created business
+        would lose its `industry` on the first admin save."""
+        session = AdminSession()
+        create(session, name="ZZ Test", plan_tier="starter", feature_flags={
+            "industry": "construction",
+            "brand_color": "#3B82F6",
+            "receptionist": True,      # contradicts starter's default -> kept
+            "quoting": True,           # restates starter's default -> stripped
+        })
+        saved = session.params_for("INSERT INTO businesses")["feature_flags"]
+        self.assertEqual(saved["industry"], "construction")
+        self.assertEqual(saved["brand_color"], "#3B82F6")
+        self.assertIs(saved["receptionist"], True)
+        self.assertNotIn("quoting", saved,
+                         "a flag that merely restates the plan default was stored")
+
+    def test_an_undocumented_metadata_key_is_accepted_not_refused(self):
+        """The failure this change exists to prevent: a key nobody anticipated
+        must not stop an admin editing a business. It is inert —
+        `_is_feature_enabled` looks up the exact canonical key — so accepting it
+        grants nothing. It is logged, not rejected."""
+        session = AdminSession()
+        overview(session, feature_flags={"some_future_key": "a value", "email": True})
+        self.assertEqual(
+            session.params_for("UPDATE businesses")["feature_flags"]["some_future_key"],
+            "a value",
+        )
+
+    def test_a_typo_of_a_canonical_key_is_accepted_but_grants_nothing(self):
+        """The cost of the permissive rule, stated rather than hidden.
+
+        `receptionis` (sic) is accepted as metadata and does not grant the real
+        feature, because the gate looks up `receptionist` exactly. The blast
+        radius is a junk key, versus a blocked admin under the old rule.
+
+        BE PRECISE ABOUT WHY IT IS HARMLESS, because the first version of this
+        docstring said "inert by construction" and that is not true:
+        `_is_feature_enabled` does NOT restrict itself to the vocabulary, so
+        asking it for `receptionis` on `{"receptionis": True}` returns True. It
+        is inert because no caller passes a non-canonical name — inert by
+        convention. If a caller ever takes a feature name from user input, that
+        stops being true.
+        """
+        session = AdminSession()
+        overview(session, feature_flags={"receptionis": True})
+        saved = session.params_for("UPDATE businesses")["feature_flags"]
+        self.assertIs(saved["receptionis"], True)
+
+        from auth import _is_feature_enabled
+        from types import SimpleNamespace
+        business = SimpleNamespace(plan_tier="starter", feature_flags=saved)
+        self.assertFalse(_is_feature_enabled(business, "receptionist"),
+                         "a typo'd key granted the real feature")
+
+    def test_structure_is_still_enforced_for_every_key(self):
+        """Metadata may be any SCALAR — not an object or an array. The column
+        stays flat whatever the key is called."""
+        for bad in ({"hex": "#000"}, ["#000"]):
+            with self.subTest(bad=bad):
+                expect_400(self, overview, AdminSession(),
+                           feature_flags={"brand_color": bad})
+                expect_400(self, overview, AdminSession(),
+                           feature_flags={"industry": bad})
+                expect_400(self, overview, AdminSession(),
+                           feature_flags={"anything_at_all": bad})
 
 
 class TestLimitsValidation(unittest.TestCase):
