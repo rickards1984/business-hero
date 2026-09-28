@@ -31,6 +31,7 @@ from auth import (
     get_platform_admin_context,
     is_platform_admin_user,
     strip_plan_defaults,
+    validate_feature_flags,
 )
 
 _logger = logging.getLogger("onboarding")
@@ -387,7 +388,19 @@ async def save_wizard_step(
             )
 
     elif step_name == "plan_features":
-        submitted = step_data.get("feature_flags", {})
+        # BH-007. This branch validated NOTHING. `step_data` is an untyped dict
+        # and the declared `PlanFeaturesStep` model is not applied here, so a
+        # canonical feature could be persisted as a STRING — and
+        # `bool("false")` is True, so `{"receptionist": "false"}` GRANTED
+        # receptionist on a plan whose default is False. It then blocked every
+        # subsequent admin save, because the admin validator (correctly)
+        # refuses a non-boolean feature key. One missing validator, an
+        # entitlement escalation and a blocked admin.
+        #
+        # Same function as the admin endpoints now use. Raises 400 before
+        # anything is written.
+        submitted = validate_feature_flags(
+            step_data.get("feature_flags", {}), "feature_flags")
         # PART C: store only what DIFFERS from the plan. The wizard sends a
         # full copy of the tier's features plus whatever the admin toggled;
         # writing that verbatim put plan defaults into the column and undid

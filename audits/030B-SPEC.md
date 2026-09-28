@@ -261,6 +261,26 @@ code being written.
 
 ---
 
+## Admin capability gaps — found 28 Sep 2026, NOT addressed by 030b
+
+BH-007 fixed the validator that stopped an admin saving an onboarded business.
+While doing so, these were confirmed to be missing. None is caused by 030b or
+by BH-007; all of them bear on Mike's requirement that an admin must be able to
+**fully onboard and edit a business, and problem-solve support tickets**. Listed
+so they are scoped deliberately rather than discovered one support ticket at a
+time.
+
+| Gap | Evidence | Why it matters |
+|---|---|---|
+| **`name` and `timezone` cannot be changed after creation** | `admin_business_api.py` `OVERVIEW_FIELDS`; timezone is explicitly disabled in `AdminBusinessDetail.tsx:802` | An admin cannot rename a business or correct its timezone. The customer-facing settings endpoints resolve the CALLER's own business, so they cannot be used on someone else's. |
+| **`subscription_status` and `current_period_end` are readable but not writable** | `ADMIN_COLUMNS` includes them, `OVERVIEW_FIELDS` does not | `auth.resolve_access_level` gives `unpaid`/`canceled` precedence over `is_active` and over a trial extension, so an admin **cannot** restore a customer whose Stripe state is wrong using the controls they have. This is the one that will generate support tickets. A remedy needs a deliberate billing workflow, not an unrestricted status field — writing it by hand would re-create the conflation DECISION 3 removed. |
+| **No cross-business admin surface for settings, logo, brand colour, integrations** | `dependencies.py:38` and `:82` resolve only the caller's own business and take no target id; the platform-admin exemption applies only AFTER business selection | An admin cannot fix a customer's integration or branding on their behalf. |
+| **Onboarding does not create the owner's account** | `onboarding_api.py:373` records the owner's details and ticks the checklist item | The wizard reports an owner as "created" when no account exists and no invitation has been sent. |
+| **Connection diagnostics are read-only** | the admin detail page shows email/calendar state without repair controls; accounting explicitly requires owner action | OAuth consent genuinely must come from the customer, so this cannot be fully autonomous — but the boundary should be stated in the UI rather than looking broken. |
+
+Each needs its own ticket. They are deliberately **not** folded into a
+validator fix.
+
 ## Scope notes — things I read differently from the brief
 
 These are flagged, not decided.

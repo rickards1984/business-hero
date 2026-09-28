@@ -271,9 +271,16 @@ class TestPlanTierValidation(unittest.TestCase):
 
 class TestFeatureFlagsValidation(unittest.TestCase):
     """
-    Criterion (RULING: option (a)): structure-only — object, flat, boolean
-    values — with `brand_color` permitted as a NAMED temporary exception
-    pending 033. Not a general strings-allowed loophole.
+    RULE (BH-007, 28 Sep 2026, superseding 030B-SPEC's named exception):
+
+      * a key in the canonical feature vocabulary MUST be a boolean — those are
+        what `auth._is_feature_enabled` consults to grant access;
+      * any other key is metadata and may hold any SCALAR;
+      * nested objects and arrays are refused for every key.
+
+    Enforced by `auth.validate_feature_flags`, which every writer of the column
+    uses. This class tests it through the admin endpoints; the onboarding
+    writer has its own regression test in test_onboarding_flags.py.
     """
 
     def test_flat_booleans_are_accepted(self):
@@ -384,6 +391,54 @@ class TestFeatureFlagsValidation(unittest.TestCase):
         self.assertNotIn("industry", module.PLAN_FEATURE_VOCABULARY)
         self.assertNotIn("brand_color", module.PLAN_FEATURE_VOCABULARY)
 
+    def test_metadata_may_hold_ANY_scalar_not_just_a_string(self):
+        """Codex's review: the first version of these tests only ever put
+        STRINGS in metadata keys, so a validator that accepted `str` and `bool`
+        and rejected numbers or null would have passed them while violating the
+        stated "any scalar" rule."""
+        for value in ("a string", 42, 3.5, True, False, None):
+            with self.subTest(value=value):
+                session = AdminSession()
+                overview(session, feature_flags={"some_metadata": value})
+                self.assertEqual(
+                    session.params_for("UPDATE businesses")["feature_flags"],
+                    {"some_metadata": value},
+                )
+
+    def test_every_canonical_key_accepts_BOTH_booleans(self):
+        """The other half of the vocabulary check. The rejection test covers
+        every key, but acceptance was only exercised for a few — so a validator
+        that rejected `False` (or both values) for an unexercised key could have
+        passed."""
+        module = api()
+        for key in sorted(module.PLAN_FEATURE_VOCABULARY):
+            for value in (True, False):
+                with self.subTest(key=key, value=value):
+                    session = AdminSession()
+                    overview(session, feature_flags={key: value})
+                    self.assertIs(
+                        session.params_for("UPDATE businesses")["feature_flags"][key],
+                        value,
+                    )
+
+    def test_create_preserves_metadata_and_strips_only_plan_defaults(self):
+        """The create path runs `strip_plan_defaults` after validating, so
+        metadata must survive that too — otherwise a wizard-created business
+        would lose its `industry` on the first admin save."""
+        session = AdminSession()
+        create(session, name="ZZ Test", plan_tier="starter", feature_flags={
+            "industry": "construction",
+            "brand_color": "#3B82F6",
+            "receptionist": True,      # contradicts starter's default -> kept
+            "quoting": True,           # restates starter's default -> stripped
+        })
+        saved = session.params_for("INSERT INTO businesses")["feature_flags"]
+        self.assertEqual(saved["industry"], "construction")
+        self.assertEqual(saved["brand_color"], "#3B82F6")
+        self.assertIs(saved["receptionist"], True)
+        self.assertNotIn("quoting", saved,
+                         "a flag that merely restates the plan default was stored")
+
     def test_an_undocumented_metadata_key_is_accepted_not_refused(self):
         """The failure this change exists to prevent: a key nobody anticipated
         must not stop an admin editing a business. It is inert —
@@ -398,9 +453,18 @@ class TestFeatureFlagsValidation(unittest.TestCase):
 
     def test_a_typo_of_a_canonical_key_is_accepted_but_grants_nothing(self):
         """The cost of the permissive rule, stated rather than hidden.
-        `receptionis` (sic) is accepted as metadata. It cannot grant the
-        feature, because the gate looks up `receptionist` exactly — so the
-        blast radius is a junk key, versus a blocked admin under the old rule.
+
+        `receptionis` (sic) is accepted as metadata and does not grant the real
+        feature, because the gate looks up `receptionist` exactly. The blast
+        radius is a junk key, versus a blocked admin under the old rule.
+
+        BE PRECISE ABOUT WHY IT IS HARMLESS, because the first version of this
+        docstring said "inert by construction" and that is not true:
+        `_is_feature_enabled` does NOT restrict itself to the vocabulary, so
+        asking it for `receptionis` on `{"receptionis": True}` returns True. It
+        is inert because no caller passes a non-canonical name — inert by
+        convention. If a caller ever takes a feature name from user input, that
+        stops being true.
         """
         session = AdminSession()
         overview(session, feature_flags={"receptionis": True})
