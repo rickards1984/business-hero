@@ -9,6 +9,38 @@ acting.
 
 ---
 
+## North Star — what all work is judged against
+
+`docs/NORTH_STAR.md`, adopted by Mike on 28 September 2026: **Business Hero
+is Aria, an AI business partner who knows the whole business and helps the
+owner run it.** These rules are approved and bind every agent:
+
+1. **Read `docs/NORTH_STAR.md` before any planning or feature work.**
+2. **Every plan and PR description states which principle (P1–P9), pillar or
+   phase it serves.** If none, it states which prerequisite it meets:
+   security, tenant isolation, correctness or stability. A plan that can
+   name neither is not ready.
+3. **Once the tool layer exists, any new data the app stores or fetches ships
+   with a tenant-scoped Aria read tool.** Data Aria cannot see is a gap, not
+   a neutral choice.
+4. **Aria never states a figure that did not come from a tool or the loaded
+   business snapshot.** Aria-facing numbers need grounding tests that compare
+   what Aria is given against the database.
+5. **No new direct model-provider clients.** Once the router exists, all
+   model calls go through it. Until then, a new call site is a debt the PR
+   must name.
+6. **If a request conflicts with the North Star, stop and flag it to Mike.
+   Treat it as RED** (§2) — explicit approval before proceeding.
+7. **Security and tenant-isolation work is never deprioritised for North Star
+   features.** 030b Release 2 and RLS batches 4–5 keep their place in the
+   sequence.
+
+The per-PR checklist is `docs/NORTH_STAR.md` §8; the merge gate is
+`docs/DEFINITION_OF_DONE.md` Gate 7. Where the current code stands against the
+North Star is `docs/ARIA_GAP_ANALYSIS.md`.
+
+---
+
 ## 1 · The verification loop
 
 **Do not ask Mike to check your code.** He is the product owner and tester,
@@ -281,6 +313,8 @@ found. Describe what has been verified, and when.
 
 | Question | File |
 |---|---|
+| What is the product for? | `docs/NORTH_STAR.md` |
+| How far is the code from it? | `docs/ARIA_GAP_ANALYSIS.md` |
 | What is the real state of the system? | `docs/CURRENT_STATE.md` |
 | What is in RC1? | `docs/RC1_SCOPE.md` |
 | When is a ticket done? | `docs/DEFINITION_OF_DONE.md` |
