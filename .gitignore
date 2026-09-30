@@ -17,3 +17,8 @@ current_live_schema.sql
 live_state/
 .venv/
 .env.staging
+
+# Supabase SQL-editor exports land with this name. Rename into audits/
+# as dated evidence (see BH-001) or delete; never leave them untracked,
+# which blocks every push (BH-008).
+audits/Supabase Snippet*.csv

@@ -30,6 +30,12 @@ HOOK = REPO / ".githooks" / "pre-push"
 # asserted against check.sh's source instead.
 
 
+# Every variable .githooks/pre-push, scripts/preflight.sh or check.sh reads to
+# change its own behaviour. Keep in step with those files:
+#   grep -ohE '\$\{?[A-Z][A-Z0-9_]+' .githooks/pre-push scripts/preflight.sh check.sh
+_GATE_CONTROLS = frozenset({"PREPUSH_ALLOW_UNTRACKED", "PREFLIGHT_BASE", "SKIP_RLS_DRIFT"})
+
+
 def run(cmd, cwd=REPO, env=None, stdin=None):
     """Run a command with every GIT_* variable stripped from the environment.
 
@@ -48,8 +54,15 @@ def run(cmd, cwd=REPO, env=None, stdin=None):
     Stripping GIT_* makes each fixture repo genuinely independent, and makes
     these tests safe to run from inside a git hook — which is exactly where
     check.sh runs them.
+
+    The gate's own controls are stripped for the same reason (BH-008): a
+    variable the caller set to steer THIS push must not steer the hook or
+    preflight a test launches. A test that wants one passes it via `env=`.
     """
-    e = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    e = {
+        k: v for k, v in os.environ.items()
+        if not k.startswith("GIT_") and k not in _GATE_CONTROLS
+    }
     if env:
         e.update(env)
     return subprocess.run(
@@ -204,6 +217,66 @@ def test_hook_untracked_escape_is_explicit(tmp_path):
         stdin=f"refs/heads/main {head} refs/heads/main {'0'*40}\n",
     )
     assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize(
+    "var,value",
+    [("PREPUSH_ALLOW_UNTRACKED", "1"), ("SKIP_RLS_DRIFT", "1"),
+     ("PREFLIGHT_BASE", "refs/heads/no-such-ref")],
+)
+def test_the_callers_gate_controls_do_not_reach_the_gate_under_test(
+    tmp_path, monkeypatch, var, value
+):
+    """BH-008. The gate's own tests must not inherit the caller's gate controls.
+
+    `run()` copies the caller's environment into every hook and preflight it
+    launches. So `PREPUSH_ALLOW_UNTRACKED=1 git push` — the escape the hook
+    documents — exported the escape into pytest, which handed it to the hook
+    in `test_hook_refuses_untracked_files`. That hook then allowed the
+    untracked file, the test failed, the gate went red, and the push was
+    refused. The documented escape could never succeed. Found 30 Sep 2026.
+
+    The same leak applies to every variable the hook or preflight reads.
+    A test states its controls explicitly through `env=`, or it has none.
+    """
+    monkeypatch.setenv(var, value)
+    r = run(["env"])
+    assert f"{var}=" not in r.stdout, f"{var} leaked into the gate under test"
+
+
+def test_the_untracked_refusal_holds_even_when_the_caller_used_the_escape(
+    tmp_path, monkeypatch
+):
+    """BH-008, end to end: the exact failure. With the escape set in the
+    shell that ran pytest, the refusal test must still see a refusal."""
+    monkeypatch.setenv("PREPUSH_ALLOW_UNTRACKED", "1")
+    d = _repo(tmp_path)
+    head = run(["git", "rev-parse", "HEAD"], cwd=d).stdout.strip()
+    (d / "helper.py").write_text("x = 1\n")
+    r = _push(d, f"refs/heads/main {head} refs/heads/main {'0'*40}\n")
+    assert r.returncode != 0
+    assert "untracked files are present" in r.stderr.lower()
+
+
+def test_an_explicit_env_still_reaches_the_gate(monkeypatch):
+    """Stripping must not break the tests that pass a control on purpose."""
+    monkeypatch.delenv("PREFLIGHT_BASE", raising=False)
+    r = run(["env"], env={"PREFLIGHT_BASE": "HEAD"})
+    assert "PREFLIGHT_BASE=HEAD" in r.stdout
+
+
+def test_the_gate_control_list_matches_what_the_gate_reads():
+    """BH-008: a control added to the hook or preflight later must be added to
+    `_GATE_CONTROLS` too, or it leaks exactly as PREPUSH_ALLOW_UNTRACKED did.
+    Every control in these scripts is read as `${NAME:-default}` — an outside
+    input with a fallback — so that is the pattern this looks for."""
+    import re
+    read = set()
+    for f in (HOOK, PREFLIGHT, CHECK):
+        read |= set(re.findall(r"\$\{([A-Z][A-Z0-9_]*):-", f.read_text()))
+    assert read == set(_GATE_CONTROLS), (
+        f"gate reads {sorted(read)}, _GATE_CONTROLS has {sorted(_GATE_CONTROLS)}"
+    )
 
 
 def test_hook_allows_a_deletion(tmp_path):
