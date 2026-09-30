@@ -268,12 +268,26 @@ def test_an_explicit_env_still_reaches_the_gate(monkeypatch):
 def test_the_gate_control_list_matches_what_the_gate_reads():
     """BH-008: a control added to the hook or preflight later must be added to
     `_GATE_CONTROLS` too, or it leaks exactly as PREPUSH_ALLOW_UNTRACKED did.
-    Every control in these scripts is read as `${NAME:-default}` — an outside
-    input with a fallback — so that is the pattern this looks for."""
+
+    An outside control is read with a fallback for when it is unset, so this
+    looks for every parameter-expansion form that supplies one — `:-` `-`
+    `:=` `=` `:?` `?` `:+` `+` — outside comments. It also refuses sourced
+    files, because a control read in a file these scripts `source` would be
+    invisible here. Limit (Codex review of BH-008): a control read bare, as
+    `$NAME` with no fallback, is not detected. All three scripts run under
+    `set -u`, where reading an unset outside variable bare aborts the script,
+    so a working control needs a fallback form — which this does detect."""
     import re
     read = set()
     for f in (HOOK, PREFLIGHT, CHECK):
-        read |= set(re.findall(r"\$\{([A-Z][A-Z0-9_]*):-", f.read_text()))
+        code = "\n".join(
+            line for line in f.read_text().splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        read |= set(re.findall(r"\$\{([A-Z][A-Z0-9_]*):?[-=?+]", code))
+        assert not re.search(r"^\s*(source|\.)\s+\S", code, re.M), (
+            f"{f.name} sources another file; extend this guard to read it too"
+        )
     assert read == set(_GATE_CONTROLS), (
         f"gate reads {sorted(read)}, _GATE_CONTROLS has {sorted(_GATE_CONTROLS)}"
     )
