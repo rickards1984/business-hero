@@ -16,7 +16,8 @@ authoritative scope; this file keeps the reasoning.
 An item goes into RC1 only if it passes all three:
 
 1. **Security.** It does not delay or compete with the security sequence —
-   030b Release 2, 033 STEP 21, the BH-001 §6 findings, and the P0 list. It
+   033 STEP 21, the BH-001 §6 findings, and the P0 list (030b Release 2 was
+   applied 27 Sep 2026, PR #13). It
    adds no migration while one is in flight, and no new unscoped data path.
 2. **Stability.** It wraps working code rather than rebuilding it, adds no new
    model-provider operation, and can ship without breaking the existing UI.
@@ -182,7 +183,7 @@ Money-adjacent customer contact: **tests first, reviewed by Michael.**
 On app open, each connected source refreshes **in the background** if stale;
 nothing blocks the app. Email already does this (`POST /v1/email/sync/ensure`,
 `app/email/router.py:917`); extend the pattern to accounting and calendar.
-`/v1/accounting/sync-all` (`main.py:4598`) runs synchronously and must not be
+`/v1/accounting/sync-all` (`main.py:4646`) runs synchronously and must not be
 what opening the app waits on. Every figure — tiles, home, Aria — carries
 "updated N minutes ago", and a failed sync is shown (the `data_quality`
 pattern, extended beyond financials). Calls need nothing: the receptionist
@@ -267,7 +268,7 @@ wins.
 
 ```
 SECURITY (unchanged; owns the migration slot)
-  030b Release 2 apply ─► 033 STEP 21 ─► BH-001 §6 follow-ups ─► remaining P0s
+  033 STEP 21 ─► BH-001 §6 follow-ups ─► remaining P0s   (030b Release 2: done 27 Sep)
 
 NORTH STAR (no migrations, no new provider operations)
   A2 voice check ─────────────┐

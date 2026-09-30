@@ -5,7 +5,12 @@
 response is recorded at the end of that file.
 **Written:** 28 September 2026, by Claude Code.
 **Code audited:** `main` at `2cc2b62` (after BH-006 and the 030b Release 2 PR
-merged). Line numbers refer to that commit.
+merged). **Rebased 30 Sep 2026 to `main` at `8c76560`:** the commits between
+(030b Release 2 applied, BH-007, BH-008) touch no Aria module —
+`assistant_chat.py`, `assistant_tools.py` and `realtime_voice.py` are unchanged
+— but BH-007 moved `backend/main.py` below line 1305 by 48 lines, and
+`auth.py` by one; those references are updated. The review records keep the
+original numbers.
 **Measured against:** `docs/NORTH_STAR.md` §4 (pillars) and §5 (UX).
 **Serves:** Phase 0 — "produce a gap analysis of the current code against
 this doc".
@@ -73,7 +78,7 @@ settle it. §D collects them.
    (`services/executive_meeting_prep.py:52`), the WhatsApp briefing's
    `gather_business_data` (`services/briefing_data.py:17`), chat's
    `get_today_briefing` / `get_business_overview` tools, and
-   `GET /v1/briefing/today` (`main.py:2194`) each aggregate the business
+   `GET /v1/briefing/today` (`main.py:2242`) each aggregate the business
    independently. Only `prep_data` carries `data_quality`.
 7. **Aria can already state figures nobody computed on the server.**
    Accounting's "Aria's Financial Insights" falls back to insights **built in
@@ -160,7 +165,7 @@ daily pulse still discards its model output** and sends templated values
 (`briefing_scheduler.py:572`, the recorded `TODO(day2)`; RC1 P1-6). Snapshots
 are written to `briefing_snapshots` (`:631`, `:868`).
 
-There is also `GET /v1/briefing/today` (`backend/main.py:2194`), a tasks-and-calls
+There is also `GET /v1/briefing/today` (`backend/main.py:2242`), a tasks-and-calls
 summary already exposed as an in-app briefing source, and chat's own
 `get_today_briefing` tool (`assistant_tools.py:717`).
 
@@ -176,12 +181,12 @@ Two task systems exist, and neither has an assignee concept that means
 
 | Table | Key columns (live dump) | Written by | Read by |
 |---|---|---|---|
-| `tasks` | `business_id, title, description, status, priority, category, due_at, recurrence, source, source_id, deleted_at` — **no assignee** | `POST /v1/tasks` (`main.py:1670`); Aria `create_task` with `source='assistant'` (`assistant_tools.py:648`); automation engine (`services/automation_engine.py:230`) | Dashboard **via supabase-js/RLS** (`DashboardPage.tsx:107`); `TasksPanel.tsx`; Aria `list_tasks` |
+| `tasks` | `business_id, title, description, status, priority, category, due_at, recurrence, source, source_id, deleted_at` — **no assignee** | `POST /v1/tasks` (`main.py:1718`); Aria `create_task` with `source='assistant'` (`assistant_tools.py:648`); automation engine (`services/automation_engine.py:230`) | Dashboard **via supabase-js/RLS** (`DashboardPage.tsx:107`); `TasksPanel.tsx`; Aria `list_tasks` |
 | `executive_meeting_action_items` | `business_id, meeting_id, title, description, status, priority, due_date, assignee_name, assignee_email, success_criteria, rationale, times_reviewed, last_reviewed_at, completed_at` | board-meeting `extract-actions` (`executive_meeting_api.py:955`) | `GET/PUT /v1/executive-meeting/action-items` (`:249`, `:298`); `goals_actions` and `last_meeting` loaders |
 | `executive_meeting_goals` | `business_id, title, category, horizon, kpi_name, kpi_target_value, kpi_current_value, progress_history, set_in_meeting_id, status, target_date` | board meeting | `GET/PUT …/goals` (`:333`, `:380`) |
 
 **Status vocabularies already disagree** (Codex review 1): the backend
-completes tasks as `done` (`main.py:1749`), the frontend as `completed`
+completes tasks as `done` (`main.py:1797`), the frontend as `completed`
 (`TasksPanel.tsx:120`), and the prep loader counts only `completed` as done
 (`executive_meeting_data_loaders/tasks.py:73`) — so a task completed through
 the API is never counted as completed in a board meeting. Action items use
@@ -207,7 +212,7 @@ plus source id, and keeps the board-meeting entitlement that the action-item
 endpoint enforces today (`require_tier_feature`, `executive_meeting_api.py:257`). "Aria's tasks vs yours, told apart by
 assignee" (the Tasks pillar) needs an assignee column on `tasks` or a new
 table — **a migration, therefore RED**, and subject to the one-migration-in-flight
-rule (`AGENTS.md` §7) while 030b Release 2 is in flight.
+rule (`AGENTS.md` §7) — whichever migration holds the slot at the time.
 
 ### A5 · `realtime_voice.py`
 
@@ -294,8 +299,8 @@ All are OpenAI. No other provider is called anywhere; the frontend calls none.
 | 5 | `receptionist_call_handler.py:55`, `:733` | phone receptionist | `gpt-realtime-2` (env) + `whisper-1` | WebSocket, GA |
 | 6 | `receptionist_api.py:612-633` | `preview_voice` | `gpt-4o-mini-tts`, fallback `tts-1-hd` | SDK |
 | 7 | `receptionist_api.py:730-764` | `preview_voice_preset` | same | SDK |
-| 8 | `main.py:2408` | `/v1/tts` (chat voice mode) | `tts-1` | SDK |
-| 9 | `openai_utils.py:26` | `generate_call_summary` (from `main.py:1872`) | `gpt-4o-mini` | SDK |
+| 8 | `main.py:2456` | `/v1/tts` (chat voice mode) | `tts-1` | SDK |
+| 9 | `openai_utils.py:26` | `generate_call_summary` (from `main.py:1920`) | `gpt-4o-mini` | SDK |
 | 10 | `app/email/service.py:405` | `analyze_email_batch` | `gpt-4o-mini` | SDK |
 | 11 | `app/email/service.py:489` | `generate_email_briefing_markdown` | `gpt-5` | SDK |
 | 12 | `app/email/service.py:555` | `generate_email_reply_draft` | `gpt-4o-mini` | SDK |
@@ -323,8 +328,8 @@ platform-wide monetary metering: `usage_meters` is referenced by no code
 
 ### A8 · How Aria reads business data, and whether it respects RLS and business scoping
 
-**Path.** Chat: `POST /v1/assistant/chat` (`main.py:2299`) → verify JWT inline
-→ `_assert_ai_access(…, "aria_chat")` (`main.py:2346`) → `process_chat_message`
+**Path.** Chat: `POST /v1/assistant/chat` (`main.py:2347`) → verify JWT inline
+→ `_assert_ai_access(…, "aria_chat")` (`main.py:2394`) → `process_chat_message`
 (`assistant_chat.py:660`) → resolve conversation (ownership by `user_id`,
 `:645`) → resolve business by active membership (`get_business_for_user`,
 `:450`) → tool loop → `execute_tool(name, args, business.id, tz)`. Voice
@@ -585,7 +590,7 @@ metering easier.
 ### B8 · Voice
 
 **Current state.** §A5 — Beta protocol, expected broken; separate brain;
-gated. Chat also has a "voice mode" using `/v1/tts` (`main.py:2408`, `tts-1`).
+gated. Chat also has a "voice mode" using `/v1/tts` (`main.py:2456`, `tts-1`).
 
 **Gap.** GA migration; then route through Core with the shared tool
 registry; British voice choice (open question 4).
@@ -678,7 +683,7 @@ client-side fallback — Headline 7).
 **Current.** Route exists (`/app/board-meeting`), reachable via AI Hub's
 default sub-tab. **Gap.** A home entry point and a nav item. **Effort.** S.
 **Risk.** None to isolation; board meetings are Pro and above
-(`auth.py:522`) — Starter needs an upgrade prompt, which
+(`auth.py:523`) — Starter needs an upgrade prompt, which
 `components/board-meeting/UpgradePrompt.tsx` already provides.
 
 ### C5 · AI Hub dissolves
@@ -687,7 +692,7 @@ Booking → Calendar; CEO Briefing (WhatsApp settings) → Comms or Settings;
 Aria → home/dock; Board Meeting → own nav item. **Effort.** M, mostly moves.
 **Risk.** Low. (An earlier draft questioned `AIHubPage.tsx:87` passing
 `me.id` as `businessId`; Codex review 1 settled it — `/v1/me` sets `id` to the
-business id, `main.py:1330`.)
+business id, `main.py:1363`.)
 
 ### C6 · Alive, not gimmicky
 **Current.** No text streaming: chat is one POST returning the full reply
@@ -750,7 +755,7 @@ review 1; none of these authorises changing the adopted North Star.
    reusable backend machinery sits behind it: `gather_business_data`, the
    scheduler, and `GET /v1/briefing/today`.
 4. **The Tasks pillar implies a migration** that the North Star's phase plan
-   does not flag, and migrations queue behind 030b Release 2.
+   does not flag, and migrations queue one at a time.
 5. **Voice is a suspected stability defect, not only a Phase 2 feature.** If
    it is sold on Pro and broken, the GA migration is a stability
    prerequisite — the North Star's own prerequisite rule puts it ahead of

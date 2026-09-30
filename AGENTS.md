@@ -32,7 +32,7 @@ owner run it.** These rules are approved and bind every agent:
 6. **If a request conflicts with the North Star, stop and flag it to Mike.
    Treat it as RED** (§2) — explicit approval before proceeding.
 7. **Security and tenant-isolation work is never deprioritised for North Star
-   features.** 030b Release 2 and RLS batches 4–5 keep their place in the
+   features.** 033 STEP 21 and the BH-001 §6 findings keep their place in the
    sequence.
 
 The per-PR checklist is `docs/NORTH_STAR.md` §8; the merge gate is

@@ -15,7 +15,10 @@ Michael adopted `docs/NORTH_STAR.md` as the end goal on **28 September
 2026**: Business Hero is Aria, an AI business partner who knows the whole
 business. All work is judged against it from that date (`AGENTS.md`
 § North Star; `docs/DEFINITION_OF_DONE.md` Gate 7). The security sequence is
-unchanged — **030b Release 2 is still next.**
+unchanged. **030b Release 2 was already applied on 27 Sep 2026 (PR #13)**; the
+next security items are 033 STEP 21 (§8) and the BH-001 §6 follow-ups.
+The North Star work of 28 Sep began from a stale local `main` and wrongly
+repeated "030b Release 2 is still next"; corrected 30 Sep 2026.
 
 | Artefact | Status |
 |---|---|
@@ -27,9 +30,9 @@ Codex review 1 also surfaced two present defects, both existing code, neither
 fixed yet: the voice WebSocket forwards arbitrary client messages to the model
 and executes unmapped tool names (`realtime_voice.py:838`, `:310`), and task
 completion is written as `done` by the API but counted only as `completed` by
-the board-meeting loader (`main.py:1749`, `executive_meeting_data_loaders/tasks.py:73`).
+the board-meeting loader (`main.py:1797`, `executive_meeting_data_loaders/tasks.py:73`).
 One of its findings bears on this document: Aria chat and realtime voice
-have been gated server-side since BH-006 (`main.py:2346`,
+have been gated server-side since BH-006 (`main.py:2394`,
 `realtime_voice.py:689`), so the "none" entries for them in §5's ungated
 table predate that merge. §5 has not been reconciled here.
 
