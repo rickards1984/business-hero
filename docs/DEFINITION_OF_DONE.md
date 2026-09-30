@@ -75,6 +75,34 @@ This is the merge gate. A reviewer refusing a merge cites a gate number.
       next agent reads the file, not the history
 - [ ] Nothing in the repository now contradicts the change
 
+## Gate 7 — North Star alignment
+
+`docs/NORTH_STAR.md` §8, made checkable. Rules in `AGENTS.md` § North Star.
+
+- [ ] The PR description names the principle (P1–P9), pillar or phase it
+      serves — or, if none, the prerequisite it meets: security, tenant
+      isolation, correctness or stability
+- [ ] **Aria read tools for new data.** Once the tool layer exists: any new
+      data the app stores or fetches ships with a typed Aria read tool,
+      scoped by `business_id` derived from the authenticated context (never
+      from a model-supplied argument), with a two-business test in the style
+      of `backend/tests/test_tenant_isolation_backend_path.py` proving it
+      returns none of the other tenant's rows. Until the tool layer exists,
+      the PR states which data Aria cannot yet see
+- [ ] **Grounding tests for Aria-facing numbers.** Any figure Aria can state
+      — through a tool result, the business snapshot or a briefing — has a
+      test that seeds known rows and asserts the figure Aria is given equals
+      the value computed from the database, to the penny for money. A figure
+      shown under Aria's name that no tool or snapshot produced (for example
+      a client-side fallback) fails this gate
+- [ ] **No provider calls outside the router.** No new import of a model
+      provider SDK, and no new request to a provider endpoint (HTTP or
+      WebSocket), outside the routing layer. Until the router exists, a PR
+      that adds one names it as debt, and it is added to the inventory in
+      `docs/ARIA_GAP_ANALYSIS.md`
+- [ ] Nothing in the change deprioritises security or tenant-isolation work
+      already in the sequence
+
 ---
 
 ## Additional gates for RED work

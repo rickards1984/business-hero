@@ -5,6 +5,9 @@ governs.** This file adds only what is specific to Claude Code, and
 deliberately does not repeat AGENTS.md. If the two ever disagree, AGENTS.md
 wins — tell Mike, so the contradiction gets fixed rather than carried.
 
+**North Star:** read `docs/NORTH_STAR.md` before any planning or feature
+work; the rules it imposes are in `AGENTS.md` § North Star.
+
 | You need | Read |
 |---|---|
 | The rules — verification loop, autonomy tiers, do-not-regress, task packet, workflow | `AGENTS.md` |

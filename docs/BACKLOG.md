@@ -23,6 +23,9 @@ an audit reference — is not ready to become a ticket (`AGENTS.md` §6).
 |---|---|
 | Delete `MASTER_ADMIN_KEY` from the Railway environment and remove `verify_master_key` | `030B-SPEC.md` PART C; confirmed unused 8 Sep 2026 |
 | Locate the 14-char `sk_` API key generator, or prove it unreachable | `030B-SPEC.md` scope note 4 — still open |
+| Let owners rename the AI phone receptionist — post-RC1, once users ask for it | ADR 0001 D10 / proposal D14 (Mike, 28 Sep 2026). Receptionist identity today: `receptionist_configs.personality_prompt`, `greeting_message` |
+| Task completion is written `done` by the API and counted only as `completed` by the board meeting, so API-completed tasks go uncounted | `main.py:1749` vs `executive_meeting_data_loaders/tasks.py:73`; Codex review 1. Fixed within proposal B5 if admitted |
+| Voice WebSocket forwards arbitrary client messages to the model and executes unmapped tool names | `realtime_voice.py:838`, `:310`; Codex review 1. Fixed within proposal A1 |
 
 ---
 
