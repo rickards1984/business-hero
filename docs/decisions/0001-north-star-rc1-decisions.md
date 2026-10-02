@@ -57,7 +57,7 @@ works from stale figures. Serves P2.
   `POST /v1/email/sync/ensure` (`app/email/router.py:917`) is cache-first,
   schedules a background sync only when stale, and returns instantly. Extend
   it to accounting and calendar. `POST /v1/accounting/sync-all`
-  (`main.py:4598`) currently runs synchronously on the request and must not be
+  (`main.py:4646`) currently runs synchronously on the request and must not be
   what login waits on.
 - **Says how fresh it is.** Every figure shows "updated N minutes ago"; if a
   sync fails the page and Aria say so (the `data_quality` pattern). "Always
