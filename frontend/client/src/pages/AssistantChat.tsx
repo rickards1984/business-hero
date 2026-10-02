@@ -56,6 +56,16 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
   const [error, setError] = useState('');
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [realtimeMode, setRealtimeMode] = useState(false);
+  // NS-A2: voice is switched off server-side until the Realtime GA migration.
+  // Start hidden (null = not yet known) so a broken button never flashes up.
+  const [voiceStatus, setVoiceStatus] = useState<{ available: boolean; message: string | null } | null>(null);
+  useEffect(() => {
+    apiRequest('GET', '/v1/realtime/voice/status')
+      .then((r) => r.json())
+      .then((data) => setVoiceStatus({ available: !!data.available, message: data.message ?? null }))
+      .catch(() => setVoiceStatus({ available: false, message: null }));
+  }, []);
+  const voiceAvailable = voiceStatus?.available === true;
   const inputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -226,36 +236,44 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
               Your AI business assistant. I can help with emails, tasks, calls, invoices, and finances.
             </Typography>
 
-            <Button
-              variant="contained"
-              size="large"
-              onClick={() => setRealtimeMode(true)}
-              startIcon={<MicIcon />}
-              sx={{
-                px: 5,
-                py: 1.5,
-                borderRadius: '9999px',
-                fontSize: '0.9375rem',
-                fontWeight: 600,
-                background: 'linear-gradient(135deg, var(--color-aria-500) 0%, var(--color-aria-600) 100%)',
-                boxShadow: '0 4px 20px rgba(139,92,246,0.35)',
-                textTransform: 'none',
-                height: 52,
-                mb: 2,
-                '&:hover': {
-                  background: 'linear-gradient(135deg, var(--color-aria-600) 0%, #6D28D9 100%)',
-                  boxShadow: '0 8px 30px rgba(139,92,246,0.45)',
-                  transform: 'translateY(-2px)',
-                },
-                transition: 'all 200ms cubic-bezier(0.4,0,0.2,1)',
-              }}
-            >
-              Talk to Aria
-            </Button>
+            {voiceAvailable ? (
+              <>
+                <Button
+                  variant="contained"
+                  size="large"
+                  onClick={() => setRealtimeMode(true)}
+                  startIcon={<MicIcon />}
+                  sx={{
+                    px: 5,
+                    py: 1.5,
+                    borderRadius: '9999px',
+                    fontSize: '0.9375rem',
+                    fontWeight: 600,
+                    background: 'linear-gradient(135deg, var(--color-aria-500) 0%, var(--color-aria-600) 100%)',
+                    boxShadow: '0 4px 20px rgba(139,92,246,0.35)',
+                    textTransform: 'none',
+                    height: 52,
+                    mb: 2,
+                    '&:hover': {
+                      background: 'linear-gradient(135deg, var(--color-aria-600) 0%, #6D28D9 100%)',
+                      boxShadow: '0 8px 30px rgba(139,92,246,0.45)',
+                      transform: 'translateY(-2px)',
+                    },
+                    transition: 'all 200ms cubic-bezier(0.4,0,0.2,1)',
+                  }}
+                >
+                  Talk to Aria
+                </Button>
 
-            <Typography sx={{ fontSize: '0.8125rem', color: 'rgba(232, 230, 225, 0.4)', mb: 4 }}>
-              or type a message below
-            </Typography>
+                <Typography sx={{ fontSize: '0.8125rem', color: 'rgba(232, 230, 225, 0.4)', mb: 4 }}>
+                  or type a message below
+                </Typography>
+              </>
+            ) : (
+              <Typography sx={{ fontSize: '0.875rem', color: 'hsl(var(--muted-foreground))', mb: 4, maxWidth: 360 }}>
+                {voiceStatus?.message ?? 'Type a message below to talk to Aria.'}
+              </Typography>
+            )}
 
             {/* Quick action chips */}
             <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, justifyContent: 'center', maxWidth: 500 }}>
@@ -312,6 +330,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                 />
               ))}
               <Box sx={{ flex: 1 }} />
+              {voiceAvailable && (
               <Button
                 variant="outlined"
                 size="small"
@@ -326,6 +345,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
               >
                 Voice
               </Button>
+              )}
             </Box>
 
             {/* Messages */}

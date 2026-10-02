@@ -486,7 +486,8 @@ rather than to `authenticated` — and all seven fail it.
 | Accounting sync (Xero/QBO/FreeAgent) | **apparently complete but unverified** | Xero most developed. `accounting.py` still does money math in `float` |
 | Email summarisation | **apparently complete but unverified** | "Analyse All" is now implemented — `EmailsTab.tsx:289` calls `analyzeEmails`. `audits/FINDINGS.md` UI-7 is **fixed** |
 | AI receptionist (Twilio + OpenAI) | **apparently complete but unverified** | Signature validation and stream tokens shipped. **Ungated and unmetered** |
-| Aria chat / voice | **apparently complete but unverified** | Ungated |
+| Aria chat | **apparently complete but unverified** | Gated server-side since BH-006 (`aria_chat`) |
+| Aria realtime voice | **broken — confirmed** | Railway logs, 2 Oct 2026, six sessions on New Body: each reached OpenAI and was refused with `beta_api_shape_disabled`, "The Realtime Beta API is no longer supported". Switched off server-side by NS-A2 (`ARIA_VOICE_ENABLED`, off unless exactly `1`). GA repair after P0-2 metering (ADR 0001 D2) |
 | WhatsApp briefings | **apparently complete but unverified** | Ungated |
 | Board meetings | **apparently complete but unverified** | Gated by the second mechanism |
 | Automation rules | **apparently complete but unverified** | |
