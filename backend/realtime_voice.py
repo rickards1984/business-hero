@@ -19,6 +19,24 @@ ARIA_REALTIME_MODEL = os.getenv("ARIA_REALTIME_MODEL", "gpt-realtime")
 ARIA_REALTIME_VOICE = os.getenv("ARIA_REALTIME_VOICE", "shimmer")
 OPENAI_REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={ARIA_REALTIME_MODEL}"
 
+# NS-A2 — the kill switch. This module still speaks the Realtime BETA
+# protocol, which OpenAI refuses: production, 2 Oct 2026, every session got
+# `beta_api_shape_disabled` ("The Realtime Beta API is no longer supported").
+# Until the GA migration lands (after P0-2 metering — decision 0001 D2), voice
+# is OFF, and off is enforced HERE, before authentication or any provider
+# connection, not by hiding a button (Codex review 1, finding 5). Read per
+# request so a Railway variable change needs no code change. Only the exact
+# string "1" turns it on: a forgotten or mistyped variable leaves it off.
+VOICE_UNAVAILABLE_CODE = 4010
+VOICE_UNAVAILABLE_MESSAGE = (
+    "Voice chat with Aria is being upgraded. Type your message instead "
+    "and she will reply as normal."
+)
+
+
+def aria_voice_enabled() -> bool:
+    return os.getenv("ARIA_VOICE_ENABLED", "0") == "1"
+
 # Tool definitions for the Realtime API
 # NOTE: Realtime API format is different from Chat Completions API
 # - No nested "function" wrapper
@@ -631,6 +649,18 @@ Be honest and helpful:
 Remember: You're Aria, a trusted colleague who happens to have superpowers when it comes to accessing business data. Be warm, be helpful, be real."""
 
 
+@router.get("/v1/realtime/voice/status")
+async def realtime_voice_status():
+    """Whether voice is available, so the app can hide its voice buttons.
+
+    Unauthenticated on purpose: it discloses one platform-wide boolean and
+    nothing about any business.
+    """
+    if aria_voice_enabled():
+        return {"available": True, "message": None}
+    return {"available": False, "message": VOICE_UNAVAILABLE_MESSAGE}
+
+
 @router.websocket("/v1/realtime/voice")
 async def realtime_voice_endpoint(websocket: WebSocket):
     """
@@ -639,6 +669,12 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     """
     await websocket.accept()
     _logger.info("Client WebSocket connected")
+
+    if not aria_voice_enabled():
+        # Before auth and before any provider connection: nothing is spent.
+        await websocket.close(code=VOICE_UNAVAILABLE_CODE,
+                              reason="Aria voice is being upgraded")
+        return
     
     # Authenticate the user
     try:

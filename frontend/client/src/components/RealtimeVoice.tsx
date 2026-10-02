@@ -183,9 +183,10 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
         setIsConnected(false);
       };
       
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         setIsConnected(false);
-        setStatus('Disconnected');
+        // 4010 = voice switched off server-side (NS-A2); say why, not just "Disconnected".
+        setStatus(event.code === 4010 ? 'Voice chat is being upgraded. Please type to Aria instead.' : 'Disconnected');
         stopAudioCapture();
       };
       

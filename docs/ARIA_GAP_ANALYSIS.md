@@ -57,13 +57,12 @@ settle it. §D collects them.
    assistant". The board meeting (`services/executive_meeting_prompts.py:22`)
    is "Aria, the AI executive business advisor". Three prompts, three tool
    lists, two model protocols (P3).
-3. **Aria voice is suspected broken in production.** `realtime_voice.py`
+3. **Aria voice is broken in production — CONFIRMED 2 Oct 2026.** `realtime_voice.py`
    still speaks the Realtime **Beta** protocol (`"OpenAI-Beta": "realtime=v1"`,
    `:721`; Beta session shape `:751-766`). The receptionist's own code records
    that **OpenAI permanently removed the Beta interface on 12 May 2026**
    (`receptionist_call_handler.py:48`) and was migrated to GA. Voice was not.
-   **UNVERIFIED** in production — the removal date is asserted in a comment,
-   not demonstrated by code — and one test call settles it.
+   **Confirmed:** Railway logs, 2 Oct 2026, six sessions on New Body: each reached OpenAI and was refused with `beta_api_shape_disabled`, "The Realtime Beta API is no longer supported". NS-A2 switches it off server-side.
 4. **Every model call is a direct OpenAI call.** 19 grouped operations (24
    invocation expressions) across 12 modules, 10 distinct models, no routing
    layer, no platform metering (§A7). P7 starts from zero.
@@ -225,8 +224,7 @@ rule (`AGENTS.md` §7) — whichever migration holds the slot at the time.
   keys `modalities`, `input_audio_format`, `input_audio_transcription`,
   `temperature` (`:751-766`). Compare the receptionist's GA shape and its
   comment that Beta was removed on 12 May 2026 (`receptionist_call_handler.py:48`,
-  `:720-733`). **Production status UNVERIFIED; suspected broken** — the
-  removal is asserted in a comment, not demonstrated by code.
+  `:720-733`). **Production: CONFIRMED broken** — Railway logs, 2 Oct 2026, six sessions on New Body: each reached OpenAI and was refused with `beta_api_shape_disabled`, "The Realtime Beta API is no longer supported".
 - **The client can drive the model session.** Any client message that is not
   a `config` message is forwarded to OpenAI verbatim (`:838-840`), and the
   executor accepts unmapped tool names (`tool_name_map.get(name, name)`,
@@ -720,7 +718,7 @@ per B8. **Risk.** No frontend tests exist; Mike is the browser test
 
 | Item | What would settle it |
 |---|---|
-| Aria voice is broken in production (Beta protocol) | One voice session on a Pro test account, or Railway logs for `/v1/realtime/voice` |
+| ~~Aria voice is broken in production~~ | **Settled 2 Oct 2026:** confirmed by Railway logs (`beta_api_shape_disabled`) |
 | `ARIA_REALTIME_MODEL`, `RECEPTIONIST_REALTIME_MODEL`, `QUOTE_AI_MODEL`, `EXECUTIVE_MEETING_AI_MODEL` production values | Railway environment |
 | The live privileges of the backend's database role | `pg_roles` / `rolbypassrls` on prod, read-only |
 | Whether OpenAI's terms in force cover UK customer financial and email data (P9) | Legal review — North Star open question 5 |
