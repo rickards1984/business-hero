@@ -245,6 +245,27 @@ REALTIME_TOOLS = [
 ]
 
 
+# Advertised voice tool name -> shared dispatcher name. Only these run
+# (NS-A1). None may map to an action in assistant_tools.PROHIBITED_ACTIONS.
+VOICE_TOOL_MAP = {
+    "list_emails": "list_emails",
+    "get_schedule": "get_calendar_briefing",
+    "get_recent_calls": "list_calls",
+    "get_tasks": "list_tasks",
+    "get_financial_summary": "get_accounting_summary",
+    "analyze_spending": "analyze_spending",
+    "search_transactions": "list_transactions",
+    "list_invoices": "list_invoices",
+    "get_invoice_summary": "get_invoice_summary",
+    "get_xero_financials": "get_xero_financial_summary",
+    "get_overdue": "get_overdue_invoices",
+    "read_email": "get_email_detail",
+    "draft_reply": "draft_email_reply",
+    "business_overview": "get_business_overview",
+    "cashflow_forecast": "get_cashflow_forecast",
+}
+
+
 async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: str) -> str:
     """Execute a tool and return the result as a string."""
     _logger.info(f"Executing tool: {tool_name} with args: {args} for user={user_id}, business={business_id}")
@@ -254,23 +275,7 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
         from assistant_tools import execute_tool as execute_assistant_tool
         
         # Map realtime tool names to assistant_tools names if different
-        tool_name_map = {
-            "list_emails": "list_emails",
-            "get_schedule": "get_calendar_briefing",
-            "get_recent_calls": "list_calls",
-            "get_tasks": "list_tasks",
-            "get_financial_summary": "get_accounting_summary",
-            "analyze_spending": "analyze_spending",
-            "search_transactions": "list_transactions",
-            "list_invoices": "list_invoices",
-            "get_invoice_summary": "get_invoice_summary",
-            "get_xero_financials": "get_xero_financial_summary",
-            "get_overdue": "get_overdue_invoices",
-            "read_email": "get_email_detail",
-            "draft_reply": "draft_email_reply",
-            "business_overview": "get_business_overview",
-            "cashflow_forecast": "get_cashflow_forecast",
-        }
+        tool_name_map = VOICE_TOOL_MAP
         
         # NS-A1: the executor used to pass any unmapped name straight to the
         # shared dispatcher (`.get(name, name)`), so a client driving the
@@ -502,20 +507,20 @@ When presenting Xero data, frame it like a financial advisor:
 You can read and draft, but you cannot send emails, chase invoices, book
 calendar events, or add or remove tasks. A tap-to-approve button is coming.
 When asked, say so plainly and point them to the right place:
-- Email: "I can't send emails myself just yet. I've drafted it - open it in your Inbox to send it."
-- Chase: "I can't send chases myself just yet. Open the invoice in Finance and press Chase."
-- Calendar: "I can't book that myself yet. Here are the free slots so you can add it."
-- Tasks: "I can't add tasks myself just yet. Add it on the Tasks list and I'll keep track of it."
+- Email: "I can't send emails myself just yet. I can read you a draft to copy into a reply from your own email." (Drafts are not saved anywhere; never say they are.)
+- Chase: "I can't send chases myself just yet. Open the invoice in Finance and use Send Chase Email."
+- Calendar: "I can't book that myself yet. I can tell you what's already in your diary - add the new one in your calendar." (You cannot work out free slots in voice.)
+- Tasks: "I can't add tasks myself just yet. Add it in the Tasks panel on your Dashboard and I'll keep track of it."
 Never say or imply you have sent, booked, chased or added something.
 
 **Reporting overdue invoices:**
 Lead with the total and then get specific:
-- "You've got 3 overdue invoices right now, totalling £4,200. The biggest one is £2,500 from Davidson Ltd - that's been sitting there for 28 days. Want me to chase any of them?"
+- "You've got 3 overdue invoices right now, totalling £4,200. The biggest one is £2,500 from Davidson Ltd - that's been sitting there for 28 days. You can chase it from the invoice in Finance."
 - Offer the next step: "Want me to pull up the details so you can chase them from Finance?"
 
 **Drafting email replies:**
 When drafting, be collaborative:
-- "I've drafted a reply to Sarah's email - it's professional but firm about the deadline. Want me to read it out? You can send it from your Inbox."
+- "I've drafted a reply to Sarah's email - it's professional but firm about the deadline. Want me to read it out so you can copy it into your reply?"
 - "Here's what I'd suggest sending back to John..." then read key points.
 - Always offer to adjust the tone: "I can make it more formal or more casual if you prefer."
 
@@ -573,8 +578,8 @@ Be honest and helpful:
 **When asked "how's business doing?":**
 "Let me pull up the numbers... Right, so this month you're looking at a profit of about £1,500. Not your biggest month, but solid. Income's been steady, though expenses crept up a bit - looks like that was mainly the new equipment purchase. On the invoice side, you've got £800 outstanding but nothing overdue, so cash flow's healthy. Overall? You're in good shape."
 
-**Chasing an overdue invoice:**
-"Done - I've sent a polite chase to Davidson Ltd for that £2,500 invoice. It mentions it's 28 days overdue and asks them to settle it this week. I'll keep track and let you know if they respond."
+**Asked to chase an overdue invoice:**
+"I can't send chases myself just yet. Davidson Ltd owe £2,500 and it's 28 days overdue - open that invoice in Finance and use Send Chase Email, and I'll keep an eye on it."
 
 **Cash flow forecast:**
 "Looking ahead 30 days - you've got around £6,800 expected in from three outstanding invoices, and your usual outgoings sit at about £4,200. So you should be comfortable. The only thing to watch is that Carter invoice - if it slips past the 15th, you'll want to chase it sharpish."

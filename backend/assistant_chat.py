@@ -186,7 +186,7 @@ Each item needs: description, quantity, unit, unit_cost, category (labour/materi
                 "groups_summary": "\n".join(summary_lines),
                 "estimated_duration": quote_data.get("estimated_duration", ""),
                 "notes": quote_data.get("notes", ""),
-                "message": f"I've priced up the job at £{total:,.2f} + VAT (£{total*1.2:,.2f} inc VAT). Would you like me to save this as a quote?",
+                "message": f"I've priced up the job at £{total:,.2f} + VAT (£{total*1.2:,.2f} inc VAT). If you're happy with it, you can create the quote from the Quotes page.",
             }
         except Exception as e:
             return {"error": f"Quote generation failed: {str(e)}"}
@@ -277,10 +277,10 @@ You can read and draft, but you cannot send emails, chase invoices, book
 calendar events, or add or remove tasks. The owner does those themselves for
 now; a tap-to-approve button is coming. When asked, say so plainly and point
 them to the right place:
-- Email: offer the draft (use draft_email_reply), and say they can open it in their Inbox to send it.
-- Invoice chase: say they can open the invoice in Finance and press Chase.
-- Calendar: offer free slots from check_calendar_availability so they can add it.
-- Tasks: say they can add or remove it on the Tasks list, and you will keep track of it.
+- Email: show the draft in this conversation (use draft_email_reply), and say they can copy it into a reply from their own email. The draft is not saved anywhere, so never say it is.
+- Invoice chase: say they can open the invoice in Finance and use Send Chase Email.
+- Calendar: offer free slots from check_calendar_availability, and say they can add it in their own calendar.
+- Tasks: say they can add or remove it in the Tasks panel on their Dashboard, and you will keep track of it.
 Never say or imply you have sent, booked, chased or added something.
 
 ### Email Briefings
@@ -319,7 +319,7 @@ You cannot book them yourself yet: offer the slots so the owner can add it.
 When the user wants to reply to or send an email:
 1. Use draft_email_reply to prepare it, and show them the draft
 2. Make sure the recipient is an actual email address from list_emails results, not just a name
-3. Tell them they can open it in their Inbox to send it. You cannot send it yourself yet.
+3. Tell them they can copy it into a reply from their own email. You cannot send it yourself yet, and it is not saved anywhere.
 
 ### Critical Rules
 - NEVER pretend to perform an action. If a tool call is needed, make the tool call. Never describe performing an action in text that requires a tool.
@@ -342,11 +342,11 @@ When asked about finances, money, profit, or business performance:
 - Offer insights and suggestions based on the data
 
 ### Quoting
-You can help generate, manage, and send quotes/estimates for jobs:
+You can help price up jobs and check on quotes. You cannot save or send quotes yourself:
 1. Use generate_ai_quote when the user describes a job they need priced up
 2. Use list_quotes to show recent quotes or check quote statuses
 3. When generating a quote, present a clear cost breakdown with group totals, subtotal, and VAT
-4. Offer to save the generated quote if the user is happy with it
+4. If the user is happy with a generated price, tell them they can create the quote from the Quotes page
 5. Use UK pricing and trade terminology
 6. Use send_quote when the user wants to send a quote via email or WhatsApp — this will confirm the quote is ready and direct them to the Send button for the actual delivery (which generates a professional PDF)
 

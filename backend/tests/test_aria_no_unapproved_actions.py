@@ -217,6 +217,55 @@ def test_voice_prompt_does_not_offer_the_actions():
     assert offered == [], f"voice instructions still offer {offered}"
 
 
+def test_no_voice_tool_maps_to_a_prohibited_action():
+    """Codex NS-A1 review: re-adding an alias such as `send_chase ->
+    send_invoice_chase` to the map must fail here, not rely on a later
+    check to catch it."""
+    assert set(realtime_voice.VOICE_TOOL_MAP.values()).isdisjoint(
+        assistant_tools.PROHIBITED_ACTIONS)
+    assert set(realtime_voice.VOICE_TOOL_MAP).isdisjoint(PROHIBITED_VOICE)
+
+
+# Phrases that promise an action Aria cannot take, or a place that does not
+# exist (Codex NS-A1 review, findings 1-3). Her draft is not saved anywhere;
+# voice has no availability tool; a chase is sent from the invoice in Finance.
+_MISLEADING = (
+    "inbox to send", "in your inbox", "in their inbox", "free slots so you can",
+    "chase any of them", "i've sent", "sent a polite", "send a nudge",
+    "shall i just send", "save this as a quote", "offer to save", "press chase",
+    "send it using send_email",
+)
+
+
+def _everything_aria_is_told():
+    chat = assistant_chat.build_system_prompt(
+        BusinessContext(id=BIZ, name="Test Co", timezone=TZ), user_name="Mike")
+    voice = realtime_voice.build_system_instructions("Test Co", "Mike")
+    descriptions = [t["function"]["description"] for t in assistant_tools.TOOL_DEFINITIONS]
+    descriptions += [t["description"] for t in realtime_voice.REALTIME_TOOLS]
+    refusals = list(assistant_tools.PROHIBITED_ACTIONS.values())
+    return {"chat prompt": chat, "voice prompt": voice,
+            "tool descriptions": "\n".join(descriptions),
+            "refusals": "\n".join(refusals)}
+
+
+@pytest.mark.parametrize("phrase", _MISLEADING)
+def test_aria_is_told_nothing_that_promises_an_action_or_a_missing_place(phrase):
+    found = [where for where, text in _everything_aria_is_told().items()
+             if phrase in text.lower()]
+    assert found == [], f"{phrase!r} appears in {found}"
+
+
+def test_tool_results_do_not_promise_sending_or_saving():
+    """Two tool RESULTS told Aria she could send or save: the reply-draft
+    instruction and the AI-quote message. Their source must not."""
+    import inspect
+    sources = inspect.getsource(assistant_tools._draft_email_reply) + \
+        inspect.getsource(assistant_chat._execute_tool_async)
+    for phrase in ("send it using send_email", "save this as a quote"):
+        assert phrase not in sources.lower(), phrase
+
+
 def test_voice_refuses_a_tool_name_it_never_advertised(tripwire):
     """The executor used to accept any name (`tool_name_map.get(n, n)`)."""
     raw = asyncio.run(realtime_voice.execute_tool("drop_everything", {}, USER, BIZ))

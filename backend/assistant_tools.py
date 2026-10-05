@@ -395,7 +395,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "send_quote",
-            "description": "Send a quote to a customer via email or WhatsApp. Use when the user says to send a quote.",
+            "description": "Check a quote is ready to send by email or WhatsApp and tell the user where to send it. Does not send anything: the user sends it with the Send button in Quotes.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -438,23 +438,26 @@ def _decrypt_token(ciphertext: str) -> str:
 # The messages are what Aria relays; wording approved by Mike, 5 Oct 2026.
 PROHIBITED_ACTIONS = {
     "send_email": (
-        "Aria can't send emails herself yet. Offer the draft, and tell the "
-        "owner to open it in their Inbox to send it."
+        "Aria can't send emails herself yet. Show the owner the draft text "
+        "in this conversation so they can copy it into a reply from their "
+        "own email. Do not say the draft is saved anywhere: it is not."
     ),
     "send_invoice_chase": (
         "Aria can't send invoice chases herself yet. Tell the owner to open "
-        "the invoice in Finance and press Chase."
+        "the invoice in Finance and use Send Chase Email."
     ),
     "create_calendar_event": (
-        "Aria can't book calendar events herself yet. Offer the free slots "
-        "from check_calendar_availability so the owner can add it."
+        "Aria can't book calendar events herself yet. Tell the owner to add "
+        "it in their own calendar; in chat, offer free slots from "
+        "check_calendar_availability first."
     ),
     "create_task": (
-        "Aria can't add tasks herself yet. Tell the owner to add it on the "
-        "Tasks list, and she'll keep track of it from there."
+        "Aria can't add tasks herself yet. Tell the owner to add it in the "
+        "Tasks panel on their Dashboard, and she'll keep track of it from there."
     ),
     "delete_task": (
-        "Aria can't remove tasks. Tell the owner to remove it on the Tasks list."
+        "Aria can't remove tasks. Tell the owner to remove it in the Tasks "
+        "panel on their Dashboard."
     ),
 }
 
@@ -2637,7 +2640,7 @@ def _draft_email_reply(engine, business_id: str, args: dict) -> dict:
             "replying_to": from_email,
             "original_subject": subject,
             "drafts": result_drafts,
-            "instruction": "Present these options to the user. They can pick one, and you can send it using send_email."
+            "instruction": "Present these options to the user. They can pick one and copy it into a reply from their own email. You cannot send it."
         }
 
     except Exception as e:
