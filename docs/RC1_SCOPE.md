@@ -253,7 +253,7 @@ P0-2 needs, `assistant_tools.py`), the P0 ticket goes first.
 | Item | What | Effort |
 |---|---|---|
 | **NS-A1** | Aria stops acting on her own: all five model-triggered mutations refused **server-side**, at both chat and voice execution boundaries; voice stops forwarding arbitrary client messages | M |
-| **NS-A2** | Voice: confirm broken, then disable server-side before the provider connection opens; GA repair after P0-2 | S |
+| **NS-A2** | Voice: **confirmed broken 2 Oct 2026**; disabled server-side before the provider connection opens; GA repair after P0-2 | S |
 | **NS-B1** | Two-tenant and grounding tests over Aria's tools, by tool class | L |
 | **NS-B2** | Tool registry and citation contracts | L |
 | **NS-B3** | Model router, request/response calls — this *is* P1-1 | L |
