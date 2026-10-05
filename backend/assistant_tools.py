@@ -1773,25 +1773,20 @@ def _get_google_calendar_token(engine, business_id: str):
     return access_token, account_id, refresh_ciphertext
 
 
-async def check_calendar_availability(
+async def fetch_busy_periods(
     business_id: str,
-    date: str,
-    duration_minutes: int = 60,
-    start_hour: int = 9,
-    end_hour: int = 17,
-    calendar_id: str = "primary",
+    calendar_id: str,
+    time_min: str,
+    time_max: str,
 ) -> dict:
-    """Check available time slots on a given date using Google Calendar FreeBusy API."""
-    from datetime import datetime as _dt, timedelta as _td
-
+    """Google free/busy for one calendar: {"busy": [{start, end}, ...]} in
+    UTC, or {"error": ...}. `time_min`/`time_max` must carry their real UTC
+    offset (see services/booking.freebusy_window) — a local clock time
+    labelled "Z" is what made availability an hour out in summer."""
     access_token, account_id, refresh_ciphertext = _get_google_calendar_token(engine, business_id)
 
     if not access_token:
-        return {"error": "Google Calendar not connected", "slots": []}
-
-    date_obj = _dt.fromisoformat(date)
-    time_min = date_obj.replace(hour=start_hour, minute=0, second=0).isoformat() + "Z"
-    time_max = date_obj.replace(hour=end_hour, minute=0, second=0).isoformat() + "Z"
+        return {"error": "Google Calendar not connected"}
 
     async def _freebusy(token: str):
         async with httpx.AsyncClient(timeout=30) as client:
@@ -1808,35 +1803,52 @@ async def check_calendar_availability(
             access_token = _refresh_google_token(engine, account_id, refresh_ciphertext)
             resp = await _freebusy(access_token)
         except Exception:
-            return {"error": "Calendar token expired — please reconnect Google", "slots": []}
+            return {"error": "Calendar token expired — please reconnect Google"}
 
     if resp.status_code != 200:
-        return {"error": f"Calendar API error: {resp.status_code}", "slots": []}
+        return {"error": f"Calendar API error: {resp.status_code}"}
 
-    busy_periods = resp.json().get("calendars", {}).get(calendar_id, {}).get("busy", [])
+    return {"busy": resp.json().get("calendars", {}).get(calendar_id, {}).get("busy", [])}
 
-    available_slots = []
-    current_time = date_obj.replace(hour=start_hour, minute=0, second=0)
-    end_time = date_obj.replace(hour=end_hour, minute=0, second=0)
-    slot_duration = _td(minutes=duration_minutes)
 
-    while current_time + slot_duration <= end_time:
-        slot_end = current_time + slot_duration
-        is_busy = False
-        for busy in busy_periods:
-            busy_start = _dt.fromisoformat(busy["start"].replace("Z", "+00:00")).replace(tzinfo=None)
-            busy_end = _dt.fromisoformat(busy["end"].replace("Z", "+00:00")).replace(tzinfo=None)
-            if current_time < busy_end and slot_end > busy_start:
-                is_busy = True
-                break
-        if not is_busy:
-            available_slots.append({
-                "start": current_time.strftime("%H:%M"),
-                "end": slot_end.strftime("%H:%M"),
-                "start_iso": current_time.isoformat(),
-                "end_iso": slot_end.isoformat(),
-            })
-        current_time += _td(minutes=30)
+async def check_calendar_availability(
+    business_id: str,
+    date: str,
+    duration_minutes: int = 60,
+    start_hour: int = 9,
+    end_hour: int = 17,
+    calendar_id: str = "primary",
+    timezone: str = "Europe/London",
+) -> dict:
+    """Free slots on a date between `start_hour` and `end_hour`, local time.
+
+    NS-R1: the maths is services/booking's, in the business's time zone.
+    Notice, advance and buffer rules belong to booking settings, which this
+    general-purpose tool does not have, so they are left off here."""
+    from datetime import date as _date, time as _time
+    from services import booking as _booking
+
+    rules = _booking.BookingRules(
+        tz=_booking.ZoneInfo(timezone or _booking.DEFAULT_TIMEZONE),
+        hours={d: (_time(start_hour, 0), _time(end_hour, 0)) for d in _booking._DAYS},
+        appointment_types=(), buffer_minutes=0, min_notice_hours=0,
+        max_advance_days=3650, calendar_id=calendar_id, confirmation_message=None,
+    )
+    day = _date.fromisoformat(date)
+    time_min, time_max = _booking.freebusy_window(rules, day)
+    fb = await fetch_busy_periods(business_id, calendar_id, time_min, time_max)
+    if fb.get("error"):
+        return {"error": fb["error"], "slots": []}
+    busy = _booking.parse_busy(fb["busy"], rules)
+    # Past slots today are not offered; the tool has no other notice rule.
+    starts = _booking.free_slots(rules, day, duration_minutes, busy,
+                                 now=_booking.now(rules.tz))
+    available_slots = [{
+        "start": s.strftime("%H:%M"),
+        "end": (s + _booking.timedelta(minutes=duration_minutes)).strftime("%H:%M"),
+        "start_iso": s.isoformat(),
+        "end_iso": (s + _booking.timedelta(minutes=duration_minutes)).isoformat(),
+    } for s in starts]
 
     return {
         "date": date,

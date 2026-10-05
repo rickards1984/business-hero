@@ -143,7 +143,8 @@ def test_minimum_notice_is_enforced():
 def test_maximum_advance_is_enforced():
     b = booking()
     now = at(BST_DAY, "08:00")
-    far = BST_DAY + timedelta(days=31)
+    far = BST_DAY + timedelta(days=35)   # a Wednesday: open, but beyond 30 days
+    assert far.weekday() == 2
     assert b.check_slot(rules(), at(far, "10:00"), 60, [], now=now) == "too_far"
 
 
@@ -328,7 +329,7 @@ def test_availability_offered_to_a_caller_is_in_uk_time(monkeypatch, google, now
 
 # --------------------------------------------- Aria's chat availability tool ---
 
-def test_arias_chat_availability_is_in_uk_time_too(monkeypatch, google):
+def test_arias_chat_availability_is_in_uk_time_too(monkeypatch, google, now_is):
     google.events.append((at(BST_DAY, "10:00"), at(BST_DAY, "11:00")))
     result = asyncio.run(assistant_tools.check_calendar_availability(
         business_id=BIZ, date="2026-10-07", duration_minutes=60,

@@ -14,7 +14,7 @@ import os
 import json
 import asyncio
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 
@@ -166,6 +166,55 @@ def _create_task(
 # Function-call handler (invoked by the AI during a live call)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Booking helpers (NS-R1)
+# ---------------------------------------------------------------------------
+
+_BOOKING_UNAVAILABLE = {
+    "success": False,
+    "message": (
+        "Appointment booking is not currently available. "
+        "Please take the caller's details and someone will get back to them."
+    ),
+}
+
+_CALENDAR_TROUBLE = {
+    "success": False,
+    "message": (
+        "I'm having trouble checking the calendar right now. "
+        "Let me take your details and someone will call you back to arrange a time."
+    ),
+}
+
+# What the receptionist is told when a time cannot be booked. It relays the
+# gist and offers to check other times.
+_REFUSAL_WORDS = {
+    "closed": "We're not open that day. Offer to check another day.",
+    "outside_hours": "That time is outside our opening hours. Offer to check available times that day.",
+    "too_soon": "That's too short notice to book. Offer to check later times.",
+    "too_far": "That's too far ahead to book yet. Offer an earlier date.",
+    "clash": "That time has just been taken. Apologise and offer to check other available times.",
+}
+
+
+def _booking_rules(business_id: str, config: dict):
+    """The business's booking rules, or None when booking is off or unset.
+
+    None means no booking at all. The old code fell through to a default
+    hour on the owner's primary calendar when no enabled settings existed.
+    """
+    from db import get_session_context
+    from sqlalchemy import text as sql_text
+    from services import booking as bk
+
+    with get_session_context() as session:
+        row = session.execute(
+            sql_text("SELECT * FROM booking_settings WHERE business_id = :bid AND enabled = true"),
+            {"bid": business_id},
+        ).fetchone()
+    return bk.rules_from_settings(row, (config or {}).get("timezone"))
+
+
 async def handle_receptionist_function_call(
     function_name: str,
     arguments: dict,
@@ -285,89 +334,42 @@ async def handle_receptionist_function_call(
         return {"success": True, "message": "Say a warm goodbye and end the conversation naturally."}
 
     elif function_name == "check_availability":
+        # NS-R1: availability and booking share services/booking's rules,
+        # in the business's own time zone.
         try:
-            from assistant_tools import check_calendar_availability
-            from db import get_session_context
-            import json as _json
+            import assistant_tools
+            from services import booking as bk
+
+            rules = _booking_rules(business_id, config)
+            if rules is None:
+                return _BOOKING_UNAVAILABLE
 
             date_str = arguments.get("date")
-            appointment_type = arguments.get("appointment_type", "Consultation")
-
-            with get_session_context() as session:
-                from sqlalchemy import text as sql_text
-                settings_row = session.execute(
-                    sql_text("SELECT * FROM booking_settings WHERE business_id = :bid AND enabled = true"),
-                    {"bid": business_id},
-                ).fetchone()
-
-            if not settings_row:
-                return {
-                    "success": False,
-                    "message": (
-                        "Appointment booking is not currently available. "
-                        "Please take the caller's details and someone will get back to them."
-                    ),
-                }
-
-            appointment_types = (
-                settings_row.appointment_types
-                if isinstance(settings_row.appointment_types, list)
-                else _json.loads(settings_row.appointment_types or "[]")
-            )
-            duration = 60
-            for apt in appointment_types:
-                if apt.get("name", "").lower() == appointment_type.lower():
-                    duration = apt.get("duration_minutes", 60)
-                    break
-
-            import datetime as _dt
-            day_name = _dt.datetime.fromisoformat(date_str).strftime("%A").lower()
-            business_hours = (
-                settings_row.business_hours
-                if isinstance(settings_row.business_hours, list)
-                else _json.loads(settings_row.business_hours or "[]")
-            )
-            day_config = next((d for d in business_hours if d.get("day") == day_name), None)
-
-            if not day_config or not day_config.get("enabled"):
+            day = date.fromisoformat(date_str)
+            duration = bk.duration_for(rules, arguments.get("appointment_type"))
+            if bk.opening(rules, day) is None:
                 return {
                     "success": True,
-                    "message": f"Sorry, we're not available on {day_name.title()}s. Would you like to try another day?",
+                    "message": f"Sorry, we're not open on {day.strftime('%A')}s. Would you like to try another day?",
                 }
-
-            start_hour = int(day_config["start"].split(":")[0])
-            end_hour = int(day_config["end"].split(":")[0])
-            calendar_id = getattr(settings_row, "calendar_id", None) or "primary"
-
-            result = await check_calendar_availability(
-                business_id=business_id,
-                date=date_str,
-                duration_minutes=duration,
-                start_hour=start_hour,
-                end_hour=end_hour,
-                calendar_id=calendar_id,
-            )
-
-            if result.get("error"):
-                return {
-                    "success": False,
-                    "message": (
-                        "I'm having trouble checking the calendar right now. "
-                        "Let me take your details and someone will call you back to arrange a time."
-                    ),
-                }
-            elif result.get("total_available", 0) == 0:
+            time_min, time_max = bk.freebusy_window(rules, day)
+            fb = await assistant_tools.fetch_busy_periods(
+                business_id, rules.calendar_id, time_min, time_max)
+            if fb.get("error"):
+                logger.error(f"[Receptionist Fn] free/busy failed: {fb['error']}")
+                return _CALENDAR_TROUBLE
+            busy = bk.parse_busy(fb["busy"], rules)
+            starts = bk.free_slots(rules, day, duration, busy, now=bk.now(rules.tz))
+            if not starts:
                 return {
                     "success": True,
-                    "message": f"Unfortunately there are no available slots on {date_str}. Would you like to try another day?",
+                    "message": f"Unfortunately there are no available times on {date_str}. Would you like to try another day?",
                 }
-            else:
-                slots = result["available_slots"][:6]
-                slot_text = ", ".join([s["start"] for s in slots])
-                return {
-                    "success": True,
-                    "message": f"Available times on {date_str}: {slot_text}. Which time works best for you?",
-                }
+            slot_text = ", ".join(s.strftime("%H:%M") for s in starts[:6])
+            return {
+                "success": True,
+                "message": f"Available times on {date_str}: {slot_text}. Which time works best for you?",
+            }
         except Exception as e:
             logger.error(f"[Receptionist Fn] check_availability failed: {e}")
             return {
@@ -376,79 +378,83 @@ async def handle_receptionist_function_call(
             }
 
     elif function_name == "book_appointment":
+        # NS-R1: refuse when booking is off; check the slot against the
+        # rules AND the live calendar at the moment of booking, under a
+        # per-calendar lock so two callers cannot take the same slot; store
+        # the caller's number on the booking.
         try:
-            from assistant_tools import create_calendar_event
-            from db import get_session_context
-            import json as _json
-            from datetime import datetime as _datetime, timedelta as _timedelta
+            import assistant_tools
+            from services import booking as bk
+
+            rules = _booking_rules(business_id, config)
+            if rules is None:
+                return _BOOKING_UNAVAILABLE
 
             date_str = arguments.get("date")
             time_str = arguments.get("time")
             caller_name = arguments.get("caller_name", "")
             caller_email = arguments.get("caller_email")
-            appointment_type = arguments.get("appointment_type", "Appointment")
+            appointment_type = arguments.get("appointment_type") or "Appointment"
             notes = arguments.get("notes", "")
 
-            with get_session_context() as session:
-                from sqlalchemy import text as sql_text
-                settings_row = session.execute(
-                    sql_text("SELECT * FROM booking_settings WHERE business_id = :bid AND enabled = true"),
-                    {"bid": business_id},
-                ).fetchone()
+            day = date.fromisoformat(date_str)
+            h, m = (int(x) for x in time_str.split(":")[:2])
+            start = datetime(day.year, day.month, day.day, h, m, tzinfo=rules.tz)
+            duration = bk.duration_for(rules, appointment_type)
+            end = start + timedelta(minutes=duration)
 
-            duration = 60
-            confirmation_msg = "Your appointment has been booked."
-            if settings_row:
-                appointment_types = (
-                    settings_row.appointment_types
-                    if isinstance(settings_row.appointment_types, list)
-                    else _json.loads(settings_row.appointment_types or "[]")
+            async with bk.calendar_lock(business_id, rules.calendar_id):
+                time_min, time_max = bk.freebusy_window(rules, day)
+                fb = await assistant_tools.fetch_busy_periods(
+                    business_id, rules.calendar_id, time_min, time_max)
+                if fb.get("error"):
+                    logger.error(f"[Receptionist Fn] free/busy failed at booking: {fb['error']}")
+                    return _CALENDAR_TROUBLE
+                busy = bk.parse_busy(fb["busy"], rules)
+                reason = bk.check_slot(rules, start, duration, busy, now=bk.now(rules.tz))
+                if reason:
+                    logger.info(f"[Receptionist Fn] Booking refused ({reason}): {date_str} {time_str}")
+                    return {"success": False, "message": _REFUSAL_WORDS[reason]}
+
+                desc_parts = [
+                    "Booked by AI receptionist.",
+                    f"Caller: {caller_name}",
+                    f"Phone: {caller_number or 'unknown'}",
+                ]
+                if caller_email:
+                    desc_parts.append(f"Email: {caller_email}")
+                if notes:
+                    desc_parts.append(f"Notes: {notes}")
+
+                result = await assistant_tools.create_calendar_event(
+                    business_id=business_id,
+                    title=f"{appointment_type} - {caller_name}",
+                    start_time=start.replace(tzinfo=None).isoformat(),
+                    end_time=end.replace(tzinfo=None).isoformat(),
+                    description="\n".join(desc_parts),
+                    attendee_email=caller_email,
+                    attendee_name=caller_name,
+                    timezone=str(rules.tz),
+                    calendar_id=rules.calendar_id,
                 )
-                for apt in appointment_types:
-                    if apt.get("name", "").lower() == appointment_type.lower():
-                        duration = apt.get("duration_minutes", 60)
-                        break
-                confirmation_msg = settings_row.confirmation_message or confirmation_msg
-
-            start_dt = _datetime.fromisoformat(f"{date_str}T{time_str}:00")
-            end_dt = start_dt + _timedelta(minutes=duration)
-
-            desc_parts = ["Booked by AI receptionist.", f"Caller: {caller_name}"]
-            if caller_email:
-                desc_parts.append(f"Email: {caller_email}")
-            if notes:
-                desc_parts.append(f"Notes: {notes}")
-
-            calendar_id = getattr(settings_row, "calendar_id", None) or "primary"
-
-            result = await create_calendar_event(
-                business_id=business_id,
-                title=f"{appointment_type} - {caller_name}",
-                start_time=start_dt.isoformat(),
-                end_time=end_dt.isoformat(),
-                description="\n".join(desc_parts),
-                attendee_email=caller_email,
-                attendee_name=caller_name,
-                calendar_id=calendar_id,
-            )
 
             if result.get("success"):
                 logger.info(f"[Receptionist Fn] Appointment booked: {caller_name} on {date_str} at {time_str}")
+                confirmation = rules.confirmation_message or "Your appointment has been booked."
                 return {
                     "success": True,
                     "message": (
                         f"I've booked a {appointment_type} for {caller_name} "
-                        f"on {date_str} at {time_str}. {confirmation_msg}"
+                        f"on {date_str} at {time_str}. {confirmation}"
                     ),
                 }
-            else:
-                return {
-                    "success": False,
-                    "message": (
-                        "I'm having trouble booking that appointment right now. "
-                        "Let me take your details and someone will confirm the booking shortly."
-                    ),
-                }
+            return {
+                "success": False,
+                "message": (
+                    "I'm having trouble booking that appointment right now. "
+                    "Let me take your details and someone will confirm the booking shortly."
+                ),
+            }
         except Exception as e:
             logger.error(f"[Receptionist Fn] book_appointment failed: {e}")
             return {
