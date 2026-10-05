@@ -452,12 +452,13 @@ PROHIBITED_ACTIONS = {
         "check_calendar_availability first."
     ),
     "create_task": (
-        "Aria can't add tasks herself yet. Tell the owner to add it in the "
-        "Tasks panel on their Dashboard, and she'll keep track of it from there."
+        "Aria can't add tasks herself yet. Tell the owner to add it in "
+        "the Tasks panel (Dashboard, Tasks, View all). She can check their tasks whenever they ask."
     ),
     "delete_task": (
-        "Aria can't remove tasks. Tell the owner to remove it in the Tasks "
-        "panel on their Dashboard."
+        "Aria can't remove tasks, and there is no remove button in the app. "
+        "If the task is done, the owner can mark it complete in "
+        "the Tasks panel (Dashboard, Tasks, View all)."
     ),
 }
 
@@ -2802,7 +2803,9 @@ def _send_quote_via_aria(engine, business_id: str, args: dict) -> dict:
     contact = row[1] if method == "email" else row[2]
     return {
         "message": f"Quote {quote_number} is ready to send via {method} to {contact}. "
-                   f"Please go to the Quotes section and click 'Send Quote' on this quote to generate the PDF and send it.",
+                   + ("Please go to the Quotes section and click 'Send Quote' on this quote: it emails the customer the quote as a PDF."
+                      if method == "email" else
+                      "Please go to the Quotes section and click 'Send Quote' on this quote: on WhatsApp it sends a text summary, not a PDF."),
         "quote_number": quote_number,
         "status": row[4],
         "method": method,

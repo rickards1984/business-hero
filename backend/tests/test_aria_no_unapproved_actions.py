@@ -234,6 +234,11 @@ _MISLEADING = (
     "chase any of them", "i've sent", "sent a polite", "send a nudge",
     "shall i just send", "save this as a quote", "offer to save", "press chase",
     "send it using send_email",
+    # Codex NS-A1 review 2: no remove button exists; Aria has no monitoring;
+    # send_quote sends nothing; WhatsApp quotes are text, not PDF.
+    "remove it in the tasks", "keep track of it", "keep an eye on it",
+    "i'll flag it", "send a quote to a customer", "sending emails on behalf",
+    "after any action completes",
 )
 
 
@@ -261,8 +266,10 @@ def test_tool_results_do_not_promise_sending_or_saving():
     instruction and the AI-quote message. Their source must not."""
     import inspect
     sources = inspect.getsource(assistant_tools._draft_email_reply) + \
-        inspect.getsource(assistant_chat._execute_tool_async)
-    for phrase in ("send it using send_email", "save this as a quote"):
+        inspect.getsource(assistant_chat._execute_tool_async) + \
+        inspect.getsource(assistant_tools._send_quote_via_aria)
+    for phrase in ("send it using send_email", "save this as a quote",
+                   "generate the pdf and send it"):
         assert phrase not in sources.lower(), phrase
 
 

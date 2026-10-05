@@ -27,6 +27,8 @@ an audit reference — is not ready to become a ticket (`AGENTS.md` §6).
 | Task completion is written `done` by the API and counted only as `completed` by the board meeting, so API-completed tasks go uncounted | `main.py:1797` vs `executive_meeting_data_loaders/tasks.py:73`; Codex review 1. Fixed within proposal B5 if admitted |
 | ~~Voice WebSocket forwards arbitrary client messages to the model and executes unmapped tool names~~ | **Fixed by NS-A1** (5 Oct 2026): only audio and `config` reach the model; unmapped names are refused |
 | Every INFO log line is labelled `severity: error` in Railway (logging writes to stderr), so real errors are buried and an error alert would fire constantly | Railway logs, 2 Oct 2026 (e.g. "Uvicorn running", "Successfully connected" as error). Small: route INFO to stdout or emit structured levels |
+| Voice tells Aria absent data "DOES NOT EXIST", and its email wrapper drops `error`, so a connection failure reads as an empty inbox | Codex NS-A1 review 2, finding 4: `realtime_voice.py` system instructions and the `list_emails` wrapper. Belongs to NS-B1 grounding tests; must be fixed before voice returns |
+| `get_cashflow_forecast` claims "known upcoming expenses" and a horizon it does not compute | Codex NS-A1 review 2, finding 5: `assistant_tools.py` description and result label. Belongs to NS-B1 |
 | Aria voice GA migration, then set `ARIA_VOICE_ENABLED=1` in Railway | NS-A2 switched it off; ADR 0001 D2 puts the repair after P0-2 metering. `receptionist_call_handler.py:720-733` is the worked GA example |
 
 ---

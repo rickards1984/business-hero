@@ -58,3 +58,66 @@ Every finding taken. Each was checked against the code and the screens first.
 | OAuth token refresh writes `email_accounts` | Credential maintenance, not a business action; NS-A1's claim is "no business action", not "no writes" |
 
 Tests: 42 pass; against `cca19a5`, 11 of them fail. `./check.sh full` green.
+
+## Review 2
+
+| | |
+|---|---|
+| Reviewed commit | `f1155f8` |
+| Session id | `01a10d77-247b-7f91-8c6e-ff11dd7e8a6d` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 88,993` |
+| **Verdict** | **REQUEST-CHANGES** — review 1's three findings resolved; further hand-off inaccuracies |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** on `f1155f8`. The three original findings are resolved, but inaccurate handoffs and capability claims remain. Review serves North Star P4 and P8.
+
+1. **P2 — Dashboard Tasks has no remove control.**  
+   [assistant_chat.py:283](/Users/michaelrickards/dev/bh2-NS-A1-review/backend/assistant_chat.py:283) and [assistant_tools.py:459](/Users/michaelrickards/dev/bh2-NS-A1-review/backend/assistant_tools.py:459) tell owners to remove tasks there. Dashboard’s **Tasks → View all** renders `TasksPanel`, which supports creation, status cycling and completion—not deletion ([TasksPanel.tsx:395](/Users/michaelrickards/dev/bh2-NS-A1-review/frontend/client/src/components/TasksPanel.tsx:395)). Correct the refusal; completing a task must not be described as deleting it.
+
+2. **P2 — Chat still advertises quote sending and models prohibited actions.**  
+   [assistant_chat.py:271](/Users/michaelrickards/dev/bh2-NS-A1-review/backend/assistant_chat.py:271) still says “send_quote: Send a quote to a customer via email or WhatsApp”, contradicting the corrected description and read-only implementation. Lines 327 and 378 retain instructions about confirming completed email/task actions and “sending emails on behalf of the user”. Rewrite these around reading, drafting and manual handoff.
+
+3. **P2 — Quote handoff still promises a PDF for WhatsApp.**  
+   [assistant_chat.py:351](/Users/michaelrickards/dev/bh2-NS-A1-review/backend/assistant_chat.py:351) and [assistant_tools.py:2805](/Users/michaelrickards/dev/bh2-NS-A1-review/backend/assistant_tools.py:2805) describe PDF generation/delivery regardless of method. The actual UI explicitly says WhatsApp sends a text summary and cannot send PDFs ([QuotesPage.tsx:1186](/Users/michaelrickards/dev/bh2-NS-A1-review/frontend/client/src/pages/QuotesPage.tsx:1186)). Qualify the handoff by method.
+
+4. **P2 — Voice falsely equates missing results with nonexistent data.**  
+   [realtime_voice.py:379](/Users/michaelrickards/dev/bh2-NS-A1-review/backend/realtime_voice.py:379) says absent data “DOES NOT EXIST”; its email-result wrapper makes the same claim at line 357. Results are limited, and the wrapper also converts an email error into an empty list by discarding `error`. Aria can therefore report an empty inbox during a connection failure. Preserve errors and describe results as the fetched subset.
+
+5. **P2 — Cashflow descriptions overstate what the tool establishes.**  
+   [assistant_tools.py:314](/Users/michaelrickards/dev/bh2-NS-A1-review/backend/assistant_tools.py:314) promises “known upcoming expenses”, but the implementation uses expenses already recorded this month. Its “Next N days” result at [line 2729](/Users/michaelrickards/dev/bh2-NS-A1-review/backend/assistant_tools.py:2729) changes only the label: neither invoice inclusion nor expenditure calculation depends on that horizon. Qualify these claims to match the calculation.
+
+6. **P3 — Voice still promises unsupported follow-up.**  
+   [realtime_voice.py:547](/Users/michaelrickards/dev/bh2-NS-A1-review/backend/realtime_voice.py:547) models “I'll flag it” without a reporting tool; line 582 promises “I'll keep an eye on it” without establishing monitoring. Prefer offering to check again when asked.
+
+The original corrections do hold:
+
+- Successful-chase examples and the draft-result instruction to use `send_email` are removed.
+- Draft handoffs now accurately describe unpersisted text.
+- Voice no longer offers computed free slots.
+- Finance’s **Send Chase Email** section exists, with **Preview** and **Send** controls ([InvoicesPanel.tsx:955](/Users/michaelrickards/dev/bh2-NS-A1-review/frontend/client/src/components/InvoicesPanel.tsx:955)).
+- Quote-saving promises identified previously are removed.
+
+The alias test at [test_aria_no_unapproved_actions.py:220](/Users/michaelrickards/dev/bh2-NS-A1-review/backend/tests/test_aria_no_unapproved_actions.py:220) genuinely closes the reported gap: any map value targeting a prohibited canonical action fails, including a newly named alias.
+
+The phrase scan is useful but incomplete. At [line 232](/Users/michaelrickards/dev/bh2-NS-A1-review/backend/tests/test_aria_no_unapproved_actions.py:232), it checks 13 literal substrings; it misses the contradictions above and excludes parameter descriptions and runtime results. The separate result test at line 262 scans two function sources for only two phrases. It does not verify actual returned messages or UI handoff accuracy.
+
+Permitted test: **42 passed, 1 deprecation warning**. Inspected both complete prompts, all 22 chat/15 voice definitions and their result-producing paths. No edits, pushes or network access; no live UI/provider verification.
+---
+
+### Response to review 2 — Claude Code, 5 October 2026
+
+| Finding | Action |
+|---|---|
+| 1 · No remove control on Tasks | Taken. Refusal and prompts now say there is no remove button and a finished task can be marked complete in the Tasks panel (Dashboard, Tasks, View all) |
+| 2 · Chat still advertises quote sending; "after any action completes" and "sending emails on behalf" | Taken. Tool list line, Critical Rules line and Email Signatures section rewritten around reading, drafting and hand-off |
+| 3 · WhatsApp quote promised a PDF | Taken. `send_quote`'s result and the prompt now differ by method: email sends a PDF, WhatsApp sends a text summary, not a PDF (`QuotesPage.tsx:1186`). Checked by calling the function for both methods |
+| 6 · "I'll flag it", "I'll keep an eye on it", "keep track of it" | Taken. Replaced with offers to check again when asked |
+| 4 · Voice says missing data "DOES NOT EXIST"; email wrapper drops `error` | **Deferred to NS-B1 (grounding tests), logged in the backlog.** A real P2 defect, but about reads, not actions, so outside NS-A1. Voice is off server-side (NS-A2), so it cannot occur in production until voice returns, and the GA-repair ticket must take it |
+| 5 · Cashflow description overstates the calculation | **Deferred to NS-B1, logged.** Pre-existing read-accuracy defect, not an action or a hand-off |
+| Phrase scan incomplete | Extended with this review's seven phrases, plus a source check on the quote hand-off. Runtime-result verification across all tools is NS-B1's job |
+
+Repair cycles used: 2 of 3 (AGENTS.md §8). Tests: 49 pass. `./check.sh full`: 717 passed.
