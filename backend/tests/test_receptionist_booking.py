@@ -527,3 +527,59 @@ def test_chat_availability_uses_the_business_timezone_and_booking_rules(
     starts = [x["start"] for x in result["available_slots"]]
     assert starts[0] == "09:30"
     assert "10:00" not in starts and "10:30" not in starts and "11:00" in starts
+
+
+# ------------------------------------------- Codex NS-R1 review 2 additions ---
+
+def test_the_event_sent_to_google_keeps_both_offsets_across_the_change(
+        monkeypatch, google, now_is):
+    """25 Oct 2026: 00:30 BST plus 120 real minutes ends at the SECOND
+    01:30 (GMT). Sending '01:30' without its offset lets Google read the
+    first one. Both ends must carry their own offset."""
+    _settings_db(monkeypatch, {
+        **SETTINGS, "business_hours": SUNDAY_ALL_DAY, "min_notice_hours": 0,
+        "max_advance_days": 365,
+        "appointment_types": [{"name": "Long session", "duration_minutes": 120}]})
+    now_is(datetime(2026, 10, 1, 8, 0, tzinfo=LONDON))
+    result = asyncio.run(book(day="2026-10-25", time="00:30", kind="Long session"))
+    assert result["success"] is True
+    made = google.created[0]
+    assert made["start_time"] == "2026-10-25T00:30:00+01:00"
+    assert made["end_time"] == "2026-10-25T01:30:00+00:00"
+
+
+def test_a_long_appointment_across_the_change_is_offered_if_it_fits_in_real_time():
+    """Open 00:00-03:00 on 25 Oct 2026, which is four real hours. A
+    180-minute slot at 00:30 BST ends at 02:30 GMT, inside closing."""
+    b = booking()
+    hours = [{"day": "sunday", "start": "00:00", "end": "03:00", "enabled": True}]
+    r = rules(business_hours=hours, min_notice_hours=0, max_advance_days=365)
+    starts = [s.strftime("%H:%M") for s in
+              b.free_slots(r, FALL_BACK, 180, [], now=datetime(2026, 10, 1, tzinfo=LONDON))]
+    assert "00:30" in starts
+
+
+def test_minimum_notice_is_real_time_across_the_change():
+    """Now 00:45 BST (23:45Z). One hour's notice. 01:30 GMT (01:30Z) is
+    1h45 away in real time, so it can be booked; on the wall clock it looks
+    like 45 minutes."""
+    b = booking()
+    r = rules(business_hours=SUNDAY_ALL_DAY, min_notice_hours=1)
+    now = datetime(2026, 10, 25, 0, 45, tzinfo=LONDON)
+    gmt_0130 = datetime(2026, 10, 25, 1, 30, tzinfo=LONDON, fold=1)
+    assert b.check_slot(r, gmt_0130, 30, [], now=now) is None
+
+
+def test_chat_availability_without_booking_settings_is_unchanged(monkeypatch, google, now_is):
+    """No booking settings: chat keeps its default 09:00-17:00 day and the
+    calendar asked for, in the business's time zone."""
+    import assistant_chat
+    _settings_db(monkeypatch, None)
+    google.events.append((at(BST_DAY, "10:00"), at(BST_DAY, "11:00")))
+    result = asyncio.run(assistant_chat._execute_tool_async(
+        "check_calendar_availability", {"date": "2026-10-07", "duration_minutes": 60},
+        BIZ, "Europe/London"))
+    starts = [x["start"] for x in result["available_slots"]]
+    assert starts[0] == "09:00"
+    assert "10:00" not in starts and "11:00" in starts
+    assert google.queries[-1][0] == "primary"
