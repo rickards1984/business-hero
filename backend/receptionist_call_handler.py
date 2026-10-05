@@ -14,7 +14,7 @@ import os
 import json
 import asyncio
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 
@@ -194,6 +194,8 @@ _REFUSAL_WORDS = {
     "too_soon": "That's too short notice to book. Offer to check later times.",
     "too_far": "That's too far ahead to book yet. Offer an earlier date.",
     "clash": "That time has just been taken. Apologise and offer to check other available times.",
+    "in_the_past": "That time has already passed. Offer to check upcoming times.",
+    "invalid_time": "The clocks change that night, so that time can't be booked. Offer another time.",
 }
 
 
@@ -352,14 +354,11 @@ async def handle_receptionist_function_call(
                     "success": True,
                     "message": f"Sorry, we're not open on {day.strftime('%A')}s. Would you like to try another day?",
                 }
-            time_min, time_max = bk.freebusy_window(rules, day)
-            fb = await assistant_tools.fetch_busy_periods(
-                business_id, rules.calendar_id, time_min, time_max)
-            if fb.get("error"):
-                logger.error(f"[Receptionist Fn] free/busy failed: {fb['error']}")
+            avail = await assistant_tools.booking_availability(business_id, rules, day, duration)
+            if avail.get("error"):
+                logger.error(f"[Receptionist Fn] free/busy failed: {avail['error']}")
                 return _CALENDAR_TROUBLE
-            busy = bk.parse_busy(fb["busy"], rules)
-            starts = bk.free_slots(rules, day, duration, busy, now=bk.now(rules.tz))
+            starts = avail["slots"]
             if not starts:
                 return {
                     "success": True,
@@ -399,11 +398,21 @@ async def handle_receptionist_function_call(
 
             day = date.fromisoformat(date_str)
             h, m = (int(x) for x in time_str.split(":")[:2])
-            start = datetime(day.year, day.month, day.day, h, m, tzinfo=rules.tz)
+            start = bk.local_time(day, h, m, rules.tz)
+            if start is None:
+                # 01:30 on the night the clocks change happens twice or never.
+                return {"success": False, "message": _REFUSAL_WORDS[bk.INVALID_TIME]}
             duration = bk.duration_for(rules, appointment_type)
-            end = start + timedelta(minutes=duration)
+            end = bk.slot_end(start, duration)
 
             async with bk.calendar_lock(business_id, rules.calendar_id):
+                # Re-read inside the lock: a caller queued behind another
+                # booking must not book once the owner has switched booking
+                # off, or moved it to another calendar (Codex NS-R1 review 1).
+                current = _booking_rules(business_id, config)
+                if current is None or current.calendar_id != rules.calendar_id:
+                    return _BOOKING_UNAVAILABLE
+                rules = current
                 time_min, time_max = bk.freebusy_window(rules, day)
                 fb = await assistant_tools.fetch_busy_periods(
                     business_id, rules.calendar_id, time_min, time_max)
@@ -436,6 +445,10 @@ async def handle_receptionist_function_call(
                     attendee_name=caller_name,
                     timezone=str(rules.tz),
                     calendar_id=rules.calendar_id,
+                    # For Phase 2's cancel-by-phone check: private event data
+                    # the attendee is never sent.
+                    private_properties={"caller_phone": caller_number or "",
+                                        "booked_by": "ai_receptionist"},
                 )
 
             if result.get("success"):

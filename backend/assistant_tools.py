@@ -1808,7 +1808,22 @@ async def fetch_busy_periods(
     if resp.status_code != 200:
         return {"error": f"Calendar API error: {resp.status_code}"}
 
-    return {"busy": resp.json().get("calendars", {}).get(calendar_id, {}).get("busy", [])}
+    # A 200 is not an answer. Google reports per-calendar failures (not
+    # found, no access) inside a successful response; a missing calendar or
+    # busy list means we do not know the diary. Treating any of those as
+    # "no busy periods" offers every slot (Codex NS-R1 review 1).
+    try:
+        entry = (resp.json().get("calendars") or {}).get(calendar_id)
+    except Exception:
+        return {"error": "Calendar API returned an unreadable answer"}
+    if not isinstance(entry, dict):
+        return {"error": "Calendar not in Google's answer"}
+    if entry.get("errors"):
+        reasons = ", ".join(str(e.get("reason")) for e in entry["errors"])
+        return {"error": f"Calendar unavailable: {reasons}"}
+    if not isinstance(entry.get("busy"), list):
+        return {"error": "Calendar answer had no busy list"}
+    return {"busy": entry["busy"]}
 
 
 async def check_calendar_availability(
@@ -1859,6 +1874,20 @@ async def check_calendar_availability(
     }
 
 
+async def booking_availability(business_id: str, rules, day, duration_minutes: int) -> dict:
+    """Bookable start times on `day` under the business's booking rules —
+    exactly what the phone receptionist would accept. {"slots": [...]} or
+    {"error": ...}. Shared by the receptionist and Aria's chat (NS-R1)."""
+    from services import booking as _booking
+    time_min, time_max = _booking.freebusy_window(rules, day)
+    fb = await fetch_busy_periods(business_id, rules.calendar_id, time_min, time_max)
+    if fb.get("error"):
+        return {"error": fb["error"]}
+    busy = _booking.parse_busy(fb["busy"], rules)
+    return {"slots": _booking.free_slots(rules, day, duration_minutes, busy,
+                                         now=_booking.now(rules.tz))}
+
+
 async def create_calendar_event(
     business_id: str,
     title: str,
@@ -1870,8 +1899,12 @@ async def create_calendar_event(
     location: str = None,
     timezone: str = "Europe/London",
     calendar_id: str = "primary",
+    private_properties: Optional[dict] = None,
 ) -> dict:
-    """Create a Google Calendar event (book an appointment)."""
+    """Create a Google Calendar event (book an appointment).
+
+    `private_properties` go in Google's private extended properties: visible
+    to the calendar's owner through the API, never sent to attendees."""
     access_token, account_id, refresh_ciphertext = _get_google_calendar_token(engine, business_id)
 
     if not access_token:
@@ -1896,6 +1929,10 @@ async def create_calendar_event(
 
     if location:
         event_body["location"] = location
+
+    if private_properties:
+        event_body["extendedProperties"] = {
+            "private": {k: str(v) for k, v in private_properties.items()}}
 
     if attendee_email:
         attendee: dict = {"email": attendee_email}

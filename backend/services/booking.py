@@ -29,6 +29,10 @@ OUTSIDE_HOURS = "outside_hours"
 TOO_SOON = "too_soon"
 TOO_FAR = "too_far"
 CLASH = "clash"
+IN_THE_PAST = "in_the_past"
+INVALID_TIME = "invalid_time"   # a clock time that happens twice or never
+
+_UTC = ZoneInfo("UTC")
 
 _DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
@@ -107,6 +111,24 @@ def duration_for(rules: BookingRules, appointment_type: Optional[str], default: 
     return default
 
 
+def local_time(day: date, hour: int, minute: int, tz: ZoneInfo) -> Optional[datetime]:
+    """An aware local time, or None if that clock time is ambiguous (happens
+    twice when the clocks go back) or nonexistent (skipped when they go
+    forward). Both passes of an ambiguous time, or a skipped one, give
+    different UTC offsets for fold=0 and fold=1 — that is the test."""
+    first = datetime(day.year, day.month, day.day, hour, minute, tzinfo=tz, fold=0)
+    second = first.replace(fold=1)
+    if first.utcoffset() != second.utcoffset():
+        return None
+    return first
+
+
+def slot_end(start: datetime, minutes: int) -> datetime:
+    """`minutes` of real time after `start`. Python's aware arithmetic adds
+    wall-clock time within one tzinfo, which is wrong across a clock change."""
+    return (start.astimezone(_UTC) + timedelta(minutes=minutes)).astimezone(start.tzinfo)
+
+
 def opening(rules: BookingRules, day: date):
     """(open, close) as aware datetimes, or None if closed that day."""
     hours = rules.hours.get(_DAYS[day.weekday()])
@@ -118,12 +140,16 @@ def opening(rules: BookingRules, day: date):
 
 
 def freebusy_window(rules: BookingRules, day: date):
-    """The window to ask Google about, with its real UTC offset. A whole
-    local day if closed, so callers still get a sane request."""
+    """The window to ask Google about, with its real UTC offset, widened by
+    the buffer on both sides: an event ending just before opening still
+    blocks the first slot (Codex NS-R1 review 1). A whole local day if
+    closed, so callers still get a sane request."""
     window = opening(rules, day) or (
         datetime.combine(day, time(0, 0), tzinfo=rules.tz),
         datetime.combine(day + timedelta(days=1), time(0, 0), tzinfo=rules.tz))
-    return window[0].isoformat(), window[1].isoformat()
+    lo = slot_end(window[0], -rules.buffer_minutes)
+    hi = slot_end(window[1], rules.buffer_minutes)
+    return lo.isoformat(), hi.isoformat()
 
 
 def parse_busy(busy_entries, rules: BookingRules):
@@ -141,23 +167,31 @@ def parse_busy(busy_entries, rules: BookingRules):
 
 def check_slot(rules: BookingRules, start: datetime, duration_minutes: int, busy,
                now: datetime) -> Optional[str]:
-    """None if `start` can be booked; otherwise the reason it cannot."""
+    """None if `start` can be booked; otherwise the reason it cannot.
+
+    Every comparison is between real instants (UTC). Comparing aware
+    datetimes that share one tzinfo compares wall clock, which cannot tell
+    the two passes of 01:30 apart on the night the clocks go back."""
     if start.tzinfo is None:
         start = start.replace(tzinfo=rules.tz)
-    end = start + timedelta(minutes=duration_minutes)
+    s = start.astimezone(_UTC)
+    e = s + timedelta(minutes=duration_minutes)
     window = opening(rules, start.astimezone(rules.tz).date())
     if window is None:
         return CLOSED
-    if start < window[0] or end > window[1]:
+    if s < window[0].astimezone(_UTC) or e > window[1].astimezone(_UTC):
         return OUTSIDE_HOURS
-    if start < now + timedelta(hours=rules.min_notice_hours):
+    n = now.astimezone(_UTC)
+    if s < n:
+        return IN_THE_PAST
+    if s < n + timedelta(hours=rules.min_notice_hours):
         return TOO_SOON
     if start.astimezone(rules.tz).date() > (now.astimezone(rules.tz).date()
                                             + timedelta(days=rules.max_advance_days)):
         return TOO_FAR
     pad = timedelta(minutes=rules.buffer_minutes)
     for b_start, b_end in busy:
-        if start - pad < b_end and end + pad > b_start:
+        if s - pad < b_end.astimezone(_UTC) and e + pad > b_start.astimezone(_UTC):
             return CLASH
     return None
 
@@ -169,18 +203,29 @@ def free_slots(rules: BookingRules, day: date, duration_minutes: int, busy,
     if window is None:
         return []
     out = []
-    cursor = window[0]
-    while cursor + timedelta(minutes=duration_minutes) <= window[1]:
-        if check_slot(rules, cursor, duration_minutes, busy, now) is None:
-            out.append(cursor)
-        cursor += timedelta(minutes=step_minutes)
+    # Walk the wall clock, as a person reads a diary; skip clock times that
+    # happen twice or never, which cannot be booked unambiguously.
+    minute = window[0].hour * 60 + window[0].minute
+    close = window[1].hour * 60 + window[1].minute
+    while minute + duration_minutes <= close:
+        candidate = local_time(day, minute // 60, minute % 60, rules.tz)
+        if candidate is not None and \
+                check_slot(rules, candidate, duration_minutes, busy, now) is None:
+            out.append(candidate)
+        minute += step_minutes
     return out
 
 
 # One booking at a time per calendar, so "is it free?" and "book it" are a
-# single step. In-process: correct because Railway runs exactly one replica
-# (AGENTS.md §3.7 — the same constraint the rate limiter and the Xero refresh
-# lock already depend on). A second replica would reopen double booking.
+# single step for Business Hero's own bookings. What it does NOT cover
+# (Codex NS-R1 review 1):
+#   - a second Railway replica (AGENTS.md §3.7 requires exactly one — the
+#     rate limiter and the Xero refresh lock depend on the same rule);
+#   - anyone else writing to the calendar between the check and the create:
+#     the owner in Google Calendar, another booking tool, a second business
+#     sharing the calendar, or the same calendar under another alias;
+#   - Google answering free/busy before a just-created event is visible.
+# The window for those is the length of one Google round-trip.
 _locks: dict = {}
 
 

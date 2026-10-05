@@ -108,7 +108,7 @@ def test_busy_times_are_read_in_uk_time_in_winter_too():
     busy = b.parse_busy([utc_busy(GMT_DAY, "10:00", "11:00")], rules())
     starts = [s.strftime("%H:%M") for s in
               b.free_slots(rules(), GMT_DAY, 60, busy, now=EARLY_MORNING(GMT_DAY))]
-    assert "10:00" not in starts and "11:00" in starts
+    assert "10:00" not in starts and "10:30" not in starts and "11:00" in starts
 
 
 def test_the_free_busy_window_is_sent_to_google_with_its_real_offset():
@@ -522,8 +522,8 @@ def test_chat_availability_uses_the_business_timezone_and_booking_rules(
                           datetime(2026, 10, 7, 11, 0, tzinfo=ny)))
     now_is(datetime(2026, 10, 6, 8, 0, tzinfo=ny))
     result = asyncio.run(assistant_chat._execute_tool_async(
-        "check_calendar_availability", {"date": "2026-10-07", "duration_minutes": 60},
+        "check_calendar_availability", {"date": "2026-10-07", "duration_minutes": 30},
         BIZ, "America/New_York"))
     starts = [x["start"] for x in result["available_slots"]]
     assert starts[0] == "09:30"
-    assert "10:00" not in starts and "11:00" in starts
+    assert "10:00" not in starts and "10:30" not in starts and "11:00" in starts
