@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Reviewed commits | `26821e8` (tests) + `21b0d0c`-era fix on `ticket/NS-R1-safe-phone-booking` |
+| Reviewed commits | `26821e8` (tests) + `c8b82f0` (fix), `ticket/NS-R1-safe-phone-booking` |
 | Session id | `01a10e4e-570d-7df1-95e1-17911c979751` |
 | Model | `gpt-6-astra` |
 | Usage, as reported | `tokens used 39,614` |
