@@ -438,8 +438,11 @@ async def handle_receptionist_function_call(
                 result = await assistant_tools.create_calendar_event(
                     business_id=business_id,
                     title=f"{appointment_type} - {caller_name}",
-                    start_time=start.replace(tzinfo=None).isoformat(),
-                    end_time=end.replace(tzinfo=None).isoformat(),
+                    # Both ends keep their own UTC offset: across a clock
+                    # change the end can fall in the repeated hour, and a
+                    # bare "01:30" is ambiguous (Codex NS-R1 review 2).
+                    start_time=start.isoformat(),
+                    end_time=end.isoformat(),
                     description="\n".join(desc_parts),
                     attendee_email=caller_email,
                     attendee_name=caller_name,

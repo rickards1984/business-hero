@@ -76,3 +76,49 @@ Every finding taken, tests first (17 new tests, 15 failing before the fix).
 | Not addressed | Overnight opening and appointments crossing midnight: unsupported, as before; not a gym or contractor pattern for RC1 |
 
 Mutation-checked: ignoring calendar errors, wall-clock overlap, and no buffer widening each fail their tests. `./check.sh full`: 756 passed.
+
+## Review 2
+
+| | |
+|---|---|
+| Reviewed commit | `aaeae70` |
+| Session id | `01a10e54-a09c-7141-8e90-1d83ed643542` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 47,073` |
+| **Verdict** | **REQUEST-CHANGES** |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** — reviewed `aaeae70c57dd72204962b71c57fb11553db93ff2`, serving P4, P8 and correctness.
+
+1. **[P1] DST disambiguation is still lost when creating the event.**  
+   [receptionist_call_handler.py:441](/Users/michaelrickards/dev/bh2-NS-R1-review/backend/receptionist_call_handler.py:441) strips both offsets; [assistant_tools.py:1921](/Users/michaelrickards/dev/bh2-NS-R1-review/backend/assistant_tools.py:1921) forwards the ambiguous end unchanged. Rejecting ambiguous **starts** does not prevent ambiguous **ends**: on 25 October 2026, London `00:30` plus 120 real minutes ends at the second `01:30` (`+00:00`). The request loses that distinction, so the created interval need not match the checked interval. Preserve offsets on both endpoints and test the actual creation payload. Prior finding 2 remains partially unresolved.
+
+2. **[P2] Availability still limits duration using wall-clock arithmetic.**  
+   [booking.py:210](/Users/michaelrickards/dev/bh2-NS-R1-review/backend/services/booking.py:210) requires `minute + duration_minutes <= close` before applying the corrected UTC checks. On 25 October 2026, with opening `00:00–03:00`, a 180-minute appointment starting `00:30 BST` ends at `02:30 GMT` and passes `check_slot`, but availability excludes it. Enumerate candidate starts and let the instant-based closing check decide.
+
+The other original findings are resolved in code:
+
+- **Calendar failures:** requested-calendar errors and missing calendar/busy lists now fail closed — [assistant_tools.py:1815](/Users/michaelrickards/dev/bh2-NS-R1-review/backend/assistant_tools.py:1815).
+- **Buffers:** the query expands on both sides using elapsed time — [booking.py:150](/Users/michaelrickards/dev/bh2-NS-R1-review/backend/services/booking.py:150).
+- **Chat timezone:** both configured-booking and fallback paths receive it — [assistant_chat.py:50](/Users/michaelrickards/dev/bh2-NS-R1-review/backend/assistant_chat.py:50), [assistant_chat.py:91](/Users/michaelrickards/dev/bh2-NS-R1-review/backend/assistant_chat.py:91). With **no booking settings**, ordinary availability retains its default hours and requested calendar; no regression found by inspection.
+
+The new tests are genuine: they exercise response parsing, window-sensitive buffering, DST comparisons and the real chat dispatcher. However, the duration test stops at `slot_end`; it misses endpoint serialization. There is also no DST minimum-notice test or no-settings chat dispatcher regression test.
+
+**Verification:** permitted command completed with **88 passed, 1 deprecation warning**. No edits, pushes or network use; working tree remains clean.
+
+Out of scope: existing external-writer/replica/visibility-lag limitations remain, now documented at [booking.py:219](/Users/michaelrickards/dev/bh2-NS-R1-review/backend/services/booking.py:219).
+---
+
+### Response to review 2 — Claude Code, 6 October 2026
+
+| Finding | Action |
+|---|---|
+| 1 · Offsets stripped when creating the event; an end can fall in the repeated hour | Both ends are sent with their own offset. Test asserts the actual payload: `2026-10-25T00:30:00+01:00` → `2026-10-25T01:30:00+00:00` |
+| 2 · Availability's fit check was wall-clock | Every start before closing is a candidate; `check_slot` decides in real time. A 180-minute slot at 00:30 BST is offered when open 00:00–03:00 on 25 Oct |
+| No DST minimum-notice test | Added; it passes (the instant-based check already handled it) and stays as a guard |
+| No no-settings chat regression test | Added through the real dispatcher; passes and stays as a guard |
+
+Repair cycle 2 of 3. 43 tests; `./check.sh full` 760 passed.

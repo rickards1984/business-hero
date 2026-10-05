@@ -205,9 +205,11 @@ def free_slots(rules: BookingRules, day: date, duration_minutes: int, busy,
     out = []
     # Walk the wall clock, as a person reads a diary; skip clock times that
     # happen twice or never, which cannot be booked unambiguously.
+    # Every start before closing is a candidate; whether the appointment
+    # fits is check_slot's real-time judgement, not wall-clock maths.
     minute = window[0].hour * 60 + window[0].minute
     close = window[1].hour * 60 + window[1].minute
-    while minute + duration_minutes <= close:
+    while minute < close:
         candidate = local_time(day, minute // 60, minute % 60, rules.tz)
         if candidate is not None and \
                 check_slot(rules, candidate, duration_minutes, busy, now) is None:
