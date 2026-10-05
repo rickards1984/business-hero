@@ -259,7 +259,8 @@ P0-2 needs, `assistant_tools.py`), the P0 ticket goes first.
 | **NS-B3** | Model router, request/response calls — this *is* P1-1 | L |
 | **NS-B4** | One Aria persona across chat, voice, board meeting | M |
 | **NS-B9** | Owner can rename Aria, choose her voice with preview, pick an avatar; Aria default; settings and onboarding | M |
-| **NS-B10** | Aria drafts (email reply, invoice chase, task); owner approves with a tap; sent/created once; signed as an AI assistant | L |
+| **NS-B10** | Aria drafts (email reply, invoice chase, task, **calendar booking**); owner approves with a tap; sent/created once; signed as an AI assistant. Booking added by Mike, 5 Oct 2026 (ADR 0001 D15) | L |
+| **NS-R1** | Phone receptionist booking made safe: refuse when booking is off, check the slot is still free and inside the business's rules at the moment of booking, save the caller's number on the booking. Mike, 5 Oct 2026 (ADR 0001 D17) | M |
 | **NS-B11** | Opening the app refreshes email, accounting and calendar in the background; every figure shows its age | M |
 | **NS-B5** | Unified task view, with Codex's conditions (entitlement, status normalisation, Aria read tool) | L |
 | **NS-B6** | Board Meeting one tap from home, out of AI Hub | S |
