@@ -122,3 +122,31 @@ Out of scope: existing external-writer/replica/visibility-lag limitations remain
 | No no-settings chat regression test | Added through the real dispatcher; passes and stays as a guard |
 
 Repair cycle 2 of 3. 43 tests; `./check.sh full` 760 passed.
+
+## Review 3 (final, narrow)
+
+| | |
+|---|---|
+| Reviewed commit | `407fee4` |
+| Session id | `01a10e56-9b17-7362-b7ac-6449d26e6551` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 25,872` |
+| **Verdict** | **ACCEPT** |
+
+Verbatim:
+
+---
+
+**ACCEPT** — `407fee48cabec47213c0b3e23b2abd813949dea9`. No blocking findings within the requested scope.
+
+- **Review-2 finding 1 resolved:** [receptionist_call_handler.py:444](backend/receptionist_call_handler.py:444) preserves both endpoint offsets. The [regression test:534](backend/tests/test_receptionist_booking.py:534) asserts `00:30+01:00 → 01:30+00:00`; reverting the fix would fail those assertions. [assistant_tools.py:1916](backend/assistant_tools.py:1916) forwards these strings unchanged alongside `Europe/London`. The offsets agree with that zone at both instants; no conflicting timezone or double conversion introduced.
+- **Review-2 finding 2 resolved:** [booking.py:212](backend/services/booking.py:212) enumerates starts before closing and admits each only after `check_slot` accepts it. The [regression test:551](backend/tests/test_receptionist_booking.py:551) genuinely catches the former exclusion of the 180-minute `00:30` slot. With identical inputs, the new loop cannot offer a start that `check_slot` refuses.
+
+**Verification limit:** the creation test captures arguments to a mocked `create_calendar_event`, not the HTTP JSON. Actual JSON forwarding was inspected; Google’s live interpretation was not tested offline.
+
+Permitted test command: **43 passed**. No edits, pushes or network use; working tree clean.
+---
+
+### Response to review 3
+
+Accepted. The stated limit stands: the creation test captures the arguments to `create_calendar_event`, not Google's live reading of them. That is what the PR's click test covers. Three review cycles, within the AGENTS.md section 8 budget.
