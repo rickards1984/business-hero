@@ -67,20 +67,6 @@ REALTIME_TOOLS = [
     },
     {
         "type": "function",
-        "name": "send_email_reply",
-        "description": "Send an email. ALWAYS confirm the exact content with the user before calling this. Never send without explicit confirmation.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "to_email": {"type": "string", "description": "Recipient email address"},
-                "subject": {"type": "string", "description": "Email subject"},
-                "body": {"type": "string", "description": "Email body text (plain text)"}
-            },
-            "required": ["to_email", "subject", "body"]
-        }
-    },
-    {
-        "type": "function",
         "name": "get_schedule",
         "description": "Get today's calendar events and appointments. Call this when the user asks about their schedule, calendar, meetings, or what's on today.",
         "parameters": {
@@ -120,29 +106,6 @@ REALTIME_TOOLS = [
                     "description": "Filter by task status"
                 }
             }
-        }
-    },
-    {
-        "type": "function",
-        "name": "create_task",
-        "description": "Create a new task or to-do item. Call this when the user asks to create a task, add a reminder, make a note to do something, or follow up on something.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "The title or description of the task"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Optional additional details about the task"
-                },
-                "due_at": {
-                    "type": "string",
-                    "description": "Optional due date in ISO 8601 format (e.g., '2024-12-25T10:00:00Z')"
-                }
-            },
-            "required": ["title"]
         }
     },
     {
@@ -232,19 +195,6 @@ REALTIME_TOOLS = [
     },
     {
         "type": "function",
-        "name": "send_chase",
-        "description": "Send a chase email for an unpaid invoice. Say the invoice number and I'll handle it.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "invoice_id": {"type": "string", "description": "Invoice UUID"},
-                "chase_stage": {"type": "integer", "description": "Stage 1-4"}
-            },
-            "required": ["invoice_id"]
-        }
-    },
-    {
-        "type": "function",
         "name": "get_overdue",
         "description": "Check which invoices are overdue and recommend chase actions.",
         "parameters": {"type": "object", "properties": {}, "required": []}
@@ -295,6 +245,27 @@ REALTIME_TOOLS = [
 ]
 
 
+# Advertised voice tool name -> shared dispatcher name. Only these run
+# (NS-A1). None may map to an action in assistant_tools.PROHIBITED_ACTIONS.
+VOICE_TOOL_MAP = {
+    "list_emails": "list_emails",
+    "get_schedule": "get_calendar_briefing",
+    "get_recent_calls": "list_calls",
+    "get_tasks": "list_tasks",
+    "get_financial_summary": "get_accounting_summary",
+    "analyze_spending": "analyze_spending",
+    "search_transactions": "list_transactions",
+    "list_invoices": "list_invoices",
+    "get_invoice_summary": "get_invoice_summary",
+    "get_xero_financials": "get_xero_financial_summary",
+    "get_overdue": "get_overdue_invoices",
+    "read_email": "get_email_detail",
+    "draft_reply": "draft_email_reply",
+    "business_overview": "get_business_overview",
+    "cashflow_forecast": "get_cashflow_forecast",
+}
+
+
 async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: str) -> str:
     """Execute a tool and return the result as a string."""
     _logger.info(f"Executing tool: {tool_name} with args: {args} for user={user_id}, business={business_id}")
@@ -304,37 +275,26 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
         from assistant_tools import execute_tool as execute_assistant_tool
         
         # Map realtime tool names to assistant_tools names if different
-        tool_name_map = {
-            "list_emails": "list_emails",
-            "send_email_reply": "send_email",
-            "get_schedule": "get_calendar_briefing",
-            "get_recent_calls": "list_calls",
-            "get_tasks": "list_tasks",
-            "create_task": "create_task",
-            "get_financial_summary": "get_accounting_summary",
-            "analyze_spending": "analyze_spending",
-            "search_transactions": "list_transactions",
-            "list_invoices": "list_invoices",
-            "get_invoice_summary": "get_invoice_summary",
-            "get_xero_financials": "get_xero_financial_summary",
-            "send_chase": "send_invoice_chase",
-            "get_overdue": "get_overdue_invoices",
-            "read_email": "get_email_detail",
-            "draft_reply": "draft_email_reply",
-            "business_overview": "get_business_overview",
-            "cashflow_forecast": "get_cashflow_forecast",
-        }
+        tool_name_map = VOICE_TOOL_MAP
         
-        mapped_name = tool_name_map.get(tool_name, tool_name)
+        # NS-A1: the executor used to pass any unmapped name straight to the
+        # shared dispatcher (`.get(name, name)`), so a client driving the
+        # session could name any tool. Only the advertised voice tools run;
+        # the old action aliases are refused explicitly, with the reason.
+        from assistant_tools import refusal
+        _VOICE_ACTION_ALIASES = {
+            "send_email_reply": "send_email",
+            "send_chase": "send_invoice_chase",
+        }
+        refused = refusal(_VOICE_ACTION_ALIASES.get(tool_name, tool_name))
+        if refused:
+            return json.dumps(refused)
+        if tool_name not in tool_name_map:
+            return json.dumps({"error": f"Unknown tool: {tool_name}"})
+        mapped_name = tool_name_map[tool_name]
         
         # Map arguments to what assistant_tools expects
-        if tool_name == "send_email_reply":
-            mapped_args = {
-                "to": args.get("to_email", ""),
-                "subject": args.get("subject", ""),
-                "body": args.get("body", ""),
-            }
-        elif tool_name == "list_emails":
+        if tool_name == "list_emails":
             # Force a minimum of 20 emails to prevent hallucination from small samples
             requested_limit = args.get("limit", 20)
             if requested_limit < 10:
@@ -352,12 +312,6 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
             mapped_args = {"limit": args.get("count", 5)}
         elif tool_name == "get_tasks":
             mapped_args = {"status": args.get("status", "open")}
-        elif tool_name == "create_task":
-            mapped_args = {
-                "title": args.get("title", ""),
-                "description": args.get("description"),
-                "due_at": args.get("due_at")
-            }
         elif tool_name == "get_financial_summary":
             mapped_args = {"period": args.get("period", "month")}
         elif tool_name == "analyze_spending":
@@ -370,8 +324,6 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
             mapped_args = {}
         elif tool_name == "get_xero_financials":
             mapped_args = {}
-        elif tool_name == "send_chase":
-            mapped_args = {"invoice_id": args.get("invoice_id", ""), "chase_stage": args.get("chase_stage")}
         elif tool_name == "get_overdue":
             mapped_args = {}
         elif tool_name == "read_email":
@@ -464,18 +416,16 @@ Your personality:
    - "schedule", "calendar", "meetings", "appointments", "diary" → get_schedule
    - "calls", "phone", "who called", "missed calls" → get_recent_calls
    - "tasks", "to-do", "what do I need to do" → get_tasks
-   - "create task", "add task", "remind me", "follow up", "make a note" → create_task
    - "finances", "money", "profit", "how's business", "accounting" → get_financial_summary
    - "spending", "expenses", "costs", "where's money going" → analyze_spending
    - "invoices", "bills", "what's owed", "outstanding", "overdue" → list_invoices or get_invoice_summary
    - "Xero", "Xero figures", "Xero summary", "accounts from Xero" → get_xero_financials
-   - "chase", "chase invoice", "nudge", "send a reminder" → send_chase (requires invoice_id)
    - "overdue invoices", "who hasn't paid", "late payments" → get_overdue
    - "read email", "open email", "what does it say", "read that", "full email" → read_email (requires email_id from list_emails)
    - "reply", "draft a reply", "respond to that email" → draft_reply (requires email_id from list_emails)
    - "business overview", "how's the business", "give me a summary" → business_overview
    - "cash flow", "cashflow", "forecast", "will I have enough" → cashflow_forecast
-   - "send", "send it", "send that", "send the email", "email them" → send_email_reply (requires to_email, subject, body — ALWAYS confirm with user first)
+   - "send", "chase", "book", "add a task", "remind me" → you cannot do these yourself yet; see WHAT YOU CANNOT DO YET
 
 6. **EMAIL FETCHING RULE** - When calling list_emails, ALWAYS set limit=20. Never use limit=1, limit=5, or any small number. You need enough emails to give a proper briefing.
 
@@ -553,29 +503,26 @@ When presenting Xero data, frame it like a financial advisor:
 - "Looking at Xero, your profit's up 15% on last month - mainly driven by that big invoice from Carter & Sons coming through."
 - Highlight trends and comparisons when available.
 
-**Chasing invoices:**
-When asked to chase or nudge, be proactive but check first:
-- "Sure, I'll fire off a reminder to Thompson & Co for that £800 invoice. It's 12 days overdue now."
-- After sending: "Done - chase email sent to Thompson & Co. I'll keep an eye on it."
-- If something goes wrong: "I tried to send the chase but hit an issue - looks like we don't have an email on file for that contact. Want me to look it up?"
+**WHAT YOU CANNOT DO YET:**
+You can read and draft, but you cannot send emails, chase invoices, book
+calendar events, or add or remove tasks. A tap-to-approve button is coming.
+When asked, say so plainly and point them to the right place:
+- Email: "I can't send emails myself just yet. I can read you a draft to copy into a reply from your own email." (Drafts are not saved anywhere; never say they are.)
+- Chase: "I can't send chases myself just yet. Open the invoice in Finance and use Send Chase Email."
+- Calendar: "I can't book that myself yet. I can tell you what's already in your diary - add the new one in your calendar." (You cannot work out free slots in voice.)
+- Tasks: "I can't add tasks myself just yet. Add it in the Tasks panel (Dashboard, Tasks, View all) and I can check your tasks whenever you ask."
+Never say or imply you have sent, booked, chased or added something.
 
 **Reporting overdue invoices:**
 Lead with the total and then get specific:
-- "You've got 3 overdue invoices right now, totalling £4,200. The biggest one is £2,500 from Davidson Ltd - that's been sitting there for 28 days. Want me to chase any of them?"
-- Offer to take action: "I can send a nudge to all three if you'd like?"
+- "You've got 3 overdue invoices right now, totalling £4,200. The biggest one is £2,500 from Davidson Ltd - that's been sitting there for 28 days. You can chase it from the invoice in Finance."
+- Offer the next step: "Want me to pull up the details so you can chase them from Finance?"
 
 **Drafting email replies:**
 When drafting, be collaborative:
-- "I've drafted a reply to Sarah's email - it's professional but firm about the deadline. Want me to read it out, or shall I just send it?"
+- "I've drafted a reply to Sarah's email - it's professional but firm about the deadline. Want me to read it out so you can copy it into your reply?"
 - "Here's what I'd suggest sending back to John..." then read key points.
 - Always offer to adjust the tone: "I can make it more formal or more casual if you prefer."
-
-**Sending emails:**
-- ALWAYS confirm the exact content before sending: read back the to address, subject, and a brief summary of the body.
-- NEVER call send_email_reply without explicit user confirmation like "yes", "send it", "go ahead".
-- After the tool returns success, say ONE short confirmation: "Done — email sent to [name] at [email]."
-- Do NOT repeat the confirmation multiple times or keep talking about the sent email.
-- If the tool returns an error, explain the error briefly and offer to try again.
 
 **Giving business overviews:**
 Paint the big picture naturally:
@@ -597,7 +544,7 @@ Be natural about it:
 **When there are errors or issues:**
 Be honest and helpful:
 - "I'm having trouble pulling up the emails - might be a connection issue. Want me to try again?"
-- "That tool isn't responding right now. I'll flag it, but in the meantime..."
+- "That tool isn't responding right now. I can try again in a moment, but in the meantime..."
 
 ## CONVERSATION FLOW
 
@@ -631,8 +578,8 @@ Be honest and helpful:
 **When asked "how's business doing?":**
 "Let me pull up the numbers... Right, so this month you're looking at a profit of about £1,500. Not your biggest month, but solid. Income's been steady, though expenses crept up a bit - looks like that was mainly the new equipment purchase. On the invoice side, you've got £800 outstanding but nothing overdue, so cash flow's healthy. Overall? You're in good shape."
 
-**Chasing an overdue invoice:**
-"Done - I've sent a polite chase to Davidson Ltd for that £2,500 invoice. It mentions it's 28 days overdue and asks them to settle it this week. I'll keep track and let you know if they respond."
+**Asked to chase an overdue invoice:**
+"I can't send chases myself just yet. Davidson Ltd owe £2,500 and it's 28 days overdue - open that invoice in Finance and use Send Chase Email. I can check it again whenever you ask."
 
 **Cash flow forecast:**
 "Looking ahead 30 days - you've got around £6,800 expected in from three outstanding invoices, and your usual outgoings sit at about £4,200. So you should be comfortable. The only thing to watch is that Carter invoice - if it slips past the 15th, you'll want to chase it sharpish."
@@ -872,8 +819,15 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                             }))
                             _logger.info(f"Updated turn detection - quiet_mode: {new_quiet_mode}")
                         else:
-                            # Forward other messages to OpenAI
-                            await openai_ws.send(json.dumps(message))
+                            # NS-A1: never forward client JSON to the model
+                            # session. The browser sends only `auth`, `config`
+                            # and raw audio (RealtimeVoice.tsx); anything else
+                            # — a session.update rewriting Aria's instructions,
+                            # an injected conversation item, a response.create
+                            # — would let a client steer Aria and her tools.
+                            _logger.warning(
+                                "Dropped client message type %r on voice socket",
+                                msg_type)
                         
                     elif "bytes" in data:
                         # Raw audio data - wrap in proper format

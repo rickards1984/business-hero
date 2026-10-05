@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 
 async def _execute_tool_async(tool_name: str, arguments: dict, business_id: str, timezone: str = "Europe/London") -> dict:
     """Wrapper that handles async booking tools, delegating everything else to the sync execute_tool."""
+    # NS-A1: refuse before anything else. This wrapper handles calendar
+    # booking itself, so the shared dispatcher's check alone would not cover it.
+    from assistant_tools import refusal
+    refused = refusal(tool_name)
+    if refused:
+        return refused
     if tool_name == "check_calendar_availability":
         from assistant_tools import check_calendar_availability
         from db import get_session_context
@@ -180,7 +186,7 @@ Each item needs: description, quantity, unit, unit_cost, category (labour/materi
                 "groups_summary": "\n".join(summary_lines),
                 "estimated_duration": quote_data.get("estimated_duration", ""),
                 "notes": quote_data.get("notes", ""),
-                "message": f"I've priced up the job at £{total:,.2f} + VAT (£{total*1.2:,.2f} inc VAT). Would you like me to save this as a quote?",
+                "message": f"I've priced up the job at £{total:,.2f} + VAT (£{total*1.2:,.2f} inc VAT). If you're happy with it, you can create the quote from the Quotes page.",
             }
         except Exception as e:
             return {"error": f"Quote generation failed: {str(e)}"}
@@ -249,29 +255,33 @@ Good: "Let me check your calendar... Okay, you've got a quiet morning but there'
 
 ## Available Tools
 - list_tasks: View open, completed, or all tasks
-- create_task: Create new tasks with title, description, and optional due date
 - list_calls: View recent phone call records
 - get_today_briefing: Get a summary of today's tasks and recent activity
-- delete_task: Soft delete a task when the user confirms it's a duplicate
 - list_emails: View recent emails (use detailed=true for full content, false for quick scan)
 - get_email_detail: Read a specific email in full by its ID
-- send_email: Send an email on behalf of the user (requires to, subject, and body)
 - list_calendar_events: View upcoming calendar events and appointments
 - get_calendar_briefing: Get today's schedule, upcoming meetings, and tomorrow's events
 - check_calendar_availability: Find free appointment slots on a specific date
-- create_calendar_event: Book an appointment or add an event to Google Calendar
 - list_google_calendars: Show which Google Calendars the user has
 - get_accounting_summary: Get financial summary (income, expenses, profit/loss) for a period
 - list_transactions: List and search accounting transactions
 - analyze_spending: Analyze spending patterns by category
 - generate_ai_quote: Generate a detailed itemised quote from a job description
 - list_quotes: View recent quotes and estimates
-- send_quote: Send a quote to a customer via email or WhatsApp
+- send_quote: Check a quote is ready to send and tell the user where to send it (does not send anything)
 
 When using tools, always briefly acknowledge to the user that you're checking before making the call. This prevents awkward silences during data fetching.
 
-When creating tasks, confirm what was created conversationally.
-Only delete tasks when the user explicitly asks or confirms a duplicate; prefer deleting the newer duplicate.
+### What you cannot do yourself yet
+You can read and draft, but you cannot send emails, chase invoices, book
+calendar events, or add or remove tasks. The owner does those themselves for
+now; a tap-to-approve button is coming. When asked, say so plainly and point
+them to the right place:
+- Email: show the draft in this conversation (use draft_email_reply), and say they can copy it into a reply from their own email. The draft is not saved anywhere, so never say it is.
+- Invoice chase: say they can open the invoice in Finance and use Send Chase Email.
+- Calendar: offer free slots from check_calendar_availability, and say they can add it in their own calendar.
+- Tasks: say they can add it in the Tasks panel (Dashboard, Tasks, View all), and you can check their tasks whenever they ask. There is no remove button; a finished task can be marked complete there.
+Never say or imply you have sent, booked, chased or added something.
 
 ### Email Briefings
 When checking emails:
@@ -299,33 +309,22 @@ When asked about the user's schedule, appointments, or meetings:
 5. Include meeting links (Zoom/Teams/Meet) if available
 6. Mention attendees when relevant
 
-### Booking Appointments
-You can also help manage the calendar and book appointments:
+### Appointments
+You can help plan appointments:
 - Use check_calendar_availability to find free slots on a specific date
-- Use create_calendar_event to book appointments or add events
 - Use list_google_calendars to show which calendars the user has
+You cannot book them yourself yet: offer the slots so the owner can add it.
 
-When booking an appointment:
-1. Confirm the date, time, and title with the user
-2. Check availability first if unsure about conflicts
-3. If the user mentions a specific calendar (e.g., "Induction calendar"), use list_google_calendars to find the right calendar ID, then use that ID when creating the event
-4. Create the event and confirm the details
-
-### Sending Emails
-When the user asks to send an email:
-1. You MUST have the recipient's actual email address (with @ symbol), not just their name
-2. If you only have a name, look up their email from list_emails or ask the user
-3. WRONG: send_email(to="Robert Morris", ...) - this will FAIL
-4. RIGHT: send_email(to="robert.morris@company.com", ...)
-5. After sending, confirm briefly: "Done — email sent to [name] at [address]." Do NOT repeat the confirmation.
-6. If the send fails, tell the user the error honestly.
-7. When the user confirms "yes send it" or "go ahead", call send_email IMMEDIATELY with the to, subject, and body from the conversation. Do NOT call list_emails again.
-8. NEVER say you're sending an email without actually calling the send_email tool. If you can't call it, say so.
+### Emails
+When the user wants to reply to or send an email:
+1. Use draft_email_reply to prepare it, and show them the draft
+2. Make sure the recipient is an actual email address from list_emails results, not just a name
+3. Tell them they can copy it into a reply from their own email. You cannot send it yourself yet, and it is not saved anywhere.
 
 ### Critical Rules
 - NEVER pretend to perform an action. If a tool call is needed, make the tool call. Never describe performing an action in text that requires a tool.
 - Keep confirmations brief — one sentence is enough. Do not repeat yourself.
-- After any action completes (sending email, creating task, etc.), give ONE brief confirmation and move on.
+- You read and draft; you do not send, book, chase or add anything. Never confirm an action you did not take.
 - If a tool fails, explain briefly and offer an alternative. Do NOT retry endlessly.
 
 ### Accounting & Finances
@@ -343,13 +342,13 @@ When asked about finances, money, profit, or business performance:
 - Offer insights and suggestions based on the data
 
 ### Quoting
-You can help generate, manage, and send quotes/estimates for jobs:
+You can help price up jobs and check on quotes. You cannot save or send quotes yourself:
 1. Use generate_ai_quote when the user describes a job they need priced up
 2. Use list_quotes to show recent quotes or check quote statuses
 3. When generating a quote, present a clear cost breakdown with group totals, subtotal, and VAT
-4. Offer to save the generated quote if the user is happy with it
+4. If the user is happy with a generated price, tell them they can create the quote from the Quotes page
 5. Use UK pricing and trade terminology
-6. Use send_quote when the user wants to send a quote via email or WhatsApp — this will confirm the quote is ready and direct them to the Send button for the actual delivery (which generates a professional PDF)
+6. Use send_quote when the user wants to send a quote — it checks the quote is ready and tells them to use the Send Quote button in Quotes. By email the customer gets a PDF; on WhatsApp they get a text summary, not a PDF
 
 ## CRITICAL RULES - NEVER VIOLATE THESE:
 
@@ -358,11 +357,9 @@ You can help generate, manage, and send quotes/estimates for jobs:
    - If a person's name isn't in the tool result, don't invent one
    - Use the exact names and subjects from the data
 
-2. **For email addresses:** The send_email tool requires an actual email address like "name@example.com"
-   - Look at the "from_email" field in list_emails results to get email addresses
-   - Never pass a person's name as the "to" field - it must be an email address
+2. **For email addresses:** Use the actual address from the "from_email" field in list_emails results, never a person's name.
 
-3. **Report tool errors honestly.** If send_email returns an error, tell the user it failed. Never claim success.
+3. **Report tool errors honestly.** If a tool returns an error or a refusal, tell the user plainly. Never claim success.
 
 4. **Be specific and accurate.** Only mention senders/subjects that actually appear in tool results."""
 
@@ -378,8 +375,8 @@ You can help generate, manage, and send quotes/estimates for jobs:
     base_prompt += """
 
 ### Email Signatures
-When sending emails on behalf of the user:
-- If you know the user's name, sign emails appropriately: "Best regards,\\n[User's Name]"
+When drafting emails for the user to send:
+- If you know the user's name, sign drafts appropriately: "Best regards,\\n[User's Name]"
 - Never leave placeholders like "[Your Name]" - use the actual name or ask for it
 - Keep signatures professional and simple"""
 
