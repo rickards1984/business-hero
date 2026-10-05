@@ -56,31 +56,6 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "create_task",
-            "description": "Create a new task for the business.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Title of the task"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Optional description of the task"
-                    },
-                    "due_at": {
-                        "type": "string",
-                        "description": "Optional due date in ISO 8601 format (e.g., '2024-12-25T10:00:00Z')"
-                    }
-                },
-                "required": ["title"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "list_calls",
             "description": "List recent phone calls/call events for the business. By default only shows non-archived calls.",
             "parameters": {
@@ -114,23 +89,6 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "delete_task",
-            "description": "Soft delete a task by ID. Use when user confirms a task is a duplicate.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "Task UUID to delete"
-                    }
-                },
-                "required": ["task_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "list_emails",
             "description": "List recent emails from the user's connected email account (Gmail or Microsoft). Use detailed=true when the user needs a thorough briefing or when you need to understand email content, not just subjects.",
             "parameters": {
@@ -150,31 +108,6 @@ TOOL_DEFINITIONS = [
                     }
                 },
                 "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "send_email",
-            "description": "Send an email on behalf of the user. Use this when the user asks to send, reply to, or compose and send an email.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "to": {
-                        "type": "string",
-                        "description": "Recipient email address"
-                    },
-                    "subject": {
-                        "type": "string",
-                        "description": "Email subject line"
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "Email body content (plain text)"
-                    }
-                },
-                "required": ["to", "subject", "body"]
             }
         }
     },
@@ -338,21 +271,6 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "send_invoice_chase",
-            "description": "Send a chase email for an unpaid invoice. Can specify stage 1-4 (1=friendly reminder, 2=firm follow-up, 3=urgent notice, 4=final demand). Use list_invoices first to get invoice IDs.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "invoice_id": {"type": "string", "description": "Invoice UUID (from list_invoices results)"},
-                    "chase_stage": {"type": "integer", "description": "Chase stage 1-4. Default: next stage up from current."}
-                },
-                "required": ["invoice_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "get_overdue_invoices",
             "description": "Get all overdue invoices with details on how overdue they are and recommended chase actions.",
             "parameters": {
@@ -416,27 +334,6 @@ TOOL_DEFINITIONS = [
                     "calendar_id": {"type": "string", "description": "Which Google Calendar to check. Use 'primary' for the main calendar, or a specific calendar ID."},
                 },
                 "required": ["date"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "create_calendar_event",
-            "description": "Create an event on the user's Google Calendar. Use this to book appointments, schedule meetings, or add events. Always confirm details with the user before booking.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "description": "Title/name of the event"},
-                    "start_time": {"type": "string", "description": "Start date and time in ISO format, e.g. 2026-03-21T10:00:00"},
-                    "end_time": {"type": "string", "description": "End date and time in ISO format, e.g. 2026-03-21T11:00:00"},
-                    "description": {"type": "string", "description": "Description or notes for the event"},
-                    "attendee_email": {"type": "string", "description": "Email address of an attendee to invite (optional)"},
-                    "attendee_name": {"type": "string", "description": "Name of the attendee (optional)"},
-                    "location": {"type": "string", "description": "Location of the event (optional)"},
-                    "calendar_id": {"type": "string", "description": "Which Google Calendar to create the event in. Use 'primary' for the main calendar, or a specific calendar ID."},
-                },
-                "required": ["title", "start_time", "end_time"]
             }
         }
     },
@@ -529,6 +426,47 @@ def _decrypt_token(ciphertext: str) -> str:
     return f.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
 
 
+# NS-A1 — Aria does not act outside the app, or write, on her own decision.
+# North Star P4 and Phase 1; ADR 0001 D1 and D11 (Mike, 28 Sep 2026). Until
+# NS-B10's tap-to-approve card exists, these five are REFUSED here and at the
+# other two boundaries (`assistant_chat._execute_tool_async`,
+# `realtime_voice.execute_tool`). Removing them from the advertised lists is
+# not the boundary: the model — or a client driving the voice session — can
+# name any tool (Codex review 1, finding 1). The implementations stay, for
+# NS-B10 to call once the owner has approved a specific draft.
+#
+# The messages are what Aria relays; wording approved by Mike, 5 Oct 2026.
+PROHIBITED_ACTIONS = {
+    "send_email": (
+        "Aria can't send emails herself yet. Offer the draft, and tell the "
+        "owner to open it in their Inbox to send it."
+    ),
+    "send_invoice_chase": (
+        "Aria can't send invoice chases herself yet. Tell the owner to open "
+        "the invoice in Finance and press Chase."
+    ),
+    "create_calendar_event": (
+        "Aria can't book calendar events herself yet. Offer the free slots "
+        "from check_calendar_availability so the owner can add it."
+    ),
+    "create_task": (
+        "Aria can't add tasks herself yet. Tell the owner to add it on the "
+        "Tasks list, and she'll keep track of it from there."
+    ),
+    "delete_task": (
+        "Aria can't remove tasks. Tell the owner to remove it on the Tasks list."
+    ),
+}
+
+
+def refusal(tool_name: str) -> Optional[dict]:
+    """The refusal for a prohibited action, or None if the tool may run."""
+    message = PROHIBITED_ACTIONS.get(tool_name)
+    if message is None:
+        return None
+    return {"refused": True, "error": message, "tool": tool_name}
+
+
 def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: str = "Europe/London") -> dict:
     """Execute a tool and return the result.
     
@@ -541,6 +479,10 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
     Returns:
         dict with tool result
     """
+    refused = refusal(tool_name)
+    if refused:
+        return refused
+
     if tool_name == "list_tasks":
         return _list_tasks(engine, business_id, arguments)
     elif tool_name == "create_task":

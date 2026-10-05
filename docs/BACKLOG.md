@@ -25,7 +25,7 @@ an audit reference — is not ready to become a ticket (`AGENTS.md` §6).
 | Locate the 14-char `sk_` API key generator, or prove it unreachable | `030B-SPEC.md` scope note 4 — still open |
 | Let owners rename the AI phone receptionist — post-RC1, once users ask for it | ADR 0001 D10 / proposal D14 (Mike, 28 Sep 2026). Receptionist identity today: `receptionist_configs.personality_prompt`, `greeting_message` |
 | Task completion is written `done` by the API and counted only as `completed` by the board meeting, so API-completed tasks go uncounted | `main.py:1797` vs `executive_meeting_data_loaders/tasks.py:73`; Codex review 1. Fixed within proposal B5 if admitted |
-| Voice WebSocket forwards arbitrary client messages to the model and executes unmapped tool names | `realtime_voice.py:838`, `:310`; Codex review 1. Fixed within proposal A1 |
+| ~~Voice WebSocket forwards arbitrary client messages to the model and executes unmapped tool names~~ | **Fixed by NS-A1** (5 Oct 2026): only audio and `config` reach the model; unmapped names are refused |
 | Every INFO log line is labelled `severity: error` in Railway (logging writes to stderr), so real errors are buried and an error alert would fire constantly | Railway logs, 2 Oct 2026 (e.g. "Uvicorn running", "Successfully connected" as error). Small: route INFO to stdout or emit structured levels |
 | Aria voice GA migration, then set `ARIA_VOICE_ENABLED=1` in Railway | NS-A2 switched it off; ADR 0001 D2 puts the repair after P0-2 metering. `receptionist_call_handler.py:720-733` is the worked GA example |
 

@@ -26,8 +26,14 @@ repeated "030b Release 2 is still next"; corrected 30 Sep 2026.
 | `docs/RC1_SCOPE_PROPOSAL.md` — which Phase 1 items could join RC1 | **Revision 2, awaiting Michael's decision on D11–D14.** `docs/RC1_SCOPE.md` is unchanged |
 | `docs/decisions/0001-north-star-rc1-decisions.md` | Michael's decisions D1–D10, accepted 28 Sep 2026 |
 
-Codex review 1 also surfaced two present defects, both existing code, neither
-fixed yet: the voice WebSocket forwards arbitrary client messages to the model
+**NS-A1 (5 Oct 2026):** Aria no longer sends email, chases invoices, books
+calendar events, or creates or deletes tasks on her own decision. All five
+are refused at the chat wrapper, the shared dispatcher and the voice
+executor (`assistant_tools.PROHIBITED_ACTIONS`), pending NS-B10's
+tap-to-approve card. `backend/tests/test_aria_no_unapproved_actions.py`.
+
+Codex review 1 also surfaced two present defects in existing code; the
+first is now fixed by NS-A1, the second is open: the voice WebSocket forwards arbitrary client messages to the model
 and executes unmapped tool names (`realtime_voice.py:838`, `:310`), and task
 completion is written as `done` by the API but counted only as `completed` by
 the board-meeting loader (`main.py:1797`, `executive_meeting_data_loaders/tasks.py:73`).

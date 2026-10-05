@@ -62,16 +62,6 @@ import assistant_tools  # noqa: E402
 import realtime_voice  # noqa: E402
 from assistant_chat import BusinessContext  # noqa: E402
 
-# Tests first (AGENTS.md §2, RED discipline: customer contact about money).
-# Every test that encodes the NEW behaviour carries this marker until Mike
-# has reviewed them and the fix lands. strict=True: the moment the fix makes
-# one pass, the marker itself fails the suite and must be removed — so a
-# marker cannot outlive the fix and quietly hide a regression.
-NS_A1_PENDING = pytest.mark.xfail(
-    strict=True,
-    reason="NS-A1: tests written first; the fix follows Mike's review",
-)
-
 BIZ = "11111111-1111-1111-1111-111111111111"
 USER = "22222222-2222-2222-2222-222222222222"
 TZ = "Europe/London"
@@ -175,7 +165,6 @@ def _assert_refused(result):
 
 # ------------------------------------------------------------------- chat ---
 
-@NS_A1_PENDING
 @pytest.mark.parametrize("name", sorted(PROHIBITED_CHAT))
 def test_chat_refuses_each_action(tripwire, name):
     result = asyncio.run(
@@ -184,7 +173,6 @@ def test_chat_refuses_each_action(tripwire, name):
     assert _acted(tripwire) == [], f"{name} executed: {tripwire}"
 
 
-@NS_A1_PENDING
 @pytest.mark.parametrize("name", sorted(PROHIBITED_CHAT))
 def test_the_shared_dispatcher_refuses_each_action_too(tripwire, name):
     """Defence in depth: any future caller of execute_tool is covered, not
@@ -194,13 +182,11 @@ def test_the_shared_dispatcher_refuses_each_action_too(tripwire, name):
     assert _acted(tripwire) == []
 
 
-@NS_A1_PENDING
 def test_chat_advertises_none_of_the_actions():
     names = {t["function"]["name"] for t in assistant_tools.TOOL_DEFINITIONS}
     assert names.isdisjoint(PROHIBITED_CHAT), names & set(PROHIBITED_CHAT)
 
 
-@NS_A1_PENDING
 def test_chat_prompt_does_not_offer_the_actions():
     """Aria must not be told she can do what the server will refuse — she
     would promise it, then fail."""
@@ -212,7 +198,6 @@ def test_chat_prompt_does_not_offer_the_actions():
 
 # ------------------------------------------------------------------ voice ---
 
-@NS_A1_PENDING
 @pytest.mark.parametrize("name", sorted(PROHIBITED_VOICE))
 def test_voice_refuses_each_action(tripwire, name):
     raw = asyncio.run(
@@ -221,13 +206,11 @@ def test_voice_refuses_each_action(tripwire, name):
     assert _acted(tripwire) == [], f"{name} executed via voice: {tripwire}"
 
 
-@NS_A1_PENDING
 def test_voice_advertises_none_of_the_actions():
     names = {t["name"] for t in realtime_voice.REALTIME_TOOLS}
     assert names.isdisjoint(PROHIBITED_VOICE), names & set(PROHIBITED_VOICE)
 
 
-@NS_A1_PENDING
 def test_voice_prompt_does_not_offer_the_actions():
     text = realtime_voice.build_system_instructions("Test Co", "Mike")
     offered = [n for n in PROHIBITED_VOICE if n in text]
@@ -306,7 +289,6 @@ def _wait_for(predicate, timeout=5.0):
     return False
 
 
-@NS_A1_PENDING
 def test_voice_socket_does_not_forward_client_messages_to_the_model(voice_socket):
     """A client can no longer rewrite Aria's instructions, inject a
     conversation turn or trigger a response on the model session."""
@@ -340,7 +322,6 @@ def test_voice_socket_still_forwards_audio(voice_socket):
                                      for m in holder["upstream"].sent))
 
 
-@NS_A1_PENDING
 def test_a_model_call_to_send_a_chase_is_refused_end_to_end(voice_socket, tripwire):
     """The model itself asks to chase an invoice over the live socket. The
     server answers the call with a refusal and nothing is sent."""
