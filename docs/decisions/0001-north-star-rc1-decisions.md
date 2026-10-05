@@ -121,6 +121,37 @@ images. Doing nothing leaves Aria, her default voice and default avatar.
   rename the AI receptionist is to be added once there are users asking for
   it. That is post-RC1 and logged in `docs/BACKLOG.md`.
 
+### D15–D17 — calendar booking and removal (Mike, 5 Oct 2026)
+
+- **D15 — Aria books calendar events on approval.** Calendar booking joins
+  NS-B10's tap-to-approve card alongside email replies, invoice chases and
+  tasks. The booking code exists (`assistant_tools.create_calendar_event`);
+  NS-A1 put it behind a refusal, and NS-B10 puts the approval in front of it.
+- **D16 — Removing or cancelling events is Phase 2.** No code can delete or
+  cancel an event today. Cancelling can notify every attendee and is hard to
+  undo, so it is built as its own approval-gated work after booking works.
+- **D17 — The phone receptionist books for callers; this is RC1.** Example:
+  a caller rings New Body's AI receptionist and books an induction. Booking
+  for callers is the business's own public booking service, switched on by
+  the owner in booking settings. That setting IS the standing permission P4
+  allows, so the receptionist books without asking the owner each time.
+  This is unlike Aria acting for the owner, which waits for a tap.
+  The receptionist already books (`receptionist_call_handler.py:378`), but
+  code review on 5 Oct 2026 found four gaps, now ticket **NS-R1** (RC1):
+  1. it books even when booking is switched off — with no enabled settings
+     it falls through to a default one-hour slot on the owner's primary
+     calendar (`:392-422`);
+  2. nothing checks the slot is still free at the moment of booking, so two
+     callers, or a skipped availability check, can double-book;
+  3. business hours, minimum notice and maximum advance are enforced only
+     by the availability check, not by the booking;
+  4. the caller's phone number is not stored on the booking.
+  Production behaviour is UNVERIFIED until a test call.
+  **Caller cancellation and rescheduling by phone is Phase 2, with D16.** It
+  needs the caller verified first (their number must match the booking's),
+  or anyone could cancel someone else's induction by naming a time — which is
+  why NS-R1 stores the caller's number now.
+
 ## Consequences
 
 - RC1 gains its first Aria write path (D9). It is safer than today — where
