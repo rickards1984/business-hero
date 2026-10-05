@@ -185,13 +185,17 @@ class FakeGoogle:
     def __init__(self, existing=()):
         self.events = list(existing)   # (start_aware, end_aware)
         self.created = []
+        self.queries = []
 
     async def busy(self, business_id, calendar_id, time_min, time_max):
+        """Like Google: only events overlapping the requested window."""
         await asyncio.sleep(0.01)  # let a concurrent caller interleave
+        self.queries.append((calendar_id, time_min, time_max))
+        lo, hi = datetime.fromisoformat(time_min), datetime.fromisoformat(time_max)
         return {"busy": [
             {"start": s.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
              "end": e.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")}
-            for s, e in self.events]}
+            for s, e in self.events if s < hi and e > lo]}
 
     async def create(self, **kw):
         await asyncio.sleep(0.01)
@@ -214,11 +218,14 @@ def google(monkeypatch):
 
 
 def _settings_db(monkeypatch, settings):
-    row = None if settings is None else types.SimpleNamespace(**settings)
+    holder = {"settings": settings}
 
     class _Res:
         def fetchone(self):
-            return row if (row is not None and row.enabled) else None
+            current = holder["settings"]
+            if current is None or not current.get("enabled"):
+                return None
+            return types.SimpleNamespace(**current)
 
     class _Sess:
         def execute(self, *a, **k):
@@ -230,6 +237,7 @@ def _settings_db(monkeypatch, settings):
 
     import db
     monkeypatch.setattr(db, "get_session_context", _ctx)
+    return holder
 
 
 @pytest.fixture
@@ -337,3 +345,185 @@ def test_arias_chat_availability_is_in_uk_time_too(monkeypatch, google, now_is):
     starts = [s["start"] for s in result["available_slots"]]
     assert "10:00" not in starts and "10:30" not in starts
     assert "09:00" in starts and "11:00" in starts
+
+
+# ------------------------------------------- Codex NS-R1 review 1 additions ---
+
+SUNDAY_ALL_DAY = [{"day": d, "start": "00:00", "end": "23:30", "enabled": True}
+                  for d in ("monday", "tuesday", "wednesday", "thursday",
+                            "friday", "saturday", "sunday")]
+FALL_BACK = date(2026, 10, 25)     # clocks go back: 01:00-02:00 happens twice
+SPRING_FORWARD = date(2027, 3, 28)  # clocks go forward: 01:00-02:00 never happens
+
+
+def test_overlap_is_judged_on_real_instants_not_wall_clock():
+    """25 Oct 2026: an event 00:45Z-01:15Z. 01:30 in the SECOND (GMT) pass
+    is 01:30Z — clear of it. 01:30 in the FIRST (BST) pass is 00:30Z —
+    overlapping it for a 60-minute slot. A wall-clock comparison cannot
+    tell them apart."""
+    b = booking()
+    r = rules(business_hours=SUNDAY_ALL_DAY, min_notice_hours=0)
+    busy = b.parse_busy([{"start": "2026-10-25T00:45:00Z", "end": "2026-10-25T01:15:00Z"}], r)
+    early = datetime(2026, 10, 24, 12, 0, tzinfo=LONDON)
+    gmt_pass = datetime(2026, 10, 25, 1, 30, tzinfo=LONDON, fold=1)
+    bst_pass = datetime(2026, 10, 25, 1, 30, tzinfo=LONDON, fold=0)
+    assert b.check_slot(r, gmt_pass, 60, busy, now=early) is None
+    assert b.check_slot(r, bst_pass, 60, busy, now=early) == "clash"
+
+
+def test_duration_is_real_time_across_the_clock_change():
+    b = booking()
+    start = datetime(2026, 10, 25, 0, 30, tzinfo=LONDON)   # BST, 23:30Z
+    end = b.slot_end(start, 120)
+    assert end.astimezone(UTC) == datetime(2026, 10, 25, 1, 30, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("day,why", [(FALL_BACK, "happens twice"),
+                                     (SPRING_FORWARD, "never happens")])
+def test_a_clock_change_time_is_refused_at_booking(monkeypatch, google, now_is, day, why):
+    _settings_db(monkeypatch, {**SETTINGS, "business_hours": SUNDAY_ALL_DAY,
+                               "max_advance_days": 365})
+    now_is(datetime(2026, 10, 1, 8, 0, tzinfo=LONDON))
+    result = asyncio.run(book(day=day.isoformat(), time="01:30"))
+    assert result["success"] is False, f"01:30 {why} on {day}"
+    assert google.created == []
+
+
+def test_clock_change_times_are_not_offered(monkeypatch):
+    b = booking()
+    r = rules(business_hours=SUNDAY_ALL_DAY, min_notice_hours=0, max_advance_days=365)
+    early = datetime(2026, 10, 1, 8, 0, tzinfo=LONDON)
+    for day in (FALL_BACK, SPRING_FORWARD):
+        starts = [s.strftime("%H:%M") for s in b.free_slots(r, day, 30, [], now=early)]
+        assert "01:00" not in starts and "01:30" not in starts, day
+
+
+def test_the_free_busy_window_is_widened_by_the_buffer():
+    lo, hi = booking().freebusy_window(rules(buffer_minutes=15), BST_DAY)
+    assert lo == "2026-10-07T09:15:00+01:00"
+    assert hi == "2026-10-07T17:15:00+01:00"
+
+
+def test_an_event_just_before_opening_still_blocks_the_buffer(monkeypatch, google, now_is):
+    """Opening 09:30, buffer 15: an event ending 09:25 must block a 09:30
+    booking. Asking Google only about 09:30-17:00 would never see it."""
+    _settings_db(monkeypatch, {**SETTINGS, "buffer_minutes": 15})
+    google.events.append((at(BST_DAY, "09:00"), at(BST_DAY, "09:25")))
+    assert asyncio.run(book(time="09:30"))["success"] is False
+    assert google.created == []
+
+
+def test_a_slot_in_the_past_is_refused_even_with_no_notice_period():
+    b = booking()
+    assert b.check_slot(rules(min_notice_hours=0), at(BST_DAY, "10:00"), 60, [],
+                        now=at(BST_DAY, "15:00")) == "in_the_past"
+
+
+def test_free_busy_is_asked_about_the_booking_calendar(monkeypatch, google, now_is):
+    _settings_db(monkeypatch, SETTINGS)
+    asyncio.run(book(time="10:00"))
+    assert google.queries and all(q[0] == SETTINGS["calendar_id"] for q in google.queries)
+
+
+def test_switching_booking_off_stops_a_caller_who_was_waiting(monkeypatch, google, now_is):
+    """Settings are re-read inside the lock: a caller queued behind another
+    booking must not book once the owner has switched booking off."""
+    holder = _settings_db(monkeypatch, SETTINGS)
+    original_create = google.create
+
+    async def create_then_switch_off(**kw):
+        result = await original_create(**kw)
+        holder["settings"] = {**SETTINGS, "enabled": False}
+        return result
+    monkeypatch.setattr(assistant_tools, "create_calendar_event", create_then_switch_off)
+
+    async def both():
+        return await asyncio.gather(book(time="10:00", name="Sam"),
+                                    book(time="12:00", name="Alex"))
+    results = asyncio.run(both())
+    assert [r["success"] for r in results].count(True) == 1
+    assert len(google.created) == 1
+
+
+def test_the_callers_number_is_also_stored_privately(monkeypatch, google, now_is):
+    """For Phase 2's caller verification: private event data the attendee
+    never receives, not only the description."""
+    _settings_db(monkeypatch, SETTINGS)
+    asyncio.run(book(time="10:00"))
+    assert google.created[0].get("private_properties", {}).get("caller_phone") == CALLER
+
+
+# --- Google's free/busy response, parsed for real ---
+
+class _Resp:
+    def __init__(self, status, body):
+        self.status_code, self._body = status, body
+
+    def json(self):
+        return self._body
+
+
+def _google_answers(monkeypatch, body, status=200):
+    monkeypatch.setattr(assistant_tools, "_get_google_calendar_token",
+                        lambda engine, bid: ("token", "acct", None))
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            return _Resp(status, body)
+    monkeypatch.setattr(assistant_tools.httpx, "AsyncClient", _Client)
+
+
+CAL = "inductions@group.calendar.google.com"
+
+
+@pytest.mark.parametrize("body,why", [
+    ({"calendars": {CAL: {"errors": [{"domain": "global", "reason": "notFound"}], "busy": []}}},
+     "calendar-level error"),
+    ({"calendars": {}}, "calendar missing from the answer"),
+    ({"calendars": {CAL: {}}}, "no busy list"),
+    ({}, "no calendars at all"),
+])
+def test_an_unusable_free_busy_answer_is_an_error_not_an_empty_diary(monkeypatch, body, why):
+    _google_answers(monkeypatch, body)
+    result = asyncio.run(assistant_tools.fetch_busy_periods(
+        BIZ, CAL, "2026-10-07T09:30:00+01:00", "2026-10-07T17:00:00+01:00"))
+    assert result.get("error"), why
+
+
+def test_a_valid_free_busy_answer_is_returned(monkeypatch):
+    busy = [{"start": "2026-10-07T09:00:00Z", "end": "2026-10-07T10:00:00Z"}]
+    _google_answers(monkeypatch, {"calendars": {CAL: {"busy": busy}}})
+    result = asyncio.run(assistant_tools.fetch_busy_periods(
+        BIZ, CAL, "2026-10-07T09:30:00+01:00", "2026-10-07T17:00:00+01:00"))
+    assert result == {"busy": busy}
+
+
+# --- Aria's chat, through the real dispatcher ---
+
+def test_chat_availability_uses_the_business_timezone_and_booking_rules(
+        monkeypatch, google, now_is):
+    """Through assistant_chat's dispatcher, for a business NOT in London.
+    New York, 7 Oct 2026, is UTC-4: an event 14:00-15:00Z is 10:00-11:00
+    local. With booking set up, chat offers what the receptionist would:
+    opening at 09:30, so 09:30 is offered and 10:00 is not."""
+    import assistant_chat
+    _settings_db(monkeypatch, SETTINGS)
+    ny = ZoneInfo("America/New_York")
+    google.events.append((datetime(2026, 10, 7, 10, 0, tzinfo=ny),
+                          datetime(2026, 10, 7, 11, 0, tzinfo=ny)))
+    now_is(datetime(2026, 10, 6, 8, 0, tzinfo=ny))
+    result = asyncio.run(assistant_chat._execute_tool_async(
+        "check_calendar_availability", {"date": "2026-10-07", "duration_minutes": 60},
+        BIZ, "America/New_York"))
+    starts = [x["start"] for x in result["available_slots"]]
+    assert starts[0] == "09:30"
+    assert "10:00" not in starts and "11:00" in starts
