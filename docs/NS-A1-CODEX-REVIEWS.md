@@ -121,3 +121,35 @@ Permitted test: **42 passed, 1 deprecation warning**. Inspected both complete pr
 | Phrase scan incomplete | Extended with this review's seven phrases, plus a source check on the quote hand-off. Runtime-result verification across all tools is NS-B1's job |
 
 Repair cycles used: 2 of 3 (AGENTS.md §8). Tests: 49 pass. `./check.sh full`: 717 passed.
+
+## Review 3 (narrow)
+
+| | |
+|---|---|
+| Reviewed commit | `949192b` |
+| Session id | `01a10d7a-d53e-7ab0-a8d4-550692bc7eb0` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 31,425` |
+| **Verdict** | **ACCEPT** |
+
+Verbatim:
+
+---
+
+**ACCEPT** — narrow re-review of `949192b`, serving North Star P4/P8. No blocking findings within scope.
+
+- **1 resolved:** `backend/assistant_chat.py:283` and `backend/assistant_tools.py:458` distinguish completion from removal. This matches **Dashboard → Tasks → View all** and the completion control at `frontend/client/src/components/TasksPanel.tsx:420`.
+- **2 resolved:** `backend/assistant_chat.py:271`, `:327`, `:378` now describe quote handoff, reading and drafting without promising execution.
+- **3 resolved:** `backend/assistant_chat.py:351` and `backend/assistant_tools.py:2806` distinguish email PDF from WhatsApp text, matching `frontend/client/src/pages/QuotesPage.tsx:1170` and `:1186`.
+- **6 resolved:** `backend/realtime_voice.py:513`, `:547`, `:582` no longer promise monitoring or reporting.
+- **4/5 deferral acceptable for this actions-only ticket:** `docs/BACKLOG.md:30–31` records both under NS-B1 and requires finding 4 fixed before voice returns. The server gate at `backend/realtime_voice.py:620` exits before provider connection when disabled. Production configuration was not independently verified. Finding 5 remains a chat read-accuracy defect; disabling voice does not mitigate it.
+- **No new false claims identified in the edits.**
+
+Out of scope: existing WhatsApp loading copy still promises PDF generation (`frontend/client/src/pages/QuotesPage.tsx:1162`).
+
+Permitted test: **49 passed, 1 deprecation warning**. UI verified against source, not interactively. No edits, pushes or network access.
+---
+
+### Response to review 3
+
+Accepted. The one out-of-scope note (WhatsApp loading text in `QuotesPage.tsx:1162` promises a PDF) is logged in `docs/BACKLOG.md`. Three review cycles, within the AGENTS.md §8 budget.
