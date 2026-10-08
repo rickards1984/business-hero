@@ -152,6 +152,24 @@ images. Doing nothing leaves Aria, her default voice and default avatar.
   or anyone could cancel someone else's induction by naming a time — which is
   why NS-R1 stores the caller's number now.
 
+### D18 — approving by voice (Mike, 6 Oct 2026)
+
+For RC1 an approval is a **tap**, as D9 says, even in voice: Aria reads the
+draft aloud and the owner taps once. Spoken approval ("confirm send", after
+Aria reads it back, recorded in the audit trail) is **Phase 3**, introduced
+per action type like the standing permissions. Built for site, not the
+desk (§5) argues for it eventually; a misheard "yes" emailing a customer
+about money argues against it now.
+
+### D17 addendum — the double-booking cause (6 Oct 2026)
+
+Writing NS-R1's tests found the main cause of double booking, beyond the
+four gaps above: availability sent Google UK clock times labelled UTC and
+compared Google's UTC answers against UK clock times, so during British
+Summer Time every existing appointment was an hour out and an occupied
+slot was offered again. Aria's chat availability tool had the same bug.
+Fixed in NS-R1 (`backend/services/booking.py`).
+
 ## Consequences
 
 - RC1 gains its first Aria write path (D9). It is safer than today — where

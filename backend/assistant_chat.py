@@ -29,6 +29,7 @@ async def _execute_tool_async(tool_name: str, arguments: dict, business_id: str,
         from db import get_session_context
         from sqlalchemy import text as sql_text
         import json as _json
+        from datetime import date as _dt_date
 
         date_str = arguments.get("date")
         duration = arguments.get("duration_minutes", 60)
@@ -41,6 +42,33 @@ async def _execute_tool_async(tool_name: str, arguments: dict, business_id: str,
                     sql_text("SELECT * FROM booking_settings WHERE business_id = :bid"),
                     {"bid": business_id},
                 ).fetchone()
+
+            # NS-R1: with booking set up, chat offers exactly what the phone
+            # receptionist would accept — the same rules, in the business's
+            # own time zone — rather than its own looser hour-only version.
+            from services import booking as _bk
+            rules = _bk.rules_from_settings(settings_row, timezone)
+            if rules is not None:
+                from assistant_tools import booking_availability
+                day = _dt_date.fromisoformat(date_str)
+                avail = await booking_availability(business_id, rules, day, int(duration))
+                if avail.get("error"):
+                    return {"error": avail["error"], "slots": []}
+                slots = [{
+                    "start": st.strftime("%H:%M"),
+                    "end": _bk.slot_end(st, int(duration)).strftime("%H:%M"),
+                    "start_iso": st.isoformat(),
+                    "end_iso": _bk.slot_end(st, int(duration)).isoformat(),
+                } for st in avail["slots"]]
+                window = _bk.opening(rules, day)
+                return {
+                    "date": date_str,
+                    "duration_minutes": int(duration),
+                    "business_hours": (f"{window[0]:%H:%M} - {window[1]:%H:%M}"
+                                       if window else "closed"),
+                    "available_slots": slots,
+                    "total_available": len(slots),
+                }
 
             if settings_row and settings_row.enabled:
                 import datetime as _dt
@@ -60,6 +88,7 @@ async def _execute_tool_async(tool_name: str, arguments: dict, business_id: str,
             logger.warning(f"Failed to load booking settings: {e}")
 
         return await check_calendar_availability(
+            timezone=timezone,
             business_id=business_id,
             date=date_str,
             duration_minutes=duration,
