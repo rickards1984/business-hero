@@ -201,3 +201,31 @@ address and contact details; customer name and address; description;
 supply date; invoice date; amounts; VAT if applicable; total owed. So the
 customer-address gap (open question 1) affects non-VAT invoices too, and
 the supply-date gap (open question 2) is a general requirement as well.
+
+## Decisions — Mike, 8 October 2026
+
+Mike reviewed the Stage 1 tests and approved them, and agreed every
+recommendation put to him (Claude Code's summary of the eight open
+questions). These now bind Stage 2:
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Customer address | A RED migration adds `invoices.customer_address` and `invoices.supply_date`, delivered **with P0-5** (manual invoices), not in BH-009. Until then Stage 2 reads the address from the same-business quote linked by `quotes.invoice_id` only; it never guesses |
+| 2 | Invoice date | Quote conversion records the invoice date from now on (P0-5 owns that write). For existing rows: `issue_date`, else `invoice_date`, else the date of `created_at`, labelled "Invoice date". A tax point is shown only when stored and different |
+| 3 | VAT number | `businesses.tax_number` wins; `quote_settings.vat_number` only when it is empty. (Flagging a mismatch in Settings is follow-up UI, not BH-009) |
+| 4 | Imported CSV/Xero invoices | Titled **"Invoice copy"**, never "VAT invoice", with "Originally issued from Xero" (or "Imported from CSV") and "No itemised lines" when there are none |
+| 5 | Currency | The invoice's own currency wins over the business region. A VAT-registered business with a non-GBP invoice is **refused** in RC1 (HMRC requires VAT shown in sterling too) |
+| 6 | Unregistered business, VAT stored on the invoice | **Refused** with a clear message telling the owner to check their VAT settings. Never rendered either way |
+| 7 | Discounts | Shown as their own line in the totals |
+| 8 | HMRC | Mike has the reviewer addendum above; confirmation against Notice 700 §16 rests with him |
+
+### Behaviour while the address column does not exist (Stage 2 interim)
+
+A VAT-registered invoice over £250 with no customer address cannot be a
+complete full VAT invoice (§16.3); at £250 or under, the less detailed
+form needs none (§16.6.1). Stage 2 renders what exists and **never
+invents an address**, and the API reports what is missing in a response
+header, `X-Invoice-Missing-Fields` (e.g. `customer_address`), so the app
+can warn the owner before they send it. The PDF itself carries no warning
+text. This is an interim rule until P0-5's migration, and it is Claude
+Code's call within Mike's decisions, flagged to him.

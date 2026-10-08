@@ -276,3 +276,35 @@ Command: `npm_config_cache="$PWD/.bh009-npm-cache" npm_config_offline=true ./che
   Green. Safe to proceed.
 ------------------------------------------------------------
 ```
+
+---
+
+## Stage 2 — implementation (approved by Mike, 8 Oct 2026)
+
+Mike approved the Stage 1 tests and every decision in
+`docs/BH-009-DESIGN.md` § "Decisions — Mike, 8 October 2026". Build:
+
+1. **Tests first for the decisions.** Add tests for decisions 2–6 and the
+   interim missing-fields header (they are new behaviour Mike approved),
+   watch them fail, then implement. Do not weaken any Stage 1 test; if one
+   must change to match a decision (e.g. decision 4's "Invoice copy" title),
+   change only what the decision requires and say so in Completion evidence.
+2. `backend/services/invoice_pdf.py` and `backend/invoice_pdf_api.py`, per
+   the design. Register the router in `backend/main.py` — one line, beside
+   the other `include_router` calls. No other `main.py` change.
+3. Remove the strict-xfail markers as each test passes (strict XPASS will
+   force it).
+4. Frontend: a **Download PDF** button on each invoice in
+   `frontend/client/src/components/InvoicesPanel.tsx`, calling the new
+   endpoint with the user's auth and saving the file. If the response has
+   `X-Invoice-Missing-Fields`, show a visible warning beside the button
+   naming what is missing (e.g. "Customer address not recorded — this is
+   not a complete VAT invoice"), not a console message.
+5. No migration. No email sending. No change to quote PDFs.
+6. Run `./check.sh full` from the worktree (the `.venv` and `node_modules`
+   symlinks are there) and paste the output into Completion evidence.
+
+Same rules as Stage 1: no network, no production, no git commit or push —
+Claude Code reviews every line, commits and pushes.
+
+**Status** in progress — stage 2 (implementation)
