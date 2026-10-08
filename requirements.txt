@@ -1,3 +1,8 @@
+# Railway runs `pip install -r requirements.txt` with no constraints file of
+# its own, so the lock is applied HERE. Without this line every deploy
+# resolved to the newest versions that day: on 8 Oct 2026 SQLAlchemy 2.1
+# (default PostgreSQL driver: psycopg, not installed) took production down.
+-c requirements.lock.txt
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 sqlmodel>=0.0.14

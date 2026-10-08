@@ -15,9 +15,26 @@ SUPABASE_URL = os.getenv("SUPABASE_DATABASE_URL")
 DATABASE_URL = SUPABASE_URL or os.getenv("DATABASE_URL")
 SQLITE_DATABASE_URL = os.getenv("SQLITE_DATABASE_URL", "sqlite:///./data.db")
 
+
+def normalise_database_url(url: str) -> str:
+    """Name the PostgreSQL driver explicitly.
+
+    `postgresql://` means "the dialect's default driver", and that default
+    changed: SQLAlchemy 2.1 picks psycopg (v3), which is not installed, where
+    2.0 picked psycopg2, which is. On 8 Oct 2026 an unpinned deploy resolved
+    to 2.1 and every boot failed with "No module named 'psycopg'". Naming
+    psycopg2 makes a future upgrade fail loudly in tests, not in production.
+    An explicitly chosen driver (postgresql+anything://) is left alone.
+    """
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+    return url
+
+
 if DATABASE_URL:
-    if DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    DATABASE_URL = normalise_database_url(DATABASE_URL)
     
     parsed = urlparse(DATABASE_URL)
     logger.info(f"Connecting to PostgreSQL database at host: {parsed.hostname}")
