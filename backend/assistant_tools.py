@@ -2197,7 +2197,8 @@ def _list_invoices(engine, business_id: str, args: dict) -> dict:
         if status == "all":
             query = text("""
                 SELECT id, invoice_number, customer_name, customer_email, amount, status,
-                       due_date, issue_date, chase_stage, created_at
+                       due_date, issue_date, chase_stage, created_at,
+                       customer_address, invoice_date, supply_date
                 FROM invoices
                 WHERE business_id = :business_id AND (archived IS NULL OR archived = false)
                 ORDER BY due_date DESC NULLS LAST, created_at DESC
@@ -2209,7 +2210,8 @@ def _list_invoices(engine, business_id: str, args: dict) -> dict:
             placeholders = ", ".join([f":status_{i}" for i in range(len(statuses))])
             query = text(f"""
                 SELECT id, invoice_number, customer_name, customer_email, amount, status,
-                       due_date, issue_date, chase_stage, created_at
+                       due_date, issue_date, chase_stage, created_at,
+                       customer_address, invoice_date, supply_date
                 FROM invoices
                 WHERE business_id = :business_id
                   AND status IN ({placeholders})
@@ -2223,7 +2225,8 @@ def _list_invoices(engine, business_id: str, args: dict) -> dict:
         else:
             query = text("""
                 SELECT id, invoice_number, customer_name, customer_email, amount, status,
-                       due_date, issue_date, chase_stage, created_at
+                       due_date, issue_date, chase_stage, created_at,
+                       customer_address, invoice_date, supply_date
                 FROM invoices
                 WHERE business_id = :business_id AND status = :status
                   AND (archived IS NULL OR archived = false)
@@ -2234,6 +2237,11 @@ def _list_invoices(engine, business_id: str, args: dict) -> dict:
         
         result = conn.execute(query, params)
         
+        def _iso(value):
+            if not value:
+                return None
+            return value.isoformat() if hasattr(value, "isoformat") else str(value)[:10]
+
         invoices = []
         for row in result.fetchall():
             invoices.append({
@@ -2243,9 +2251,15 @@ def _list_invoices(engine, business_id: str, args: dict) -> dict:
                 "customer_email": row[3] or None,
                 "amount": float(row[4]) if row[4] else 0,
                 "status": row[5],
-                "due_date": row[6].isoformat() if row[6] else None,
-                "issue_date": row[7].isoformat() if row[7] else None,
+                "due_date": _iso(row[6]),
+                "issue_date": _iso(row[7]),
                 "chase_stage": row[8] if row[8] else 0,
+                # BH-010 / North Star Gate 7: what the app now stores, Aria
+                # can read. invoice_date is the invoice's own date (issue_date
+                # is the older column some invoices still carry).
+                "customer_address": row[10] or None,
+                "invoice_date": _iso(row[11]),
+                "supply_date": _iso(row[12]),
             })
         
         return {

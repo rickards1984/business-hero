@@ -10,7 +10,7 @@
 # that nothing is left unchecked. Keep UNGUARDED_BUDGET at 0 while this says
 # FULL — the test enforces that too.
 #
-# Captured 2026-09-03: 816 columns across 59 tables, covering all 39 tables
+# Captured 2026-10-09 (after migration 034): 818 columns across 59 tables, covering all 39 tables
 # the backend writes. Supersedes the businesses-only bootstrap.
 #
 # The Supabase editor exports CSV, which QUOTES any field containing a comma —
@@ -489,6 +489,7 @@ col   invoices.business_id uuid null=NO def=-
 col   invoices.chase_stage integer(32,0) null=NO def=0
 col   invoices.created_at timestamp with time zone null=NO def=now()
 col   invoices.currency text null=NO def='GBP'::text
+col   invoices.customer_address text null=YES def=-
 col   invoices.customer_email text null=YES def=-
 col   invoices.customer_name text null=NO def=-
 col   invoices.due_date date null=NO def=-
@@ -509,6 +510,7 @@ col   invoices.source text null=NO def='csv'::text
 col   invoices.source_ref text null=YES def=-
 col   invoices.status text null=NO def='unpaid'::text
 col   invoices.subtotal numeric(12,2) null=YES def=-
+col   invoices.supply_date date null=YES def=-
 col   invoices.tax_amount numeric(12,2) null=YES def=-
 col   invoices.updated_at timestamp with time zone null=NO def=now()
 col   knowledge_base_items.business_id uuid null=NO def=-

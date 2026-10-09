@@ -447,6 +447,11 @@ app.include_router(invoice_pdf_router)
 from executive_meeting_api import router as executive_meeting_router
 app.include_router(executive_meeting_router)
 
+# BH-010: POST /v1/invoices (manual invoice creation). Its own module, so the
+# hot spot gains one line, not an endpoint.
+from invoices_api import router as invoices_router
+app.include_router(invoices_router)
+
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
