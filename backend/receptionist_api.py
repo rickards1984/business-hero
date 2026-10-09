@@ -13,13 +13,14 @@ if TYPE_CHECKING:
     from collections import OrderedDict
 
 import pytz
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from rate_limiting import limiter, LIMIT_TTS
 from pydantic import BaseModel
 from sqlmodel import Session, SQLModel, Field as SQLField, select
 from sqlalchemy import Column
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 
+from auth import assert_feature_access
 from db import get_session
 from models import Business, Call
 from services.voice_instructions import (
@@ -303,24 +304,6 @@ DEFAULT_BUSINESS_HOURS: Dict[str, Any] = {
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _require_receptionist_flag(business: Business):
-    """ENTITLEMENT-SPEC PART D — resolve, do not read.
-
-    `feature_flags` holds exceptions only, so a MISSING key means "follow the
-    plan", not "denied". Reading it raw refused every `pro` business the
-    moment 033 SECTION 7 stripped the redundant `receptionist: true` — while
-    the phone kept ringing, because the Twilio webhook gates on
-    `receptionist_configs.enabled` and never looks at entitlement at all.
-    That left the owner locked out of `PATCH /config/toggle`, the only switch
-    that turns the thing off.
-    """
-    if not _is_feature_enabled(business, "receptionist"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Receptionist feature is not enabled for this business",
-        )
-
-
 def _require_platform_admin(auth_ctx: dict, session: Session):
     if not is_platform_admin_user(auth_ctx["user_id"], session):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
@@ -407,7 +390,7 @@ async def get_receptionist_config(
     session: Session = Depends(get_session),
 ):
     """Get receptionist config for the current business."""
-    _require_receptionist_flag(business)
+    assert_feature_access(business, "receptionist")
     bid = business.id
 
     cfg = session.exec(
@@ -426,7 +409,7 @@ async def upsert_receptionist_config(
     session: Session = Depends(get_session),
 ):
     """Create or update receptionist config for the current business."""
-    _require_receptionist_flag(business)
+    assert_feature_access(business, "receptionist")
     bid = business.id
 
     cfg = session.exec(
@@ -456,7 +439,7 @@ async def toggle_receptionist(
     session: Session = Depends(get_session),
 ):
     """Toggle the receptionist on/off."""
-    _require_receptionist_flag(business)
+    assert_feature_access(business, "receptionist")
     bid = business.id
 
     cfg = session.exec(
@@ -491,7 +474,7 @@ async def list_knowledge_base(
     session: Session = Depends(get_session),
 ):
     """List knowledge base items for the current business."""
-    _require_receptionist_flag(business)
+    assert_feature_access(business, "receptionist")
 
     stmt = (
         select(KnowledgeBaseItem)
@@ -512,7 +495,7 @@ async def create_knowledge_base_item(
     session: Session = Depends(get_session),
 ):
     """Add a knowledge base item."""
-    _require_receptionist_flag(business)
+    assert_feature_access(business, "receptionist")
 
     kb = KnowledgeBaseItem(business_id=business.id, **item.model_dump())
     session.add(kb)
@@ -529,7 +512,7 @@ async def update_knowledge_base_item(
     session: Session = Depends(get_session),
 ):
     """Update a knowledge base item."""
-    _require_receptionist_flag(business)
+    assert_feature_access(business, "receptionist")
 
     kb = session.exec(
         select(KnowledgeBaseItem)
@@ -555,7 +538,7 @@ async def delete_knowledge_base_item(
     session: Session = Depends(get_session),
 ):
     """Delete a knowledge base item."""
-    _require_receptionist_flag(business)
+    assert_feature_access(business, "receptionist")
 
     kb = session.exec(
         select(KnowledgeBaseItem)
@@ -586,6 +569,7 @@ async def preview_voice(
 ):
     """Generate a voice preview audio clip using OpenAI TTS. Auth required —
     this endpoint spends OpenAI credit and was previously open to anyone."""
+    assert_feature_access(business, "receptionist")
     import io
     import openai as _openai
     from fastapi.responses import StreamingResponse
@@ -692,6 +676,7 @@ async def preview_voice_preset(
     `sample_text` so the preview reflects the real greeting. Falls back to a
     generic line if not provided.
     """
+    assert_feature_access(business, "receptionist")
     import io
     import openai as _openai
     from fastapi.responses import StreamingResponse
@@ -797,7 +782,7 @@ async def list_receptionist_calls(
     session: Session = Depends(get_session),
 ):
     """List calls handled by the AI receptionist."""
-    _require_receptionist_flag(business)
+    assert_feature_access(business, "receptionist", retained_history=True)
 
     stmt = (
         select(Call)
@@ -865,7 +850,7 @@ async def receptionist_stats(
     session: Session = Depends(get_session),
 ):
     """Get receptionist call statistics for dashboard cards."""
-    _require_receptionist_flag(business)
+    assert_feature_access(business, "receptionist", retained_history=True)
 
     calls = session.exec(
         select(Call).where(Call.business_id == business.id, Call.source == "receptionist")

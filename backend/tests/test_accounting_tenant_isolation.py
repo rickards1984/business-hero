@@ -33,6 +33,12 @@ CATEGORY_OF_A = uuid.UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
 class FakeBusiness:
     def __init__(self, business_id):
         self.id = business_id
+        # BH-011: real handlers now check entitlement before domain queries.
+        self.subscription_status = "active"
+        self.is_active = True
+        self.trial_ends_at = None
+        self.plan_tier = "starter"
+        self.feature_flags = {}
 
 
 class FakeResult:

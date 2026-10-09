@@ -12,6 +12,7 @@ from fastapi.responses import Response
 from sqlalchemy import text
 from sqlmodel import Session
 
+from auth import require_feature, assert_feature_access, _load_business
 from db import get_session
 from auth import get_user_business_context, get_platform_admin_context
 
@@ -36,7 +37,7 @@ admin_router = APIRouter(prefix="/v1/admin/whatsapp", tags=["Admin WhatsApp"])
 # ---------------------------------------------------------------------------
 
 
-@router.get("/config")
+@router.get("/config", dependencies=[Depends(require_feature("whatsapp"))])
 async def get_whatsapp_config(
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -83,7 +84,7 @@ async def get_whatsapp_config(
     }
 
 
-@router.put("/config")
+@router.put("/config", dependencies=[Depends(require_feature("whatsapp"))])
 async def upsert_whatsapp_config(
     config: dict[str, Any],
     auth_ctx: dict = Depends(get_user_business_context),
@@ -199,7 +200,7 @@ async def upsert_whatsapp_config(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/send-daily-pulse")
+@router.post("/send-daily-pulse", dependencies=[Depends(require_feature("whatsapp"))])
 async def trigger_daily_pulse(
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -272,7 +273,7 @@ async def trigger_daily_pulse(
     return {"sent": bool(sid), "message_sid": sid}
 
 
-@router.post("/send-weekly-briefing")
+@router.post("/send-weekly-briefing", dependencies=[Depends(require_feature("whatsapp"))])
 async def trigger_weekly_briefing(
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -361,7 +362,7 @@ async def trigger_weekly_briefing(
     }
 
 
-@router.post("/send-task-reminder")
+@router.post("/send-task-reminder", dependencies=[Depends(require_feature("whatsapp"))])
 async def trigger_task_reminder(
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -401,7 +402,7 @@ async def trigger_task_reminder(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/messages")
+@router.get("/messages", dependencies=[Depends(require_feature("whatsapp", retained_history=True))])
 async def get_whatsapp_messages(
     limit: int = 50,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -462,8 +463,6 @@ async def whatsapp_webhook(request: Request):
         body = form_data.get("Body", "").strip()
         message_sid = form_data.get("MessageSid", "")
 
-        _logger.info(f"[WhatsApp Webhook] Received from {from_number}: {body[:80]}")
-
         from db import get_session_context, get_session_transactional
 
         with get_session_context() as session:
@@ -482,6 +481,16 @@ async def whatsapp_webhook(request: Request):
 
         business_id = str(config_row[0])
         owner_name = config_row[2] or ""
+
+        with get_session_context() as session:
+            business = _load_business(session, business_id)
+            try:
+                assert_feature_access(business, "whatsapp")
+            except HTTPException:
+                # Signed but not entitled: acknowledge without recording or replying.
+                return Response(content="", status_code=200)
+
+        _logger.info(f"[WhatsApp Webhook] Received from {from_number}: {body[:80]}")
 
         # Log the inbound message
         try:
