@@ -321,3 +321,58 @@ reviewer's note above that Mike's Aria test confirmed New Body was WRONG:
 platform admins bypass `_assert_ai_access`, so an admin's Aria chat proves
 nothing about the business. A read-only query of `subscription_status`,
 `is_active` and `trial_ends_at` for both settles it.
+
+
+## Stage 2 implementation contract (supersedes Stage 1 proposals above)
+
+Implements Mike's approved decisions and the ticket's MSC clarification;
+serves RC1 P0-1, the North Star security/money prerequisite. No plan defaults
+change and no founder exception is introduced.
+
+The seven retained-history routes are explicitly:
+
+| Method | Route | Feature |
+|---|---|---|
+| GET | `/v1/whatsapp/messages` | whatsapp |
+| GET | `/v1/receptionist/calls` | receptionist |
+| GET | `/v1/receptionist/stats` | receptionist |
+| GET | `/v1/executive-meetings/meetings` | board_meetings |
+| GET | `/v1/executive-meetings/action-items` | board_meetings |
+| GET | `/v1/executive-meetings/goals` | board_meetings |
+| GET | `/v1/executive-meetings/{meeting_id}/messages` | board_meetings |
+
+These allow retained reads with a plan omission, including unpaid/canceled,
+through `retained_history=True` on the canonical gate. Explicit boolean false,
+admin suspension and an expired trial still deny. The suspension check is
+explicit because the general access resolver deliberately permits statutory
+quote/invoice reads for canceled suspended accounts; that statutory exception
+is unchanged and does not extend to this history. No other GET receives the
+retention exception. Writes, AI, settings, previews and sends retain the
+ordinary feature gate. History endpoints still apply their existing ownership
+and business filters; the gate does not infer a previous subscription from data.
+
+Signed WhatsApp callbacks resolve the configured sender, then load and check
+that business before message logging, pending-action lookup or replies. A
+canonical entitlement denial returns empty 200 with no such effects. Forged
+signatures still return 403. Unknown senders retain the existing empty 200.
+The previous proposed webhook 403 tests now require empty 200 instead.
+
+Accounting and receptionist call `assert_feature_access` on the exact business
+loaded by their existing dependencies. The other ordinary routes use
+`require_feature`; adding a second resolver to accounting/receptionist could
+check a different business because the two identity dependencies differ in
+handling the optional `business_id` query parameter. A regression test covers
+that mismatch. Accounting AI insights is explicitly a side-effecting GET in
+`enforce_access`. Both voice previews gate before cache lookup.
+
+The tier gate module and receptionist legacy helper are deleted. Access-check
+uses canonical `board_meetings` access and keeps its existing response shape;
+advanced metadata and settings filtering retain the business/beta restriction.
+Unknown canonical feature names fail closed even with truthy metadata flags.
+All Stage 1 xfails are removed. Synthetic decision tests demonstrated failures
+before implementation; the full verification evidence is in the ticket.
+
+Limits from Stage 1 remain: request tests mount individual routes and stop at
+domain I/O. They do not prove full operations, live providers, frontend flows,
+production founder state, phone callbacks or background-job enforcement. Mike's
+Stripe founder-coupon action is separate and does not block this implementation.

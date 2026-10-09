@@ -1,8 +1,7 @@
-"""BH-011 Stage 1: real router requests, synthetic identity, no database/provider.
+"""BH-011: real router requests, synthetic identity, no database/provider.
 
 BoundaryReached stops before domain I/O (including reads). An allowed test
-proves gate passage, not endpoint success. Expected failures catch only a
-named contract violation; validation errors and fixture bugs fail normally.
+proves gate passage, not endpoint success. All contracts are enforced; validation errors and fixture bugs fail normally.
 """
 import ast
 import asyncio
@@ -42,7 +41,7 @@ ROUTES = [(name, route, method) for name, module in MODULES.items()
           if isinstance(route, APIRoute) for method in sorted(route.methods)]
 
 # Explicit endpoint inventory: a newly registered endpoint cannot inherit an
-# xfail silently. It must first receive a reviewed policy here and in the design.
+# coverage silently. It must first receive a reviewed policy here and in the design.
 EXPECTED = {
     "quoting_api": "list_quotes get_quote create_quote update_quote delete_quote send_quote accept_quote decline_quote convert_to_invoice generate_pdf send_quote_email send_quote_whatsapp get_quote_settings update_quote_settings generate_ai_quote",
     "whatsapp_briefing_api": "get_whatsapp_config upsert_whatsapp_config trigger_daily_pulse trigger_weekly_briefing trigger_task_reminder get_whatsapp_messages whatsapp_webhook admin_whatsapp_overview admin_update_whatsapp_config",
@@ -53,28 +52,24 @@ EXPECTED = {
 }
 PUBLIC = {"list_knowledge_base_categories", "list_voices", "list_voice_presets"}
 SPECIAL = PUBLIC | {"check_meeting_access", "whatsapp_webhook"}
-RECEPTIONIST_GATED = set(EXPECTED["receptionist_api"].split()) - PUBLIC - {
-    "preview_voice", "preview_voice_preset"} - {
-    n for n in EXPECTED["receptionist_api"].split() if n.startswith("admin_")}
 READ_ALLOWED = {"list_quotes", "get_quote", "generate_pdf", "get_quote_settings",
                 "list_categories", "list_transactions", "get_accounting_summary", "list_imports"}
+HISTORY = {"list_meetings", "list_meeting_messages", "list_action_items", "list_goals",
+           "list_receptionist_calls", "receptionist_stats", "get_whatsapp_messages"}
+READ_ALLOWED |= HISTORY
 BID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 class GateContractMissing(AssertionError):
-    """Only this known unmet entitlement contract may xfail."""
+    """A route violated the entitlement contract."""
 
 
 class LegacyGatePresent(AssertionError):
-    """Only the named legacy gate call sites may xfail."""
+    """A legacy gate remains in runtime code."""
 
 
 class BoundaryReached(BaseException):
     """Cannot be swallowed by application except Exception handlers."""
-
-
-def pending(reason):
-    return pytest.mark.xfail(strict=True, raises=GateContractMissing, reason=reason)
 
 
 def business(plan="pro", status="active", flags=None):
@@ -117,7 +112,7 @@ def harness(monkeypatch):
     class Session:
         def exec(self, statement, *args, **kwargs):
             if "FROM businesses" in str(statement) and "WHERE" in str(statement):
-                return SimpleNamespace(first=lambda: state.business)
+                return SimpleNamespace(first=lambda: getattr(state, "gate_business", state.business))
             return stop()
 
         def execute(self, statement, *args, **kwargs):
@@ -186,7 +181,7 @@ def harness(monkeypatch):
                 response = await client.request(method, path, **options)
             except BoundaryReached:
                 return None
-        # Malformed fixtures must NEVER be hidden behind the xfail contract.
+        # Malformed fixtures must never count as gate passage.
         assert response.status_code not in {400, 401, 404, 422, 500}, response.text
         return response
 
@@ -206,8 +201,7 @@ def normal_routes():
             if r.endpoint.__name__ not in SPECIAL and not r.endpoint.__name__.startswith("admin_")]
 
 
-DENIED = [pytest.param(n, r, m, f, id=f"{m} {r.path} [{f}]",
-                      marks=[] if r.endpoint.__name__ in RECEPTIONIST_GATED else pending("BH-011: missing canonical feature refusal"))
+DENIED = [pytest.param(n, r, m, f, id=f"{m} {r.path} [{f}]")
           for n, r, m in normal_routes() for f in features(n, r.endpoint.__name__)]
 
 
@@ -233,9 +227,7 @@ READ_CASES = []
 for _n, _r, _m in normal_routes():
     _endpoint = _r.endpoint.__name__
     _allow = _endpoint in READ_ALLOWED
-    _missing = not _allow and _m == "GET" and _endpoint != "preview_voice"
-    READ_CASES.append(pytest.param(_n, _r, _m, _allow, id=f"{_m} {_r.path}",
-                                  marks=pending("BH-011: read-only GET not protected") if _missing else []))
+    READ_CASES.append(pytest.param(_n, _r, _m, _allow, id=f"{_m} {_r.path}"))
 
 
 @pytest.mark.parametrize("name,route,method,allowed", READ_CASES)
@@ -273,7 +265,6 @@ def test_admin_exception_requires_platform_admin_not_paid_plan(harness, name, ro
         assert harness.boundary == []
 
 
-@pytest.mark.xfail(strict=True, raises=LegacyGatePresent, reason="BH-011: fold legacy gates into auth")
 def test_no_legacy_gate_call_sites_remain():
     offenders = []
     for path in Path(__file__).parents[1].rglob("*.py"):
@@ -313,7 +304,6 @@ def test_missing_business_fails_closed():
     assert denied.value.status_code == 404
 
 
-@pending("BH-011: unknown metadata key must never grant a feature")
 def test_unknown_feature_fails_closed_even_if_metadata_is_truthy():
     try:
         auth.assert_feature_access(business(flags={"not_a_feature": True}), "not_a_feature")
@@ -325,10 +315,8 @@ def test_unknown_feature_fails_closed_even_if_metadata_is_truthy():
 
 STARTER_CASES = []
 for _n, _r, _m in normal_routes():
-    _granted = all(auth.PLAN_FEATURE_DEFAULTS["starter"][f] for f in features(_n, _r.endpoint.__name__))
-    _existing_denial = _r.endpoint.__name__ in RECEPTIONIST_GATED or _n == "executive_meeting_api"
-    STARTER_CASES.append(pytest.param(_n, _r, _m, _granted, id=f"{_m} {_r.path}",
-                                     marks=pending("BH-011: Starter lacks this feature") if not _granted and not _existing_denial else []))
+    _granted = _r.endpoint.__name__ in HISTORY or all(auth.PLAN_FEATURE_DEFAULTS["starter"][f] for f in features(_n, _r.endpoint.__name__))
+    STARTER_CASES.append(pytest.param(_n, _r, _m, _granted, id=f"{_m} {_r.path}"))
 
 
 @pytest.mark.parametrize("name,route,method,granted", STARTER_CASES)
@@ -344,7 +332,7 @@ def test_starter_route_access_uses_actual_plan_matrix(harness, name, route, meth
 
 
 @pytest.mark.parametrize("name,route,method", [
-    pytest.param(n, r, m, id=f"{m} {r.path}", marks=pending("BH-011: legacy tier gate ignores explicit grant") if n == "executive_meeting_api" else [])
+    pytest.param(n, r, m, id=f"{m} {r.path}")
     for n, r, m in normal_routes()])
 def test_explicit_grant_allows_starter(harness, name, route, method):
     harness.business = business(plan="starter", flags={f: True for f in features(name, route.endpoint.__name__)})
@@ -363,7 +351,7 @@ def test_founder_stopgap_and_stripped_flags_both_allow_toggle(harness, plan, fla
     assert harness.boundary
 
 
-@pytest.mark.parametrize("flags,expected", [({}, True), pytest.param({"board_meetings": False}, False, marks=pending("BH-011: access-check ignores flag"))])
+@pytest.mark.parametrize("flags,expected", [({}, True), ({"board_meetings": False}, False)])
 def test_access_check_reports_canonical_access(harness, flags, expected):
     harness.business = business(flags=flags)
     _, route, method = next(x for x in ROUTES if x[1].endpoint.__name__ == "check_meeting_access")
@@ -374,7 +362,6 @@ def test_access_check_reports_canonical_access(harness, flags, expected):
 
 
 @pytest.mark.parametrize("status", ["unpaid", "canceled"])
-@pending("BH-011: access-check must reflect read-only subscription status")
 def test_access_check_read_only_reports_false(harness, status):
     harness.business = business(status=status)
     _, route, method = next(x for x in ROUTES if x[1].endpoint.__name__ == "check_meeting_access")
@@ -439,16 +426,15 @@ def test_entitled_signed_webhook_passes_gate(harness, webhook, body):
 
 @pytest.mark.parametrize("status,flags", [("active", {"whatsapp": False}), ("unpaid", {}), ("canceled", {})])
 @pytest.mark.parametrize("body", ["1", "hello"])
-@pending("BH-011: signature authenticates sender, not business entitlement")
 def test_signed_webhook_denied_before_logging_action_or_reply(harness, webhook, status, flags, body):
     harness.business = business(status=status, flags=flags)
     response = webhook(body=body)
-    if response is None or response.status_code != 403:
+    if response is None or response.status_code != 200:
         raise GateContractMissing("Signed webhook must check resolved business before any write/action/reply")
+    assert response.content == b""
     assert harness.boundary == []
 
 
-@pytest.mark.xfail(strict=True, raises=LegacyGatePresent, reason="BH-011: noncanonical board meeting feature names")
 def test_route_gate_names_are_canonical():
     offenders = []
     for name in MODULES:
@@ -466,3 +452,89 @@ def test_route_gate_names_are_canonical():
                     offenders.append(f"{name}:{node.lineno}: {feature}")
     if offenders:
         raise LegacyGatePresent(", ".join(offenders))
+
+
+@pytest.mark.parametrize("name,route,method", [x for x in normal_routes() if x[1].endpoint.__name__ in HISTORY])
+@pytest.mark.parametrize("status", ["active", "unpaid", "canceled"])
+@pytest.mark.parametrize("restriction", ["none", "false", "suspended"])
+def test_decision_history_is_retained_but_admin_denial_wins(harness, name, route, method, status, restriction):
+    feature = MODULE_FEATURES[name]
+    harness.business = business(plan="starter", status=status,
+                                flags={feature: False} if restriction == "false" else {})
+    harness.business.is_active = restriction != "suspended"
+    response = harness.request(route, method)
+    if restriction == "none":
+        assert response is None or response.status_code == 200
+    else:
+        assert response is not None and response.status_code == 403
+        assert harness.boundary == []
+
+
+@pytest.mark.parametrize("body", ["1", "hello"])
+def test_decision_starter_signed_webhook_acknowledges_without_effects(harness, webhook, body):
+    harness.business = business(plan="starter")
+    response = webhook(body=body)
+    assert response is not None and response.status_code == 200
+    assert response.content == b""
+    assert harness.boundary == []
+
+
+@pytest.mark.parametrize("plan,flags,access,advanced", [
+    ("starter", {"board_meetings": True}, True, False),
+    ("pro", {}, True, False), ("business", {}, True, True),
+    ("beta", {}, True, True), ("business", {"board_meetings": False}, False, False),
+])
+def test_decision_access_metadata_preserves_advanced_tiers(harness, plan, flags, access, advanced):
+    harness.business = business(plan=plan, flags=flags)
+    _, route, method = next(x for x in ROUTES if x[1].endpoint.__name__ == "check_meeting_access")
+    response = harness.request(route, method)
+    assert response.json() == {"has_access": access, "has_advanced": advanced,
+                               "current_tier": plan, "required_tier": None if access else "pro",
+                               "feature_name": "Executive Board Meeting"}
+
+
+@pytest.mark.parametrize("plan", ["starter", "pro", "business", "beta"])
+def test_advanced_settings_filtering_is_preserved(harness, monkeypatch, plan):
+    import json
+    harness.business = business(plan=plan, flags={"board_meetings": True})
+    captured = {}
+
+    def execute(statement, params):
+        if "SELECT id FROM executive_meeting_settings" in str(statement):
+            return SimpleNamespace(fetchone=lambda: (BID,))
+        captured.update(params)
+        return harness.stop()
+
+    monkeypatch.setattr(harness.session, "execute", execute)
+    _, route, method = next(x for x in ROUTES if x[1].endpoint.__name__ == "update_meeting_settings")
+    response = harness.request(route, method, json={"attendees": ["advisor"],
+                                                  "focus_areas": ["financial", "custom"]})
+    assert response is None
+    assert json.loads(captured["attendees"]) == (["advisor"] if plan in {"business", "beta"} else [])
+    assert json.loads(captured["focus_areas"]) == (["financial", "custom"] if plan in {"business", "beta"} else ["financial"])
+
+
+@pytest.mark.parametrize("endpoint", ["preview_voice", "preview_voice_preset"])
+def test_disabled_preview_is_refused_before_cache_lookup(harness, monkeypatch, endpoint):
+    module = MODULES["receptionist_api"]
+    class ForbiddenCache(dict):
+        def __contains__(self, key):
+            return harness.stop()
+    monkeypatch.setattr(module, "_voice_preview_cache", ForbiddenCache())
+    monkeypatch.setattr(module, "_preview_cache_get", harness.stop)
+    harness.business = business(flags={"receptionist": False})
+    _, route, method = next(x for x in ROUTES if x[1].endpoint.__name__ == endpoint)
+    response = harness.request(route, method)
+    assert response is not None and response.status_code == 403
+    assert harness.boundary == []
+
+
+@pytest.mark.parametrize("name,route,method", [x for x in normal_routes() if x[0] in {"accounting", "receptionist_api"}])
+def test_gate_checks_the_same_business_as_the_handler(harness, name, route, method):
+    # These routers resolve their business without the optional business_id
+    # query parameter accepted by auth.get_user_business_context.
+    harness.business = business(flags={MODULE_FEATURES[name]: False})
+    harness.gate_business = business()
+    response = harness.request(route, method)
+    assert response is not None and response.status_code == 403
+    assert harness.boundary == []

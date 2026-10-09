@@ -13,6 +13,7 @@ from rate_limiting import limiter, LIMIT_AI_HEAVY
 from sqlalchemy import text
 from sqlmodel import Session
 
+from auth import require_feature
 from db import get_session
 from auth import get_user_business_context
 from decimal import Decimal
@@ -238,7 +239,7 @@ def _row_to_quote(row) -> dict:
 
 # ── Quote CRUD ───────────────────────────────────────────
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_feature("quoting"))])
 async def list_quotes(
     status: Optional[str] = None,
     search: Optional[str] = None,
@@ -285,7 +286,7 @@ async def list_quotes(
     }
 
 
-@router.get("/{quote_id}")
+@router.get("/{quote_id}", dependencies=[Depends(require_feature("quoting"))])
 async def get_quote(
     quote_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -328,7 +329,7 @@ async def get_quote(
     return quote
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(require_feature("quoting"))])
 async def create_quote(
     data: dict,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -431,7 +432,7 @@ async def create_quote(
     return {"id": quote_id, "quote_number": quote_number, "status": "draft", "total": totals["total"]}
 
 
-@router.put("/{quote_id}")
+@router.put("/{quote_id}", dependencies=[Depends(require_feature("quoting"))])
 async def update_quote(
     quote_id: str,
     data: dict,
@@ -528,7 +529,7 @@ async def update_quote(
     return {"status": "updated", "total": totals["total"]}
 
 
-@router.delete("/{quote_id}")
+@router.delete("/{quote_id}", dependencies=[Depends(require_feature("quoting"))])
 async def delete_quote(
     quote_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -546,7 +547,7 @@ async def delete_quote(
 
 # ── Status Actions ───────────────────────────────────────
 
-@router.post("/{quote_id}/send")
+@router.post("/{quote_id}/send", dependencies=[Depends(require_feature("quoting"))])
 async def send_quote(
     quote_id: str,
     data: dict,
@@ -569,7 +570,7 @@ async def send_quote(
     return {"status": "sent"}
 
 
-@router.post("/{quote_id}/accept")
+@router.post("/{quote_id}/accept", dependencies=[Depends(require_feature("quoting"))])
 async def accept_quote(
     quote_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -585,7 +586,7 @@ async def accept_quote(
     return {"status": "accepted"}
 
 
-@router.post("/{quote_id}/decline")
+@router.post("/{quote_id}/decline", dependencies=[Depends(require_feature("quoting"))])
 async def decline_quote(
     quote_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -601,7 +602,7 @@ async def decline_quote(
     return {"status": "declined"}
 
 
-@router.post("/{quote_id}/convert-to-invoice")
+@router.post("/{quote_id}/convert-to-invoice", dependencies=[Depends(require_feature("quoting")), Depends(require_feature("invoicing"))])
 async def convert_to_invoice(
     quote_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -810,7 +811,7 @@ def _get_quote_pdf_data(session, quote_id: str, business_id: str):
     return quote_dict, items_list, settings_dict
 
 
-@router.post("/{quote_id}/generate-pdf")
+@router.post("/{quote_id}/generate-pdf", dependencies=[Depends(require_feature("quoting"))])
 async def generate_pdf(
     quote_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -835,7 +836,7 @@ async def generate_pdf(
     )
 
 
-@router.post("/{quote_id}/send-email")
+@router.post("/{quote_id}/send-email", dependencies=[Depends(require_feature("quoting")), Depends(require_feature("email"))])
 async def send_quote_email(
     quote_id: str,
     data: dict,
@@ -945,7 +946,7 @@ async def send_quote_email(
         raise HTTPException(status_code=500, detail=f"Failed to send quote email: {str(e)}")
 
 
-@router.post("/{quote_id}/send-whatsapp")
+@router.post("/{quote_id}/send-whatsapp", dependencies=[Depends(require_feature("quoting")), Depends(require_feature("whatsapp"))])
 async def send_quote_whatsapp(
     quote_id: str,
     data: dict,
@@ -1016,7 +1017,7 @@ async def send_quote_whatsapp(
 
 # ── Quote Settings ───────────────────────────────────────
 
-@router.get("/settings/config")
+@router.get("/settings/config", dependencies=[Depends(require_feature("quoting"))])
 async def get_quote_settings(
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -1065,7 +1066,7 @@ async def get_quote_settings(
     }
 
 
-@router.put("/settings/config")
+@router.put("/settings/config", dependencies=[Depends(require_feature("quoting"))])
 async def update_quote_settings(
     settings: dict,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -1139,7 +1140,7 @@ async def update_quote_settings(
 
 # ── AI Quote Generation ──────────────────────────────────
 
-@router.post("/ai/generate")
+@router.post("/ai/generate", dependencies=[Depends(require_feature("quoting"))])
 @limiter.limit(LIMIT_AI_HEAVY)
 async def generate_ai_quote(
     request: Request,

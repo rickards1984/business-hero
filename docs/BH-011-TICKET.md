@@ -171,3 +171,233 @@ bypass `_assert_ai_access` entirely, and Mike's account administers the
 platform, so his Aria test proves nothing about New Body's access. Neither
 business is verified. The read-only query in the design note's decisions
 section settles both.
+
+---
+
+## Stage 2 — implementation (unblocked 10 Oct 2026: BH-010 merged)
+
+Mike approved the Stage 1 tests and the decisions recorded in
+`docs/BH-011-DESIGN.md` § "Decisions — Mike, 9 October 2026". The branch is
+rebased onto `main` at `252d849` (BH-009 and BH-010 merged).
+
+Build exactly the design, with these decision-driven changes:
+1. **Downgrade history (decision 2):** define the history routes explicitly
+   (board meetings + their messages/action items/goals; receptionist calls
+   and stats; WhatsApp messages) as READ-ONLY readable when the feature is
+   absent from the PLAN, refused when an admin set the flag explicitly
+   `false` or the business is suspended. Tests first for both sides.
+2. **Signed WhatsApp webhook, business without `whatsapp` (decision 3):**
+   empty 200 with NO effects (no logging, no pending-action lookup or
+   execution, no reply). Change the Stage 1 tests that encode 403 to match,
+   and say so in Completion evidence.
+3. Remove xfail markers as tests pass; fold `require_tier_feature` and
+   `_require_receptionist_flag` into the canonical mechanism and delete them.
+4. **MSC:** decision 2026-10-10 — the fix for MSC's suspended state is the
+   Stripe founder coupon (DECISION 4), done by Mike. Folding the gate in must
+   not be blocked on it, and must not special-case MSC.
+
+Rules as before: no network, no production, no migration, no git
+commit/push. Finish with `./check.sh full` and record the output.
+
+**Status** in progress — stage 2 (implementation)
+
+
+## Stage 2 Completion evidence
+
+**Status** in review — implementation and local verification complete;
+Claude Code review pending. No commit or push. The existing uncommitted Stage 2
+instructions above were preserved. Serves RC1 P0-1, the North Star
+security/money prerequisite.
+
+**Implemented** Canonical gates in the six routers, compound quote-action
+requirements, seven explicit retained-history exceptions, accounting AI GET
+read-only refusal, and signed WhatsApp entitlement checks before any message
+logging/action lookup/reply (denied business: empty 200). Deleted the tier-gate
+module and receptionist helper. Access-check uses canonical access and keeps
+advanced access/settings restricted to business/beta. Unknown feature names
+fail closed. PLAN_FEATURE_DEFAULTS is unchanged (verified by AST comparison).
+No frontend, migrations, production access, network requests, commits or pushes.
+MSC has no special case; Mike's founder-coupon action remains separate.
+
+**Tests first — observed before implementation**
+
+Command (using the required interpreter):
+`PYTHONDONTWRITEBYTECODE=1 /Users/michaelrickards/dev/business-hero-2/.venv/bin/python -m pytest backend/tests/test_plan_enforcement.py -q --tb=short`
+
+```text
+40 failed, 501 passed, 105 xfailed, 27 warnings in 3.55s
+```
+
+Each new decision test had failing cases in that run:
+
+* `test_decision_history_is_retained_but_admin_denial_wins`: 63 cases across
+  the seven named history routes, active/unpaid/canceled and no restriction /
+  explicit false / suspension. 24 failed first: 18 missing history permissions
+  and six WhatsApp admin-denial/suspension failures. Other cases already passed.
+* `test_decision_starter_signed_webhook_acknowledges_without_effects`: both
+  numbered-action and ordinary-message cases failed first by reaching logging.
+* `test_decision_access_metadata_preserves_advanced_tiers`: Starter explicit
+  grant and Business explicit denial failed first; the other three tier cases
+  already passed. Response shape and advanced restriction are asserted.
+* Updated Stage 1 `test_signed_webhook_denied_before_logging_action_or_reply`:
+  all six cases failed first against the approved empty-200/no-effects contract.
+  The original 403 expectation was deliberately replaced per decision 3.
+* Updated Stage 1 Starter route matrix: six newly retained receptionist/board
+  history reads failed first. WhatsApp history already passed before gating.
+
+The remaining Stage 1 denied-feature, read-only, explicit-grant, metadata,
+unknown-feature and legacy-gate assertions passed after implementation (105
+strict XPASS results), then their markers were removed. `READ_ALLOWED` and the
+Starter route matrix now include the seven explicitly approved history reads;
+explicit false still denies all of them. No other Stage 1 permission expectation
+was relaxed. Route inventory remains 78 and is not marked or bypassed.
+
+**Additional regression coverage** The 24-case
+`test_gate_checks_the_same_business_as_the_handler` failed first against the
+initial dependency implementation, then passed after accounting/receptionist
+used `assert_feature_access` on their existing resolved business. This avoids
+checking a query-selected business while operating on a different one. Added
+four advanced-settings filtering cases and two preview-before-cache cases;
+these preservation tests passed when introduced, rather than being claimed as
+new failing decision tests.
+
+Final targeted result:
+
+```text
+676 passed, 24 warnings in 3.03s
+```
+
+**Full-suite repair** The first full check found 28 older-test failures:
+accounting FakeBusiness fixtures lacked subscription fields, and seven
+entitlement-read tests still called the now-deleted receptionist helper.
+Updated `test_accounting_tenant_isolation.py` and
+`test_tenant_isolation_backend_path.py` with active Starter business attributes;
+updated `test_entitlement_reads.py` to call the canonical receptionist assertion
+with an active synthetic business. No tenant-isolation assertion was removed
+or weakened and no gate was mocked. Targeted rerun: 56 passed, 425 warnings.
+The second full check passed.
+
+**Verification command** (all temporary/cache paths kept inside this worktree;
+pre-existing `.venv` and node_modules symlinks reused, no installs):
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/.bh011-tmp" npm_config_cache="$PWD/.npm-cache" npm_config_offline=true ./check.sh full
+```
+
+Exit code **0**. Exact final check output:
+
+```text
+------------------------------------------------------------
+  FRONTEND
+------------------------------------------------------------
+  PASS  tsc --noEmit
+  SKIP  eslint  (no lint script in package.json)
+------------------------------------------------------------
+  BACKEND
+------------------------------------------------------------
+  PASS  python syntax (py_compile)
+        All checks passed!
+  PASS  ruff
+            business.last_stripe_event_at = datetime.utcnow()
+        
+        backend/tests/test_stripe_webhook_correctness.py::TestCheckoutIsDeduplicatedToo::test_a_replayed_checkout_applies_once
+        backend/tests/test_stripe_webhook_correctness.py::TestCheckoutIsDeduplicatedToo::test_a_checkout_is_recorded_in_the_audit_table
+          /Users/michaelrickards/dev/bh2-BH-011/backend/main.py:1048: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+            business.last_stripe_event_at = datetime.utcnow()
+        
+        backend/tests/test_tenant_isolation_backend_path.py: 180 warnings
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+            cursor.execute(statement, parameters)
+        
+        backend/tests/test_tenant_isolation_backend_path.py: 120 warnings
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default date adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+            cursor.execute(statement, parameters)
+        
+        backend/tests/test_tenant_isolation_backend_path.py: 55 warnings
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/sqlalchemy/engine/cursor.py:1201: DeprecationWarning: The default date converter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+            rows = dbapi_cursor.fetchall()
+        
+        backend/tests/test_tenant_isolation_backend_path.py: 60 warnings
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/sqlalchemy/engine/cursor.py:1201: DeprecationWarning: The default timestamp converter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+            rows = dbapi_cursor.fetchall()
+        
+        -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+        1557 passed, 33 skipped, 809 warnings, 220 subtests passed in 9.36s
+  PASS  pytest
+------------------------------------------------------------
+  PREFLIGHT (deploy traps)
+------------------------------------------------------------
+        
+        TRAP 1 — requirements.txt sync
+          PASS  every backend dep is present in root requirements.txt
+        
+        TRAP 2 — trailing newline on requirements.txt
+          PASS  trailing newline present
+        
+        TRAP 3 — repo location
+          PASS  repo is outside CloudStorage/Dropbox
+        
+        TRAP 4 — create_all() RLS drift warning
+          PASS  no models.py changes on this branch
+                comparison base: origin/main
+        
+        TRAP 5 — secret scan on staged/changed files
+          PASS  no secret patterns in changed files
+        
+        PREFLIGHT PASSED — safe to push.
+        
+  PASS  preflight
+------------------------------------------------------------
+  5 passed   0 failed   1 skipped
+  Green. Safe to proceed.
+------------------------------------------------------------
+```
+
+Supplemental checks: `git -c core.whitespace=cr-at-eol diff --check -- backend docs/BH-011-DESIGN.md` passed
+(WhatsApp's existing CRLF endings preserved; the verbatim check transcript above
+retains its whitespace-only output lines); no frontend/migration changes;
+PLAN_FEATURE_DEFAULTS AST unchanged; the preflight secret-pattern scan was
+also applied to all uncommitted changed files and passed. Preflight traps 4/5
+compare committed/staged paths, so that supplemental check matters here.
+Temporary scripts/logs/cache were removed after recording this evidence.
+
+**Unverified / review boundary** This is local synthetic request and unit-test
+verification. Gate passage is not a full provider/database operation. No browser,
+end-to-end, live Twilio, production founder-state or phone-callback smoke test was
+run; background-job/call-site audit remains outside this six-router ticket.
+Existing skips and deprecation warnings remain. Claude Code still reviews the
+implementation; the builder is not approving this RED change.
+
+**What Mike should click when reviewing behaviour in an authorised test setup**
+Open Quotes and Accounting on Starter; view retained board/WhatsApp/receptionist
+history after downgrade, then try settings, new meetings, sends and previews
+(refused). Repeat with an explicit false or suspension (history refused). For
+unpaid/canceled, view/download an existing quote and try editing/sending or
+accounting AI insights (refused). These manual checks were not run here.
+
+---
+
+## Stage 2 review — Claude Code (reviewer), 10 October 2026
+
+**Verdict: ACCEPT.** Read the full diff.
+
+- `auth.py`: `assert_feature_access` refuses unknown feature names (every
+  real caller uses a canonical name — checked by search); `retained_history`
+  lets the seven designated history GETs pass a plan omission but never an
+  explicit admin `false` or suspension (Mike's decision 2);
+  `/v1/accounting/ai-insights` joins the side-effecting GETs refused to
+  read-only accounts.
+- Six routers gated through `require_feature`; quote convert/email/WhatsApp
+  require both features (decision 1); legacy `require_tier_feature` and
+  `_require_receptionist_flag` deleted, `services/tier_gating.py` removed.
+- Signed WhatsApp webhook: entitlement asserted after tenant resolution and
+  BEFORE the inbound log line, logging or any action; a denied business gets
+  an empty 200 (decision 3).
+- Changes to pre-existing tests are legitimate, not weakening: two fakes gain
+  the access fields the gate now reads; the receptionist gate test targets the
+  canonical gate with the same plan/flag outcomes asserted.
+
+Not verified by tests — for Mike's click test: how AI Hub's Receptionist,
+Booking and CEO Briefing tabs render for a plan WITHOUT those features (they
+now receive 403s; the Dashboard's WhatsApp-config call already swallows its
+error). Not a defect in this ticket; a Starter-account look is the check.
