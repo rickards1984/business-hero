@@ -170,6 +170,28 @@ Summer Time every existing appointment was an hour out and an occupied
 slot was offered again. Aria's chat availability tool had the same bug.
 Fixed in NS-R1 (`backend/services/booking.py`).
 
+### D19 — metering (RC1 P0-2), Mike, 10 Oct 2026
+
+ENTITLEMENT-SPEC PART E and DECISION 2 stand (allowances Pro 120 / Business
+350 / Starter 0 receptionist minutes a month; 20-minute per-call cap; a call
+that exhausts the allowance completes; then new calls are blocked and the
+owner told; opt-in overage at £0.45/min with an owner-set cap, £100 by
+default; usage visible before the limit). Mike agreed all five open points:
+
+1. **Minutes counted to the second**, shown to one decimal place.
+2. **The month is the calendar month, UK time** (`usage_meters.period`,
+   `YYYY-MM`) — not each customer's Stripe billing date.
+3. **The owner is told by email and an in-app banner**, and by WhatsApp when
+   the business has WhatsApp briefings switched on.
+4. **`beta` gets Business's allowance (350).**
+5. **The meter is generic; the receptionist is metered first.** Aria voice
+   gets its meter in the same ticket that repairs it, so it never returns
+   unmetered.
+
+`usage_meters` already exists with `UNIQUE (business_id, meter, period)`, a
+`YYYY-MM` check, RLS on and client `SELECT` only (staging, 10 Oct 2026; 033
+SECTION 4) — no migration is needed.
+
 ## Consequences
 
 - RC1 gains its first Aria write path (D9). It is safer than today — where
