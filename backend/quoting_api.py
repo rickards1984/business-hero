@@ -657,15 +657,33 @@ async def convert_to_invoice(
         discount_type=getattr(quote_row, "discount_type", None) or "fixed",
     )
 
+    # BH-010 (decisions 1 and 2, Mike, 8 Oct 2026): the invoice keeps its own
+    # snapshot of the customer's address — a later edit to the quote must not
+    # change an issued invoice — and records its date, which conversion used
+    # to leave empty. "Today" is the business's own day, not the server's.
+    from datetime import datetime as _datetime
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    tz_row = session.execute(
+        text("SELECT timezone FROM businesses WHERE id = :business_id"),
+        {"business_id": business_id},
+    ).fetchone()
+    try:
+        _tz = _ZoneInfo((tz_row[0] if tz_row is not None else None) or "Europe/London")
+    except Exception:
+        _tz = _ZoneInfo("Europe/London")
+    invoice_date = _datetime.now(_tz).date()
+
     def _insert_invoice(inv_number: str) -> None:
         session.execute(
             text("""
                 INSERT INTO invoices
                 (id, business_id, invoice_number, customer_name, customer_email,
+                 customer_address, invoice_date,
                  due_date, subtotal, tax_amount, amount, amount_due, currency,
                  status, source, source_ref, created_at)
                 VALUES
-                (:id, :bid, :inum, :cname, :cemail, :due, :subtotal, :tax_amount,
+                (:id, :bid, :inum, :cname, :cemail, :customer_address, :invoice_date,
+                 :due, :subtotal, :tax_amount,
                  :amount, :amount_due, :currency, 'unpaid', 'quote', :qnum, now())
             """),
             {
@@ -674,6 +692,8 @@ async def convert_to_invoice(
                 "inum": inv_number,
                 "cname": quote_row.customer_name,
                 "cemail": quote_row.customer_email,
+                "customer_address": getattr(quote_row, "customer_address", None),
+                "invoice_date": invoice_date.isoformat(),
                 "due": due_date.isoformat(),
                 "subtotal": totals["subtotal"],
                 "tax_amount": totals["tax_amount"],

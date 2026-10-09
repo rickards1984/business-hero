@@ -100,6 +100,13 @@ CREATE TABLE invoice_line_items (
 
 @pytest.fixture
 def database():
+    # PostgreSQL's driver binds Decimal natively; sqlite3 does not. Store it as
+    # its exact text form for the life of the test, then remove the adapter
+    # so no other test inherits it.
+    import sqlite3
+    key = (Decimal, sqlite3.PrepareProtocol)
+    previous = sqlite3.adapters.get(key)
+    sqlite3.register_adapter(Decimal, str)
     engine = create_engine("sqlite://", poolclass=StaticPool,
                            connect_args={"check_same_thread": False})
     with Session(engine) as s:
@@ -115,6 +122,10 @@ def database():
         s.commit()
     yield engine
     engine.dispose()
+    if previous is None:
+        sqlite3.adapters.pop(key, None)
+    else:
+        sqlite3.adapters[key] = previous
 
 
 def _rows(engine, sql, **params):
@@ -173,7 +184,6 @@ def create(client, **overrides):
 
 # ------------------------------------------------------------- the money ---
 
-@pending
 def test_totals_come_from_the_money_engine_to_the_penny(database, monkeypatch):
     r = create(client_for(database, monkeypatch))
     assert r.status_code == 201, r.text
@@ -186,7 +196,6 @@ def test_totals_come_from_the_money_engine_to_the_penny(database, monkeypatch):
     assert inv["status"] == "unpaid" and inv["source"] == "manual"
 
 
-@pending
 def test_every_line_is_stored_with_its_own_tax(database, monkeypatch):
     create(client_for(database, monkeypatch))
     lines = _rows(database, "SELECT * FROM invoice_line_items ORDER BY sort_order")
@@ -200,7 +209,6 @@ def test_every_line_is_stored_with_its_own_tax(database, monkeypatch):
     assert (total_net, total_tax) == (D(inv["subtotal"]), D(inv["tax_amount"]))
 
 
-@pending
 def test_a_business_not_registered_for_vat_charges_none(database, monkeypatch):
     with Session(database) as s:
         s.execute(text("UPDATE businesses SET tax_registered = 0 WHERE id = :a"), {"a": A})
@@ -209,7 +217,6 @@ def test_a_business_not_registered_for_vat_charges_none(database, monkeypatch):
     assert body["tax_amount"] == "0.00" and body["amount"] == "383.83"
 
 
-@pending
 def test_a_zero_default_rate_stays_zero(database, monkeypatch):
     """The `rate or 20` trap (test_tax_registration.py), on the invoice path."""
     with Session(database) as s:
@@ -220,14 +227,12 @@ def test_a_zero_default_rate_stays_zero(database, monkeypatch):
     assert body["tax_amount"] == "0.00"
 
 
-@pending
 def test_a_rate_sent_by_the_client_is_ignored(database, monkeypatch):
     """The rate is the business's, not whatever the browser sends."""
     body = create(client_for(database, monkeypatch), tax_rate="0").json()
     assert body["tax_amount"] == "76.77"
 
 
-@pending
 def test_money_is_exact_with_no_float_drift(database, monkeypatch):
     """2.675 must round to 2.68; Decimal(2.675) from a float gives 2.67."""
     r = create(client_for(database, monkeypatch),
@@ -236,7 +241,6 @@ def test_money_is_exact_with_no_float_drift(database, monkeypatch):
     assert r.json()["subtotal"] == "2.68"
 
 
-@pending
 def test_an_invoice_discount_is_applied_and_apportioned(database, monkeypatch):
     body = create(client_for(database, monkeypatch),
                   discount_amount="83.83", discount_type="fixed").json()
@@ -246,7 +250,6 @@ def test_an_invoice_discount_is_applied_and_apportioned(database, monkeypatch):
 
 # ------------------------------------------------------------- numbering ---
 
-@pending
 def test_numbers_come_from_the_atomic_counter_per_business(database, monkeypatch):
     a = client_for(database, monkeypatch, business=A)
     assert create(a).json()["invoice_number"] == "INV-0001"
@@ -257,7 +260,6 @@ def test_numbers_come_from_the_atomic_counter_per_business(database, monkeypatch
     assert row["next_invoice_number"] == 3
 
 
-@pending
 def test_the_client_cannot_choose_the_number(database, monkeypatch):
     """HMRC: unique and sequential. A number typed by the user breaks the
     sequence, so it is refused rather than silently ignored."""
@@ -268,7 +270,6 @@ def test_the_client_cannot_choose_the_number(database, monkeypatch):
 
 # -------------------------------------------- what HMRC needs on the record ---
 
-@pending
 def test_address_and_dates_are_stored(database, monkeypatch):
     create(client_for(database, monkeypatch), supply_date="2026-10-06", due_date="2026-11-07")
     [inv] = _rows(database, "SELECT * FROM invoices")
@@ -278,14 +279,12 @@ def test_address_and_dates_are_stored(database, monkeypatch):
     assert inv["due_date"] == "2026-11-07"
 
 
-@pending
 def test_due_date_defaults_to_thirty_days_after_the_invoice(database, monkeypatch):
     create(client_for(database, monkeypatch))
     [inv] = _rows(database, "SELECT due_date FROM invoices")
     assert inv["due_date"] == (date(2026, 10, 8) + timedelta(days=30)).isoformat()
 
 
-@pending
 def test_invoice_date_defaults_to_today_in_the_business_timezone(database, monkeypatch):
     body = {"customer_name": "Sam", "lines": LINES}
     r = client_for(database, monkeypatch).post("/v1/invoices", json=body)
@@ -296,7 +295,6 @@ def test_invoice_date_defaults_to_today_in_the_business_timezone(database, monke
 
 # ------------------------------------------------------------ validation ---
 
-@pending
 @pytest.mark.parametrize("overrides,why", [
     ({"lines": []}, "no lines"),
     ({"customer_name": "  "}, "no customer"),
@@ -319,7 +317,6 @@ def test_invalid_invoices_are_refused_and_nothing_is_written(database, monkeypat
 
 # --------------------------------------------------- isolation and access ---
 
-@pending
 def test_the_invoice_belongs_to_the_callers_business_whatever_the_body_says(database, monkeypatch):
     create(client_for(database, monkeypatch, business=A), business_id=B)
     rows = _rows(database, "SELECT business_id FROM invoices")
@@ -327,7 +324,6 @@ def test_the_invoice_belongs_to_the_callers_business_whatever_the_body_says(data
     assert _rows(database, "SELECT * FROM invoices WHERE business_id = :b", b=B) == []
 
 
-@pending
 @pytest.mark.parametrize("status,is_active,invoicing,why", [
     ("unpaid", False, True, "read-only: unpaid"),
     ("canceled", False, True, "read-only: cancelled"),
@@ -354,20 +350,9 @@ def _convert_capturing():
     return session.params_for("INSERT INTO invoices")
 
 
-def test_conversion_snapshot_contract_is_pending_until_the_migration():
-    """Not marked pending: this holds TODAY and must keep holding until 034
-    is live — conversion must not write columns production lacks. When
-    BH-010 Stage 2 lands with 034 applied, this test is replaced by the two
-    below, unmarked."""
-    params = _convert_capturing()
-    assert "customer_address" not in params
-
-
-@pytest.mark.xfail(strict=True, reason="BH-010 Stage 2: needs migration 034 live first")
 def test_conversion_copies_the_quote_address_as_a_snapshot():
     assert _convert_capturing().get("customer_address") == "9 Quote Lane, Leeds LS1 1AA"
 
 
-@pytest.mark.xfail(strict=True, reason="BH-010 Stage 2: decision 2 (invoice_date already exists live)")
 def test_conversion_records_the_invoice_date():
     assert _convert_capturing().get("invoice_date"), "decision 2: conversion records the date"
