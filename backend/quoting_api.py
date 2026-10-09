@@ -672,6 +672,9 @@ async def convert_to_invoice(
     except Exception:
         _tz = _ZoneInfo("Europe/London")
     invoice_date = _datetime.now(_tz).date()
+    # Due 30 days from the invoice's own (business-local) date, not the
+    # server's, so the two can never straddle midnight differently.
+    due_date = invoice_date + timedelta(days=30)
 
     def _insert_invoice(inv_number: str) -> None:
         session.execute(

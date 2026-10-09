@@ -85,6 +85,17 @@ def _money(value, label, *, allow_negative=False):
     return parsed
 
 
+def _fits(value: Decimal, places: int, label: str) -> Decimal:
+    """Refuse a value finer than the column stores it. Calculating with
+    0.0004 and storing 0.000 leaves a line whose stored figures no longer
+    produce its stored total (Codex BH-010 review 1). Refusing is honest;
+    rounding silently is not. Storage: quantity numeric(12,3), unit_cost
+    numeric(14,4), discounts numeric(12,2)."""
+    if value.as_tuple().exponent < -places:
+        _refuse(f"{label} can have at most {places} decimal places")
+    return value
+
+
 def _clean_text(value: Optional[str]) -> Optional[str]:
     value = (value or "").strip()
     return value or None
@@ -127,26 +138,38 @@ async def create_invoice(
         description = _clean_text(line.description)
         if not description:
             _refuse(f"Line {index} needs a description")
-        quantity = _money(line.quantity, f"Line {index} quantity")
+        quantity = _fits(_money(line.quantity, f"Line {index} quantity"), 3,
+                         f"Line {index} quantity")
         if quantity <= 0:
             _refuse(f"Line {index} quantity must be more than zero")
-        unit_cost = _money(line.unit_cost, f"Line {index} price")
-        discount = (_money(line.discount_amount, f"Line {index} discount")
+        unit_cost = _fits(_money(line.unit_cost, f"Line {index} price"), 4,
+                          f"Line {index} price")
+        discount = (_fits(_money(line.discount_amount, f"Line {index} discount"), 2,
+                          f"Line {index} discount")
                     if line.discount_amount not in (None, "") else Decimal("0"))
+        line_discount_type = line.discount_type or "fixed"
+        if line_discount_type not in ("fixed", "percentage"):
+            _refuse(f"Line {index} discount type must be 'fixed' or 'percentage'")
+        # Each line on its own: another line's value must not be able to hide
+        # a discount larger than this line, which would carry negative VAT.
+        if line_discount_type == "percentage" and discount > Decimal("100"):
+            _refuse(f"Line {index} discount cannot exceed 100%")
+        if line_discount_type == "fixed" and discount > q2(quantity * unit_cost):
+            _refuse(f"Line {index} discount is larger than the line")
         lines.append({
             "description": description,
             "quantity": quantity,
             "unit": _clean_text(line.unit) or "each",
             "unit_cost": unit_cost,
             "discount_amount": discount,
-            "discount_type": line.discount_type or "fixed",
+            "discount_type": line_discount_type,
             "tax_treatment": "standard",
             "category": "general",
             "group_name": None,
             "sort_order": index - 1,
         })
 
-    discount_amount = (_money(data.discount_amount, "Discount")
+    discount_amount = (_fits(_money(data.discount_amount, "Discount"), 2, "Discount")
                        if data.discount_amount not in (None, "") else Decimal("0"))
     discount_type = data.discount_type or "fixed"
     if discount_type not in ("fixed", "percentage"):

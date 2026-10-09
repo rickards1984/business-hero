@@ -153,7 +153,7 @@ export default function NewInvoiceDialog({ open, onClose, onCreated }: Props) {
             onChange={e => setCustomerEmail(e.target.value)} />
           <TextField label="Customer address" multiline minRows={2} value={customerAddress}
             onChange={e => setCustomerAddress(e.target.value)}
-            helperText="Needed on a full VAT invoice over £250"
+            helperText="Every invoice should show the customer’s address. You can save without it, but the PDF will flag it as missing."
             sx={{ gridColumn: { sm: '1 / -1' } }} />
           <TextField label="Invoice date" type="date" value={invoiceDate}
             onChange={e => setInvoiceDate(e.target.value)} InputLabelProps={{ shrink: true }} />
