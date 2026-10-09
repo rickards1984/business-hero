@@ -619,3 +619,30 @@ or live integration verification is claimed.
   Green. Safe to proceed.
 ------------------------------------------------------------
 ```
+
+---
+
+## Review — Claude Code (reviewer), 9 October 2026
+
+**Stage 1:** reviewed line by line; HMRC VAT Notice 700 §16 checked online
+(the reviewer addendum in the design note). Approved by Mike, 8 Oct.
+
+**Stage 2, review 1 — REQUEST-CHANGES**, four findings, all repaired by
+Codex with failing tests first (commit `e78f604`):
+1. [P1] QuickBooks/FreeAgent invoices titled "VAT invoice" — fixed: every
+   externally issued invoice is an "Invoice copy" naming its system.
+2. [P1] "Total excluding VAT" showed the pre-discount subtotal — fixed:
+   Subtotal / Discount / Total excluding VAT (verified against stored line
+   taxables) / Total VAT / Total payable.
+3. [P3] "Discount £0.00" on every invoice — fixed.
+4. [P3] Router registration style — fixed.
+
+Checked and not a defect: the browser can read `X-Invoice-Missing-Fields`
+(CORS `expose_headers=["*"]` applies because `apiRequest` does not send
+credentials); `businesses.tax_registered` is NOT NULL DEFAULT true in
+production, so `bool(None)` cannot arise.
+
+**Verdict after repair cycle 1: ACCEPT.** Rebased onto `main` at `237348f`;
+`./check.sh full` green, 840 passed. Not verified: visual layout across PDF
+readers and printing, and HMRC completeness — Mike's click test and his
+confirmation against Notice 700 cover those.
