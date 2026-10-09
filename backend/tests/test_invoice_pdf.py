@@ -566,3 +566,71 @@ def test_multipage_first_line_stays_below_invoice_header(document, rendered_text
     ]
     render(document, rendered_text)
     assert positions['Work 000'] < positions['Invoice date']
+
+
+# Repair cycle 1: regressions run against Stage 2 before implementation.
+@pytest.mark.parametrize("origin,label", [
+    ({"source": "quickbooks"}, "Originally issued from QuickBooks"),
+    ({"source": "freeagent"}, "Originally issued from FreeAgent"),
+    ({"external_source": "xero"}, "Originally issued from Xero"),
+    ({"external_source": "quickbooks"}, "Originally issued from QuickBooks"),
+    ({"external_source": "freeagent"}, "Originally issued from FreeAgent"),
+    ({"external_source": "csv"}, "Imported from CSV"),
+    ({"external_id": "remote-42"}, "Originally issued externally"),
+])
+@pytest.mark.parametrize("has_lines", [True, False])
+def test_repair_external_invoice_copy(document, rendered_text, origin, label, has_lines):
+    document["invoice"].update(origin)
+    if not has_lines:
+        document["line_items"] = []
+    observed = render(document, rendered_text)
+    assert "Invoice copy" in observed
+    assert label in observed
+    assert "vat invoice" not in observed.lower()
+
+
+def test_repair_discounted_net_matches_stored_taxable(document, rendered_text):
+    net = document["invoice"]["subtotal"] - document["invoice"]["discount_amount"]
+    assert net == sum(line["taxable"] for line in document["line_items"])
+    observed = render(document, rendered_text)
+    assert "Subtotal £100.00 Discount £10.00 Total excluding VAT £90.00 Total VAT £18.00 Total payable £108.00" in observed
+
+
+@pytest.mark.parametrize("subtotal", ["101", None])
+def test_repair_unverified_net_omitted_and_reported(database, monkeypatch, rendered_text, subtotal):
+    with Session(database) as session:
+        session.execute(text("UPDATE invoices SET subtotal=:subtotal WHERE id=:id"), dict(subtotal=subtotal, id=IA))
+        session.execute(text("UPDATE invoice_line_items SET taxable='90' WHERE invoice_id=:id"), dict(id=IA))
+        session.commit()
+    with client_for(database, monkeypatch) as client:
+        response = client.get(f"/v1/invoices/{IA}/pdf")
+    assert response.status_code == 200
+    assert "total_excluding_vat" in response.headers.get("X-Invoice-Missing-Fields", "").split(",")
+    observed = " ".join(rendered_text)
+    assert "Total excluding VAT" not in observed
+    assert "Total VAT £20.00 Total payable £120.00" in observed
+
+
+@pytest.mark.parametrize("registered", [True, False])
+@pytest.mark.parametrize("discount", [D("0"), None])
+def test_repair_zero_discount_row_omitted(document, rendered_text, registered, discount):
+    document["business"]["tax_registered"] = registered
+    document["invoice"].update(discount_amount=discount, tax_amount=D("0"), amount=D("100"))
+    document["line_items"][0]["taxable"] = D("100")
+    observed = render(document, rendered_text)
+    assert "Discount" not in observed
+    assert ("Total excluding VAT £100.00" if registered else "Subtotal £100.00") in observed
+
+
+def test_repair_router_uses_explicit_import():
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parents[1] / "main.py").read_text())
+    assert any(isinstance(node, ast.ImportFrom) and node.module == "invoice_pdf_api"
+               and any(alias.name == "router" and alias.asname == "invoice_pdf_router" for alias in node.names)
+               for node in tree.body)
+    assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+               and node.func.attr == "include_router" and node.args
+               and isinstance(node.args[0], ast.Name) and node.args[0].id == "invoice_pdf_router"
+               for node in ast.walk(tree))

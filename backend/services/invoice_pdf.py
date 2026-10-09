@@ -100,6 +100,20 @@ def prepare_invoice(invoice, line_items, business, settings):
             invoice["discount_amount"] = sum(differences, Decimal("0"))
 
     missing = []
+    invoice["total_excluding_vat"] = invoice["subtotal"]
+    if registered and invoice["discount_amount"]:
+        # Presentation only: validate the discounted header net against stored
+        # taxable lines. Never overwrite issued subtotal, VAT or payable totals.
+        invoice["total_excluding_vat"] = None
+        taxable_values = [decimal_value(line.get("taxable")) for line in line_items]
+        if invoice["subtotal"] is not None and taxable_values and all(
+            value is not None for value in taxable_values
+        ):
+            net = invoice["subtotal"] - invoice["discount_amount"]
+            if net == sum(taxable_values, Decimal("0")):
+                invoice["total_excluding_vat"] = net
+        if invoice["total_excluding_vat"] is None:
+            missing.append("total_excluding_vat")
     for field, value in (
         ("supplier_name", invoice["supplier_name"]),
         ("supplier_address", settings.get("company_address")),
@@ -149,9 +163,15 @@ async def generate_invoice_pdf(invoice, line_items, business, settings) -> bytes
         return Paragraph(escape(str(value or "")).replace("\n", "<br/>"), styles[style])
 
     source = nonblank(invoice.get("source")).lower()
+    external_source = nonblank(invoice.get("external_source")).lower()
+    systems = {"xero": "Xero", "quickbooks": "QuickBooks", "freeagent": "FreeAgent"}
+    imported = source in {*systems, "csv"} or bool(
+        external_source or nonblank(invoice.get("external_id"))
+    )
+    origin = external_source or source
     title = (
         "Invoice copy"
-        if source in ("csv", "xero")
+        if imported
         else "VAT invoice"
         if registered
         else "Invoice"
@@ -160,14 +180,14 @@ async def generate_invoice_pdf(invoice, line_items, business, settings) -> bytes
         paragraph(title, "Title"),
         paragraph(invoice.get("invoice_number"), "Heading2"),
     ]
-    if source in ("csv", "xero"):
-        story.append(
-            paragraph(
-                "Originally issued from Xero"
-                if source == "xero"
-                else "Imported from CSV"
-            )
-        )
+    if imported:
+        if origin == "csv":
+            label = "Imported from CSV"
+        elif origin in systems:
+            label = f"Originally issued from {systems[origin]}"
+        else:
+            label = "Originally issued externally"
+        story.append(paragraph(label))
     story.extend(
         [
             paragraph(invoice["supplier_name"], "Heading2"),
@@ -235,11 +255,14 @@ async def generate_invoice_pdf(invoice, line_items, business, settings) -> bytes
     else:
         story.append(paragraph("No itemised lines"))
     story.append(Spacer(1, 18))
+    has_discount = bool(invoice["discount_amount"])
     totals = [
-        ("Total excluding VAT" if registered else "Subtotal", invoice["subtotal"])
+        ("Total excluding VAT" if registered and not has_discount else "Subtotal", invoice["subtotal"])
     ]
-    if invoice["discount_amount"] is not None:
+    if has_discount:
         totals.append(("Discount", invoice["discount_amount"]))
+        if registered:
+            totals.append(("Total excluding VAT", invoice["total_excluding_vat"]))
     if registered:
         totals.append(("Total VAT", invoice["tax_amount"]))
     totals.append(("Total payable", invoice["amount"]))

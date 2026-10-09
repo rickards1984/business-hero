@@ -492,3 +492,130 @@ cache is worktree-local and offline mode is enabled:
   Green. Safe to proceed.
 ------------------------------------------------------------
 ```
+
+
+## Completion evidence — Stage 2 repair cycle 1, Codex, 9 October 2026
+
+**Status:** in review — all four Claude Code findings repaired; awaiting
+Claude Code re-review. Serves North Star P8 and the correctness prerequisite.
+User explicitly authorised these repairs. Base HEAD: `9dfafeb` (clean worktree
+at start). No network, commit, push, migration or production action performed.
+
+1. External invoices: CSV, Xero, QuickBooks and FreeAgent sources, or a set
+   external_source/external_id, render as Invoice copy. Known systems are named;
+   CSV says Imported from CSV. An external ID without an identified provider
+   says Originally issued externally rather than guessing a system.
+2. Discounted registered invoices now show Subtotal / Discount / Total excluding
+   VAT / Total VAT / Total payable. The displayed net is stored subtotal minus
+   stored discount, accepted only when it exactly equals the sum of stored line
+   taxable values. Otherwise it is omitted and `total_excluding_vat` is reported
+   in `X-Invoice-Missing-Fields`. Missing subtotal or unavailable taxable lines
+   also cannot establish that equality. Issued subtotal, VAT and payable values
+   remain unchanged. Unregistered invoices retain Subtotal / optional Discount /
+   Total payable, with no VAT rows.
+3. Zero discounts, including those derived from itemised lines, no longer print.
+4. main.py imports `router as invoice_pdf_router` and registers that name.
+
+Tests added in `backend/tests/test_invoice_pdf.py` (22 parameterised cases):
+- `test_repair_external_invoice_copy`: 14 source/metadata cases with and without lines.
+- `test_repair_discounted_net_matches_stored_taxable`: asserts exact Decimal
+  equality and the complete ordered totals text.
+- `test_repair_unverified_net_omitted_and_reported`: mismatch and missing-subtotal
+  endpoint cases verify omission, diagnostic header and unchanged issued totals.
+- `test_repair_zero_discount_row_omitted`: four explicit/derived-zero cases for
+  registered and unregistered businesses.
+- `test_repair_router_uses_explicit_import`: AST check of import and registration.
+
+All 22 cases were observed failing against the committed Stage 2 implementation
+before any production-code edits. Command:
+`/Users/michaelrickards/dev/business-hero-2/.venv/bin/python -m pytest backend/tests/test_invoice_pdf.py -q -k repair`
+Result: `22 failed, 54 deselected, 1 warning in 1.35s`.
+Failures were assertions for the incorrect title, totals/diagnostic header,
+zero-discount row and absent explicit import, not harness errors.
+
+After repairs, the complete invoice suite passed:
+`/Users/michaelrickards/dev/business-hero-2/.venv/bin/python -m pytest backend/tests/test_invoice_pdf.py -q`
+Result: `76 passed, 1 warning in 1.58s`.
+
+Final verification command (offline npm; .venv points to the specified Python):
+`npm_config_cache="$PWD/.bh009-npm-cache" npm_config_offline=true ./check.sh full`
+Exit code: 0. TypeScript, py_compile, ruff, pytest and all five deploy traps passed.
+Backend result: `792 passed, 33 skipped, 785 warnings, 220 subtests passed in 6.60s`.
+Gate result: `5 passed   0 failed   1 skipped` (eslint: no lint script).
+`git diff --check` also passed.
+
+Manual behaviour check: Invoices → select a QuickBooks/FreeAgent import → Download
+PDF and confirm Invoice copy and the named source; download a discounted native
+invoice and confirm the totals order and post-discount net; download a zero-discount
+invoice and confirm no Discount row. Automated checks verify rendered text and
+HTTP behaviour, not visual layout or third-party sync behaviour. No new visual
+or live integration verification is claimed.
+
+### Full check output
+
+```text
+------------------------------------------------------------
+  FRONTEND
+------------------------------------------------------------
+  PASS  tsc --noEmit
+  SKIP  eslint  (no lint script in package.json)
+------------------------------------------------------------
+  BACKEND
+------------------------------------------------------------
+  PASS  python syntax (py_compile)
+        All checks passed!
+  PASS  ruff
+            business.last_stripe_event_at = datetime.utcnow()
+
+        backend/tests/test_stripe_webhook_correctness.py::TestCheckoutIsDeduplicatedToo::test_a_replayed_checkout_applies_once
+        backend/tests/test_stripe_webhook_correctness.py::TestCheckoutIsDeduplicatedToo::test_a_checkout_is_recorded_in_the_audit_table
+          /Users/michaelrickards/dev/bh2-BH-009/backend/main.py:1043: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+            business.last_stripe_event_at = datetime.utcnow()
+
+        backend/tests/test_tenant_isolation_backend_path.py: 180 warnings
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+            cursor.execute(statement, parameters)
+
+        backend/tests/test_tenant_isolation_backend_path.py: 120 warnings
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default date adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+            cursor.execute(statement, parameters)
+
+        backend/tests/test_tenant_isolation_backend_path.py: 55 warnings
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/sqlalchemy/engine/cursor.py:1201: DeprecationWarning: The default date converter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+            rows = dbapi_cursor.fetchall()
+
+        backend/tests/test_tenant_isolation_backend_path.py: 60 warnings
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/sqlalchemy/engine/cursor.py:1201: DeprecationWarning: The default timestamp converter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+            rows = dbapi_cursor.fetchall()
+
+        -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+        792 passed, 33 skipped, 785 warnings, 220 subtests passed in 6.60s
+  PASS  pytest
+------------------------------------------------------------
+  PREFLIGHT (deploy traps)
+------------------------------------------------------------
+
+        TRAP 1 — requirements.txt sync
+          PASS  every backend dep is present in root requirements.txt
+
+        TRAP 2 — trailing newline on requirements.txt
+          PASS  trailing newline present
+
+        TRAP 3 — repo location
+          PASS  repo is outside CloudStorage/Dropbox
+
+        TRAP 4 — create_all() RLS drift warning
+          PASS  no models.py changes on this branch
+                comparison base: origin/main
+
+        TRAP 5 — secret scan on staged/changed files
+          PASS  no secret patterns in changed files
+
+        PREFLIGHT PASSED — safe to push.
+
+  PASS  preflight
+------------------------------------------------------------
+  5 passed   0 failed   1 skipped
+  Green. Safe to proceed.
+------------------------------------------------------------
+```
