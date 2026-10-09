@@ -165,3 +165,9 @@ canonical `assert_feature_access`, and Mike's Aria test on **New Body**
 passed on 9 Oct, so New Body resolves to FULL access and folding the
 receptionist gate changes nothing for it. **MSC is not verified** — one
 Aria message on MSC, or one read-only query, settles it before Stage 2.
+
+**CORRECTION (same day):** the paragraph above is wrong. Platform admins
+bypass `_assert_ai_access` entirely, and Mike's account administers the
+platform, so his Aria test proves nothing about New Body's access. Neither
+business is verified. The read-only query in the design note's decisions
+section settles both.

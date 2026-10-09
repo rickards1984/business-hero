@@ -293,3 +293,31 @@ WhatsApp/Booking/Board Meeting on Starter (refused at API), then repeat on a
 granted plan. For unpaid/canceled, open/download an existing quote (available)
 and try edits, sends, previews and accounting AI insights (refused). A browser
 smoke test cannot replace the API tests. No production smoke test was run here.
+
+## Decisions — Mike, 9 October 2026
+
+Mike approved the Stage 1 tests ("BH-011 tests approved") and agreed every
+recommendation:
+
+1. **Compound mappings: yes.** Quote → invoice also needs `invoicing`; quote
+   email needs `email`; quote WhatsApp needs `whatsapp`.
+2. **Downgrade history: read-only, as ENTITLEMENT-SPEC PART C says.** After a
+   plan change removes a feature, the customer can still SEE that feature's
+   history (board meetings and their messages/actions/goals, receptionist
+   call history and stats, WhatsApp message history) but cannot use the
+   feature or add to it. An explicit admin `false` and admin suspension still
+   block everything. Stage 2 defines the history routes explicitly (no
+   generic GET bypass) and adds tests for both sides.
+3. **Signed WhatsApp webhook for a business without `whatsapp`: empty 200,
+   no effects** — no logging, no pending-action lookup or execution, no
+   reply. Replaces the 403 the Stage 1 tests encode; Stage 2 updates those
+   tests to match and says so. Mike: "this can be an answer in the help
+   section if needed, just in case a customer gets confused" — a help
+   article explaining why WhatsApp replies stop when WhatsApp is not on the
+   plan (backlog, alongside the app's own upgrade prompt).
+
+**Open before Stage 2:** MSC's and New Body's effective access state. The
+reviewer's note above that Mike's Aria test confirmed New Body was WRONG:
+platform admins bypass `_assert_ai_access`, so an admin's Aria chat proves
+nothing about the business. A read-only query of `subscription_status`,
+`is_active` and `trial_ends_at` for both settles it.
