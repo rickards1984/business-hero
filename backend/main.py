@@ -441,6 +441,9 @@ app.include_router(booking_router)
 from quoting_api import router as quoting_router
 app.include_router(quoting_router)
 
+from invoice_pdf_api import router as invoice_pdf_router
+app.include_router(invoice_pdf_router)
+
 from executive_meeting_api import router as executive_meeting_router
 app.include_router(executive_meeting_router)
 

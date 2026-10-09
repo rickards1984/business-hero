@@ -80,3 +80,9 @@ def term(word, region):
     if normalise(region) == US:
         return TERMS.get(word, word)
     return word
+
+
+def currency_symbol(currency):
+    """Invoice currency takes precedence; unknown codes stay unambiguous."""
+    code = str(currency).strip().upper()
+    return {"GBP": "£", "USD": "$", "EUR": "€"}.get(code, f"{code} ")
