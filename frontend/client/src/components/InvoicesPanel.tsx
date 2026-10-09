@@ -57,6 +57,7 @@ import {
 import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
 import { config } from '@/config/env';
+import NewInvoiceDialog from '@/components/NewInvoiceDialog';
 
 // Chase stage definitions
 interface ChaseStage {
@@ -130,6 +131,7 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
   const [invoiceDrawerOpen, setInvoiceDrawerOpen] = useState(false);
   const [chaseDraft, setChaseDraft] = useState<{ subject: string; body: string; chase_stage: number } | null>(null);
   const [csvUploading, setCsvUploading] = useState(false);
+  const [newInvoiceOpen, setNewInvoiceOpen] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
   const [error, setError] = useState('');
   const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<string[]>([]);
@@ -684,7 +686,19 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
             {csvUploading ? 'Uploading...' : 'Upload CSV'}
           </Button>
         </label>
+        <Button variant="contained" onClick={() => setNewInvoiceOpen(true)}>
+          New invoice
+        </Button>
       </Box>
+      <NewInvoiceDialog
+        open={newInvoiceOpen}
+        onClose={() => setNewInvoiceOpen(false)}
+        onCreated={async (number, total) => {
+          setNewInvoiceOpen(false);
+          setSuccessMessage(`Invoice ${number} created (total ${total})`);
+          await fetchInvoices();
+        }}
+      />
 
       {invoicesLoading && invoices.length === 0 ? (
         <LoadingMessage
@@ -696,7 +710,7 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
           <ReceiptIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
           <Typography color="text.secondary">No invoices found</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            Upload a CSV file to import invoices
+            Create one with New invoice, or upload a CSV file to import invoices
           </Typography>
         </Box>
       ) : (
