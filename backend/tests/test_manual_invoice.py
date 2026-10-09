@@ -418,3 +418,94 @@ def test_aria_can_read_the_new_invoice_fields_for_her_business_only(database, mo
     assert inv["supply_date"] == "2026-10-06"
     flat = str(result)
     assert "B private" not in flat and "B Private Customer" not in flat
+
+
+# --------------------------------------------- Codex BH-010 review 2 additions ---
+
+def test_conversion_due_date_counts_from_the_invoice_date(monkeypatch):
+    """Due is 30 days from the invoice's own business-local date, so the two
+    can never straddle midnight differently (Codex review 2). The server's
+    date.today() is pinned far from the real date: code that still used it
+    for the due date would fail here every time, not only at midnight."""
+    import quoting_api
+
+    class _ServerDate(date):
+        @classmethod
+        def today(cls):
+            return date(2001, 1, 1)
+    monkeypatch.setattr(quoting_api, "date", _ServerDate)
+    params = _convert_capturing()
+    assert date.fromisoformat(params["due"]) == \
+        date.fromisoformat(params["invoice_date"]) + timedelta(days=30)
+
+
+@pytest.mark.parametrize("overrides,why", [
+    ({"discount_amount": "10.005", "discount_type": "fixed"}, "invoice discount, 3dp"),
+    ({"discount_amount": "12.505", "discount_type": "percentage"}, "invoice percentage, 3dp"),
+    ({"lines": [{"description": "x", "quantity": "1", "unit_cost": "10",
+                 "discount_amount": "5.555", "discount_type": "percentage"}]},
+     "line percentage, 3dp"),
+])
+def test_discounts_finer_than_storage_are_refused(database, monkeypatch, overrides, why):
+    r = create(client_for(database, monkeypatch), **overrides)
+    assert r.status_code == 422, f"{why}: {r.status_code} {r.text}"
+    assert _rows(database, "SELECT * FROM invoices") == [], why
+
+
+def test_a_percentage_discount_at_storage_precision_keeps_lines_and_header_equal(
+        database, monkeypatch):
+    r = create(client_for(database, monkeypatch), discount_amount="12.5",
+               discount_type="percentage")
+    assert r.status_code == 201, r.text
+    lines = _rows(database, "SELECT taxable, tax_amount FROM invoice_line_items")
+    [inv] = _rows(database, "SELECT subtotal, tax_amount, amount FROM invoices")
+    net = sum(D(ln["taxable"]) for ln in lines)
+    tax = sum(D(ln["tax_amount"]) for ln in lines)
+    assert tax == D(inv["tax_amount"])
+    assert net + tax == D(inv["amount"])
+
+
+class _DateEngine:
+    """PostgreSQL returns Python dates, and older invoices have NULL in the
+    new columns. A fake engine returning exactly that, through the real
+    _list_invoices, on its filtered branch."""
+
+    def __init__(self, rows):
+        self.rows, self.sql = rows, []
+
+    def connect(self):
+        engine = self
+
+        class _Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, statement, params):
+                engine.sql.append((str(statement), params))
+                return SimpleNamespace(fetchall=lambda: engine.rows)
+        return _Conn()
+
+
+def test_aria_reads_legacy_invoices_and_real_dates_on_every_branch():
+    import assistant_tools
+    rows = [
+        # (id, number, name, email, amount, status, due, issue, chase, created,
+        #  customer_address, invoice_date, supply_date)
+        ("i1", "INV-0001", "Quote Customer", None, D("120.00"), "unpaid",
+         date(2026, 11, 7), None, 0, None, "9 Quote Lane", date(2026, 10, 8), None),
+        ("i2", "XERO-77", "Xero Customer", None, D("50.00"), "overdue",
+         date(2026, 9, 1), date(2026, 8, 1), 2, None, None, None, None),
+    ]
+    for status in ("all", "outstanding", "something-else"):
+        engine = _DateEngine(rows)
+        result = assistant_tools._list_invoices(engine, A, {"status": status})
+        first, legacy = result["invoices"]
+        assert first["invoice_date"] == "2026-10-08" and first["supply_date"] is None
+        assert first["customer_address"] == "9 Quote Lane"
+        assert legacy["customer_address"] is None and legacy["invoice_date"] is None
+        assert legacy["issue_date"] == "2026-08-01" and legacy["due_date"] == "2026-09-01"
+        sql, params = engine.sql[0]
+        assert "customer_address" in sql and params["business_id"] == A, status

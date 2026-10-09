@@ -51,3 +51,51 @@ Every finding taken, tests first (8 tests, 7 failing before the fix).
 | Not injected: a post-allocation line-insert failure | Codex traced it to an uncommitted rollback. Left as traced, not added as a test |
 
 `./check.sh full`: 800 passed.
+
+## Review 2 (narrow)
+
+| | |
+|---|---|
+| Reviewed commit | `29d2e0c` |
+| Session id | `01a12221-5411-72c3-885c-96321e082203` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 31,311` |
+| **Verdict** | **ACCEPT-WITH-CHANGES** (test coverage only) |
+
+Verbatim:
+
+---
+
+**ACCEPT-WITH-CHANGES** — `29d2e0c5a9aceccdf0dd91fdc18e057e660f5616`.
+
+Findings 1–4 and the minor due-date issue are resolved in code. No new runtime regression or remaining stored-line/header disagreement found within scope. Regression coverage remains incomplete:
+
+1. **Conversion due date lacks a regression test.** [quoting_api.py:677](/Users/michaelrickards/dev/bh2-BH-010-review/backend/quoting_api.py:677) correctly derives it from business-local invoice date, but [test_manual_invoice.py:358](/Users/michaelrickards/dev/bh2-BH-010-review/backend/tests/test_manual_invoice.py:358) only checks that invoice date exists. Add a midnight/timezone-boundary test asserting both dates.
+
+2. **Aria compatibility is correct by inspection, incompletely tested.** [test_manual_invoice.py:405](/Users/michaelrickards/dev/bh2-BH-010-review/backend/tests/test_manual_invoice.py:405) genuinely tests tenant isolation and new snapshots, but only with SQLite strings and populated fields. Cover legacy NULL snapshots, Python `date` values returned by PostgreSQL, and filtered query branches.
+
+3. **Precision coverage omits invoice-level and percentage discounts.** [test_manual_invoice.py:365](/Users/michaelrickards/dev/bh2-BH-010-review/backend/tests/test_manual_invoice.py:365) tests quantity, price and fixed line discounts. Add excessive-precision percentage/invoice discounts and verify accepted boundary values against persisted lines and header.
+
+The per-line fixed-discount limit correctly uses the engine’s rounded line total. NULL handling and date serialization look sound. Address guidance is corrected at [NewInvoiceDialog.tsx:156](/Users/michaelrickards/dev/bh2-BH-010-review/frontend/client/src/components/NewInvoiceDialog.tsx:156); browser behaviour was not exercised.
+
+Permitted tests: **54 passed, 1 deprecation warning**. No edits, push or network access; working tree remains clean.
+---
+
+### Response to review 2 — Claude Code (builder)
+
+All three coverage gaps closed (6 tests). The code was already correct, so
+these are coverage tests rather than failing-first tests, and each was made
+to bite:
+1. **Due date:** the test pins the server's `date.today()` to 2001-01-01.
+   Mutation-checked: reinstating `date.today() + 30` fails it every time,
+   not only at midnight.
+2. **Aria tool:** the real `_list_invoices` is driven through a fake
+   engine returning Python `date` values (as PostgreSQL does) and a legacy
+   invoice with NULL snapshots, on the `all`, filtered and fallback
+   branches, asserting the business_id parameter each time.
+3. **Discount precision:** invoice fixed, invoice percentage and line
+   percentage at 3dp are refused. A 12.5% invoice discount at storage
+   precision keeps the stored line VAT equal to the header VAT, and the
+   line net plus VAT equal to the gross.
+
+Two review cycles. `./check.sh full`: 806 passed.
