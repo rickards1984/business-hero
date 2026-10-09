@@ -1,9 +1,7 @@
-"""BH-009 Stage 1 contract; no application implementation lives in this file.
+"""BH-009 approved Stage 1 contract and Stage 2 decision regressions.
 
-Only the absent target module is an expected failure. Once it exists, ANY
-assertion/import/fixture error fails normally; strict XPASS requires removing
-this staging marker. Text assertions observe ReportLab's real text drawing,
-not mocked PDF bytes. Visual layout and PDF-reader extraction remain manual.
+Text assertions observe ReportLab's real text drawing, not mocked PDF bytes.
+Visual layout and PDF-reader extraction remain separate verification.
 """
 import asyncio
 import importlib
@@ -25,14 +23,9 @@ for _key in ("SUPABASE_DATABASE_URL", "DATABASE_URL"):
 
 
 class MissingInvoicePDF(AssertionError):
-    """Only this precise, intentional Stage 1 absence may be xfailed."""
+    """A missing implementation is now an ordinary contract-test failure."""
 
 
-pending = pytest.mark.xfail(
-    strict=True,
-    reason="BH-009: tests first; implementation follows Mike's review",
-    raises=MissingInvoicePDF,
-)
 D = Decimal
 A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -125,7 +118,6 @@ def test_pdf_text_observer_sees_real_reportlab_output(rendered_text):
     assert output.getvalue().startswith(b"%PDF-")
 
 
-@pending
 def test_registered_invoice_has_required_identity_dates_and_line_fields(document, rendered_text):
     result = render(document, rendered_text)
     assert "vat invoice" in result.lower() or "tax invoice" in result.lower()
@@ -138,7 +130,6 @@ def test_registered_invoice_has_required_identity_dates_and_line_fields(document
         assert label in result.lower()
 
 
-@pending
 def test_stored_discount_and_header_totals_are_not_recalculated(document, rendered_text):
     # Deliberate mismatch: existing records are authoritative, even when lines
     # would yield other totals. Never silently rewrite issued header amounts.
@@ -153,7 +144,6 @@ def test_stored_discount_and_header_totals_are_not_recalculated(document, render
     assert "£108.00" not in result
 
 
-@pending
 @pytest.mark.parametrize("stale_rate", [D("0"), D("20")])
 def test_unregistered_omits_all_vat_even_with_stale_settings(document, rendered_text, stale_rate):
     document["business"]["tax_registered"] = False
@@ -169,7 +159,6 @@ def test_unregistered_omits_all_vat_even_with_stale_settings(document, rendered_
     assert "£90.00" in result
 
 
-@pending
 def test_registered_zero_rate_is_not_replaced_by_twenty(document, rendered_text):
     document["line_items"][0].update(tax_rate=D("0"), tax_amount=D("0.00"))
     document["invoice"].update(tax_amount=D("0.00"), amount=D("90.00"))
@@ -178,7 +167,6 @@ def test_registered_zero_rate_is_not_replaced_by_twenty(document, rendered_text)
     assert "£0.00" in result and "£90.00" in result
 
 
-@pending
 def test_mixed_rates_stay_attached_to_their_lines(document, rendered_text):
     document["line_items"] = [
         dict(description=name, quantity=D("1"), unit_cost=D("100"),
@@ -205,7 +193,6 @@ class NoFloatDecimal(Decimal):
         raise AssertionError("PDF must not convert exact money to float")
 
 
-@pending
 def test_decimal_pennies_survive_without_float_conversion(document, rendered_text):
     for row in [document["invoice"], *document["line_items"]]:
         for key, value in row.items():
@@ -220,7 +207,6 @@ def test_decimal_pennies_survive_without_float_conversion(document, rendered_tex
     assert "£2.67" not in result
 
 
-@pending
 @pytest.mark.parametrize("region,currency,symbol", [("UK", "GBP", "£"), ("US", "USD", "$")])
 def test_currency_follows_region(document, rendered_text, region, currency, symbol):
     from services.region import resolve
@@ -233,7 +219,6 @@ def test_currency_follows_region(document, rendered_text, region, currency, symb
     assert ("$" if symbol == "£" else "£") not in result
 
 
-@pending
 @pytest.mark.parametrize("source", ["csv", "xero"])
 def test_import_without_lines_uses_only_header_totals(document, rendered_text, source):
     document["line_items"] = []
@@ -342,7 +327,6 @@ def client_for(database, monkeypatch, business=A, status="active", enabled=True,
     return TestClient(app)
 
 
-@pending
 @pytest.mark.parametrize("business,own,foreign", [(A, IA, IB), (B, IB, IA)])
 def test_http_download_is_scoped_both_directions(database, monkeypatch, rendered_text, business, own, foreign):
     with client_for(database, monkeypatch, business=business) as client:
@@ -366,7 +350,6 @@ def test_http_download_is_scoped_both_directions(database, monkeypatch, rendered
         assert not rendered_text, "Foreign/missing invoice must never be rendered"
 
 
-@pending
 @pytest.mark.parametrize("status,active,enabled,expected", [
     ("active", True, True, 200), ("unpaid", False, True, 200),
     ("canceled", False, True, 200), ("active", True, False, 403),
@@ -384,3 +367,202 @@ def test_http_invoicing_entitlement_and_retained_read_access(
     else:
         assert not response.content.startswith(b"%PDF-")
         assert not rendered_text
+
+
+# Stage 2: Mike's approved decisions, added and run before implementation.
+@pytest.mark.parametrize("issue,invoice_date,created,expected", [
+    ("2026-10-08", "2026-10-07", "2026-10-06T12:30:00+00:00", "08/10/2026"),
+    (None, "2026-10-07", "2026-10-06T12:30:00+00:00", "07/10/2026"),
+    (None, None, "2026-10-06T12:30:00+00:00", "06/10/2026"),
+])
+def test_decision_invoice_date_precedence(database, monkeypatch, rendered_text, issue, invoice_date, created, expected):
+    with Session(database) as session:
+        session.execute(text("UPDATE invoices SET issue_date=:issue, invoice_date=:day, created_at=:created WHERE id=:id"),
+                        dict(issue=issue, day=invoice_date, created=created, id=IA))
+        session.commit()
+    with client_for(database, monkeypatch) as client:
+        assert client.get(f"/v1/invoices/{IA}/pdf").status_code == 200
+    observed = " ".join(rendered_text)
+    assert "Invoice date" in observed and expected in observed
+    assert "Tax point" not in observed
+
+
+@pytest.mark.parametrize("tax_point,shown", [(None, False), (date(2026, 9, 29), False), (date(2026, 9, 28), True)])
+def test_decision_tax_point_only_when_stored_and_different(document, rendered_text, tax_point, shown):
+    document["invoice"]["tax_point"] = tax_point
+    observed = render(document, rendered_text)
+    assert ("Tax point" in observed) == shown
+
+
+@pytest.mark.parametrize("canonical,expected,absent", [
+    ("CANONICAL-TAX", "CANONICAL-TAX", "LEGACY-TAX"),
+    (None, "LEGACY-TAX", "CANONICAL-TAX"),
+    ("   ", "LEGACY-TAX", "CANONICAL-TAX"),
+])
+def test_decision_vat_number_precedence(database, monkeypatch, rendered_text, canonical, expected, absent):
+    with Session(database) as session:
+        session.execute(text("UPDATE businesses SET tax_number=:number WHERE id=:id"), dict(number=canonical, id=A))
+        session.execute(text("UPDATE quote_settings SET vat_number='LEGACY-TAX' WHERE business_id=:id"), dict(id=A))
+        session.commit()
+    with client_for(database, monkeypatch) as client:
+        assert client.get(f"/v1/invoices/{IA}/pdf").status_code == 200
+    observed = " ".join(rendered_text)
+    assert expected in observed and absent not in observed
+
+
+@pytest.mark.parametrize("source,label", [("csv", "Imported from CSV"), ("xero", "Originally issued from Xero")])
+@pytest.mark.parametrize("has_lines", [False, True])
+def test_decision_import_title_and_origin(document, rendered_text, source, label, has_lines):
+    document["invoice"]["source"] = source
+    if not has_lines:
+        document["line_items"] = []
+    observed = render(document, rendered_text)
+    assert "Invoice copy" in observed and label in observed
+    assert "vat invoice" not in observed.lower()
+    assert ("No itemised lines" in observed) == (not has_lines)
+
+
+@pytest.mark.parametrize("region,currency,symbol", [("UK", "USD", "$"), ("US", "GBP", "£"), ("UK", "CAD", "CAD ")])
+def test_decision_invoice_currency_overrides_region(document, rendered_text, region, currency, symbol):
+    document["business"].update(region=region, tax_registered=False)
+    document["invoice"].update(currency=currency, tax_amount=D("0"))
+    assert f"{symbol}108.00" in render(document, rendered_text)
+
+
+@pytest.mark.parametrize("source", ["quote", "csv", "xero"])
+def test_decision_registered_foreign_currency_refused(database, monkeypatch, rendered_text, source):
+    with Session(database) as session:
+        session.execute(text("UPDATE invoices SET currency='USD', source=:source WHERE id=:id"), dict(source=source, id=IA))
+        session.commit()
+    with client_for(database, monkeypatch) as client:
+        response = client.get(f"/v1/invoices/{IA}/pdf")
+    assert response.status_code == 422
+    assert "sterling" in response.json()["detail"].lower()
+    assert not response.content.startswith(b"%PDF-") and not rendered_text
+
+
+@pytest.mark.parametrize("tax", ["20.00", "-20.00"])
+def test_decision_unregistered_stored_vat_refused(database, monkeypatch, rendered_text, tax):
+    with Session(database) as session:
+        session.execute(text("UPDATE businesses SET tax_registered=0 WHERE id=:id"), dict(id=A))
+        session.execute(text("UPDATE invoices SET tax_amount=:tax WHERE id=:id"), dict(tax=tax, id=IA))
+        session.commit()
+    with client_for(database, monkeypatch) as client:
+        response = client.get(f"/v1/invoices/{IA}/pdf")
+    assert response.status_code == 422
+    assert "check" in response.json()["detail"].lower()
+    assert "vat settings" in response.json()["detail"].lower()
+    assert not response.content.startswith(b"%PDF-") and not rendered_text
+
+
+@pytest.mark.parametrize("amount,registered,missing", [
+    ("250.00", True, False), ("250.01", True, True),
+    ("249.99", True, False), ("250.01", False, True),
+])
+def test_decision_missing_address_threshold_and_no_guess(database, monkeypatch, rendered_text, amount, registered, missing):
+    with Session(database) as session:
+        # Same source_ref still matches both quotes; neither is an authorised link.
+        session.execute(text("UPDATE quotes SET invoice_id=NULL WHERE business_id=:id"), dict(id=A))
+        # A malicious/incorrect foreign quote link must not supply the address.
+        session.execute(text("UPDATE quotes SET invoice_id=:invoice WHERE business_id=:id"), dict(invoice=IA, id=B))
+        session.execute(text("UPDATE invoices SET amount=:amount, tax_amount=:tax WHERE id=:id"),
+                        dict(amount=amount, tax="20" if registered else "0", id=IA))
+        session.execute(text("UPDATE businesses SET tax_registered=:registered WHERE id=:id"), dict(registered=registered, id=A))
+        session.commit()
+    with client_for(database, monkeypatch) as client:
+        response = client.get(f"/v1/invoices/{IA}/pdf")
+    assert response.status_code == 200
+    assert ("customer_address" in response.headers.get("X-Invoice-Missing-Fields", "")) == missing
+    observed = " ".join(rendered_text)
+    assert "Customer Address" not in observed and "B-PRIVATE" not in observed
+    assert "missing" not in observed.lower() and "incomplete" not in observed.lower()
+
+
+def test_decision_missing_fields_and_complete_header(database, monkeypatch, rendered_text):
+    with client_for(database, monkeypatch) as client:
+        complete = client.get(f"/v1/invoices/{IA}/pdf")
+        assert complete.status_code == 200
+        assert "X-Invoice-Missing-Fields" not in complete.headers
+        with Session(database) as session:
+            session.execute(text("UPDATE businesses SET tax_number=NULL WHERE id=:id"), dict(id=A))
+            session.execute(text("UPDATE quote_settings SET vat_number=NULL, company_address=NULL WHERE business_id=:id"), dict(id=A))
+            session.commit()
+        response = client.get(f"/v1/invoices/{IA}/pdf")
+    assert response.status_code == 200
+    assert set(response.headers["X-Invoice-Missing-Fields"].split(",")) == {"supplier_address", "vat_number"}
+
+
+def test_decision_discount_uses_stored_taxable_not_percentage_input(database, monkeypatch, rendered_text):
+    with Session(database) as session:
+        session.execute(text("UPDATE invoice_line_items SET line_total='100', discount_type='percentage', discount_amount='10', apportioned_discount='5', taxable='85' WHERE invoice_id=:id"), dict(id=IA))
+        session.commit()
+    with client_for(database, monkeypatch) as client:
+        assert client.get(f"/v1/invoices/{IA}/pdf").status_code == 200
+    observed = " ".join(rendered_text)
+    assert "Discount" in observed and "£15.00" in observed
+    # Header is intentionally unchanged; the PDF must not reprice it.
+    assert "£120.00" in observed and "£20.00" in observed
+
+
+@pytest.mark.parametrize("source", ["csv", "xero"])
+def test_import_with_null_net_and_tax_preserves_only_known_total(database, monkeypatch, rendered_text, source):
+    """Real import writers can leave subtotal/tax_amount NULL; never invent zero."""
+    with Session(database) as session:
+        session.execute(text("DELETE FROM invoice_line_items WHERE invoice_id=:id"), dict(id=IA))
+        session.execute(text("UPDATE invoices SET subtotal=NULL, tax_amount=NULL, source=:source WHERE id=:id"), dict(source=source, id=IA))
+        session.commit()
+    with client_for(database, monkeypatch) as client:
+        response = client.get(f"/v1/invoices/{IA}/pdf")
+    assert response.status_code == 200
+    assert {"subtotal", "tax_amount"} <= set(response.headers["X-Invoice-Missing-Fields"].split(","))
+    observed = " ".join(rendered_text)
+    assert "Invoice copy" in observed and "£120.00" in observed
+    assert "£0.00" not in observed and "No itemised lines" in observed
+
+
+def test_long_invoice_wraps_and_paginates_without_losing_lines(document, rendered_text):
+    document["line_items"] = [
+        {**document["line_items"][0], "description": f"Work {index:03d}: Copper pipe & fittings <supplied> " + "long description " * 12}
+        for index in range(65)
+    ]
+    observed = render(document, rendered_text)
+    for index in range(65):
+        assert f"Work {index:03d}" in observed
+    assert "Page 2" in observed
+    # ReportLab can draw escaped angle brackets as separate text fragments.
+    assert "<supplied>" in observed.replace(" ", "")
+    assert "£108.00" in observed
+
+
+def test_ambiguous_quote_links_do_not_choose_an_address(database, monkeypatch, rendered_text):
+    with Session(database) as session:
+        session.execute(text("INSERT INTO quotes VALUES ('extra',:business,:invoice,'OTHER','Untrusted duplicate address')"), dict(business=A, invoice=IA))
+        session.execute(text("UPDATE invoices SET amount='251' WHERE id=:id"), dict(id=IA))
+        session.commit()
+    with client_for(database, monkeypatch) as client:
+        response = client.get(f"/v1/invoices/{IA}/pdf")
+    assert response.status_code == 200
+    assert "customer_address" in response.headers["X-Invoice-Missing-Fields"]
+    assert "address" not in " ".join(rendered_text).lower().replace("supplier address", "")
+
+
+def test_multipage_first_line_stays_below_invoice_header(document, rendered_text, monkeypatch):
+    """Check drawing coordinates independently of PDF thumbnail rendering."""
+    from reportlab.platypus import Paragraph
+
+    positions = {}
+    original = Paragraph.draw
+
+    def observe(paragraph):
+        content = paragraph.getPlainText()
+        if content.startswith(('Invoice date:', 'Work 000:')):
+            positions[content.split(':')[0]] = paragraph.canv.absolutePosition(0, paragraph.height)[1]
+        return original(paragraph)
+
+    monkeypatch.setattr(Paragraph, 'draw', observe)
+    document['line_items'] = [
+        {**document['line_items'][0], 'description': f'Work {i:03}: ' + 'Copper pipe & fittings <supplied> long description ' * 5}
+        for i in range(65)
+    ]
+    render(document, rendered_text)
+    assert positions['Work 000'] < positions['Invoice date']

@@ -229,3 +229,47 @@ header, `X-Invoice-Missing-Fields` (e.g. `customer_address`), so the app
 can warn the owner before they send it. The PDF itself carries no warning
 text. This is an interim rule until P0-5's migration, and it is Claude
 Code's call within Mike's decisions, flagged to him.
+
+
+## Stage 2 implementation notes — Codex, 8 October 2026
+
+Implemented the approved decisions; Stage 1's proposed/open text above is
+historical and is superseded by Mike's decisions and these implementation notes.
+Serves P8 correctness and P9 tenant isolation over existing records. No new
+stored data, Aria figures or model calls; no schema or money-engine changes.
+
+- Header/line numeric values are read through raw SQL mappings, retaining
+  PostgreSQL NUMERIC as Decimal. Float input is rejected by the renderer.
+  Stored subtotal, tax_amount and amount are displayed, never repriced.
+  The displayed discount is the sum of stored line_total minus stored taxable,
+  covering line and apportioned discounts without reinterpreting percentage
+  input. An explicit normalized discount_amount remains authoritative.
+- Nullable import net/tax values are omitted and named in the missing-fields
+  header, never inferred or replaced with zero. Known total payable remains.
+- Interim address lookup uses only same-business quotes.invoice_id. Multiple
+  links are treated as unknown rather than choosing one. No source_ref fallback.
+- Missing supplier name/address, invoice number/date, customer name, applicable
+  VAT number, totals, and customer address are reported. The customer-address
+  exception applies only to registered GBP invoices at or below 250. Unregistered
+  invoices still report absent customer addresses. PDF text contains no warning.
+- Invoice currency wins; absent currency uses services.region; unknown currency
+  codes print as the code plus a space. Registered non-GBP and unregistered
+  nonzero stored header VAT return 422 with explanatory messages and no PDF.
+- Authenticated GET uses the real invoicing dependency, including retained
+  read access; foreign/missing UUIDs have identical 404 responses. The response
+  is an attachment with no-store caching and a sanitized filename.
+- The frontend uses apiRequest's bearer authentication and existing CORS header
+  exposure. Each row and invoice drawer has a Download PDF control, loading
+  state, persistent missing-field warning and download error. No mutation is
+  made by download. No browser end-to-end test was run.
+
+Offline visual evidence: generated synthetic standard, 65-line/10-page, and
+missing-import PDFs in ignored build/bh009-review/. PDFKit extracted their text;
+CoreGraphics rasterization confirmed the standard, first/last long-document
+pages and missing-import layout. PDFKit's thumbnail of the long first page
+was misleading; independent PDF text coordinates and CoreGraphics show no
+identity/line overlap. A supplemental drawing-coordinate test covers placement.
+ReportLab can repeat the column header before an intra-page row split; content
+is retained. This sample inspection does not establish every-page/all-reader
+layout, font coverage, print behaviour or legal compliance. No new dependency
+was installed. Review/addendum HMRC limitations still apply.

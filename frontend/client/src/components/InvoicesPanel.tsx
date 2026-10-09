@@ -37,6 +37,7 @@ import {
   InputAdornment,
 } from '@mui/material';
 import {
+  Download as DownloadIcon,
   Receipt as ReceiptIcon,
   Archive as ArchiveIcon,
   Warning as WarningIcon,
@@ -151,6 +152,70 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
   const [invoiceSortOrder, setInvoiceSortOrder] = useState<'asc' | 'desc'>('asc');
   const [invoiceActionLoading, setInvoiceActionLoading] = useState<string | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{ open: boolean; action: 'delete' | 'cancel' | null; invoiceId: string | null }>({ open: false, action: null, invoiceId: null });
+
+  const [pdfLoading, setPdfLoading] = useState<Record<string, boolean>>({});
+  const [pdfWarnings, setPdfWarnings] = useState<Record<string, string>>({});
+  const [pdfErrors, setPdfErrors] = useState<Record<string, string>>({});
+
+  const downloadPdf = async (invoice: Invoice) => {
+    const key = `${businessId}:${invoice.id}`;
+    setPdfLoading(previous => ({ ...previous, [key]: true }));
+    setPdfErrors(previous => ({ ...previous, [key]: '' }));
+    try {
+      // apiRequest supplies the current Supabase token and retries a 401 once.
+      const response = await apiRequest('GET', `/v1/invoices/${invoice.id}/pdf`);
+      const labels: Record<string, string> = {
+        customer_address: 'Customer address', supplier_address: 'Supplier address',
+        supplier_name: 'Supplier name', vat_number: 'VAT registration number',
+        invoice_number: 'Invoice number', invoice_date: 'Invoice date',
+        customer_name: 'Customer name', subtotal: 'Subtotal', tax_amount: 'Tax amount',
+        amount: 'Total payable',
+      };
+      const missing = (response.headers.get('X-Invoice-Missing-Fields') || '')
+        .split(',').map(field => field.trim()).filter(Boolean);
+      setPdfWarnings(previous => ({
+        ...previous,
+        [key]: missing.length
+          ? `${missing.map(field => labels[field] || field.replace(/_/g, ' ')).join(', ')} not recorded — this document is incomplete. Check it before sending.`
+          : '',
+      }));
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `invoice-${invoice.invoice_number.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 100)}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      // Give the browser time to start reading the blob before releasing it.
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err: unknown) {
+      setPdfErrors(previous => ({
+        ...previous, [key]: err instanceof Error ? err.message : 'Failed to download invoice PDF',
+      }));
+    } finally {
+      setPdfLoading(previous => ({ ...previous, [key]: false }));
+    }
+  };
+
+  const pdfControls = (invoice: Invoice) => {
+    const key = `${businessId}:${invoice.id}`;
+    return (
+      <Box onClick={event => event.stopPropagation()}>
+        <Button
+          variant="outlined"
+          size="small"
+          startIcon={pdfLoading[key] ? <CircularProgress size={16} /> : <DownloadIcon />}
+          disabled={!!pdfLoading[key]}
+          onClick={() => downloadPdf(invoice)}
+          aria-label={`Download PDF for invoice ${invoice.invoice_number}`}
+        >
+          {pdfLoading[key] ? 'Downloading…' : 'Download PDF'}
+        </Button>
+        {pdfWarnings[key] && <Alert severity="warning" sx={{ mt: 1 }}>{pdfWarnings[key]}</Alert>}
+        {pdfErrors[key] && <Alert severity="error" sx={{ mt: 1 }}>{pdfErrors[key]}</Alert>}
+      </Box>
+    );
+  };
 
   // Invoice functions
   const fetchInvoices = async () => {
@@ -717,6 +782,7 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
                 <TableCell align="right">Amount</TableCell>
                 <TableCell>Status</TableCell>
                 <TableCell>Chase Stage</TableCell>
+                <TableCell>PDF</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -782,6 +848,7 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
                   <TableCell>
                     <ChaseStageChip stage={invoice.chase_stage} />
                   </TableCell>
+                  <TableCell>{pdfControls(invoice)}</TableCell>
                 </TableRow>
               );})}
             </TableBody>
@@ -918,6 +985,8 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
             )}
 
             <Divider sx={{ my: 3 }} />
+
+            <Box sx={{ mb: 2 }}>{pdfControls(selectedInvoice)}</Box>
 
             {/* Primary Action: Mark as Paid / Mark as Unpaid */}
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>

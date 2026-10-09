@@ -307,4 +307,188 @@ Mike approved the Stage 1 tests and every decision in
 Same rules as Stage 1: no network, no production, no git commit or push —
 Claude Code reviews every line, commits and pushes.
 
-**Status** in progress — stage 2 (implementation)
+**Status** in review — Stage 2 implemented; awaiting Claude Code review
+
+
+## Completion evidence — Stage 2, Codex, 8 October 2026
+
+**Serves:** North Star P8 correctness and P9 tenant isolation; RC1 P0-4.
+**Builder:** Codex. **Reviewer:** Claude Code (review pending).
+
+Built `backend/services/invoice_pdf.py`, `backend/invoice_pdf_api.py`, the
+region-owned currency-symbol helper in `backend/services/region.py`, and the
+row/drawer Download PDF controls in
+`frontend/client/src/components/InvoicesPanel.tsx`. Router registration is
+exactly one added line in `backend/main.py`, beside quoting_router; inline
+module import keeps the requested one-line main.py change. The endpoint is
+read-only, feature-gated and tenant-scoped. Decimal values and stored header
+amounts remain authoritative; no invoice total recalculation or money-engine
+change. Missing-field warnings remain beside the download buttons, outside
+the PDF. Decisions and implementation boundaries are recorded in the design.
+
+**Stage 1 test changes:** no fixture or assertion changes. Removed all 20
+strict-xfail case markers (10 decorated test functions) and the unused pending
+marker definition after all 20 produced strict XPASS with the implementation.
+Updated only explanatory module/helper docstrings. Stage 1 passed unchanged,
+including imported-header totals; the new decision tests add the Invoice copy
+contract without weakening the original import test.
+
+**Tests first:** added 27 parameterized cases for decisions 2–6, the interim
+missing-fields rule, and discount display. Before either implementation module
+existed, ran the following command with no xfail markers on the new cases:
+
+`/Users/michaelrickards/dev/business-hero-2/.venv/bin/python -m pytest backend/tests/test_invoice_pdf.py -q -k decision`
+
+Every new case failed with MissingInvoicePDF for its required module. This
+proves the missing-implementation red step; assertions were then exercised by
+the implementation and passed. The red run's exact case summary follows:
+
+```text
+FAILED backend/tests/test_invoice_pdf.py::test_decision_invoice_date_precedence[2026-10-08-2026-10-07-2026-10-06T12:30:00+00:00-08/10/2026]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_invoice_date_precedence[None-2026-10-07-2026-10-06T12:30:00+00:00-07/10/2026]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_invoice_date_precedence[None-None-2026-10-06T12:30:00+00:00-06/10/2026]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_tax_point_only_when_stored_and_different[None-False]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_tax_point_only_when_stored_and_different[tax_point1-False]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_tax_point_only_when_stored_and_different[tax_point2-True]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_vat_number_precedence[CANONICAL-TAX-CANONICAL-TAX-LEGACY-TAX]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_vat_number_precedence[None-LEGACY-TAX-CANONICAL-TAX]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_vat_number_precedence[   -LEGACY-TAX-CANONICAL-TAX]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_import_title_and_origin[False-csv-Imported from CSV]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_import_title_and_origin[False-xero-Originally issued from Xero]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_import_title_and_origin[True-csv-Imported from CSV]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_import_title_and_origin[True-xero-Originally issued from Xero]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_invoice_currency_overrides_region[UK-USD-$]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_invoice_currency_overrides_region[US-GBP-\xa3]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_invoice_currency_overrides_region[UK-CAD-CAD ]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_registered_foreign_currency_refused[quote]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_registered_foreign_currency_refused[csv]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_registered_foreign_currency_refused[xero]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_unregistered_stored_vat_refused[20.00]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_unregistered_stored_vat_refused[-20.00]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_missing_address_threshold_and_no_guess[250.00-True-False]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_missing_address_threshold_and_no_guess[250.01-True-True]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_missing_address_threshold_and_no_guess[249.99-True-False]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_missing_address_threshold_and_no_guess[250.01-False-True]
+FAILED backend/tests/test_invoice_pdf.py::test_decision_missing_fields_and_complete_header
+FAILED backend/tests/test_invoice_pdf.py::test_decision_discount_uses_stored_taxable_not_percentage_input
+27 failed, 22 deselected in 0.57s
+```
+
+First implementation run: `20 failed, 29 passed, 1 warning in 1.37s`;
+all 20 failures were strict XPASS of Stage 1, requiring marker removal.
+Then `49 passed, 1 warning in 1.39s` with all approved cases unmarked.
+
+Supplemental tests cover actual import writers' null net/tax fields (two
+cases), ambiguous quote links, long-document line retention/pagination and
+page-one drawing positions. These were added after implementation; they are
+not claimed as part of the 27 red-first decision cases. The long-text test's
+initial literal-angle-bracket assertion failed because ReportLab emits escaped
+brackets in separate text fragments; fixed that new assertion to join fragments.
+No Stage 1 assertion was touched.
+
+**Visual verification:** offline synthetic PDFs and CoreGraphics previews
+inspected: standard one-page invoice, first/last pages of a 65-line ten-page
+invoice, and a header-only Xero copy missing address/net/tax. PDFKit extracted
+text as an independent check. A PDFKit thumbnail artefact initially appeared
+to overlap the heading; CoreGraphics and PDF coordinates disprove that.
+ReportLab may repeat a column header before a split row on the same page.
+Local ignored evidence: `build/bh009-review/` (PDFs, PNGs, extracted text,
+red/XPASS logs and full verification output). No dependencies installed.
+
+**Not verified:** browser download/auth refresh/CORS and warning UX end to end;
+all PDF pages/readers/fonts/printing; PostgreSQL numeric driver behaviour, RLS,
+production schema/data, and legal completeness under HMRC Notice 700. The
+in-memory tests prove application query scoping and the real feature resolver,
+not JWT verification. The existing preflight changed-file traps inspect the
+committed branch diff/staged files, not all unstaged Stage 2 work; an additional
+manual scan of Stage 2 files and diff inspection supplement it. Claude remains
+the independent reviewer; no review approval is claimed.
+
+**Mike's behavioural click test:** Invoices → Download PDF on a row (or open
+its drawer → Download PDF). Open the file and compare identities, dates, lines
+and totals to the invoice. For a registered invoice over 250 without an address,
+confirm the visible Customer address warning; at 250 it should not flag that
+field. Confirm imported records say Invoice copy; check the explanatory
+refusals for registered non-GBP and unregistered stored VAT. Downloads should
+remain available for unpaid/cancelled subscriptions with invoicing enabled.
+
+No network, production access, migration, email, dependency installation,
+commit or push. All authored files and temporary review artefacts are inside
+this worktree. Quote PDF and money engine are unchanged.
+
+### Final Stage 2 check.sh full output
+
+Full output pasted below; trailing spaces on blank lines removed for Markdown.
+The byte-for-byte log is in `build/bh009-review/check-full.txt`.
+
+Run from this worktree root with existing venv/node_modules symlinks; npm's
+cache is worktree-local and offline mode is enabled:
+
+`npm_config_cache="$PWD/build/bh009-review/npm-cache" npm_config_offline=true ./check.sh full`
+
+```text
+------------------------------------------------------------
+  FRONTEND
+------------------------------------------------------------
+  PASS  tsc --noEmit
+  SKIP  eslint  (no lint script in package.json)
+------------------------------------------------------------
+  BACKEND
+------------------------------------------------------------
+  PASS  python syntax (py_compile)
+        All checks passed!
+  PASS  ruff
+            business.last_stripe_event_at = datetime.utcnow()
+
+        backend/tests/test_stripe_webhook_correctness.py::TestCheckoutIsDeduplicatedToo::test_a_replayed_checkout_applies_once
+        backend/tests/test_stripe_webhook_correctness.py::TestCheckoutIsDeduplicatedToo::test_a_checkout_is_recorded_in_the_audit_table
+          /Users/michaelrickards/dev/bh2-BH-009/backend/main.py:1041: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+            business.last_stripe_event_at = datetime.utcnow()
+
+        backend/tests/test_tenant_isolation_backend_path.py: 180 warnings
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+            cursor.execute(statement, parameters)
+
+        backend/tests/test_tenant_isolation_backend_path.py: 120 warnings
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default date adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+            cursor.execute(statement, parameters)
+
+        backend/tests/test_tenant_isolation_backend_path.py: 55 warnings
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/sqlalchemy/engine/cursor.py:1201: DeprecationWarning: The default date converter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+            rows = dbapi_cursor.fetchall()
+
+        backend/tests/test_tenant_isolation_backend_path.py: 60 warnings
+          /Users/michaelrickards/dev/business-hero-2/.venv/lib/python3.12/site-packages/sqlalchemy/engine/cursor.py:1201: DeprecationWarning: The default timestamp converter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+            rows = dbapi_cursor.fetchall()
+
+        -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+        770 passed, 33 skipped, 785 warnings, 220 subtests passed in 6.73s
+  PASS  pytest
+------------------------------------------------------------
+  PREFLIGHT (deploy traps)
+------------------------------------------------------------
+
+        TRAP 1 — requirements.txt sync
+          PASS  every backend dep is present in root requirements.txt
+
+        TRAP 2 — trailing newline on requirements.txt
+          PASS  trailing newline present
+
+        TRAP 3 — repo location
+          PASS  repo is outside CloudStorage/Dropbox
+
+        TRAP 4 — create_all() RLS drift warning
+          PASS  no models.py changes on this branch
+                comparison base: origin/main
+
+        TRAP 5 — secret scan on staged/changed files
+          PASS  no secret patterns in changed files
+
+        PREFLIGHT PASSED — safe to push.
+
+  PASS  preflight
+------------------------------------------------------------
+  5 passed   0 failed   1 skipped
+  Green. Safe to proceed.
+------------------------------------------------------------
+```
