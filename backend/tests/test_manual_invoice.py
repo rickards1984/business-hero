@@ -87,6 +87,7 @@ CREATE TABLE invoices (id TEXT PRIMARY KEY, business_id TEXT NOT NULL,
   customer_address TEXT, invoice_date TEXT, issue_date TEXT, supply_date TEXT,
   due_date TEXT, subtotal TEXT, tax_amount TEXT, amount TEXT, amount_due TEXT,
   currency TEXT, status TEXT, source TEXT, source_ref TEXT,
+  archived BOOLEAN DEFAULT 0, chase_stage INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (business_id, invoice_number));
 CREATE TABLE invoice_line_items (
@@ -356,3 +357,64 @@ def test_conversion_copies_the_quote_address_as_a_snapshot():
 
 def test_conversion_records_the_invoice_date():
     assert _convert_capturing().get("invoice_date"), "decision 2: conversion records the date"
+
+
+
+# --------------------------------------------- Codex BH-010 review 1 additions ---
+
+@pytest.mark.parametrize("line,why", [
+    ({"description": "x", "quantity": "0.0004", "unit_cost": "10000"},
+     "quantity finer than the 3 places stored"),
+    ({"description": "x", "quantity": "1", "unit_cost": "2.67501"},
+     "price finer than the 4 places stored"),
+    ({"description": "x", "quantity": "1", "unit_cost": "10", "discount_amount": "1.005"},
+     "line discount finer than the 2 places stored"),
+])
+def test_amounts_finer_than_storage_are_refused(database, monkeypatch, line, why):
+    """Codex review 1, finding 1: calculating with 0.0004 but storing 0.000
+    leaves a line whose stored figures no longer produce its stored total.
+    Refuse rather than round silently."""
+    r = create(client_for(database, monkeypatch), lines=[line])
+    assert r.status_code == 422, f"{why}: {r.status_code} {r.text}"
+    assert _rows(database, "SELECT * FROM invoices") == [], why
+
+
+def test_storage_precision_itself_is_accepted(database, monkeypatch):
+    r = create(client_for(database, monkeypatch),
+               lines=[{"description": "Cable", "quantity": "12.125", "unit_cost": "1.2345"}])
+    assert r.status_code == 201, r.text
+
+
+@pytest.mark.parametrize("line,why", [
+    ({"description": "x", "quantity": "1", "unit_cost": "10",
+      "discount_amount": "200", "discount_type": "percentage"}, "200% off one line"),
+    ({"description": "x", "quantity": "1", "unit_cost": "10",
+      "discount_amount": "15", "discount_type": "fixed"}, "£15 off a £10 line"),
+    ({"description": "x", "quantity": "1", "unit_cost": "10",
+      "discount_amount": "1", "discount_type": "bogus"}, "unknown discount type"),
+])
+def test_each_line_discount_is_checked_on_its_own(database, monkeypatch, line, why):
+    """Codex review 1, finding 2: another line must not be able to hide a
+    line whose discount exceeds it — that line would carry negative VAT."""
+    lines = [line, {"description": "Other work", "quantity": "1", "unit_cost": "100"}]
+    r = create(client_for(database, monkeypatch), lines=lines)
+    assert r.status_code == 422, f"{why}: {r.status_code} {r.text}"
+    assert _rows(database, "SELECT * FROM invoices") == [], why
+
+
+def test_aria_can_read_the_new_invoice_fields_for_her_business_only(database, monkeypatch):
+    """North Star Gate 7 (Codex review 1, finding 3): data the app stores is
+    data Aria can read, through a tenant-scoped tool."""
+    import assistant_tools
+    create(client_for(database, monkeypatch, business=A),
+           customer_address="1 High Street, Bath BA1 1AA", supply_date="2026-10-06")
+    create(client_for(database, monkeypatch, business=B),
+           customer_name="B Private Customer", customer_address="B private address")
+    result = assistant_tools._list_invoices(database, A, {})
+    assert result["count"] == 1
+    [inv] = result["invoices"]
+    assert inv["customer_address"] == "1 High Street, Bath BA1 1AA"
+    assert inv["invoice_date"] == "2026-10-08"
+    assert inv["supply_date"] == "2026-10-06"
+    flat = str(result)
+    assert "B private" not in flat and "B Private Customer" not in flat
