@@ -155,3 +155,20 @@ property exactly.
 Send me: STEP 0's row, STEP 3's result, and the CSV file name. I will
 regenerate `audits/live-schema-public.txt`, record the run here, and then
 the BH-010 code can be reviewed and merged.
+
+---
+
+## RESULT — run by Mike in production, 9 October 2026
+
+| Step | Result |
+|---|---|
+| STEP 0 | `postgres`, businesses **8**, members **5**, invoices **7**, invoice_columns **30**, already_there **0** — every EXPECT met |
+| STEP 1 | table-level grants confirmed (Mike) |
+| STEP 2 | applied |
+| STEP 3 | both columns present; invoices **7** (unchanged), invoice_policies **5** — every EXPECT met |
+| STEP 4 | dump exported with "No limit": **818 rows**. Compared with the 2026-09-03 dump: exactly two added — `invoices.customer_address text null=YES`, `invoices.supply_date date null=YES` — and **none removed or changed**, so nothing else in production drifted in five weeks |
+| STEP 5 | not needed |
+
+`audits/live-schema-public.txt` regenerated from that export (parsed as CSV,
+never `grep`); `test_schema_conformance.py` green against it. **Migration 034
+is live in production.** The raw CSV exports were deleted after parsing.
