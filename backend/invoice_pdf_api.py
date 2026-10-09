@@ -76,8 +76,14 @@ async def download_invoice_pdf(
         .scalars()
         .all()
     )
-    # No source_ref/name guess and no arbitrary choice if links are ambiguous.
-    invoice["customer_address"] = addresses[0] if len(addresses) == 1 else None
+    # The invoice's own address (migration 034, BH-010) is a snapshot taken
+    # when it was issued, and wins: editing the quote later must not change an
+    # issued invoice. The linked quote is only the fallback for invoices issued
+    # before the snapshot existed. No source_ref/name guess, and no arbitrary
+    # choice if quote links are ambiguous.
+    own = (invoice.get("customer_address") or "").strip()
+    if not own:
+        invoice["customer_address"] = addresses[0] if len(addresses) == 1 else None
     try:
         invoice, missing = prepare_invoice(invoice, lines, business, settings)
         payload = await generate_invoice_pdf(invoice, lines, business, settings)

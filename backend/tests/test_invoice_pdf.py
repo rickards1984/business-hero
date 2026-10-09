@@ -634,3 +634,89 @@ def test_repair_router_uses_explicit_import():
                and node.func.attr == "include_router" and node.args
                and isinstance(node.args[0], ast.Name) and node.args[0].id == "invoice_pdf_router"
                for node in ast.walk(tree))
+
+
+# --- BH-009 x BH-010: the invoice's own snapshot wins (found after both merged) ---
+
+def _with_snapshot_columns(database, invoice_id, address, supply_date=None, drop_quote=False,
+                           **updates):
+    """Migration 034 (live 9 Oct 2026) gave invoices their own address and
+    supply date. Add them to this fixture's table and fill one invoice."""
+    with Session(database) as session:
+        cols = {r[1] for r in session.execute(text("PRAGMA table_info(invoices)")).all()}
+        if "customer_address" not in cols:
+            session.execute(text("ALTER TABLE invoices ADD COLUMN customer_address TEXT"))
+            session.execute(text("ALTER TABLE invoices ADD COLUMN supply_date TEXT"))
+        session.execute(text("UPDATE invoices SET customer_address=:a, supply_date=:s WHERE id=:i"),
+                        dict(a=address, s=supply_date, i=invoice_id))
+        for column, value in updates.items():
+            session.execute(text(f"UPDATE invoices SET {column}=:v WHERE id=:i"),
+                            dict(v=value, i=invoice_id))
+        if drop_quote:
+            session.execute(text("DELETE FROM quotes WHERE invoice_id=:i"), dict(i=invoice_id))
+        session.commit()
+
+
+def test_the_invoices_own_address_wins_over_the_quotes(database, monkeypatch, rendered_text):
+    """A snapshot is the point: editing the quote later must not change an
+    issued invoice's PDF."""
+    _with_snapshot_columns(database, IA, "Own Snapshot Address, Bath BA1 1AA")
+    with client_for(database, monkeypatch) as client:
+        response = client.get(f"/v1/invoices/{IA}/pdf")
+    assert response.status_code == 200
+    observed = " ".join(rendered_text)
+    assert "Own Snapshot Address" in observed
+    assert "A Customer Address" not in observed
+
+
+def test_a_manual_invoice_with_no_quote_shows_its_own_address(database, monkeypatch, rendered_text):
+    """A real BH-010 invoice: source 'manual', no quote, and over £250, where
+    a full VAT invoice MUST show the address (Codex review: at £120 a missing
+    address is permitted, so the old assertion could not fail)."""
+    _with_snapshot_columns(database, IA, "Manual Customer Road, Leeds LS1 1AA", drop_quote=True,
+                           source="manual", subtotal="500.00", tax_amount="100.00",
+                           amount="600.00")
+    with client_for(database, monkeypatch) as client:
+        response = client.get(f"/v1/invoices/{IA}/pdf")
+    assert response.status_code == 200
+    observed = " ".join(rendered_text)
+    assert "Manual Customer Road" in observed
+    assert "VAT invoice" in observed and "Invoice copy" not in observed
+    assert "customer_address" not in response.headers.get("X-Invoice-Missing-Fields", "")
+
+
+def test_a_manual_invoice_over_250_without_an_address_is_flagged(database, monkeypatch, rendered_text):
+    """The same invoice with no address: the header must say so — proving the
+    assertion above can fail."""
+    _with_snapshot_columns(database, IA, None, drop_quote=True, source="manual",
+                           subtotal="500.00", tax_amount="100.00", amount="600.00")
+    with client_for(database, monkeypatch) as client:
+        response = client.get(f"/v1/invoices/{IA}/pdf")
+    assert "customer_address" in response.headers.get("X-Invoice-Missing-Fields", "")
+
+
+def test_a_new_invoice_with_only_invoice_date_shows_it(database, monkeypatch, rendered_text):
+    """BH-010 writes invoice_date and leaves issue_date empty. Decision 2
+    (Mike, 8 Oct: issue_date, else invoice_date, else created_at) then shows
+    the invoice's own date. Codex suggested preferring invoice_date even
+    when both exist; that would reverse Mike's recorded decision, so it is
+    not done here."""
+    _with_snapshot_columns(database, IA, "Own Snapshot Address", issue_date=None,
+                           invoice_date="2026-10-08")
+    with client_for(database, monkeypatch) as client:
+        client.get(f"/v1/invoices/{IA}/pdf")
+    assert "Invoice date: 08/10/2026" in " ".join(rendered_text)
+
+
+def test_the_quotes_address_is_the_fallback_when_the_invoice_has_none(database, monkeypatch, rendered_text):
+    _with_snapshot_columns(database, IA, None)
+    with client_for(database, monkeypatch) as client:
+        client.get(f"/v1/invoices/{IA}/pdf")
+    assert "A Customer Address" in " ".join(rendered_text)
+
+
+def test_the_stored_supply_date_is_the_tax_point(database, monkeypatch, rendered_text):
+    _with_snapshot_columns(database, IA, "Own Snapshot Address", supply_date="2026-09-20")
+    with client_for(database, monkeypatch) as client:
+        client.get(f"/v1/invoices/{IA}/pdf")
+    assert "Tax point: 20/09/2026" in " ".join(rendered_text)
