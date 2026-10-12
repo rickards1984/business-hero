@@ -103,9 +103,10 @@ def _save_call_record(
     intent: str,
     outcome: str,
     receptionist_config_id: Optional[str],
-) -> None:
+) -> Optional[str]:
+    """Save the call and return its id (BH-012 meters each call once by it)."""
     with Session(engine) as session:
-        session.execute(
+        row = session.execute(
             sa_text("""
                 INSERT INTO calls (
                     business_id, source, caller_number, caller_name,
@@ -117,6 +118,7 @@ def _save_call_record(
                     :archived, :duration_seconds, :outcome,
                     CAST(:receptionist_config_id AS uuid)
                 )
+                RETURNING id
             """),
             {
                 "business_id": business_id,
@@ -133,8 +135,9 @@ def _save_call_record(
                 "outcome": outcome,
                 "receptionist_config_id": receptionist_config_id,
             },
-        )
+        ).fetchone()
         session.commit()
+    return str(row[0]) if row is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -1186,7 +1189,11 @@ async def receptionist_media_stream(ws: WebSocket):
         from services import metering as _metering
         _limit = _metering.call_time_limit_seconds(
             (config_data or {}).get("max_call_duration_seconds"))
-        limit_task = asyncio.create_task(asyncio.sleep(_limit))
+        # The limit counts from the call's START: setup (prompt, OpenAI
+        # connection) is inside the 20 minutes, not added to it.
+        limit_task = asyncio.create_task(asyncio.sleep(
+            _metering.seconds_left_in_call(_limit, call_start_time)
+            if call_start_time else _limit))
 
         done, pending = await asyncio.wait(
             [twilio_task, openai_task, limit_task],
@@ -1257,9 +1264,10 @@ async def receptionist_media_stream(ws: WebSocket):
         if call_outcome == "transferred":
             intent = "transfer requested"
 
+        saved_call_id: Optional[str] = None
         if business_id:
             try:
-                _save_call_record(
+                saved_call_id = _save_call_record(
                     business_id=business_id,
                     caller_number=caller_number or "Unknown",
                     caller_name=caller_name,
@@ -1279,15 +1287,19 @@ async def receptionist_media_stream(ws: WebSocket):
             except Exception as e:
                 logger.error(f"[Receptionist WS] Failed to save call record: {e}")
 
-            # BH-012: count the call's actual minutes against the month. A
-            # failure here is logged, never raised — the call has happened.
+            # BH-012: count the call's actual minutes against the month it
+            # ended in, once, by the saved call's id. A failure here is logged,
+            # never raised — the call has happened — and the scheduler's
+            # reconciliation meters any saved call that missed this.
             try:
                 from services import metering as _metering
+                from datetime import timezone as _tz
                 with Session(engine) as _session:
                     _mb = _metering.load_business(_session, business_id)
                     if _mb is not None:
-                        _metering.record_call(_session, _mb, duration_seconds)
-                        _session.commit()
+                        _metering.record_call(
+                            _session, _mb, duration_seconds, call_id=saved_call_id,
+                            at=call_end_time.replace(tzinfo=_tz.utc))
             except Exception as e:
                 logger.error(f"[Receptionist WS] Failed to meter the call: {e}")
 

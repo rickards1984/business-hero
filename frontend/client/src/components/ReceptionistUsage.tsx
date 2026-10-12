@@ -60,8 +60,10 @@ export default function ReceptionistUsage() {
   const [cap, setCap] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [loadFailed, setLoadFailed] = useState(false);
 
   const load = async () => {
+    setLoadFailed(false);
     try {
       const r = await apiRequest('GET', '/v1/usage');
       const u: Usage = await r.json();
@@ -69,11 +71,22 @@ export default function ReceptionistUsage() {
       setCap(u.spend_cap_gbp);
     } catch {
       setUsage(null);
+      setLoadFailed(true);
     }
   };
 
   useEffect(() => { load(); }, []);
 
+  // Say so when usage cannot be shown: "no warning" and "could not check"
+  // must not look the same (Codex BH-012 review 1).
+  if (loadFailed) {
+    return (
+      <Alert severity="warning" sx={{ mb: 2 }}
+        action={<Button color="inherit" size="small" onClick={load}>Retry</Button>}>
+        Receptionist usage could not be loaded, so this page cannot show how many minutes are left.
+      </Alert>
+    );
+  }
   if (!usage) return null;
 
   const allowance = Number(usage.allowance_minutes);

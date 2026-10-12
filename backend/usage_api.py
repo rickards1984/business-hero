@@ -39,23 +39,8 @@ def _save_metering_settings(session: Session, business_id: str, enabled: bool,
     session.commit()
 
 
-def _one_dp(value: Decimal) -> str:
-    return f"{value:.1f}"
-
-
 def _view(u: dict) -> dict:
-    return {
-        "period": u["period"],
-        "allowance_minutes": f"{u['allowance_minutes']:.0f}",
-        "used_minutes": _one_dp(u["used_minutes"]),
-        "remaining_minutes": _one_dp(u["remaining_minutes"]),
-        "overage_minutes": _one_dp(u["overage_minutes"]),
-        "overage_spend_gbp": f"{u['overage_spend_gbp']:.2f}",
-        "overage_rate_gbp": f"{u['overage_rate_gbp']:.2f}",
-        "metered_usage_enabled": u["metered_usage_enabled"],
-        "spend_cap_gbp": f"{u['spend_cap_gbp']:.2f}",
-        "state": u["state"],
-    }
+    return metering.display(u)
 
 
 @router.get("")

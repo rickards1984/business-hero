@@ -470,7 +470,7 @@ def test_allocation_is_locked_per_business_and_month_on_postgres():
     assert A in str(seen[0][1]) and "2026-10" in str(seen[0][1])
     import inspect
     source = inspect.getsource(m.record_call)
-    assert source.index("_lock(") < source.index("usage(session"), \
+    assert source.index("_lock(") < source.index("_usage_for(session"), \
         "the lock must be taken before the remaining allowance is read"
 
 

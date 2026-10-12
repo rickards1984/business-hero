@@ -373,6 +373,14 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "get_receptionist_usage",
+            "description": "This month's AI receptionist minutes: used, allowance, remaining, extra (paid) minutes, the spending cap, and whether new calls are being answered. Read-only.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_quotes",
             "description": "List recent quotes. Use when the user asks about their quotes, estimates, or pricing.",
             "parameters": {
@@ -531,6 +539,8 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _get_cashflow_forecast(engine, business_id, arguments)
     elif tool_name == "list_quotes":
         return _list_quotes(engine, business_id, arguments)
+    elif tool_name == "get_receptionist_usage":
+        return _get_receptionist_usage(engine, business_id, arguments)
     elif tool_name == "send_quote":
         return _send_quote_via_aria(engine, business_id, arguments)
     else:
@@ -2813,6 +2823,20 @@ def _get_cashflow_forecast(engine, business_id: str, args: dict) -> dict:
 
 
 # ── Quoting ──────────────────────────────────────────────
+
+def _get_receptionist_usage(engine, business_id: str, args: dict) -> dict:
+    """This month's receptionist minutes, extra minutes and cap (BH-012;
+    North Star Gate 7: usage the app records, Aria can read). Tenant-scoped:
+    the business is the caller's, never an argument."""
+    from sqlmodel import Session as _Session
+    from services import metering
+
+    with _Session(engine) as session:
+        business = metering.load_business(session, business_id)
+        if business is None:
+            return {"error": "Business not found"}
+        return metering.display(metering.usage(session, business))
+
 
 def _list_quotes(engine, business_id: str, args: dict) -> dict:
     """List recent quotes for the business."""
