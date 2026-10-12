@@ -766,6 +766,7 @@ def _drive_handler(monkeypatch, setup, connect=None, cap=None, within=3.0):
     """Run the REAL receptionist media-stream handler with the edges faked:
     stream token, call setup, OpenAI connection, saving and metering."""
     import asyncio
+    import time
     m = metering()
     import receptionist_call_handler as rch
     recorded, saved = [], []
@@ -785,7 +786,11 @@ def _drive_handler(monkeypatch, setup, connect=None, cap=None, within=3.0):
     ws = _FakeTwilioSocket()
 
     async def run():
+        # Timed here, not around asyncio.run(): at exit asyncio.run() waits
+        # for any setup thread still stalled, which a live server does not.
+        started = time.monotonic()
         await asyncio.wait_for(rch.receptionist_media_stream(ws), within)
+        ws.elapsed = time.monotonic() - started
     asyncio.run(run())
     return ws, saved, recorded
 
@@ -804,9 +809,8 @@ def test_the_deadline_holds_while_setup_is_blocked_on_the_database(monkeypatch):
     def stalled_setup(business_id):
         time.sleep(2)  # synchronous, as the real prompt build's queries are
         return _setup_result()
-    started = time.monotonic()
     ws, saved, recorded = _drive_handler(monkeypatch, stalled_setup, cap=0.3, within=1.5)
-    assert time.monotonic() - started < 1.5
+    assert ws.elapsed < 1.5
     assert ws.closed
     assert len(saved) == 1 and recorded == [(saved[0]["duration_seconds"], "call-1")]
     assert saved[0]["duration_seconds"] <= 1, "only time actually on the call is counted"
@@ -817,15 +821,13 @@ def test_the_business_limit_ends_a_call_stuck_connecting_to_openai(monkeypatch):
     watchdog, and when it fires it ends the handler itself — not just its
     sockets — so cleanup, saving and metering happen on time."""
     import asyncio
-    import time
 
     async def hung_connect(*a, **k):
         await asyncio.sleep(3600)
-    started = time.monotonic()
     ws, saved, recorded = _drive_handler(
         monkeypatch, lambda business_id: _setup_result(limit_seconds=1),
         connect=hung_connect, within=3.0)
-    assert time.monotonic() - started < 3.0
+    assert ws.elapsed < 3.0
     assert ws.closed
     assert len(saved) == 1 and recorded and recorded[0][1] == "call-1"
     assert saved[0]["duration_seconds"] <= 2

@@ -91,6 +91,18 @@ router = APIRouter(prefix="/v1/receptionist", tags=["Receptionist Calls"])
 # Helper: save a call record using raw SQL (Call model lacks migration-only cols)
 # ---------------------------------------------------------------------------
 
+def _load_call_setup(business_id: str):
+    """The call's prompt and config id, read synchronously — the handler runs
+    this in a thread so the event loop (and the call's deadline) keeps
+    running while the database answers."""
+    with Session(engine) as session:
+        prompt_data = asyncio.run(build_receptionist_system_prompt(business_id, session))
+        cfg = session.exec(
+            select(ReceptionistConfig).where(ReceptionistConfig.business_id == business_id)
+        ).first()
+        return prompt_data, (str(cfg.id) if cfg else None)
+
+
 def _save_call_record(
     business_id: str,
     caller_number: str,
@@ -655,6 +667,8 @@ async def receptionist_media_stream(ws: WebSocket):
     tasks_created: List[dict] = []
     messages_taken: List[dict] = []
     receptionist_config_id: Optional[str] = None
+    timed_out = False
+    twilio_task = openai_task = None
 
     try:
         # ---- PHASE 1: Receive Twilio 'start' event ----
@@ -708,25 +722,31 @@ async def receptionist_media_stream(ws: WebSocket):
         # known. Cancelled in `finally`.
         from services import metering as _metering
 
+        handler_task = asyncio.current_task()
+
         async def _close_call():
             if openai_ws is not None:
                 await openai_ws.close()
             await ws.close()
 
+        async def _end_handler():
+            # Closing sockets does not end an await that is not reading them
+            # (e.g. a hung OpenAI connect), so stop the handler itself; its
+            # `finally` still saves and meters the call (review 3).
+            nonlocal timed_out
+            timed_out = True
+            handler_task.cancel()
+
         watchdog = asyncio.create_task(_metering.call_watchdog(
-            _metering.CALL_HARD_CAP_SECONDS, [_close_call]))
+            _metering.CALL_HARD_CAP_SECONDS, [_close_call, _end_handler]))
 
         # ---- PHASE 2: Build system prompt & connect to OpenAI ----
+        # In a thread: the prompt build's queries are synchronous, and on the
+        # event loop a stalled query would stop the watchdog from firing
+        # (Codex BH-012 review 3).
         try:
-            with Session(engine) as session:
-                prompt_data = await build_receptionist_system_prompt(business_id, session)
-                cfg = session.exec(
-                    select(ReceptionistConfig).where(
-                        ReceptionistConfig.business_id == business_id
-                    )
-                ).first()
-                if cfg:
-                    receptionist_config_id = str(cfg.id)
+            prompt_data, receptionist_config_id = await asyncio.to_thread(
+                _load_call_setup, business_id)
         except Exception as e:
             logger.error(f"[Receptionist WS] Failed to build system prompt: {e}")
             await ws.close()
@@ -742,7 +762,7 @@ async def receptionist_media_stream(ws: WebSocket):
             watchdog.cancel()
             watchdog = asyncio.create_task(_metering.call_watchdog(
                 _metering.seconds_left_in_call(_configured_limit, call_start_time),
-                [_close_call]))
+                [_close_call, _end_handler]))
         preset_id = prompt_data.get("voice_preset_id")
         accent_name = prompt_data.get("accent")
         preset_verified = prompt_data.get("preset_verified", True)
@@ -1235,6 +1255,11 @@ async def receptionist_media_stream(ws: WebSocket):
             except asyncio.CancelledError:
                 pass
 
+    except asyncio.CancelledError:
+        if not timed_out:
+            raise  # a shutdown, not our deadline
+        asyncio.current_task().uncancel()
+        logger.warning("[Receptionist WS] Call reached its time limit; ended it")
     except WebSocketDisconnect:
         logger.info("[Receptionist WS] WebSocket disconnected")
     except Exception as e:
@@ -1247,6 +1272,9 @@ async def receptionist_media_stream(ws: WebSocket):
             watchdog.cancel()
         except NameError:
             pass  # the call ended before the watchdog started
+        for _task in (twilio_task, openai_task):
+            if _task is not None and not _task.done():
+                _task.cancel()
 
         if openai_ws:
             try:

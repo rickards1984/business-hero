@@ -285,7 +285,15 @@ def deliver_pending_notices(session, lookup=None) -> int:
             _release(session, bid, meter, period)
             session.commit()
             continue
-        if notify_owner(business, state, usage(session, business)) is False:
+        current = usage(session, business)
+        if current["state"] != state:
+            # No longer true — e.g. the cap was raised or extra minutes were
+            # switched on before delivery (Codex BH-012 review 3). Dropped
+            # without marking the month notified, so a later limit is told.
+            _release(session, bid, meter, period)
+            session.commit()
+            continue
+        if notify_owner(business, state, current) is False:
             continue  # stays pending; the next run tries again
         _claim(session, bid, f"{_NOTIFIED_PREFIX}{state}", period)
         _release(session, bid, meter, period)
