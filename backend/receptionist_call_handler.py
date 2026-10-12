@@ -701,6 +701,21 @@ async def receptionist_media_stream(ws: WebSocket):
 
         call_start_time = datetime.utcnow()
 
+        # BH-012: the call's deadline covers EVERYTHING from here, setup
+        # included (Codex BH-012 review 2). When time is up the watchdog
+        # closes both sockets, which ends every loop reading them. Starts at
+        # the 20-minute cap; shortened below once the business's own limit is
+        # known. Cancelled in `finally`.
+        from services import metering as _metering
+
+        async def _close_call():
+            if openai_ws is not None:
+                await openai_ws.close()
+            await ws.close()
+
+        watchdog = asyncio.create_task(_metering.call_watchdog(
+            _metering.CALL_HARD_CAP_SECONDS, [_close_call]))
+
         # ---- PHASE 2: Build system prompt & connect to OpenAI ----
         try:
             with Session(engine) as session:
@@ -721,6 +736,13 @@ async def receptionist_media_stream(ws: WebSocket):
         voice = prompt_data["voice"]
         greeting = prompt_data["greeting"]
         config_data = prompt_data["config"]
+        _configured_limit = _metering.call_time_limit_seconds(
+            (config_data or {}).get("max_call_duration_seconds"))
+        if _configured_limit < _metering.CALL_HARD_CAP_SECONDS:
+            watchdog.cancel()
+            watchdog = asyncio.create_task(_metering.call_watchdog(
+                _metering.seconds_left_in_call(_configured_limit, call_start_time),
+                [_close_call]))
         preset_id = prompt_data.get("voice_preset_id")
         accent_name = prompt_data.get("accent")
         preset_verified = prompt_data.get("preset_verified", True)
@@ -1221,6 +1243,10 @@ async def receptionist_media_stream(ws: WebSocket):
     finally:
         # ---- PHASE 6: Cleanup & persist call record ----
         logger.info("[Receptionist WS] Cleaning up...")
+        try:
+            watchdog.cancel()
+        except NameError:
+            pass  # the call ended before the watchdog started
 
         if openai_ws:
             try:

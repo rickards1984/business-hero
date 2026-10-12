@@ -42,6 +42,10 @@ OVERAGE_METER = "receptionist_overage_minutes"
 _NOTIFIED_PREFIX = "notified:"
 # One row per metered call ("accrued:<calls.id>"), so a call is counted once.
 _ACCRUED_PREFIX = "accrued:"
+# The notice outbox: "pending:<state>" is written when a limit is reached and
+# cleared only when a delivery is acknowledged (Codex BH-012 review 2).
+_PENDING_PREFIX = "pending:"
+RECONCILE_BATCH = 500
 
 CALL_HARD_CAP_SECONDS = 1200
 OVERAGE_RATE_GBP = Decimal("0.45")
@@ -235,33 +239,59 @@ def _notices_apply(business) -> bool:
 
 
 def notify_owner(business, state: str, current_usage: dict) -> bool:
-    """Tell the owner (email + in-app banner, + WhatsApp when on). The banner
-    is the `state` GET /v1/usage returns; this sends the messages. Returns
-    False if nothing could be sent, so the notice is tried again later."""
+    """Send the notice (email + WhatsApp when on). Returns False if nothing
+    was delivered, so it stays pending and is tried again. Called only by
+    the delivery worker, never inside a call or the incoming-call request."""
     try:
         from services.metering_notify import send_usage_notice
         return send_usage_notice(business, state, current_usage)
-    except Exception as exc:  # a failed notice must never fail a call record
+    except Exception as exc:
         logger.error("[Metering] owner notice failed for %s (%s): %s",
                      getattr(business, "id", "?"), state, exc)
         return False
 
 
-def _notify_once(session, business, state: str, period: str) -> None:
-    """Claim the month's marker atomically and COMMIT it before sending, so
-    two calls cannot both send; if sending fails, release it so the next
-    call or refusal tries again (Codex BH-012 review 1)."""
+def _queue_notice(session, business, state: str, period: str) -> None:
+    """Record that the owner must be told — a durable pending marker, cheap
+    and local. Nothing is sent here: the scheduler's worker delivers it, so a
+    crash cannot lose it and the call path is never held up by email."""
     if not _notices_apply(business):
         return
     bid = str(business.id)
-    marker = f"{_NOTIFIED_PREFIX}{state}"
-    if not _claim(session, bid, marker, period):
+    if _read(session, bid, f"{_NOTIFIED_PREFIX}{state}", period) > 0:
         return
-    session.commit()
-    sent = notify_owner(business, state, usage(session, business))
-    if sent is False:
-        _release(session, bid, marker, period)
+    _claim(session, bid, f"{_PENDING_PREFIX}{state}", period)
+
+
+def deliver_pending_notices(session, lookup=None) -> int:
+    """The worker: send this month's pending notices. A notice is marked
+    sent only when a channel ACKNOWLEDGES it; otherwise it stays pending
+    for the next run. Returns how many were delivered."""
+    lookup = lookup or load_business
+    period = period_for(now())
+    rows = session.execute(
+        text("SELECT business_id, meter FROM usage_meters "
+             "WHERE period = :period AND meter LIKE :prefix"),
+        {"period": period, "prefix": f"{_PENDING_PREFIX}%"},
+    ).fetchall()
+    delivered = 0
+    for business_id, meter in rows:
+        bid = str(business_id)
+        state = meter[len(_PENDING_PREFIX):]
+        business = lookup(session, bid)
+        if business is None:
+            continue
+        if _read(session, bid, f"{_NOTIFIED_PREFIX}{state}", period) > 0:
+            _release(session, bid, meter, period)
+            session.commit()
+            continue
+        if notify_owner(business, state, usage(session, business)) is False:
+            continue  # stays pending; the next run tries again
+        _claim(session, bid, f"{_NOTIFIED_PREFIX}{state}", period)
+        _release(session, bid, meter, period)
         session.commit()
+        delivered += 1
+    return delivered
 
 
 def display(u: dict) -> dict:
@@ -284,12 +314,22 @@ def display(u: dict) -> dict:
 def admit_call(session, business) -> Tuple[bool, Optional[str]]:
     """May a NEW call be answered? A call already in progress is never cut
     off for running past the allowance — only by the 20-minute cap. A refusal
-    tells the owner (once a month), even when no call ran past a limit — e.g.
-    a cap lowered below what is already spent."""
+    queues a notice (e.g. a cap lowered below what is already spent), but
+    nothing is sent here, and a failure recording that notice NEVER turns the
+    refusal into an answer (Codex BH-012 review 2)."""
     state = usage(session, business)["state"]
     if state == STATE_OK:
         return True, None
-    _notify_once(session, business, state, period_for(now()))
+    try:
+        _queue_notice(session, business, state, period_for(now()))
+        session.commit()
+    except Exception as exc:
+        logger.error("[Metering] could not queue notice for %s: %s",
+                     getattr(business, "id", "?"), exc)
+        try:
+            session.rollback()
+        except Exception:
+            pass
     return False, state
 
 
@@ -300,13 +340,15 @@ def record_call(session, business, duration_seconds: Optional[int],
     on, the rest goes to overage; with metering off it still counts as used
     (the call was allowed to finish). With a `call_id` it is counted ONCE,
     however often it is recorded — so a failed accrual can be retried
-    (reconcile_unmetered_calls). Commits, then tells the owner if a limit
-    has just been reached."""
+    (reconcile_unmetered_calls). Commits. Queues a notice only for the
+    CURRENT month: a past month's limit says nothing about today's calls."""
     period = period_for(at or now())
     bid = str(business.id)
     _lock(session, bid, period)
     if call_id and not _claim(session, bid, f"{_ACCRUED_PREFIX}{call_id}", period):
-        return _usage_for(session, business, period)
+        current = _usage_for(session, business, period)
+        session.commit()  # end the transaction: release the advisory lock
+        return current
 
     minutes = minutes_from_seconds(duration_seconds)
     before = _usage_for(session, business, period)
@@ -317,35 +359,45 @@ def record_call(session, business, duration_seconds: Optional[int],
         _add(session, bid, OVERAGE_METER, period, minutes - inside)
     else:
         _add(session, bid, RECEPTIONIST_METER, period, minutes)
-    session.commit()
 
     after = _usage_for(session, business, period)
-    if after["state"] != STATE_OK:
-        _notify_once(session, business, after["state"], period)
+    if after["state"] != STATE_OK and period == period_for(now()):
+        _queue_notice(session, business, after["state"], period)
+    session.commit()
     return after
 
 
 def reconcile_unmetered_calls(session) -> int:
     """Meter finished receptionist calls that never reached the meter (the
     accrual at call end failed, or the process stopped). The calls table is
-    the durable record; each call is counted once by its id. Covers this
-    month and last. Returns how many calls were metered."""
+    the durable record; each call is counted once by its id. This month and
+    last only, missing markers found in SQL, at most RECONCILE_BATCH per run
+    (Codex BH-012 review 2: no full-history fetch every 15 minutes)."""
     current = now()
-    periods = {period_for(current)}
-    first_of_month = current.astimezone(LONDON).replace(day=1)
-    periods.add(period_for(first_of_month - timedelta(days=1)))
+    first_of_month = current.astimezone(LONDON).replace(day=1, hour=0, minute=0,
+                                                        second=0, microsecond=0)
+    since = (first_of_month - timedelta(days=1)).replace(day=1)
+    periods = {period_for(current), period_for(since)}
     rows = session.execute(
-        text("SELECT id, business_id, ended_at, started_at, duration_seconds FROM calls "
-             "WHERE source = 'receptionist' AND duration_seconds IS NOT NULL "
-             "AND duration_seconds > 0"),
+        text("""
+            SELECT c.id, c.business_id, c.ended_at, c.started_at, c.duration_seconds
+              FROM calls c
+             WHERE c.source = 'receptionist'
+               AND c.duration_seconds > 0
+               AND COALESCE(c.ended_at, c.started_at) >= :since
+               AND NOT EXISTS (
+                     SELECT 1 FROM usage_meters m
+                      WHERE m.business_id = c.business_id
+                        AND m.meter = 'accrued:' || CAST(c.id AS TEXT))
+             ORDER BY COALESCE(c.ended_at, c.started_at)
+             LIMIT :batch
+        """),
+        {"since": since.astimezone(ZoneInfo("UTC")), "batch": RECONCILE_BATCH},
     ).fetchall()
     metered = 0
     for call_id, business_id, ended_at, started_at, seconds in rows:
         moment = _parse_moment(ended_at or started_at)
         if moment is None or period_for(moment) not in periods:
-            continue
-        marker = f"{_ACCRUED_PREFIX}{call_id}"
-        if _read(session, str(business_id), marker, period_for(moment)) > 0:
             continue
         business = load_business(session, str(business_id))
         if business is None:
@@ -353,6 +405,20 @@ def reconcile_unmetered_calls(session) -> int:
         record_call(session, business, int(seconds), call_id=str(call_id), at=moment)
         metered += 1
     return metered
+
+
+async def call_watchdog(seconds: float, closers) -> None:
+    """End a call when its time is up, whatever it is doing — including
+    still setting up (Codex BH-012 review 2). `closers` close the call's
+    sockets; closing them ends every loop that reads them."""
+    import asyncio
+    await asyncio.sleep(max(0.0, seconds))
+    logger.warning("[Metering] call reached its time limit; closing it")
+    for close in closers:
+        try:
+            await close()
+        except Exception:
+            pass
 
 
 def _parse_moment(value) -> Optional[datetime]:

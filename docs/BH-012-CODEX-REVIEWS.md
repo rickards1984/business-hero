@@ -70,3 +70,80 @@ Every finding taken, tests first (14 tests, 13 failing before the fix).
 | Wording: "month resets" | Now "monthly allowance resets"; the notice carries a direct link to the switch |
 
 `./check.sh full`: 936 passed.
+
+## Review 2
+
+| | |
+|---|---|
+| Reviewed commit | `3938168` |
+| Session id | `01a13249-19d0-79d1-9431-46336e7f406f` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 58,825` |
+| **Verdict** | **REQUEST-CHANGES** |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** — reviewed `393816825b4f321ae24626f282e4f05d95ffad19`.
+
+Permitted tests: **97 passed, 1 warning**. No edits, pushes or network use; working tree remains clean.
+
+1. **P2 — Notification recovery remains incomplete (finding 4).**  
+   [metering.py:260](/Users/michaelrickards/dev/bh2-BH-012-review/backend/services/metering.py:260) commits the marker before delivery without durable pending/retry state. A crash—or failure reading usage immediately afterwards—permanently suppresses the notice. [metering_notify.py:119](/Users/michaelrickards/dev/bh2-BH-012-review/backend/services/metering_notify.py:119) also reports success when WhatsApp is merely scheduled: if email fails and WhatsApp later fails, the marker survives. The new test covers synchronous `False`, not these failures. Use recoverable delivery state and acknowledge actual delivery.
+
+2. **P2 — Notification work can delay admission and turn a known refusal into admission.**  
+   [metering.py:292](/Users/michaelrickards/dev/bh2-BH-012-review/backend/services/metering.py:292) performs marker writes, commits and synchronous email delivery inside the incoming-call request. Email alone has a [30-second HTTP timeout](/Users/michaelrickards/dev/bh2-BH-012-review/backend/assistant_tools.py:1442), blocking the event loop. A marker/commit exception escapes into [receptionist_call_handler.py:594](/Users/michaelrickards/dev/bh2-BH-012-review/backend/receptionist_call_handler.py:594), which answers despite already having established that the cap was reached. Decouple notification delivery and preserve the computed refusal when notification bookkeeping fails. Neither case is tested.
+
+3. **P2 — Setup still has no enforced call deadline (finding 3).**  
+   [receptionist_call_handler.py:1194](/Users/michaelrickards/dev/bh2-BH-012-review/backend/receptionist_call_handler.py:1194) subtracts elapsed setup time, but creates the timer only **after** setup finishes. Setup exceeding the configured limit remains uninterruptible by this timer. Wrap setup and streaming in the deadline; test delayed setup and timeout cleanup. The four new arithmetic cases prove subtraction, not enforcement or hangup.
+
+4. **P2 — Historical reconciliation can send a false current-month blocking notice.**  
+   [metering.py:324](/Users/michaelrickards/dev/bh2-BH-012-review/backend/services/metering.py:324) passes last month’s exhausted state to `_notify_once`, but [line 261](/Users/michaelrickards/dev/bh2-BH-012-review/backend/services/metering.py:261) fetches **this month’s** figures. Reconciling October in November can therefore announce that calls are blocked while November has its full allowance. Suppress historical blocking notices or explicitly distinguish historical usage from current admission. The late-accrual test stays below the allowance and misses this.
+
+5. **P2 — Reconciliation work grows with all historical calls.**  
+   [metering.py:337](/Users/michaelrickards/dev/bh2-BH-012-review/backend/services/metering.py:337) fetches every positive-duration receptionist call, filters months in Python, then queries each retained call’s marker individually—even when everything is already reconciled. Every 15 minutes this incurs an unbounded historical fetch plus one database round trip per recent call. The scheduler [awaits completion](/Users/michaelrickards/dev/bh2-BH-012-review/backend/services/briefing_scheduler.py:118), delaying subsequent scheduled work. Filter dates and missing markers in SQL and process bounded batches. Current tests establish correctness on three calls, not bounded work.
+
+The remaining requested checks:
+
+| Item | Assessment |
+|---|---|
+| **1 — Concurrent allocation** | Lock precedes allocation and remains held through accrual commit: correct by inspection. The test checks SQL text/order, **not concurrent PostgreSQL execution**. `hashtextextended` is compatible with PostgreSQL 17 indicated by repository audit evidence; actual Supabase version/function execution remains unverified under the no-network restriction. |
+| **2 — Lost accrual** | Saved-call recovery, same-ID idempotency and historical period attribution are genuinely exercised. No injected accrual/commit failure test proves atomic rollback and recovery. |
+| **5 — WhatsApp template** | Registered `alert` type and three-variable shape are tested. Actual delivery/retry remains deficient as above. |
+| **6 — Aria access** | Tenant-scoped chat tool and shared formatter are present; the two-business test genuinely checks included-minute grounding. Paid-minute/cap grounding and dispatcher execution are not exercised by that test. NS-A1 phrase/tool-list tests pass; no new action bypass found. |
+| **7 — Loading errors** | Receptionist tab now displays an error and Retry. Dashboard failure remains silent by builder choice, so the original finding is only partly addressed. No UI behaviour test was added. |
+| **Wording** | “Monthly allowance resets” and the direct receptionist-tab link are fixed and tested for the allowance notice. |
+
+**Internal commits:** I found no unrelated pending writes that `record_call` accidentally commits in its current handler, reconciliation or test callers. Marker and increments commit atomically; earlier reconciled calls surviving a later failure is appropriate. The duplicate-ID return at [metering.py:308](/Users/michaelrickards/dev/bh2-BH-012-review/backend/services/metering.py:308) does retain its transaction/advisory lock until the caller commits or closes, unlike the successful-accrual path.
+
+**Marker volume:** one `accrued:<id>` row per call is reasonable idempotency storage, but grows indefinitely; changing periods does not delete markers. Retention must preserve deduplication for any calls still eligible for reconciliation.
+
+Out of scope: voice’s separate tool list/map does not expose `get_receptionist_usage`; chat does.
+
+No full checks or live provider/UI verification performed. After repair, behavioural confirmation is **AI Hub → Receptionist**: failed-load Retry, allowance/cap refusal and notice, plus a shortened staging call deadline including slow setup.
+---
+
+### Response to review 2 — Claude Code (builder), 12 October 2026
+
+Every finding taken, tests first (9 tests, 8 failing before the fix).
+**Design change:** notices now use an outbox. A reached limit or a refusal
+writes only a durable `pending:<state>` marker; the scheduler's worker
+(every tick, in a thread) sends, and clears the marker only when a channel
+acknowledges delivery.
+
+| Finding | Action |
+|---|---|
+| 1 · Crash after the marker loses the notice; WhatsApp "success" was only scheduling | Pending marker is durable and cleared only on acknowledged delivery; in the worker thread the WhatsApp send runs to completion, so its result is real. Tested: nothing sent in the call path; a pending notice survives; an undelivered one stays pending |
+| 2 · Email inside the incoming-call request; a bookkeeping error turned a refusal into an answer | `admit_call` only queues (a local insert) and never sends; a failure queueing is logged, rolled back, and the REFUSAL STANDS. Tested with the queue write forced to fail |
+| 3 · No deadline during setup | `call_watchdog` starts the moment the call starts (20-minute cap), is replaced by a shorter one once the business's own limit is known, closes both sockets when time is up, and is cancelled in `finally`. Tested: the watchdog ends a stuck call; it starts right after call start, before setup |
+| 4 · Reconciling last month notified this month | Notices are queued only for the CURRENT month. Tested with an October call metered in November |
+| 5 · Unbounded reconciliation | Date window (`:since` = start of last month) and missing-marker check (`NOT EXISTS`) in SQL, `LIMIT 500` per run. Tested by source and by an out-of-window call |
+| Duplicate-ID path held its transaction | Reads, then commits before returning. Tested with `in_transaction()` |
+| Marker volume grows | Backlog: prune markers outside the reconciliation window |
+| Dashboard load error silent | Kept by design: the Dashboard banner states a known refusal; the Receptionist tab is where usage (and a load failure) is shown |
+| Voice tool list lacks the usage tool | Voice is switched off (NS-A2); the GA-repair ticket adds it with the voice meter |
+
+Harness: the tests' `call()`/`admit()` helpers now run the scheduler's
+delivery tick after each step; no assertion changed. Repair cycle 2 of 3.
+`./check.sh full`: 945 passed.
