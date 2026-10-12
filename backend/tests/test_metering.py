@@ -687,3 +687,145 @@ def test_the_watchdog_starts_when_the_call_starts():
     start = source.index("call_start_time = datetime.utcnow()")
     assert "call_watchdog" in source[start:start + 1500], \
         "the watchdog must start right after the call starts, before setup"
+
+
+# ------------------------------------------- Codex BH-012 review 3 additions ---
+# Repair cycle 4, authorised by Mike on 12 Oct 2026 after escalation.
+
+def test_a_notice_that_is_no_longer_true_is_not_sent_after_a_cap_is_raised(
+        database, clock, monkeypatch):
+    """Review 3 finding 2: a £5 cap is reached and a notice queued; the owner
+    raises the cap to £100 before delivery. Calls are being answered again,
+    so "your £100 cap has been reached" must never go out."""
+    m = metering()
+    sent = []
+    monkeypatch.setattr(m, "notify_owner", lambda b, st, u: sent.append(st) or True)
+    with Session(database) as s:
+        m.record_call(s, business(metered=True, cap="5"), 60 * 132)
+        s.commit()
+    assert _pending(database, A) == ["pending:spend_cap_reached"]
+    raised = business(metered=True, cap="100")
+    with Session(database) as s:
+        m.deliver_pending_notices(s, lookup=lambda session, bid: raised)
+    assert sent == [], "a notice that is no longer true must not be sent"
+    assert _pending(database, A) == [], "the stale notice is dropped, not retried forever"
+    assert meter_value(database, A, "notified:spend_cap_reached") == 0, \
+        "dropping it must not use up the month's notice if the new cap is reached later"
+
+
+def test_a_notice_that_is_no_longer_true_is_not_sent_after_metering_is_switched_on(
+        database, clock, monkeypatch):
+    """Review 3 finding 2: minutes used up and a notice queued; the owner
+    switches extra minutes on before delivery. No refusal notice."""
+    m = metering()
+    sent = []
+    monkeypatch.setattr(m, "notify_owner", lambda b, st, u: sent.append(st) or True)
+    with Session(database) as s:
+        m.record_call(s, business(), 60 * 121)
+        s.commit()
+    assert _pending(database, A) == ["pending:allowance_exhausted"]
+    switched_on = business(metered=True, cap="100")
+    with Session(database) as s:
+        m.deliver_pending_notices(s, lookup=lambda session, bid: switched_on)
+    assert sent == [] and _pending(database, A) == []
+
+
+class _FakeTwilioSocket:
+    """Just enough of Starlette's WebSocket for the media-stream handler: a
+    valid 'start' event, then silence until closed."""
+
+    def __init__(self):
+        import json
+        self.query_params = {}
+        self.closed = False
+        self._messages = [json.dumps({"event": "start", "start": {
+            "streamSid": "MZ1", "customParameters": {
+                "business_id": A, "caller_number": "+440000", "call_sid": "CA1",
+                "token": "t"}}})]
+
+    async def accept(self):
+        pass
+
+    async def receive_text(self):
+        import asyncio
+        from fastapi import WebSocketDisconnect
+        if self._messages:
+            return self._messages.pop(0)
+        while not self.closed:
+            await asyncio.sleep(0.01)
+        raise WebSocketDisconnect()
+
+    async def send_text(self, _):
+        pass
+
+    async def close(self, code=None, reason=None):
+        self.closed = True
+
+
+def _drive_handler(monkeypatch, setup, connect=None, cap=None, within=3.0):
+    """Run the REAL receptionist media-stream handler with the edges faked:
+    stream token, call setup, OpenAI connection, saving and metering."""
+    import asyncio
+    m = metering()
+    import receptionist_call_handler as rch
+    recorded, saved = [], []
+    monkeypatch.setattr(rch, "verify_stream_token", lambda *a: True)
+    monkeypatch.setattr(rch, "_load_call_setup", setup)
+    monkeypatch.setattr(rch, "OPENAI_API_KEY", "test-key")
+    if connect is not None:
+        monkeypatch.setattr(rch.websockets, "connect", connect)
+    if cap is not None:
+        monkeypatch.setattr(m, "CALL_HARD_CAP_SECONDS", cap)
+    monkeypatch.setattr(rch, "_save_call_record",
+                        lambda **kw: saved.append(kw) or "call-1")
+    monkeypatch.setattr(m, "load_business", lambda session, bid: business())
+    monkeypatch.setattr(m, "record_call",
+                        lambda session, biz, seconds, call_id=None, at=None:
+                        recorded.append((seconds, call_id)))
+    ws = _FakeTwilioSocket()
+
+    async def run():
+        await asyncio.wait_for(rch.receptionist_media_stream(ws), within)
+    asyncio.run(run())
+    return ws, saved, recorded
+
+
+def _setup_result(limit_seconds=None):
+    return ({"system_prompt": "p", "voice": "alloy", "greeting": "Hello",
+             "config": {"max_call_duration_seconds": limit_seconds}}, "cfg-1")
+
+
+def test_the_deadline_holds_while_setup_is_blocked_on_the_database(monkeypatch):
+    """Review 3 finding 1: setup's database work must not block the event
+    loop, or no deadline can fire. A setup that stalls for 2s against a 0.3s
+    cap still ends on time, and the call is still saved and metered."""
+    import time
+
+    def stalled_setup(business_id):
+        time.sleep(2)  # synchronous, as the real prompt build's queries are
+        return _setup_result()
+    started = time.monotonic()
+    ws, saved, recorded = _drive_handler(monkeypatch, stalled_setup, cap=0.3, within=1.5)
+    assert time.monotonic() - started < 1.5
+    assert ws.closed
+    assert len(saved) == 1 and recorded == [(saved[0]["duration_seconds"], "call-1")]
+    assert saved[0]["duration_seconds"] <= 1, "only time actually on the call is counted"
+
+
+def test_the_business_limit_ends_a_call_stuck_connecting_to_openai(monkeypatch):
+    """Review 3 finding 1: the shorter business limit replaces the 20-minute
+    watchdog, and when it fires it ends the handler itself — not just its
+    sockets — so cleanup, saving and metering happen on time."""
+    import asyncio
+    import time
+
+    async def hung_connect(*a, **k):
+        await asyncio.sleep(3600)
+    started = time.monotonic()
+    ws, saved, recorded = _drive_handler(
+        monkeypatch, lambda business_id: _setup_result(limit_seconds=1),
+        connect=hung_connect, within=3.0)
+    assert time.monotonic() - started < 3.0
+    assert ws.closed
+    assert len(saved) == 1 and recorded and recorded[0][1] == "call-1"
+    assert saved[0]["duration_seconds"] <= 2
