@@ -156,14 +156,12 @@ def usage(engine, biz):
 
 # -------------------------------------------------------------- the rules ---
 
-@pending
 @pytest.mark.parametrize("plan,minutes", [("starter", "0"), ("pro", "120"),
                                           ("business", "350"), ("beta", "350")])
 def test_allowance_per_plan(plan, minutes):
     assert metering().allowance_minutes(plan) == D(minutes)
 
 
-@pending
 @pytest.mark.parametrize("utc,period,why", [
     (datetime(2026, 8, 31, 23, 30, tzinfo=ZoneInfo("UTC")), "2026-09",
      "00:30 BST on 1 Sep is September in the UK"),
@@ -175,14 +173,12 @@ def test_the_month_is_the_uk_calendar_month(utc, period, why):
     assert metering().period_for(utc) == period, why
 
 
-@pending
 @pytest.mark.parametrize("seconds,minutes", [(60, "1.0000"), (125, "2.0833"),
                                              (1, "0.0167"), (0, "0.0000")])
 def test_minutes_are_counted_to_the_second(seconds, minutes):
     assert metering().minutes_from_seconds(seconds) == D(minutes)
 
 
-@pending
 def test_a_call_is_never_longer_than_twenty_minutes():
     m = metering()
     assert m.CALL_HARD_CAP_SECONDS == 1200
@@ -193,7 +189,6 @@ def test_a_call_is_never_longer_than_twenty_minutes():
 
 # --------------------------------------------------------- accrual and blocks ---
 
-@pending
 def test_a_call_accrues_its_actual_minutes(database, clock, notices):
     biz = business()
     call(database, biz, 125)
@@ -201,14 +196,12 @@ def test_a_call_accrues_its_actual_minutes(database, clock, notices):
     assert meter_value(database, A, "receptionist_minutes") == D("3.0833")
 
 
-@pending
 def test_under_the_allowance_calls_are_admitted(database, clock, notices):
     biz = business()
     call(database, biz, 60 * 100)
     assert admit(database, biz) == (True, None)
 
 
-@pending
 def test_allowance_exhausted_mid_call_the_call_completes_then_the_next_is_blocked(
         database, clock, notices):
     """Never cut a caller off mid-sentence; block the NEXT call."""
@@ -222,7 +215,6 @@ def test_allowance_exhausted_mid_call_the_call_completes_then_the_next_is_blocke
     assert (A, "allowance_exhausted") in notices
 
 
-@pending
 def test_the_owner_is_told_once_per_month_not_on_every_call(database, clock, notices):
     biz = business()
     call(database, biz, 60 * 121)
@@ -231,13 +223,11 @@ def test_the_owner_is_told_once_per_month_not_on_every_call(database, clock, not
     assert notices.count((A, "allowance_exhausted")) == 1
 
 
-@pending
 def test_starter_has_no_minutes_unless_metering_is_on(database, clock, notices):
     assert admit(database, business(plan="starter"))[0] is False
     assert admit(database, business(plan="starter", metered=True, cap="20"))[0] is True
 
 
-@pending
 def test_enabling_metering_unblocks_and_overage_accrues_separately(database, clock, notices):
     biz = business()
     call(database, biz, 60 * 120)
@@ -249,7 +239,6 @@ def test_enabling_metering_unblocks_and_overage_accrues_separately(database, clo
     assert usage(database, metered)["overage_spend_gbp"] == D("4.50")   # 10 x £0.45
 
 
-@pending
 def test_a_call_that_crosses_the_allowance_with_metering_on_splits(database, clock, notices):
     biz = business(metered=True, cap="100")
     call(database, biz, 60 * 118)
@@ -258,7 +247,6 @@ def test_a_call_that_crosses_the_allowance_with_metering_on_splits(database, clo
     assert meter_value(database, A, "receptionist_overage_minutes") == D("3.0000")
 
 
-@pending
 def test_the_spend_cap_blocks_again(database, clock, notices):
     biz = business(metered=True, cap="9")       # 20 overage minutes = £9.00
     call(database, biz, 60 * 120)
@@ -268,13 +256,11 @@ def test_the_spend_cap_blocks_again(database, clock, notices):
     assert (A, "spend_cap_reached") in notices
 
 
-@pending
 def test_metering_on_without_a_cap_uses_the_hundred_pound_default(database, clock, notices):
     biz = business(metered=True, cap=None)
     assert usage(database, biz)["spend_cap_gbp"] == D("100")
 
 
-@pending
 def test_a_new_month_resets_everything(database, clock, notices):
     biz = business()
     call(database, biz, 60 * 130)
@@ -284,14 +270,12 @@ def test_a_new_month_resets_everything(database, clock, notices):
     assert usage(database, biz)["used_minutes"] == D("0")
 
 
-@pending
 def test_businesses_are_metered_separately(database, clock, notices):
     call(database, business(A), 60 * 120)
     assert admit(database, business(B))[0] is True
     assert meter_value(database, B, "receptionist_minutes") == D("0")
 
 
-@pending
 def test_usage_says_what_is_left_before_the_limit(database, clock, notices):
     biz = business()
     call(database, biz, int(60 * 37.4))
@@ -328,8 +312,17 @@ def client_for(database, monkeypatch, biz):
                         lambda session, bid, enabled, cap: writes.append((bid, enabled, cap)),
                         raising=False)
 
+    class GateSession(Session):
+        """The feature gate loads the ORM Business; everything else is SQL.
+        (Harness only — the same substitute BH-009 and BH-010's tests use.)"""
+        def exec(self, statement, *a, **k):
+            from models import Business
+            if statement.column_descriptions[0]["entity"] is Business:
+                return SimpleNamespace(first=lambda: biz)
+            return super().exec(statement, *a, **k)
+
     def sessions():
-        with Session(database) as s:
+        with GateSession(database) as s:
             yield s
 
     app = FastAPI()
@@ -341,7 +334,6 @@ def client_for(database, monkeypatch, biz):
     return client
 
 
-@pending
 def test_usage_endpoint_shows_the_callers_business_only(database, monkeypatch, clock, notices):
     call(database, business(B), 60 * 99)
     r = client_for(database, monkeypatch, business(A)).get("/v1/usage")
@@ -351,14 +343,12 @@ def test_usage_endpoint_shows_the_callers_business_only(database, monkeypatch, c
     assert body["state"] == "ok"
 
 
-@pending
 def test_usage_is_shown_to_one_decimal_place(database, monkeypatch, clock, notices):
     call(database, business(A), int(60 * 37.4))
     body = client_for(database, monkeypatch, business(A)).get("/v1/usage").json()
     assert body["used_minutes"] == "37.4" and body["remaining_minutes"] == "82.6"
 
 
-@pending
 def test_the_owner_can_switch_metering_on_with_a_cap(database, monkeypatch, clock, notices):
     client = client_for(database, monkeypatch, business(A))
     r = client.put("/v1/usage/metering", json={"enabled": True, "monthly_spend_cap_gbp": "50"})
@@ -366,14 +356,12 @@ def test_the_owner_can_switch_metering_on_with_a_cap(database, monkeypatch, cloc
     assert client.writes == [(A, True, D("50"))]
 
 
-@pending
 def test_switching_metering_on_without_a_cap_sets_the_default(database, monkeypatch, clock, notices):
     client = client_for(database, monkeypatch, business(A))
     client.put("/v1/usage/metering", json={"enabled": True})
     assert client.writes == [(A, True, D("100"))]
 
 
-@pending
 @pytest.mark.parametrize("cap", ["-1", "0", "NaN", "100000"])
 def test_an_invalid_cap_is_refused(database, monkeypatch, clock, notices, cap):
     client = client_for(database, monkeypatch, business(A))
@@ -382,7 +370,6 @@ def test_an_invalid_cap_is_refused(database, monkeypatch, clock, notices, cap):
     assert client.writes == []
 
 
-@pending
 def test_a_read_only_account_cannot_switch_metering_on(database, monkeypatch, clock, notices):
     unpaid = business(A)
     unpaid.subscription_status = "unpaid"
@@ -395,7 +382,6 @@ def test_a_read_only_account_cannot_switch_metering_on(database, monkeypatch, cl
 
 # ------------------------------------------------- the phone receptionist ---
 
-@pending
 def test_the_incoming_call_path_asks_the_meter_before_answering():
     """Source-level guard (the Twilio handler needs a signed request to run):
     the incoming-call handler must consult metering.admit_call, and the media

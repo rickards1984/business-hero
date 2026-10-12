@@ -6,6 +6,8 @@ import { useIsMobile } from '@/hooks/use-mobile';
 import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
 import TasksPanel from '@/components/TasksPanel';
+import { Alert } from '@mui/material';
+import { isBlocking, type Usage } from '@/components/ReceptionistUsage';
 
 function getGreeting(): string {
   const hour = new Date().getHours();
@@ -30,6 +32,17 @@ export default function DashboardPage() {
   const [showTasks, setShowTasks] = useState(false);
   const [ownerName, setOwnerName] = useState<string>('');
   const businessId = me?.id;
+
+  // BH-012: the in-app banner when the receptionist has stopped answering
+  // because the month's minutes, or the owner's cap, are used up.
+  const [receptionistUsage, setReceptionistUsage] = useState<Usage | null>(null);
+  useEffect(() => {
+    if (!businessId) return;
+    apiRequest('GET', '/v1/usage')
+      .then(r => r.json())
+      .then((u: Usage) => setReceptionistUsage(u))
+      .catch(() => {});
+  }, [businessId]);
 
   useEffect(() => {
     if (!businessId) return;
@@ -136,6 +149,14 @@ export default function DashboardPage() {
 
   return (
     <div>
+      {receptionistUsage && isBlocking(receptionistUsage) && (
+        <Alert severity="error" sx={{ mb: 2 }}
+          action={<button className="btn btn-sm" onClick={() => navigate('/app/ai?tab=receptionist')}>Manage</button>}>
+          {receptionistUsage.state === 'spend_cap_reached'
+            ? 'Your receptionist has reached its monthly cap for extra minutes and is not answering new calls.'
+            : 'Your receptionist has used this month\'s minutes and is not answering new calls.'}
+        </Alert>
+      )}
       {/* Greeting — renders immediately, no data dependency */}
       <div style={{ marginBottom: 24 }}>
         <h1 style={{

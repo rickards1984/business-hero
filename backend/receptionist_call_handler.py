@@ -574,6 +574,35 @@ async def receptionist_incoming_call(request: Request):
         vr.hangup()
         return Response(content=str(vr), media_type="application/xml")
 
+    # BH-012: the month's minutes. A call already running is never cut off
+    # for the allowance (only by the 20-minute cap); this refuses the NEXT
+    # call once the allowance — or, with extra minutes on, the owner's cap —
+    # is used up. The owner was told when it ran out (metering.record_call).
+    # Fail OPEN, by Mike's decision (12 Oct 2026), as the access check above
+    # does: if the meter cannot be read, answer — one unmetered call costs
+    # pennies, a missed customer costs the business. The call is still capped.
+    try:
+        from services import metering as _metering
+        with Session(engine) as _session:
+            _mb = _metering.load_business(_session, business_id)
+            _admitted, _reason = (_metering.admit_call(_session, _mb)
+                                  if _mb is not None else (True, None))
+    except Exception as e:
+        logger.error(f"[Receptionist] Meter check failed, answering anyway: {e}")
+        _admitted, _reason = True, None
+
+    if not _admitted:
+        logger.warning("[Receptionist] Refusing call for business %s: %s",
+                       business_id, _reason)
+        vr = VoiceResponse()
+        vr.say(
+            "I'm sorry, this number is not currently accepting calls. "
+            "Please try again later.",
+            voice="alice",
+        )
+        vr.hangup()
+        return Response(content=str(vr), media_type="application/xml")
+
     host = request.headers.get("host", "")
     if not host:
         host = str(request.base_url).replace("http://", "").replace("https://", "").rstrip("/")
@@ -1151,11 +1180,24 @@ async def receptionist_media_stream(ws: WebSocket):
 
         twilio_task = asyncio.create_task(forward_twilio_to_openai())
         openai_task = asyncio.create_task(forward_openai_to_twilio())
+        # BH-012 / DECISION 2: no call runs past 20 minutes (a business's own
+        # max_call_duration_seconds may shorten it, never lengthen it). An AI
+        # talking to a voicemail loop can otherwise burn a day's budget.
+        from services import metering as _metering
+        _limit = _metering.call_time_limit_seconds(
+            (config_data or {}).get("max_call_duration_seconds"))
+        limit_task = asyncio.create_task(asyncio.sleep(_limit))
 
         done, pending = await asyncio.wait(
-            [twilio_task, openai_task],
+            [twilio_task, openai_task, limit_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
+        if limit_task in done:
+            # Logged, not written as a new `calls.outcome` value: production's
+            # constraints on that column are not verified (staging has none,
+            # and staging has lacked prod's constraints before — AGENTS.md §3.9),
+            # and a rejected value would lose the whole call record.
+            logger.warning("[Receptionist WS] Call reached its %ss limit; ending it", _limit)
 
         for task in pending:
             task.cancel()
@@ -1236,6 +1278,18 @@ async def receptionist_media_stream(ws: WebSocket):
                 )
             except Exception as e:
                 logger.error(f"[Receptionist WS] Failed to save call record: {e}")
+
+            # BH-012: count the call's actual minutes against the month. A
+            # failure here is logged, never raised — the call has happened.
+            try:
+                from services import metering as _metering
+                with Session(engine) as _session:
+                    _mb = _metering.load_business(_session, business_id)
+                    if _mb is not None:
+                        _metering.record_call(_session, _mb, duration_seconds)
+                        _session.commit()
+            except Exception as e:
+                logger.error(f"[Receptionist WS] Failed to meter the call: {e}")
 
         logger.info("[Receptionist WS] Call session ended")
 
