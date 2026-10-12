@@ -394,3 +394,161 @@ def test_the_incoming_call_path_asks_the_meter_before_answering():
     assert "admit_call" in incoming
     assert "call_time_limit_seconds" in stream
     assert "record_call" in stream
+
+
+# ------------------------------------------- Codex BH-012 review 1 additions ---
+
+@pytest.fixture
+def full_db(database):
+    """usage_meters plus the businesses and calls rows reconciliation reads."""
+    with Session(database) as s:
+        s.execute(text("CREATE TABLE businesses (id TEXT PRIMARY KEY, name TEXT, plan_tier TEXT, "
+                       "metered_usage_enabled BOOLEAN DEFAULT 0, monthly_spend_cap_gbp TEXT)"))
+        s.execute(text("CREATE TABLE calls (id TEXT PRIMARY KEY, business_id TEXT, source TEXT, "
+                       "started_at TEXT, ended_at TEXT, duration_seconds INTEGER)"))
+        s.execute(text("INSERT INTO businesses VALUES (:a,'A Gym','pro',0,NULL)"), {"a": A})
+        s.execute(text("INSERT INTO businesses VALUES (:b,'B Builders','pro',0,NULL)"), {"b": B})
+        s.commit()
+    return database
+
+
+def test_a_call_is_counted_once_however_often_it_is_recorded(database, clock, notices):
+    """Finding 2: a retried accrual must not add the call twice."""
+    biz = business()
+    with Session(database) as s:
+        metering().record_call(s, biz, 600, call_id="call-1")
+        metering().record_call(s, biz, 600, call_id="call-1")
+        s.commit()
+    assert meter_value(database, A, "receptionist_minutes") == D("10.0000")
+
+
+def test_a_call_counts_in_the_month_it_happened(database, clock, notices):
+    """Reconciling a call from 31 Oct on 1 Nov must charge October."""
+    clock(datetime(2026, 11, 1, 9, 0, tzinfo=LONDON))
+    with Session(database) as s:
+        metering().record_call(s, business(), 300, call_id="late",
+                               at=datetime(2026, 10, 31, 23, 50, tzinfo=LONDON))
+        s.commit()
+    assert meter_value(database, A, "receptionist_minutes", "2026-10") == D("5.0000")
+    assert meter_value(database, A, "receptionist_minutes", "2026-11") == D("0")
+
+
+def test_calls_whose_metering_failed_are_counted_by_reconciliation(full_db, clock, notices):
+    """Finding 2: the calls table is the durable record; any finished
+    receptionist call with no accrual is counted, once, by reconciliation."""
+    with Session(full_db) as s:
+        for cid, bid, secs in (("c1", A, 600), ("c2", A, 120), ("c3", B, 60)):
+            s.execute(text("INSERT INTO calls VALUES (:i,:b,'receptionist',"
+                           "'2026-10-10T10:00:00+01:00','2026-10-10T10:10:00+01:00',:d)"),
+                      {"i": cid, "b": bid, "d": secs})
+        s.execute(text("INSERT INTO calls VALUES ('c4',:a,'manual',NULL,NULL,999)"), {"a": A})
+        s.commit()
+        metering().record_call(s, business(A), 600, call_id="c1")   # already metered
+        s.commit()
+        metering().reconcile_unmetered_calls(s)
+        metering().reconcile_unmetered_calls(s)                    # idempotent
+        s.commit()
+    assert meter_value(full_db, A, "receptionist_minutes") == D("12.0000")
+    assert meter_value(full_db, B, "receptionist_minutes") == D("1.0000")
+
+
+def test_allocation_is_locked_per_business_and_month_on_postgres():
+    """Finding 1: two calls ending together must not both spend the same
+    remaining allowance. On PostgreSQL the split runs under a transaction
+    advisory lock per (business, month); SQLite has no concurrency to lock."""
+    m = metering()
+    seen = []
+
+    class _Fake:
+        bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        def execute(self, statement, params=None):
+            seen.append((str(statement), params))
+
+    m._lock(_Fake(), A, "2026-10")
+    assert seen and "pg_advisory_xact_lock" in seen[0][0]
+    assert A in str(seen[0][1]) and "2026-10" in str(seen[0][1])
+    import inspect
+    source = inspect.getsource(m.record_call)
+    assert source.index("_lock(") < source.index("usage(session"), \
+        "the lock must be taken before the remaining allowance is read"
+
+
+def test_a_failed_notice_is_retried_and_then_sent_once(database, clock, monkeypatch):
+    """Finding 4: a notice that fails must not suppress the rest of the month."""
+    m = metering()
+    attempts = []
+
+    def flaky(biz, state, usage):
+        attempts.append(state)
+        return len(attempts) > 1   # first attempt fails
+    monkeypatch.setattr(m, "notify_owner", flaky)
+    biz = business()
+    call(database, biz, 60 * 121)
+    call(database, biz, 60)
+    call(database, biz, 60)
+    assert attempts == ["allowance_exhausted", "allowance_exhausted"]
+
+
+def test_a_refused_call_tells_the_owner(database, clock, notices):
+    """Finding 4: lowering the cap below what is already spent blocks calls
+    without any call ending past a limit — the refusal itself must notify."""
+    call(database, business(metered=True, cap="100"), 60 * 140)   # £9.00 extra
+    allowed, reason = admit(database, business(metered=True, cap="5"))
+    assert allowed is False and reason == "spend_cap_reached"
+    assert notices.count((A, "spend_cap_reached")) == 1
+    admit(database, business(metered=True, cap="5"))
+    assert notices.count((A, "spend_cap_reached")) == 1
+
+
+def test_a_plan_with_no_minutes_is_never_sent_a_notice(database, clock, notices):
+    admit(database, business(plan="starter"))
+    assert notices == []
+
+
+@pytest.mark.parametrize("elapsed,limit,left", [(0, 1200, 1200), (45, 1200, 1155),
+                                               (1300, 1200, 0), (30, 600, 570)])
+def test_the_time_limit_counts_from_the_start_of_the_call(elapsed, limit, left):
+    """Finding 3: call setup time is inside the 20 minutes, not added to it."""
+    started = datetime(2026, 10, 10, 12, 0, tzinfo=ZoneInfo("UTC"))
+    from datetime import timedelta
+    now_ = started + timedelta(seconds=elapsed)
+    assert metering().seconds_left_in_call(limit, started, now_) == left
+
+
+def test_the_whatsapp_notice_uses_the_approved_alert_template():
+    """Finding 5: an unsolicited message must use a registered template; free
+    text only reaches a customer inside WhatsApp's 24-hour reply window."""
+    import services.metering_notify as notify
+    from services.whatsapp_service import TEMPLATE_SID_MAP, TEMPLATE_VARIABLE_COUNTS
+    message_type, variables = notify.whatsapp_alert(
+        "New Body", "allowance_exhausted",
+        {"used_minutes": D("121"), "allowance_minutes": D("120"),
+         "spend_cap_gbp": D("100"), "overage_spend_gbp": D("0")})
+    assert message_type == "alert" and message_type in TEMPLATE_SID_MAP
+    assert len(variables) == TEMPLATE_VARIABLE_COUNTS["alert"]
+    assert variables["1"] == "New Body"
+
+
+def test_the_notice_is_accurate_about_what_resets_and_where_to_act():
+    """Review note: the ALLOWANCE resets; extra minutes already used are still
+    billed. And the owner gets a link straight to the switch."""
+    import services.metering_notify as notify
+    subject, body = notify._words("allowance_exhausted", {
+        "used_minutes": D("121"), "allowance_minutes": D("120"),
+        "spend_cap_gbp": D("100"), "overage_spend_gbp": D("0")})
+    assert "monthly allowance resets" in body
+    assert "/app/ai?tab=receptionist" in body
+
+
+def test_aria_can_read_receptionist_usage_for_her_business_only(full_db, clock, notices):
+    """Finding 6, North Star Gate 7: usage the app records, Aria can read."""
+    import assistant_tools
+    call(full_db, business(A), 60 * 30)
+    call(full_db, business(B), 60 * 90)
+    result = assistant_tools._get_receptionist_usage(full_db, A, {})
+    assert result["used_minutes"] == "30.0" and result["allowance_minutes"] == "120"
+    assert result["remaining_minutes"] == "90.0"
+    assert "90.0" not in str({k: v for k, v in result.items() if k != "remaining_minutes"})
+    names = {t["function"]["name"] for t in assistant_tools.TOOL_DEFINITIONS}
+    assert "get_receptionist_usage" in names
