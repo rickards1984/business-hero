@@ -188,3 +188,40 @@ Permitted tests: **106 passed, 4 warnings**. No edits, pushes or network use; wo
 
 Three repair cycles used (AGENTS.md: default 3, then escalate). Not fixed
 without a decision from Mike; escalated with a recommendation.
+
+## Review 4 (repair cycle 4, authorised by Mike after escalation)
+
+| | |
+|---|---|
+| Reviewed commit | `8d5c316` |
+| Session id | `01a1325b-9142-74c3-8971-5705b4cd5469` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 25,537` |
+| **Verdict** | **REQUEST-CHANGES** |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** — reviewed `8d5c316c95de30592a7358a4c3384ede4634c117`.
+
+1. **P2 — Handler cancellation still waits for socket closure.** [receptionist_call_handler.py:742](/Users/michaelrickards/dev/bh2-BH-012-review/backend/receptionist_call_handler.py:742) puts `_close_call` before `_end_handler`; [metering.py:425](/Users/michaelrickards/dev/bh2-BH-012-review/backend/services/metering.py:425) awaits callbacks sequentially. A delayed close therefore delays cancellation, cleanup and persistence. Duration is measured after another awaited close in `finally` ([receptionist_call_handler.py:1280](/Users/michaelrickards/dev/bh2-BH-012-review/backend/receptionist_call_handler.py:1280)), so teardown delay can become metered time. Cancellation needs to run independently of socket closure; bound teardown and record the deadline’s end time. Neither new test exercises delayed closure.
+
+Requested checks:
+
+- **Stale notice resolved and genuinely tested.** [metering.py:288](/Users/michaelrickards/dev/bh2-BH-012-review/backend/services/metering.py:288) revalidates current state and removes obsolete pending notices without marking them delivered. Tests cover both raising the cap and enabling metering.
+- **Worker setup is sound.** [receptionist_call_handler.py:94](/Users/michaelrickards/dev/bh2-BH-012-review/backend/receptionist_call_handler.py:94) creates and uses the session inside the worker. `asyncio.run` there is valid; the current prompt builder has no loop-bound asynchronous dependencies. Cancellation ends the handler’s wait, although the synchronous worker continues.
+- **Cancellation and forwarding cleanup:** the ordinary deadline path uncancels its cancellation; unrelated cancellation is re-raised. `finally` cancels forwarding tasks and reaches save/meter calls.
+- **The two handler tests are real, bounded evidence** ([test_metering.py:803](/Users/michaelrickards/dev/bh2-BH-012-review/backend/tests/test_metering.py:803), [test_metering.py:819](/Users/michaelrickards/dev/bh2-BH-012-review/backend/tests/test_metering.py:819)): they execute the actual handler during blocked synchronous setup and hung connection establishment. They prove timely return and invocation of mocked save/meter functions, not database persistence or established-stream teardown.
+
+Permitted pytest: **61 passed, 8 warnings**. No edits, pushes or network use.
+
+Out of scope: BH-011 and the accepted synchronous database-work backlog.
+---
+
+### Status — 13 October 2026
+
+Review 3 finding 2 confirmed resolved; finding 1 confirmed resolved for
+blocked setup and a hung connect. One new, narrower P2 (a slow socket close
+delays the cancel and can add teardown to metered time). Escalated to Mike
+before any fifth cycle.
