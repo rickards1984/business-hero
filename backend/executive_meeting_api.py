@@ -5,8 +5,8 @@ This file handles ONLY settings CRUD and read-only listings of meetings,
 action items, and goals. The actual meeting orchestration is in subsequent
 prompts.
 
-Tier gating: pro / business / beta have access. starter and paused are
-blocked at the API layer via `require_tier_feature`. Advanced features
+Feature access uses canonical plan defaults, explicit flags and subscription
+status via `auth.require_feature`, with retained-history exceptions. Advanced features
 (custom focus areas, multi-attendee) are gated to business / beta only.
 """
 import json
@@ -20,13 +20,11 @@ from rate_limiting import limiter, LIMIT_AI_CHAT, LIMIT_AI_HEAVY
 from sqlalchemy import text
 from sqlmodel import Session
 
-from auth import get_user_business_context, get_platform_admin_context
-from db import get_session
-from services.tier_gating import (
-    check_feature_access,
-    get_business_tier,
-    require_tier_feature,
+from auth import (
+    get_user_business_context, get_platform_admin_context, require_feature,
+    _load_business, assert_feature_access,
 )
+from db import get_session
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/executive-meetings", tags=["executive-meetings"])
@@ -41,14 +39,13 @@ _STANDARD_FOCUS_AREAS = {"financial", "operations", "team", "growth"}
 # Settings CRUD
 # ============================================================================
 
-@router.get("/settings")
+@router.get("/settings", dependencies=[Depends(require_feature("board_meetings"))])
 async def get_meeting_settings(
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
     """Return the business's executive meeting settings, or defaults if none saved."""
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
 
     row = session.execute(
         text("""
@@ -84,7 +81,7 @@ async def get_meeting_settings(
     }
 
 
-@router.put("/settings")
+@router.put("/settings", dependencies=[Depends(require_feature("board_meetings"))])
 async def update_meeting_settings(
     settings: dict,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -95,7 +92,10 @@ async def update_meeting_settings(
     Calculates `next_meeting_at` based on the schedule.
     """
     business_id = str(auth_ctx["business_id"])
-    tier = require_tier_feature(business_id, "executive_board_meeting", session)
+    business = _load_business(session, business_id)
+    if business is None:
+        raise HTTPException(status_code=404, detail="Business not found")
+    tier = str(business.plan_tier or "starter").lower()
 
     frequency = settings.get("frequency", "weekly")
     if frequency not in ("weekly", "monthly"):
@@ -201,10 +201,14 @@ async def check_meeting_access(
     Does NOT raise — returns access info even for blocked tiers.
     """
     business_id = str(auth_ctx["business_id"])
-    tier = get_business_tier(business_id, session)
-
-    has_access = check_feature_access(business_id, "executive_board_meeting", session)
-    has_advanced = check_feature_access(business_id, "executive_board_meeting_advanced", session)
+    business = _load_business(session, business_id)
+    tier = str(business.plan_tier or "starter").lower() if business else "starter"
+    try:
+        assert_feature_access(business, "board_meetings")
+        has_access = True
+    except HTTPException:
+        has_access = False
+    has_advanced = has_access and tier in _ADVANCED_TIERS
 
     return {
         "has_access": has_access,
@@ -219,7 +223,7 @@ async def check_meeting_access(
 # Read-only listing endpoints (placeholders — full impl in Prompt 3)
 # ============================================================================
 
-@router.get("/meetings")
+@router.get("/meetings", dependencies=[Depends(require_feature("board_meetings", retained_history=True))])
 async def list_meetings(
     limit: int = 20,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -227,7 +231,6 @@ async def list_meetings(
 ):
     """List past and upcoming meetings for the current business."""
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
 
     limit = max(1, min(100, int(limit)))
     rows = session.execute(
@@ -246,7 +249,7 @@ async def list_meetings(
     return [_meeting_row_to_dict(r) for r in rows]
 
 
-@router.get("/action-items")
+@router.get("/action-items", dependencies=[Depends(require_feature("board_meetings", retained_history=True))])
 async def list_action_items(
     status: Optional[str] = None,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -254,7 +257,6 @@ async def list_action_items(
 ):
     """List action items, optionally filtered by status."""
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
 
     if status:
         rows = session.execute(
@@ -295,7 +297,7 @@ _ACTION_ITEM_UPDATABLE_FIELDS = {
 }
 
 
-@router.put("/action-items/{item_id}")
+@router.put("/action-items/{item_id}", dependencies=[Depends(require_feature("board_meetings"))])
 async def update_action_item(
     item_id: str,
     updates: dict,
@@ -304,7 +306,6 @@ async def update_action_item(
 ):
     """Update the status, notes, or assignment of an action item."""
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
 
     update_pairs = {k: v for k, v in updates.items() if k in _ACTION_ITEM_UPDATABLE_FIELDS}
 
@@ -330,7 +331,7 @@ async def update_action_item(
     return {"status": "updated"}
 
 
-@router.get("/goals")
+@router.get("/goals", dependencies=[Depends(require_feature("board_meetings", retained_history=True))])
 async def list_goals(
     status: Optional[str] = None,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -338,7 +339,6 @@ async def list_goals(
 ):
     """List goals, optionally filtered by status."""
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
 
     if status:
         rows = session.execute(
@@ -377,7 +377,7 @@ _GOAL_UPDATABLE_FIELDS = {
 }
 
 
-@router.put("/goals/{goal_id}")
+@router.put("/goals/{goal_id}", dependencies=[Depends(require_feature("board_meetings"))])
 async def update_goal(
     goal_id: str,
     updates: dict,
@@ -386,7 +386,6 @@ async def update_goal(
 ):
     """Update a goal's progress, status, or details."""
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
 
     update_pairs = {k: v for k, v in updates.items() if k in _GOAL_UPDATABLE_FIELDS}
 
@@ -644,7 +643,7 @@ def _calculate_next_meeting_time(settings: dict) -> Optional[datetime]:
 # this line is modified.
 # ============================================================================
 
-@router.post("/prep-now")
+@router.post("/prep-now", dependencies=[Depends(require_feature("board_meetings"))])
 @limiter.limit(LIMIT_AI_HEAVY)
 async def trigger_prep_now(
     request: Request,
@@ -658,7 +657,6 @@ async def trigger_prep_now(
     Tier-gated: pro/business/beta.
     """
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
 
     from services.executive_meeting_prep import generate_prep_data
 
@@ -666,7 +664,7 @@ async def trigger_prep_now(
     return prep
 
 
-@router.post("/start-now")
+@router.post("/start-now", dependencies=[Depends(require_feature("board_meetings"))])
 @limiter.limit(LIMIT_AI_HEAVY)
 async def start_meeting_now(
     request: Request,
@@ -680,7 +678,6 @@ async def start_meeting_now(
     Prompt 3 will pick this row up and start the actual conversation.
     """
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
 
     from services.executive_meeting_prep import generate_prep_data
 
@@ -738,7 +735,7 @@ async def start_meeting_now(
     }
 
 
-@router.get("/{meeting_id}/prep-data")
+@router.get("/{meeting_id}/prep-data", dependencies=[Depends(require_feature("board_meetings"))])
 async def get_meeting_prep_data(
     meeting_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -746,7 +743,6 @@ async def get_meeting_prep_data(
 ):
     """Fetch the prep_data JSONB for a specific meeting (own-business only)."""
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
 
     row = session.execute(
         text(
@@ -813,7 +809,7 @@ def _verify_meeting_ownership(
     return {"id": str(row[0]), "business_id": str(row[1]), "status": row[2]}
 
 
-@router.post("/{meeting_id}/start")
+@router.post("/{meeting_id}/start", dependencies=[Depends(require_feature("board_meetings"))])
 @limiter.limit(LIMIT_AI_HEAVY)
 async def start_meeting_endpoint(
     request: Request,
@@ -823,7 +819,6 @@ async def start_meeting_endpoint(
 ):
     """Generate Aria's opening turn for a meeting in 'prep_ready' state."""
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
     _verify_meeting_ownership(meeting_id, business_id, session)
 
     from services.executive_meeting_orchestrator import start_meeting
@@ -846,7 +841,7 @@ async def start_meeting_endpoint(
     }
 
 
-@router.post("/{meeting_id}/message")
+@router.post("/{meeting_id}/message", dependencies=[Depends(require_feature("board_meetings"))])
 @limiter.limit(LIMIT_AI_CHAT)
 async def send_owner_message(
     request: Request,
@@ -860,7 +855,6 @@ async def send_owner_message(
     Request body: {"content": "owner's message text"}
     """
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
     _verify_meeting_ownership(meeting_id, business_id, session)
 
     content = str((body or {}).get("content") or "").strip()
@@ -888,7 +882,7 @@ async def send_owner_message(
     }
 
 
-@router.post("/{meeting_id}/end")
+@router.post("/{meeting_id}/end", dependencies=[Depends(require_feature("board_meetings"))])
 async def end_meeting_endpoint(
     meeting_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -896,7 +890,6 @@ async def end_meeting_endpoint(
 ):
     """Close a meeting: extract actions/goals, summarise, update record."""
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
     _verify_meeting_ownership(meeting_id, business_id, session)
 
     from services.executive_meeting_orchestrator import end_meeting
@@ -914,7 +907,7 @@ async def end_meeting_endpoint(
     return result
 
 
-@router.get("/{meeting_id}/messages")
+@router.get("/{meeting_id}/messages", dependencies=[Depends(require_feature("board_meetings", retained_history=True))])
 async def list_meeting_messages(
     meeting_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
@@ -922,7 +915,6 @@ async def list_meeting_messages(
 ):
     """Return the full ordered conversation log for a meeting."""
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
     _verify_meeting_ownership(meeting_id, business_id, session)
 
     rows = session.execute(
@@ -952,7 +944,7 @@ async def list_meeting_messages(
     ]
 
 
-@router.post("/{meeting_id}/extract-actions")
+@router.post("/{meeting_id}/extract-actions", dependencies=[Depends(require_feature("board_meetings"))])
 @limiter.limit(LIMIT_AI_HEAVY)
 async def extract_actions_endpoint(
     request: Request,
@@ -966,7 +958,6 @@ async def extract_actions_endpoint(
     duplicate rows — use with care.
     """
     business_id = str(auth_ctx["business_id"])
-    require_tier_feature(business_id, "executive_board_meeting", session)
     _verify_meeting_ownership(meeting_id, business_id, session)
 
     from services.executive_meeting_orchestrator import extract_actions_and_goals

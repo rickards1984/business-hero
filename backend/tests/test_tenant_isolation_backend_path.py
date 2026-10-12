@@ -137,6 +137,12 @@ def _one_request(session, coroutine):
 class FakeBusiness:
     def __init__(self, business_id):
         self.id = business_id
+        # BH-011: real handlers now check entitlement before domain queries.
+        self.subscription_status = "active"
+        self.is_active = True
+        self.trial_ends_at = None
+        self.plan_tier = "starter"
+        self.feature_flags = {}
 
 
 def as_business(business_id):

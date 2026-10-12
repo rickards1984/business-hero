@@ -113,6 +113,7 @@ class AdminSession:
 def fake_business(plan_tier="pro", flags=None, name="Test Ltd"):
     return SimpleNamespace(
         id="biz-1", name=name, plan_tier=plan_tier, is_active=True,
+        subscription_status="active", trial_ends_at=None,
         feature_flags={} if flags is None else flags,
     )
 
@@ -120,13 +121,12 @@ def fake_business(plan_tier="pro", flags=None, name="Test Ltd"):
 # ── 1. The settings gate ────────────────────────────────────────────────────
 
 class TestReceptionistGateResolvesAgainstThePlan(unittest.TestCase):
-    """receptionist_api._require_receptionist_flag — nine endpoints."""
+    """BH-011 folds the settings gate into canonical feature access."""
 
     def allowed(self, plan_tier, flags):
-        import receptionist_api
+        from auth import assert_feature_access
         try:
-            receptionist_api._require_receptionist_flag(
-                fake_business(plan_tier, flags))
+            assert_feature_access(fake_business(plan_tier, flags), "receptionist")
             return True
         except HTTPException as exc:
             self.assertEqual(exc.status_code, 403)
