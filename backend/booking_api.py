@@ -4,6 +4,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlmodel import Session
+from auth import require_feature
 from db import get_session, engine
 from auth import get_user_business_context
 
@@ -26,7 +27,7 @@ DEFAULT_APPOINTMENT_TYPES = [
 ]
 
 
-@router.get("/calendars")
+@router.get("/calendars", dependencies=[Depends(require_feature("calendar_booking"))])
 async def list_google_calendars(
     auth_ctx: dict = Depends(get_user_business_context),
 ):
@@ -76,7 +77,7 @@ async def list_google_calendars(
     return {"calendars": calendars}
 
 
-@router.get("/settings")
+@router.get("/settings", dependencies=[Depends(require_feature("calendar_booking"))])
 async def get_booking_settings(
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
@@ -111,7 +112,7 @@ async def get_booking_settings(
     }
 
 
-@router.put("/settings")
+@router.put("/settings", dependencies=[Depends(require_feature("calendar_booking"))])
 async def update_booking_settings(
     settings: dict,
     auth_ctx: dict = Depends(get_user_business_context),

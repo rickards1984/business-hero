@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, 
 from sqlmodel import Session
 from pydantic import BaseModel
 
+from auth import assert_feature_access
 from db import get_session
 from dependencies import get_current_user_and_business
 
@@ -121,6 +122,7 @@ async def list_categories(
 ):
     """List all accounting categories for the business."""
     _, business = user_business
+    assert_feature_access(business, "accounting")
     
     from sqlalchemy import text
     
@@ -163,6 +165,7 @@ async def create_category(
 ):
     """Create a new accounting category."""
     _, business = user_business
+    assert_feature_access(business, "accounting")
     
     if category.type not in ('income', 'expense'):
         raise HTTPException(status_code=400, detail="Type must be 'income' or 'expense'")
@@ -217,6 +220,7 @@ async def list_transactions(
 ):
     """List transactions with filtering and pagination."""
     _, business = user_business
+    assert_feature_access(business, "accounting")
 
     # page param takes precedence; fall back to explicit offset for backwards compat
     effective_offset = (page - 1) * limit if offset is None else offset
@@ -314,6 +318,7 @@ async def create_transaction(
 ):
     """Create a single transaction."""
     _, business = user_business
+    assert_feature_access(business, "accounting")
     
     from sqlalchemy import text
     
@@ -354,6 +359,7 @@ async def update_transaction(
 ):
     """Update a transaction."""
     _, business = user_business
+    assert_feature_access(business, "accounting")
     
     from sqlalchemy import text
     
@@ -399,6 +405,7 @@ async def delete_transaction(
 ):
     """Delete (archive) a transaction."""
     _, business = user_business
+    assert_feature_access(business, "accounting")
     
     from sqlalchemy import text
     
@@ -427,6 +434,7 @@ async def bulk_delete_transactions(
 ):
     """Soft delete multiple transactions at once."""
     _, business = user_business
+    assert_feature_access(business, "accounting")
 
     from sqlalchemy import text
     
@@ -458,6 +466,7 @@ async def bulk_update_category(
 ):
     """Assign a category to multiple transactions at once."""
     _, business = user_business
+    assert_feature_access(business, "accounting")
     
     from sqlalchemy import text
     
@@ -496,6 +505,7 @@ async def analyze_spreadsheet(
     Returns suggested mappings for user confirmation.
     """
     _, business = user_business
+    assert_feature_access(business, "accounting")
     
     # Read file content
     content = await file.read()
@@ -543,6 +553,7 @@ async def import_spreadsheet(
     Import transactions from spreadsheet using confirmed column mapping.
     """
     _, business = user_business
+    assert_feature_access(business, "accounting")
     
     # Parse mapping
     try:
@@ -790,6 +801,7 @@ async def get_accounting_summary(
 ):
     """Get financial summary with totals and breakdowns."""
     _, business = user_business
+    assert_feature_access(business, "accounting")
     
     from sqlalchemy import text
     from datetime import timedelta
@@ -936,6 +948,7 @@ async def get_ai_insights(
 ):
     """Generate AI-powered financial insights."""
     _, business = user_business
+    assert_feature_access(business, "accounting")
     business_id = str(business.id)
     
     from sqlalchemy import text
@@ -1103,6 +1116,7 @@ async def list_imports(
 ):
     """List import history."""
     _, business = user_business
+    assert_feature_access(business, "accounting")
     
     from sqlalchemy import text
     

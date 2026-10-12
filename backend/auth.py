@@ -150,6 +150,7 @@ _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # provider-side grant with no local record. What it cannot do is USE the
 # connection — every AI and outbound feature is refused by the feature gate.
 SIDE_EFFECTING_GET_EXACT = frozenset({
+    "/v1/accounting/ai-insights",                   # paid AI, not a history read
     "/v1/integrations/awaz",                        # creates an integration row
     "/v1/accounting/export/accountant-pack",        # DECISION 3 (8 Sep 2026):
                                                     # read-only export is
@@ -720,7 +721,9 @@ READ_ONLY_DETAIL = (
 )
 
 
-def assert_feature_access(business: Optional[Business], feature_name: str) -> None:
+def assert_feature_access(
+    business: Optional[Business], feature_name: str, *, retained_history: bool = False,
+) -> None:
     """The feature gate, callable imperatively. Raises HTTPException or returns.
 
     `require_feature` is the FastAPI dependency around this; several endpoints
@@ -740,6 +743,18 @@ def assert_feature_access(business: Optional[Business], feature_name: str) -> No
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
 
+    if feature_name not in CANONICAL_FEATURES:
+        raise HTTPException(status_code=403, detail="Unknown feature")
+
+    # BH-011 decision 2: only explicitly designated history handlers opt in.
+    # Retention bypasses a plan omission, never an admin denial or suspension.
+    if retained_history:
+        if not business.is_active or resolve_access_level(business) == ACCESS_SUSPENDED:
+            raise HTTPException(status_code=403, detail=SUSPENDED_DETAIL)
+        if (business.feature_flags or {}).get(feature_name) is False:
+            raise HTTPException(status_code=403, detail=f"Feature '{feature_name}' disabled")
+        return
+
     access = resolve_access_level(business)
     if access == ACCESS_SUSPENDED:
         raise HTTPException(status_code=403, detail=SUSPENDED_DETAIL)
@@ -753,7 +768,7 @@ def assert_feature_access(business: Optional[Business], feature_name: str) -> No
         )
 
 
-def require_feature(feature_name: str):
+def require_feature(feature_name: str, *, retained_history: bool = False):
     async def _dependency(
         auth_ctx: dict = Depends(get_user_business_context),
         session: Session = Depends(get_session),
@@ -763,7 +778,7 @@ def require_feature(feature_name: str):
         business = session.exec(
             select(Business).where(Business.id == auth_ctx["business_id"])
         ).first()
-        assert_feature_access(business, feature_name)
+        assert_feature_access(business, feature_name, retained_history=retained_history)
         return True
 
     return _dependency
