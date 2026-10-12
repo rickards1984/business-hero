@@ -147,3 +147,44 @@ acknowledges delivery.
 Harness: the tests' `call()`/`admit()` helpers now run the scheduler's
 delivery tick after each step; no assertion changed. Repair cycle 2 of 3.
 `./check.sh full`: 945 passed.
+
+## Review 3 (final narrow, repair cycle 3 of 3)
+
+| | |
+|---|---|
+| Reviewed commit | `f72eae3` |
+| Session id | `01a1324d-4973-7d91-90f7-b555a438ada0` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 40,044` |
+| **Verdict** | **REQUEST-CHANGES** |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** — reviewed `f72eae32725c975cec5beb7551ad3cbca07c2ec7`.
+
+1. **P2 — Finding 3 remains unresolved: the watchdog does not enforce a deadline across setup.**  
+   [receptionist_call_handler.py:716](/Users/michaelrickards/dev/bh2-BH-012-review/backend/receptionist_call_handler.py:716) schedules the watchdog, then awaits prompt construction that performs synchronous database queries ([receptionist_api.py:1095](/Users/michaelrickards/dev/bh2-BH-012-review/backend/receptionist_api.py:1095)). Those queries block the event loop, so the watchdog cannot run during stalled database setup. Once running, it closes sockets but never cancels the handler’s pending setup operation; cleanup and persistence can remain delayed, and [line 1265](/Users/michaelrickards/dev/bh2-BH-012-review/backend/receptionist_call_handler.py:1265) counts that delay as call duration. The closure correctly references the current `openai_ws`, and replacement/cancellation are present, but do not solve this. [test_metering.py:666](/Users/michaelrickards/dev/bh2-BH-012-review/backend/tests/test_metering.py:666) only tests a callback after a sleep—not delayed handler setup, socket cleanup, shorter-limit replacement or recorded duration. Enforce cancellation of setup and keep blocking work off the event loop; test the actual handler.
+
+2. **P2 — The outbox can send an obsolete blocking notice after calls have been re-enabled.**  
+   [metering.py:288](/Users/michaelrickards/dev/bh2-BH-012-review/backend/services/metering.py:288) combines the queued state with fresh usage without checking whether that state still applies. Example: a £5 cap queues `spend_cap_reached`; the owner raises it to £100 before delivery; the worker then announces that the **£100 cap has been reached**, despite only £5 spent and admission being allowed. Enabling extra minutes while an allowance notice is pending similarly produces a false refusal notice. Revalidate pending notices against current admission state before sending. No test covers settings changing between queueing and delivery.
+
+The other requested checks:
+
+| Item | Assessment |
+|---|---|
+| Finding 1 | Durable pending state and retry are genuinely tested. Worker-thread WhatsApp acknowledgement is correct by inspection, but the tests mock `notify_owner`; they do not exercise asynchronous delivery failure through the scheduler. |
+| Finding 2 | Resolved: delivery leaves the admission path, and an injected queue failure preserves refusal. |
+| Finding 4 | Historical accrual no longer queues a current blocking notice; genuinely tested. |
+| Finding 5 | SQL filters dates and missing markers and limits results to 500. Existing tests exercise reconciliation, but the batch-limit test only checks source strings—not a batch exceeding 500. |
+| Duplicate path | Resolved; the test verifies that the transaction ends. |
+| PostgreSQL SQL | No type defect found by inspection: recorded schema has `timestamptz` columns, the bound is timezone-aware, and UUID-to-text concatenation is explicit. PostgreSQL execution was not tested. |
+
+Permitted tests: **106 passed, 4 warnings**. No edits, pushes or network use; working tree clean.
+---
+
+### Status — 12 October 2026
+
+Three repair cycles used (AGENTS.md: default 3, then escalate). Not fixed
+without a decision from Mike; escalated with a recommendation.
