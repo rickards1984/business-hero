@@ -137,16 +137,29 @@ def meter_value(engine, bid, meter, period="2026-10"):
     return D(row[0]) if row else D("0")
 
 
+def _deliver(engine, biz):
+    """The scheduler's delivery tick (Codex BH-012 review 2: notices are sent
+    by a worker from durable pending markers, never inside a call or the
+    incoming-call request). Harness only: the assertions are unchanged."""
+    m = metering()
+    if hasattr(m, "deliver_pending_notices"):
+        with Session(engine) as s:
+            m.deliver_pending_notices(s, lookup=lambda session, bid: biz)
+
+
 def call(engine, biz, seconds):
     with Session(engine) as s:
         result = metering().record_call(s, biz, seconds)
         s.commit()
+    _deliver(engine, biz)
     return result
 
 
 def admit(engine, biz):
     with Session(engine) as s:
-        return metering().admit_call(s, biz)
+        result = metering().admit_call(s, biz)
+    _deliver(engine, biz)
+    return result
 
 
 def usage(engine, biz):
@@ -552,3 +565,125 @@ def test_aria_can_read_receptionist_usage_for_her_business_only(full_db, clock, 
     assert "90.0" not in str({k: v for k, v in result.items() if k != "remaining_minutes"})
     names = {t["function"]["name"] for t in assistant_tools.TOOL_DEFINITIONS}
     assert "get_receptionist_usage" in names
+
+
+
+# ------------------------------------------- Codex BH-012 review 2 additions ---
+
+def _pending(engine, bid, period="2026-10"):
+    with Session(engine) as s:
+        return [r[0] for r in s.execute(text(
+            "SELECT meter FROM usage_meters WHERE business_id=:b AND period=:p "
+            "AND meter LIKE 'pending:%'"), {"b": bid, "p": period}).fetchall()]
+
+
+def test_a_notice_survives_a_crash_before_delivery(database, clock, monkeypatch):
+    """Finding 1: reaching a limit leaves a durable pending notice; nothing is
+    sent inside the call. Whatever happens before delivery, the worker still
+    finds it."""
+    m = metering()
+    sent = []
+    monkeypatch.setattr(m, "notify_owner", lambda b, st, u: sent.append(st) or True)
+    with Session(database) as s:
+        m.record_call(s, business(), 60 * 121)
+        s.commit()
+    assert sent == [], "nothing may be sent inside the call path"
+    assert _pending(database, A) == ["pending:allowance_exhausted"]
+    with Session(database) as s:
+        m.deliver_pending_notices(s, lookup=lambda session, bid: business())
+    assert sent == ["allowance_exhausted"] and _pending(database, A) == []
+
+
+def test_an_undelivered_notice_stays_pending(database, clock, monkeypatch):
+    """Finding 1: only an ACKNOWLEDGED delivery clears the pending notice."""
+    m = metering()
+    monkeypatch.setattr(m, "notify_owner", lambda b, st, u: False)
+    with Session(database) as s:
+        m.record_call(s, business(), 60 * 121)
+        s.commit()
+        m.deliver_pending_notices(s, lookup=lambda session, bid: business())
+    assert _pending(database, A) == ["pending:allowance_exhausted"]
+
+
+def test_admission_sends_nothing_and_keeps_a_refusal_if_bookkeeping_fails(
+        database, clock, monkeypatch):
+    """Finding 2: no email inside the incoming-call request, and a failure
+    recording the notice must not turn a known refusal into an answer."""
+    m = metering()
+    sent = []
+    monkeypatch.setattr(m, "notify_owner", lambda b, st, u: sent.append(st) or True)
+    with Session(database) as s:
+        m.record_call(s, business(), 60 * 125)
+        s.commit()
+    with Session(database) as s:
+        s.execute(text("DELETE FROM usage_meters WHERE meter LIKE 'pending:%'"))
+        s.commit()
+
+    def broken(*a, **k):
+        raise RuntimeError("marker write failed")
+    monkeypatch.setattr(m, "_queue_notice", broken)
+    with Session(database) as s:
+        assert m.admit_call(s, business()) == (False, "allowance_exhausted")
+    assert sent == []
+
+
+def test_reconciling_last_month_raises_no_notice_for_this_month(database, clock, notices):
+    """Finding 4: an October call metered in November must not announce that
+    November's calls are blocked."""
+    clock(datetime(2026, 11, 2, 9, 0, tzinfo=LONDON))
+    with Session(database) as s:
+        metering().record_call(s, business(), 60 * 130, call_id="oct-late",
+                               at=datetime(2026, 10, 31, 22, 0, tzinfo=LONDON))
+        s.commit()
+    assert _pending(database, A, "2026-10") == [] and _pending(database, A, "2026-11") == []
+    assert notices == []
+
+
+def test_reconciliation_is_bounded_and_filtered_in_sql():
+    """Finding 5: no full-history fetch every 15 minutes."""
+    import inspect
+    source = inspect.getsource(metering().reconcile_unmetered_calls)
+    assert "NOT EXISTS" in source and "LIMIT" in source
+    assert ":since" in source, "the date window must be applied in SQL"
+
+
+def test_reconciliation_ignores_calls_older_than_last_month(full_db, clock, notices):
+    with Session(full_db) as s:
+        s.execute(text("INSERT INTO calls VALUES ('old',:a,'receptionist',"
+                       "'2026-07-01T10:00:00+00:00','2026-07-01T10:05:00+00:00',300)"), {"a": A})
+        s.commit()
+        assert metering().reconcile_unmetered_calls(s) == 0
+
+
+def test_a_duplicate_accrual_does_not_hold_its_lock(database, clock, notices):
+    biz = business()
+    with Session(database) as s:
+        metering().record_call(s, biz, 60, call_id="dup")
+        metering().record_call(s, biz, 60, call_id="dup")
+        assert not s.in_transaction(), "the duplicate path must end its transaction"
+
+
+def test_the_call_watchdog_ends_a_call_stuck_in_setup():
+    """Finding 3: the deadline covers setup too. The watchdog closes the
+    call's sockets when time is up, whatever the call is doing."""
+    import asyncio
+    closed = []
+
+    async def closer():
+        closed.append("closed")
+
+    async def run():
+        task = asyncio.create_task(metering().call_watchdog(0.01, [closer]))
+        await asyncio.sleep(0.05)
+        return task.done()
+    assert asyncio.run(run()) is True and closed == ["closed"]
+
+
+def test_the_watchdog_starts_when_the_call_starts():
+    import inspect
+    metering()
+    import receptionist_call_handler as rch
+    source = inspect.getsource(rch.receptionist_media_stream)
+    start = source.index("call_start_time = datetime.utcnow()")
+    assert "call_watchdog" in source[start:start + 1500], \
+        "the watchdog must start right after the call starts, before setup"
