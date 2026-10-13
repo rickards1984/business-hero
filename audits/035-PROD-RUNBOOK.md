@@ -56,6 +56,65 @@ Paste **only** SECTION 1 from the migration file, from its first `BEGIN;` to
 its `COMMIT;`. It covers the table, two CHECKs, one index, RLS, one read
 policy and the grants.
 
+It is copied here exactly from the migration file:
+
+```sql
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS public.aria_actions (
+  id           uuid         PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id  uuid         NOT NULL
+                            REFERENCES public.businesses(id) ON DELETE CASCADE,
+  proposed_by  uuid,
+  action_type  text         NOT NULL,
+  payload      jsonb        NOT NULL,
+  status       text         NOT NULL DEFAULT 'proposed',
+  approved_by  uuid,
+  approved_at  timestamptz,
+  executed_at  timestamptz,
+  expires_at   timestamptz  NOT NULL,
+  result       jsonb,
+  error        text,
+  created_at   timestamptz  NOT NULL DEFAULT now(),
+  updated_at   timestamptz  NOT NULL DEFAULT now()
+);
+
+ALTER TABLE public.aria_actions
+  DROP CONSTRAINT IF EXISTS aria_actions_type_chk;
+ALTER TABLE public.aria_actions
+  ADD CONSTRAINT aria_actions_type_chk
+  CHECK (action_type IN ('send_email', 'send_invoice_chase',
+                         'create_calendar_event', 'create_task'));
+
+ALTER TABLE public.aria_actions
+  DROP CONSTRAINT IF EXISTS aria_actions_status_chk;
+ALTER TABLE public.aria_actions
+  ADD CONSTRAINT aria_actions_status_chk
+  CHECK (status IN ('proposed', 'executing', 'done', 'failed',
+                    'dismissed', 'expired'));
+
+-- "This business's open cards, newest first" and the approve claim.
+CREATE INDEX IF NOT EXISTS idx_aria_actions_biz_status_created
+  ON public.aria_actions USING btree (business_id, status, created_at DESC);
+
+ALTER TABLE public.aria_actions ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS aria_actions_member_read ON public.aria_actions;
+CREATE POLICY aria_actions_member_read
+  ON public.aria_actions
+  AS PERMISSIVE FOR SELECT TO authenticated
+  USING (public.is_business_member(auth.uid(), aria_actions.business_id)
+         OR public.is_platform_admin(auth.uid()));
+
+REVOKE ALL ON public.aria_actions FROM anon;
+REVOKE ALL ON public.aria_actions FROM authenticated;
+GRANT SELECT ON public.aria_actions TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+  ON public.aria_actions TO service_role;
+
+COMMIT;
+```
+
 **EXPECT:** "Success. No rows returned."
 
 **STOP IF:** any error. Nothing will have changed, because it is one
