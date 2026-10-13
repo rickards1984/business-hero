@@ -14,7 +14,7 @@ import os
 import json
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 
@@ -90,6 +90,9 @@ router = APIRouter(prefix="/v1/receptionist", tags=["Receptionist Calls"])
 # ---------------------------------------------------------------------------
 # Helper: save a call record using raw SQL (Call model lacks migration-only cols)
 # ---------------------------------------------------------------------------
+
+_CLOSE_TIMEOUT_SECONDS = 2  # a slow peer's close handshake is not waited on
+
 
 def _load_call_setup(business_id: str):
     """The call's prompt and config id, read synchronously — the handler runs
@@ -668,6 +671,7 @@ async def receptionist_media_stream(ws: WebSocket):
     messages_taken: List[dict] = []
     receptionist_config_id: Optional[str] = None
     timed_out = False
+    call_limit_seconds: float = 0
     twilio_task = openai_task = None
 
     try:
@@ -737,8 +741,11 @@ async def receptionist_media_stream(ws: WebSocket):
             timed_out = True
             handler_task.cancel()
 
+        # The handler is stopped FIRST, so a slow close cannot hold the call
+        # open (Codex BH-012 review 4); `finally` bounds the closing.
+        call_limit_seconds = _metering.CALL_HARD_CAP_SECONDS
         watchdog = asyncio.create_task(_metering.call_watchdog(
-            _metering.CALL_HARD_CAP_SECONDS, [_close_call, _end_handler]))
+            call_limit_seconds, [_end_handler, _close_call]))
 
         # ---- PHASE 2: Build system prompt & connect to OpenAI ----
         # In a thread: the prompt build's queries are synchronous, and on the
@@ -759,10 +766,11 @@ async def receptionist_media_stream(ws: WebSocket):
         _configured_limit = _metering.call_time_limit_seconds(
             (config_data or {}).get("max_call_duration_seconds"))
         if _configured_limit < _metering.CALL_HARD_CAP_SECONDS:
+            call_limit_seconds = _configured_limit
             watchdog.cancel()
             watchdog = asyncio.create_task(_metering.call_watchdog(
                 _metering.seconds_left_in_call(_configured_limit, call_start_time),
-                [_close_call, _end_handler]))
+                [_end_handler, _close_call]))
         preset_id = prompt_data.get("voice_preset_id")
         accent_name = prompt_data.get("accent")
         preset_verified = prompt_data.get("preset_verified", True)
@@ -1276,18 +1284,23 @@ async def receptionist_media_stream(ws: WebSocket):
             if _task is not None and not _task.done():
                 _task.cancel()
 
+        # The call ends now — or, if the deadline ended it, at the deadline:
+        # teardown is never metered (Codex BH-012 review 4).
+        call_end_time = datetime.utcnow()
+        if timed_out and call_start_time:
+            call_end_time = min(call_end_time,
+                                call_start_time + timedelta(seconds=call_limit_seconds))
+
         if openai_ws:
             try:
-                await openai_ws.close()
-            except Exception:
+                await asyncio.wait_for(openai_ws.close(), _CLOSE_TIMEOUT_SECONDS)
+            except (Exception, asyncio.TimeoutError):
                 pass
 
         try:
-            await ws.close()
-        except Exception:
+            await asyncio.wait_for(ws.close(), _CLOSE_TIMEOUT_SECONDS)
+        except (Exception, asyncio.TimeoutError):
             pass
-
-        call_end_time = datetime.utcnow()
         duration_seconds: Optional[int] = None
         if call_start_time:
             duration_seconds = int((call_end_time - call_start_time).total_seconds())
