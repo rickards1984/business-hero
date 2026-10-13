@@ -5,6 +5,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
+import asyncio
 from typing import Optional, Tuple
 from openai import OpenAI
 from sqlalchemy import text
@@ -16,8 +17,17 @@ from assistant_tools import TOOL_DEFINITIONS, execute_tool
 logger = logging.getLogger(__name__)
 
 
-async def _execute_tool_async(tool_name: str, arguments: dict, business_id: str, timezone: str = "Europe/London") -> dict:
+async def _execute_tool_async(tool_name: str, arguments: dict, business_id: str, timezone: str = "Europe/London",
+                              user_id: Optional[str] = None, user_name: Optional[str] = None) -> dict:
     """Wrapper that handles async booking tools, delegating everything else to the sync execute_tool."""
+    # NS-B10: the four approvable actions become approval cards — stored,
+    # never executed here. Only a caller that says who is asking may
+    # propose; anything else falls through to the NS-A1 refusal.
+    from services import aria_actions
+    if tool_name in aria_actions.ACTION_TYPES and user_id:
+        return await asyncio.to_thread(
+            aria_actions.propose_from_chat, str(business_id), user_id, tool_name,
+            dict(arguments or {}), owner_name=user_name, timezone=timezone)
     # NS-A1: refuse before anything else. This wrapper handles calendar
     # booking itself, so the shared dispatcher's check alone would not cover it.
     from assistant_tools import refusal
@@ -301,16 +311,16 @@ Good: "Let me check your calendar... Okay, you've got a quiet morning but there'
 
 When using tools, always briefly acknowledge to the user that you're checking before making the call. This prevents awkward silences during data fetching.
 
-### What you cannot do yourself yet
-You can read and draft, but you cannot send emails, chase invoices, book
-calendar events, or add or remove tasks. The owner does those themselves for
-now; a tap-to-approve button is coming. When asked, say so plainly and point
-them to the right place:
-- Email: show the draft in this conversation (use draft_email_reply), and say they can copy it into a reply from their own email. The draft is not saved anywhere, so never say it is.
-- Invoice chase: say they can open the invoice in Finance and use Send Chase Email.
-- Calendar: offer free slots from check_calendar_availability, and say they can add it in their own calendar.
-- Tasks: say they can add it in the Tasks panel (Dashboard, Tasks, View all), and you can check their tasks whenever they ask. There is no remove button; a finished task can be marked complete there.
-Never say or imply you have sent, booked, chased or added something.
+### Approval cards: how you act
+You can prepare four things as an approval card: an email, an invoice chase,
+a calendar booking and a new task. Preparing one does nothing by itself. The
+owner sees a card showing exactly what will happen, and it happens only when
+they tap Approve on it. Then it is done once, and emails go from their own
+connected mailbox with your sign-off added automatically.
+- After preparing a card, say in one sentence that it is ready for them to check and approve. Never say it has been sent, booked, chased or added.
+- A reply such as "yes" or "send it" is not an approval. Point them to the Approve button on the card.
+- If a card cannot be prepared (for example the invoice is already paid, or the address is not a real email address), say why plainly.
+- You cannot remove tasks, and there is no remove button; a finished task can be marked complete in the Tasks panel (Dashboard, Tasks, View all).
 
 ### Email Briefings
 When checking emails:
@@ -342,18 +352,18 @@ When asked about the user's schedule, appointments, or meetings:
 You can help plan appointments:
 - Use check_calendar_availability to find free slots on a specific date
 - Use list_google_calendars to show which calendars the user has
-You cannot book them yourself yet: offer the slots so the owner can add it.
+Check availability first, then prepare a booking card for the slot the owner chooses.
 
 ### Emails
 When the user wants to reply to or send an email:
-1. Use draft_email_reply to prepare it, and show them the draft
+1. Read the email first if it is a reply (get_email_detail)
 2. Make sure the recipient is an actual email address from list_emails results, not just a name
-3. Tell them they can copy it into a reply from their own email. You cannot send it yourself yet, and it is not saved anywhere.
+3. Prepare an email card. Write the body only: your sign-off is added for you.
 
 ### Critical Rules
 - NEVER pretend to perform an action. If a tool call is needed, make the tool call. Never describe performing an action in text that requires a tool.
 - Keep confirmations brief — one sentence is enough. Do not repeat yourself.
-- You read and draft; you do not send, book, chase or add anything. Never confirm an action you did not take.
+- You read, draft and prepare approval cards; you never send, book, chase or add anything yourself. Never confirm an action that has not happened.
 - If a tool fails, explain briefly and offer an alternative. Do NOT retry endlessly.
 
 ### Accounting & Finances
@@ -404,10 +414,9 @@ You can help price up jobs and check on quotes. You cannot save or send quotes y
     base_prompt += """
 
 ### Email Signatures
-When drafting emails for the user to send:
-- If you know the user's name, sign drafts appropriately: "Best regards,\\n[User's Name]"
-- Never leave placeholders like "[Your Name]" - use the actual name or ask for it
-- Keep signatures professional and simple"""
+- On an email card, write no sign-off: yours is added automatically and says you are their AI assistant.
+- For text the user will send themselves, sign with their name if you know it ("Best regards,\\n[User's Name]")
+- Never leave placeholders like "[Your Name]" - use the actual name or ask for it"""
 
     if voice_mode:
         base_prompt += """
@@ -777,6 +786,7 @@ async def process_chat_message(
     
     MAX_TOOL_ROUNDS = 5
     assistant_reply = None
+    proposals: list = []  # NS-B10 approval cards raised this turn
     tool_round = 0
 
     while tool_round < MAX_TOOL_ROUNDS:
@@ -825,7 +835,11 @@ async def process_chat_message(
             logger.info(f"Executing tool (round {tool_round}): {tool_name} with args: {arguments}")
 
             try:
-                tool_result = await _execute_tool_async(tool_name, arguments, business.id, business.timezone)
+                tool_result = await _execute_tool_async(
+                    tool_name, arguments, business.id, business.timezone,
+                    user_id=user.id, user_name=user_name)
+                if isinstance(tool_result, dict) and tool_result.get("proposal"):
+                    proposals.append(tool_result["proposal"])
             except Exception as e:
                 logger.error(f"Tool execution error: {e}")
                 tool_result = {"success": False, "error": str(e)}
@@ -870,5 +884,6 @@ async def process_chat_message(
             "name": business.name,
             "timezone": business.timezone
         },
-        "conversation_id": resolved_conv_id
+        "conversation_id": resolved_conv_id,
+        "proposals": proposals,
     }

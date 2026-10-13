@@ -201,6 +201,9 @@ class ChatResponse(BaseModel):
     business_id: str = Field(..., description="Business ID used for context")
     business: ChatBusinessInfo = Field(..., description="Business context details")
     conversation_id: Optional[str] = Field(None, description="Conversation ID")
+    proposals: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="NS-B10: approval cards Aria raised this turn; nothing in them has been done")
 
 
 class BusinessSettingsResponse(BaseModel):

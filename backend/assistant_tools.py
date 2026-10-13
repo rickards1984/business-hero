@@ -421,6 +421,87 @@ TOOL_DEFINITIONS = [
                 "required": ["quote_number", "method"]
             }
         }
+    },    {
+        "type": "function",
+        "function": {
+            "name": "list_aria_actions",
+            "description": "What happened to your approval cards: each card's type, what it was for, and whether it is awaiting approval, done, not done, dismissed, expired, or not confirmed. Use it to answer 'did that chase go?' from the record.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "description": "Most recent first; default 20, max 50"}},
+                "required": []
+            }
+        }
+    },
+    # NS-B10: the four approvable actions. Calling one does NOT act: the chat
+    # boundary stores it as a card the owner approves with a tap
+    # (services/aria_actions.py). execute_tool still refuses them.
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "Draft an email for the owner to approve. It appears as a card showing the recipient, subject, body and your sign-off; nothing is sent unless the owner taps Approve. Write the body only: the sign-off is added for you.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Recipient's email address (a real address, e.g. from list_emails)"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string", "description": "Plain text, no sign-off"}
+                },
+                "required": ["to", "subject", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_invoice_chase",
+            "description": "Prepare an invoice chase for the owner to approve. It uses the business's chase template for the next stage and appears as a card; nothing is sent unless the owner taps Approve.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "invoice_id": {"type": "string", "description": "The invoice's id from list_invoices or get_overdue_invoices"},
+                    "chase_stage": {"type": "integer", "description": "Optional stage 1-4; defaults to the next stage"}
+                },
+                "required": ["invoice_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_calendar_event",
+            "description": "Propose a calendar booking for the owner to approve. It appears as a card; nothing is booked unless the owner taps Approve. Check availability first.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "start_time": {"type": "string", "description": "HH:MM, 24-hour, in the business's timezone"},
+                    "duration_minutes": {"type": "integer", "description": "Default 60"},
+                    "description": {"type": "string"},
+                    "attendee_email": {"type": "string", "description": "Optional; Google emails them an invitation once approved"},
+                    "calendar_id": {"type": "string", "description": "Optional; 'primary' by default"}
+                },
+                "required": ["title", "date", "start_time"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_task",
+            "description": "Propose a task for the owner's list. It appears as a card; it is added only if the owner taps Approve.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "due_at": {"type": "string", "description": "Optional due date, YYYY-MM-DD"}
+                },
+                "required": ["title"]
+            }
+        }
     },
 ]
 
@@ -542,6 +623,8 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _list_quotes(engine, business_id, arguments)
     elif tool_name == "get_receptionist_usage":
         return _get_receptionist_usage(engine, business_id, arguments)
+    elif tool_name == "list_aria_actions":
+        return _list_aria_actions(engine, business_id, arguments)
     elif tool_name == "send_quote":
         return _send_quote_via_aria(engine, business_id, arguments)
     else:
@@ -2005,9 +2088,12 @@ async def create_calendar_event(
     if resp.status_code == 401 and refresh_ciphertext:
         try:
             access_token = _refresh_google_token(engine, account_id, refresh_ciphertext)
-            resp = await _create(access_token)
         except Exception:
             return {"error": "Calendar token expired — please reconnect Google", "success": False}
+        # Outside the try: if the RETRIED booking times out, Google may have
+        # created the event. That must surface as an unknown outcome, not as
+        # "token expired" (Codex NS-B10 review 2, finding 1).
+        resp = await _create(access_token)
 
     if resp.status_code not in (200, 201):
         return {"error": f"Failed to create event: {resp.status_code} {resp.text}", "success": False}
@@ -2864,6 +2950,41 @@ def _get_cashflow_forecast(engine, business_id: str, args: dict) -> dict:
 
 
 # ── Quoting ──────────────────────────────────────────────
+
+def _list_aria_actions(engine, business_id: str, args: dict) -> dict:
+    """NS-B10 (Codex review 1, finding 7): what happened to Aria's approval
+    cards, from the record — this business only, newest first."""
+    import json as _json
+    limit = max(1, min(int(args.get("limit") or 20), 50))
+    from services import aria_actions as _aria_actions
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT action_type, status, payload, error, created_at, executed_at, expires_at
+            FROM aria_actions WHERE business_id = :business_id
+            ORDER BY created_at DESC LIMIT :limit
+        """), {"business_id": str(business_id), "limit": limit}).fetchall()
+    meaning = {
+        "proposed": "awaiting the owner's approval", "executing": "outcome not confirmed",
+        "done": "done", "failed": "not done", "dismissed": "dismissed by the owner",
+        "expired": "expired without approval",
+    }
+    actions = []
+    for action_type, status, payload, error, created_at, executed_at, expires_at in rows:
+        # An untouched card past its expiry is still stored as `proposed`,
+        # but it can no longer be approved (review 2, finding 4).
+        if status == "proposed" and _aria_actions._is_expired(expires_at):
+            status = "expired"
+        p = _json.loads(payload) if isinstance(payload, str) else (payload or {})
+        actions.append({
+            "action_type": action_type, "status": status, "meaning": meaning.get(status, status),
+            "to": p.get("to"), "subject": p.get("subject"), "title": p.get("title"),
+            "invoice_number": p.get("invoice_number"), "start": p.get("start"),
+            "error": error,
+            "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            "executed_at": executed_at.isoformat() if hasattr(executed_at, "isoformat") else executed_at,
+        })
+    return {"actions": actions, "count": len(actions)}
+
 
 def _get_receptionist_usage(engine, business_id: str, args: dict) -> dict:
     """This month's receptionist minutes, extra minutes and cap (BH-012;

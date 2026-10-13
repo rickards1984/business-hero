@@ -25,12 +25,14 @@ import SendIcon from '@mui/icons-material/Send';
 import { useAuth } from '@/contexts/AuthContext';
 import { apiRequest } from '@/lib/queryClient';
 import RealtimeVoice from '@/components/RealtimeVoice';
+import ApprovalCard, { Proposal } from '@/components/ApprovalCard';
 
 type ChatRole = 'user' | 'assistant';
 
 interface ChatMessage {
   role: ChatRole;
   content: string;
+  proposals?: Proposal[];  // NS-B10: Aria's drafts awaiting a tap
 }
 
 const QUICK_ACTIONS = [
@@ -110,7 +112,9 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
         throw new Error(errorData.detail || 'Failed to send message');
       }
       const data = await response.json();
-      setMessages((prev) => [...prev, { role: 'assistant', content: data.reply || '' }]);
+      setMessages((prev) => [...prev, {
+        role: 'assistant', content: data.reply || '', proposals: data.proposals || [],
+      }]);
       if (data.conversation_id) {
         setConversationId(data.conversation_id);
       }
@@ -351,8 +355,9 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
             {/* Messages */}
             <Box sx={{ flex: 1, mb: 2, overflow: 'auto', maxHeight: '55vh', display: 'flex', flexDirection: 'column', gap: 1.5 }}>
               {messages.map((message, idx) => (
+                <Box key={`${message.role}-${idx}`} sx={{ display: 'flex', flexDirection: 'column', gap: 1,
+                  alignSelf: message.role === 'user' ? 'flex-end' : 'stretch' }}>
                 <Box
-                  key={`${message.role}-${idx}`}
                   sx={{
                     alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start',
                     bgcolor: message.role === 'user' ? '#7C3AED' : 'var(--glass-bg)',
@@ -377,6 +382,10 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                   ) : (
                     <Typography variant="body2" sx={{ color: 'inherit' }}>{message.content}</Typography>
                   )}
+                </Box>
+                {(message.proposals || []).map((proposal) => (
+                  <ApprovalCard key={proposal.id} proposal={proposal} />
+                ))}
                 </Box>
               ))}
               {loading && (

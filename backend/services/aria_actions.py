@@ -1,0 +1,582 @@
+"""Aria's approval cards — NS-B10 (ADR 0001 D9, D11, D12, D15, D18).
+
+Aria drafts an email, an invoice chase, a calendar booking or a task. The
+server stores EXACTLY what would be done (`aria_actions.payload`) and does
+nothing else. The owner sees it as a card; one tap approves it; the server
+then does what was stored, once. A "yes" typed or spoken to Aria is never an
+approval — only `approve()`, reached from the card's button, is.
+
+Once only (Mike's decision 4, 13 Oct 2026): approval CLAIMS the action
+(`status: proposed -> executing`) and commits that claim before anything is
+sent. A second tap, or a tap arriving mid-send, finds nothing to claim. An
+action interrupted mid-send stays `executing` and is never retried: for
+customer contact a missing chase is cheaper than a double one.
+
+Execution goes through assistant_tools' existing senders, looked up at call
+time, never through `execute_tool` (which still refuses all five actions to
+any caller that is not this approval path).
+"""
+
+import asyncio
+import hashlib
+import json
+import re
+import logging
+import uuid
+from datetime import date, datetime, timedelta, timezone
+from typing import Optional
+
+from fastapi import HTTPException
+from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
+
+ACTION_TYPES = ("send_email", "send_invoice_chase", "create_calendar_event", "create_task")
+EXPIRY = timedelta(hours=72)
+DEFAULT_ASSISTANT_NAME = "Aria"
+
+# Every action needs Aria; each then needs the feature it touches
+# (auth.CANONICAL_FEATURES).
+_FEATURES = {
+    "send_email": ("aria_chat", "email"),
+    "send_invoice_chase": ("aria_chat", "invoicing", "email"),
+    "create_calendar_event": ("aria_chat", "calendar_sync"),
+    "create_task": ("aria_chat",),
+}
+
+# What the owner may change on a card before approving it. The sign-off is
+# never editable; neither is a chase's recipient or invoice.
+_EDITABLE = {
+    "send_email": {"to", "subject", "body"},
+    "send_invoice_chase": {"subject", "body"},
+    "create_calendar_event": {"title", "date", "start_time", "duration_minutes",
+                              "description", "calendar_id"},
+    "create_task": {"title", "description", "due_at"},
+}
+
+SENT_MESSAGE = ("Shown to the owner as an approval card. Nothing has been sent or "
+                "done yet: it happens only if they tap Approve on the card.")
+
+
+class ActionRefused(Exception):
+    def __init__(self, status_code: int, detail: str):
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def sign_off(assistant_name: str, owner_name: Optional[str], business_name: Optional[str]) -> str:
+    """Mike's decision 2 (option A). Every line is true: Aria sends from the
+    owner's own connected mailbox, so a reply reaches them."""
+    assistant = assistant_name or DEFAULT_ASSISTANT_NAME
+    business = business_name or "the business"
+    if owner_name:
+        return (f"{assistant}\n"
+                f"AI assistant to {owner_name} at {business}\n"
+                f"I pass every message straight to {owner_name}. "
+                f"Reply to this email and it reaches {owner_name}.")
+    return (f"{assistant}\n"
+            f"AI assistant at {business}\n"
+            f"I pass every message straight to the team. "
+            f"Reply to this email and it reaches them.")
+
+
+def load_business(session, business_id: str):
+    from auth import _load_business
+    return _load_business(session, business_id)
+
+
+# ------------------------------------------------------------- plumbing ---
+
+def _is_postgres(session) -> bool:
+    return session.get_bind().dialect.name == "postgresql"
+
+
+def _json_param(session) -> str:
+    return "CAST(:payload AS jsonb)" if _is_postgres(session) else ":payload"
+
+
+def version_of(payload: dict) -> str:
+    """A short fingerprint of exactly what a card will do. Approval carries
+    the version the owner saw; a different stored version is refused (Codex
+    NS-B10 review 1, finding 1)."""
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _loads(value):
+    if value is None or isinstance(value, (dict, list)):
+        return value
+    return json.loads(value)
+
+
+def _iso(value) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.replace(" ", "T", 1)
+    return value.isoformat()
+
+
+def _feature_problem(business, action_type: str) -> Optional[str]:
+    from auth import assert_feature_access
+    for feature in _FEATURES[action_type]:
+        try:
+            assert_feature_access(business, feature)
+        except HTTPException as exc:
+            return str(exc.detail)
+    return None
+
+
+def _valid_address(address: str) -> Optional[str]:
+    if not address:
+        return "An email address for the recipient is required."
+    if "@" not in address:
+        return f"'{address}' is not an email address."
+    local, _, domain = address.rpartition("@")
+    if not local or "." not in domain or " " in address:
+        return f"'{address}' is not a valid email address."
+    return None
+
+
+# ------------------------------------------------------- building payloads ---
+
+def _email_payload(args: dict, owner_name, business) -> dict:
+    to = str(args.get("to") or "").strip()
+    subject = str(args.get("subject") or "").strip()
+    body = str(args.get("body") or "").replace("\\n", "\n").strip()
+    problem = _valid_address(to)
+    if problem:
+        raise ActionRefused(422, problem)
+    if not subject or not body:
+        raise ActionRefused(422, "An email needs a subject and a body.")
+    return {"to": to, "subject": subject, "body": body,
+            "sign_off": args.get("sign_off") or sign_off(
+                DEFAULT_ASSISTANT_NAME, owner_name, getattr(business, "name", None))}
+
+
+def _invoice(session, business_id: str, invoice_id: str):
+    return session.execute(text(
+        "SELECT id, invoice_number, customer_name, customer_email, amount, status, "
+        "chase_stage, due_date FROM invoices "
+        "WHERE id = :invoice_id AND business_id = :business_id "
+        "AND (archived IS NULL OR archived = false)"),
+        {"invoice_id": str(invoice_id), "business_id": str(business_id)}).fetchone()
+
+
+def _chase_payload(session, business, args: dict, owner_name) -> dict:
+    from email_templates import get_chase_email_template
+    invoice_id = str(args.get("invoice_id") or "").strip()
+    if not invoice_id:
+        raise ActionRefused(422, "invoice_id is required. Use list_invoices to find it.")
+    try:
+        uuid.UUID(invoice_id)
+    except ValueError:
+        raise ActionRefused(422, f"Invoice {invoice_id} not found.")
+    row = _invoice(session, business.id, invoice_id)
+    if row is None:
+        raise ActionRefused(422, f"Invoice {invoice_id} not found.")
+    _, number, customer, customer_email, amount, status, current_stage, due = row
+    if (status or "").lower() == "paid":
+        raise ActionRefused(422, f"Invoice {number} is already paid. No chase needed.")
+    if not customer_email:
+        raise ActionRefused(422, f"Invoice {number} has no customer email address.")
+    requested = args.get("chase_stage")
+    stage = min(max(int(requested), 1), 4) if requested else min((current_stage or 0) + 1, 4)
+    due_text = due.isoformat() if hasattr(due, "isoformat") else (str(due) if due else "N/A")
+    template = get_chase_email_template(
+        stage, {"customer_name": customer, "invoice_number": number, "amount": amount,
+                "due_date": due_text}, getattr(business, "name", None))
+    return {"invoice_id": invoice_id, "invoice_number": number, "customer_name": customer,
+            "to": customer_email, "subject": template["subject"], "body": template["body"],
+            "chase_stage": stage,
+            "sign_off": args.get("sign_off") or sign_off(
+                DEFAULT_ASSISTANT_NAME, owner_name, getattr(business, "name", None))}
+
+
+def _event_payload(args: dict, tz_name: str) -> dict:
+    from zoneinfo import ZoneInfo
+    from services import booking
+    title = str(args.get("title") or "").strip()
+    if not title:
+        raise ActionRefused(422, "A booking needs a title.")
+    try:
+        day = date.fromisoformat(str(args.get("date")))
+        hour, minute = (int(p) for p in str(args.get("start_time")).split(":")[:2])
+        minutes = int(args.get("duration_minutes") or 60)
+    except (TypeError, ValueError):
+        raise ActionRefused(422, "A booking needs a date (YYYY-MM-DD) and a start time (HH:MM).")
+    if minutes <= 0 or minutes > 24 * 60:
+        raise ActionRefused(422, "A booking must last between 1 minute and 24 hours.")
+    tz = ZoneInfo(tz_name or "Europe/London")
+    start = booking.local_time(day, hour, minute, tz)
+    if start is None:
+        raise ActionRefused(422, f"{args.get('start_time')} on {day.isoformat()} does not "
+                                 "exist or happens twice because the clocks change. "
+                                 "Pick another time.")
+    end = booking.slot_end(start, minutes)
+    return {"title": title, "date": day.isoformat(), "start_time": f"{hour:02d}:{minute:02d}",
+            "duration_minutes": minutes, "start": start.isoformat(), "end": end.isoformat(),
+            "timezone": tz_name or "Europe/London",
+            "calendar_id": str(args.get("calendar_id") or "primary"),
+            "description": str(args.get("description") or ""),
+            "attendee_email": args.get("attendee_email") or None}
+
+
+def _task_payload(args: dict) -> dict:
+    title = str(args.get("title") or "").strip()
+    if not title:
+        raise ActionRefused(422, "A task needs a title.")
+    return {"title": title, "description": args.get("description") or None,
+            "due_at": args.get("due_at") or None}
+
+
+def _build(session, business, action_type: str, args: dict, owner_name, tz_name) -> dict:
+    if action_type == "send_email":
+        return _email_payload(args, owner_name, business)
+    if action_type == "send_invoice_chase":
+        return _chase_payload(session, business, args, owner_name)
+    if action_type == "create_calendar_event":
+        return _event_payload(args, tz_name)
+    return _task_payload(args)
+
+
+def _view(row) -> dict:
+    (aid, action_type, payload, status, expires_at, error, result, created_at) = row
+    preview = _loads(payload)
+    return {"id": str(aid), "action_type": action_type, "status": status,
+            "preview": preview, "version": version_of(preview), "expires_at": _iso(expires_at),
+            "error": error, "result": _loads(result), "created_at": _iso(created_at)}
+
+
+_COLUMNS = "id, action_type, payload, status, expires_at, error, result, created_at"
+
+
+# ------------------------------------------------------------- the API ---
+
+def propose(session, business, user_id, action_type: str, args: dict, *,
+            owner_name: Optional[str] = None, timezone: Optional[str] = None) -> dict:
+    """Store a card. Acts on nothing. Returns {"proposal": ...} or {"error": ...}."""
+    if action_type not in ACTION_TYPES:
+        return {"error": f"{action_type} cannot be proposed."}
+    problem = _feature_problem(business, action_type)
+    if problem:
+        return {"error": f"This can't be done on your current plan: {problem}"}
+    tz_name = timezone or getattr(business, "timezone", None) or "Europe/London"
+    args = {k: v for k, v in dict(args or {}).items() if k != "sign_off"}
+    try:
+        payload = _build(session, business, action_type, args, owner_name, tz_name)
+    except ActionRefused as exc:
+        return {"error": exc.detail}
+    moment = now()
+    aid = str(uuid.uuid4())
+    session.execute(text(
+        f"INSERT INTO aria_actions (id, business_id, proposed_by, action_type, payload, "
+        f"status, expires_at, created_at, updated_at) VALUES (:id, :business_id, "
+        f":user_id, :action_type, {_json_param(session)}, 'proposed', :expires_at, "
+        f":now, :now)"),
+        {"id": aid, "business_id": str(business.id),
+         "user_id": str(user_id) if user_id else None, "action_type": action_type,
+         "payload": json.dumps(payload), "expires_at": moment + EXPIRY, "now": moment})
+    session.commit()
+    return {"proposal": {"id": aid, "action_type": action_type, "status": "proposed",
+                         "preview": payload, "version": version_of(payload),
+                         "expires_at": (moment + EXPIRY).isoformat(),
+                         "error": None, "result": None, "created_at": moment.isoformat()}}
+
+
+def _scoped(session, business, action_id: str):
+    try:
+        uuid.UUID(str(action_id))
+    except ValueError:
+        raise ActionRefused(404, "Not found")
+    row = session.execute(text(
+        f"SELECT {_COLUMNS} FROM aria_actions WHERE id = :id AND business_id = :business_id"),
+        {"id": str(action_id), "business_id": str(business.id)}).fetchone()
+    if row is None:
+        raise ActionRefused(404, "Not found")
+    return row
+
+
+def _is_expired(expires_at) -> bool:
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at.replace(" ", "T"))
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at <= now()
+
+
+def _set(session, business, action_id: str, **fields) -> None:
+    fields["updated_at"] = now()
+    result_sql = "CAST(:result AS jsonb)" if _is_postgres(session) else ":result"
+    assignments = ", ".join(
+        f"result = {result_sql}" if k == "result" else f"{k} = :{k}" for k in fields)
+    params = {k: (json.dumps(v, default=str) if k == "result" and v is not None else v)
+              for k, v in fields.items()}
+    session.execute(text(f"UPDATE aria_actions SET {assignments} "
+                         "WHERE id = :action_id AND business_id = :business_id"),
+                    {**params, "action_id": str(action_id), "business_id": str(business.id)})
+
+
+def _refuse_unclaimable(session, business, row):
+    status, expires_at = row[3], row[4]
+    if status == "proposed" and _is_expired(expires_at):
+        _set(session, business, row[0], status="expired")
+        session.commit()
+        raise ActionRefused(409, "This card has expired. Ask Aria again.")
+    if status == "proposed":
+        session.rollback()
+        raise ActionRefused(409, CHANGED)
+    session.rollback()
+    if status == "executing":
+        raise ActionRefused(409, "This is already being sent.")
+    raise ActionRefused(409, f"This card is already {status}.")
+
+
+CHANGED = "This card has changed since you saw it. Check it again before approving."
+
+_STATUS_IN_ERROR = re.compile(r"Failed to create event: (\d{3})")
+
+
+def _unknown_outcome(action_type: str, error: str) -> bool:
+    """True when the provider may have acted although we have no
+    confirmation (Codex review 1, finding 2). Only a definite rejection, or a
+    failure before anything was sent, may be called a failure: calling an
+    unconfirmed send 'not done' invites a second chase."""
+    if action_type in ("send_email", "send_invoice_chase"):
+        return error.startswith("Send failed") or "did not confirm" in error
+    if action_type == "create_calendar_event":
+        status = _STATUS_IN_ERROR.search(error)
+        return bool(status) and (int(status.group(1)) >= 500 or status.group(1) == "429")
+    return False
+
+
+def _succeeded(result) -> bool:
+    return isinstance(result, dict) and result.get("success") is not False \
+        and not result.get("error")
+
+
+def approve(session, business, action_id: str, user_id, version: Optional[str] = None) -> dict:
+    """The tap. Executes exactly the stored payload — the version the owner
+    saw, when they say which — at most once."""
+    row = _scoped(session, business, action_id)
+    action_type = row[1]
+    problem = _feature_problem(business, action_type)
+    if problem:
+        session.rollback()
+        raise ActionRefused(403, problem)
+    stored = row[2] if isinstance(row[2], str) else json.dumps(row[2])
+    if version is not None and version != version_of(_loads(row[2])):
+        session.rollback()
+        raise ActionRefused(409, CHANGED)
+    seen = "CAST(:seen AS jsonb)" if _is_postgres(session) else ":seen"
+
+    moment = now()
+    claimed = session.execute(text(
+        "UPDATE aria_actions SET status = 'executing', approved_by = :user_id, "
+        "approved_at = :now, updated_at = :now "
+        "WHERE id = :id AND business_id = :business_id AND status = 'proposed' "
+        f"AND expires_at > :now AND payload = {seen} RETURNING payload"),
+        {"id": str(action_id), "business_id": str(business.id),
+         "user_id": str(user_id) if user_id else None, "now": moment,
+         "seen": stored}).fetchone()
+    if claimed is None:
+        session.rollback()
+        _refuse_unclaimable(session, business, _scoped(session, business, action_id))
+    # The claim is durable BEFORE anything leaves the building.
+    session.commit()
+    payload = _loads(claimed[0])
+
+    if action_type == "send_invoice_chase":
+        invoice = _invoice(session, business.id, payload["invoice_id"])
+        reason = None
+        if invoice is None:
+            reason = "The invoice no longer exists; nothing was sent."
+        elif (invoice[5] or "").lower() == "paid":
+            reason = "Invoice already paid; nothing was sent."
+        elif (invoice[6] or 0) >= int(payload["chase_stage"]):
+            # Codex review 1, finding 6: never resend an earlier stage or
+            # move the invoice's stage backwards.
+            reason = (f"This chase is out of date: the invoice has already had stage "
+                      f"{invoice[6]}. Nothing was sent; ask Aria for a fresh one.")
+        if reason:
+            _set(session, business, action_id, status="failed", error=reason, executed_at=now())
+            session.commit()
+            raise ActionRefused(409, reason)
+
+    try:
+        result = _execute(session, business, action_type, payload)
+    except Exception as exc:
+        # We do not know whether the provider acted. Leave it `executing`
+        # (never retried) and say so — not "failed" (review 1, finding 2).
+        # A crash (BaseException) skips this and also leaves `executing`.
+        logger.error("[AriaActions] %s %s outcome unknown: %s", action_type, action_id, exc)
+        _set(session, business, action_id, error=f"Outcome unknown: {exc}")
+        session.commit()
+        return _view(_scoped(session, business, action_id))
+
+    if not _succeeded(result):
+        error = str(result.get("error") if isinstance(result, dict) else result) or "Failed"
+        if _unknown_outcome(action_type, error):
+            _set(session, business, action_id, error=f"Outcome unknown: {error}",
+                 result=result if isinstance(result, dict) else None)
+        else:
+            _set(session, business, action_id, status="failed", error=error,
+                 executed_at=now(), result=result if isinstance(result, dict) else None)
+        session.commit()
+        return _view(_scoped(session, business, action_id))
+
+    if action_type in ("send_email", "send_invoice_chase"):
+        _bookkeep_email(session, business, action_type, payload, result)
+    _set(session, business, action_id, status="done", executed_at=now(), result=result)
+    session.commit()
+    return _view(_scoped(session, business, action_id))
+
+
+def _execute(session, business, action_type: str, payload: dict) -> dict:
+    import assistant_tools
+    engine = session.get_bind()
+    business_id = str(business.id)
+    if action_type in ("send_email", "send_invoice_chase"):
+        body = payload["body"] + "\n\n" + payload["sign_off"]
+        return assistant_tools._send_email(
+            engine, business_id, {"to": payload["to"], "subject": payload["subject"],
+                                  "body": body})
+    if action_type == "create_calendar_event":
+        return _run(assistant_tools.create_calendar_event(
+            business_id, payload["title"], payload["start"], payload["end"],
+            description=payload.get("description") or "",
+            attendee_email=payload.get("attendee_email"),
+            timezone=payload["timezone"], calendar_id=payload.get("calendar_id") or "primary"))
+    return assistant_tools._create_task(
+        engine, business_id, {"title": payload["title"],
+                              "description": payload.get("description"),
+                              "due_at": payload.get("due_at")})
+
+
+def _run(coroutine):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    raise RuntimeError("approve() must run outside the event loop (the API runs it in a thread)")
+
+
+def _bookkeep_email(session, business, action_type: str, payload: dict, result: dict) -> None:
+    """Record the send in email_outbox and, for a chase, advance the invoice.
+    The email has gone: a failure here is logged, never turned into a
+    'failed' card that invites a second send."""
+    try:
+        account = session.execute(text(
+            "SELECT id FROM email_accounts WHERE business_id = :business_id "
+            "AND provider IN ('google', 'microsoft') ORDER BY created_at DESC LIMIT 1"),
+            {"business_id": str(business.id)}).fetchone()
+        sent_at = now()
+        if account is not None:
+            to_sql = "ARRAY[:to_email]" if _is_postgres(session) else ":to_email"
+            session.execute(text(
+                f"INSERT INTO email_outbox (id, business_id, email_account_id, to_emails, "
+                f"subject, body_preview, status, invoice_id, chase_stage, "
+                f"provider_message_id, sent_at) VALUES (:id, :business_id, :account_id, "
+                f"{to_sql}, :subject, :preview, 'sent', :invoice_id, :chase_stage, "
+                f":provider_id, :sent_at)"),
+                {"id": str(uuid.uuid4()), "business_id": str(business.id),
+                 "account_id": str(account[0]), "to_email": payload["to"],
+                 "subject": payload["subject"], "preview": payload["body"][:200],
+                 "invoice_id": payload.get("invoice_id"),
+                 "chase_stage": payload.get("chase_stage"),
+                 "provider_id": result.get("gmail_message_id"), "sent_at": sent_at})
+        if action_type == "send_invoice_chase":
+            # Never backwards (review 1, finding 6).
+            session.execute(text(
+                "UPDATE invoices SET chase_stage = CASE WHEN COALESCE(chase_stage, 0) < :stage "
+                "THEN :stage ELSE chase_stage END, last_chased_at = :now, "
+                "updated_at = :now WHERE id = :invoice_id AND business_id = :business_id"),
+                {"stage": payload["chase_stage"], "now": sent_at,
+                 "invoice_id": payload["invoice_id"], "business_id": str(business.id)})
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.error("[AriaActions] sent, but recording it failed for %s: %s",
+                     business.id, exc)
+
+
+def edit(session, business, action_id: str, changes: dict) -> dict:
+    row = _scoped(session, business, action_id)
+    action_type, payload, status = row[1], _loads(row[2]), row[3]
+    if status != "proposed" or _is_expired(row[4]):
+        session.rollback()
+        raise ActionRefused(409, f"Only a card awaiting approval can be edited (this one is {status}).")
+    changes = dict(changes or {})
+    if "sign_off" in changes:
+        raise ActionRefused(422, "The sign-off cannot be changed.")
+    unknown = set(changes) - _EDITABLE[action_type]
+    if unknown:
+        raise ActionRefused(422, f"These cannot be changed: {', '.join(sorted(unknown))}.")
+    merged = {**payload, **changes}
+    tz_name = payload.get("timezone") or getattr(business, "timezone", None) or "Europe/London"
+    if action_type == "send_invoice_chase":
+        subject = str(merged.get("subject") or "").strip()
+        body = str(merged.get("body") or "").strip()
+        if not subject or not body:
+            raise ActionRefused(422, "A chase needs a subject and a body.")
+        new_payload = {**payload, "subject": subject, "body": body}
+    else:
+        new_payload = _build(session, business, action_type, merged, None, tz_name)
+        if "sign_off" in payload:
+            new_payload["sign_off"] = payload["sign_off"]
+    session.execute(text(
+        f"UPDATE aria_actions SET payload = {_json_param(session)}, updated_at = :now "
+        "WHERE id = :id AND business_id = :business_id AND status = 'proposed'"),
+        {"payload": json.dumps(new_payload), "now": now(), "id": str(action_id),
+         "business_id": str(business.id)})
+    session.commit()
+    return _view(_scoped(session, business, action_id))
+
+
+def dismiss(session, business, action_id: str) -> dict:
+    """Conditional on `proposed`: if approval won the race, this is a
+    conflict and the action carries on (Codex review 1, finding 4)."""
+    _scoped(session, business, action_id)
+    gone = session.execute(text(
+        "UPDATE aria_actions SET status = 'dismissed', updated_at = :now "
+        "WHERE id = :id AND business_id = :business_id AND status = 'proposed' RETURNING id"),
+        {"now": now(), "id": str(action_id), "business_id": str(business.id)}).fetchone()
+    if gone is None:
+        session.rollback()
+        current = _scoped(session, business, action_id)[3]
+        raise ActionRefused(409, f"This card is already {current}.")
+    session.commit()
+    return _view(_scoped(session, business, action_id))
+
+
+def get(session, business, action_id: str) -> dict:
+    return _view(_scoped(session, business, action_id))
+
+
+def list_open(session, business) -> list:
+    rows = session.execute(text(
+        f"SELECT {_COLUMNS} FROM aria_actions WHERE business_id = :business_id "
+        "AND status = 'proposed' AND expires_at > :now ORDER BY created_at DESC"),
+        {"business_id": str(business.id), "now": now()}).fetchall()
+    return [_view(r) for r in rows]
+
+
+def propose_from_chat(business_id: str, user_id, action_type: str, args: dict, *,
+                      owner_name: Optional[str] = None,
+                      timezone: Optional[str] = None) -> dict:
+    """The chat boundary: what the model's tool call becomes."""
+    from db import get_session_context
+    with get_session_context() as session:
+        business = load_business(session, business_id)
+        if business is None:
+            return {"error": "Business not found."}
+        result = propose(session, business, user_id, action_type, args,
+                         owner_name=owner_name, timezone=timezone)
+    if "proposal" not in result:
+        return result
+    return {"proposal": result["proposal"], "message": SENT_MESSAGE}
