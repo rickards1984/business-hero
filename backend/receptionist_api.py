@@ -6,6 +6,7 @@ Handles config, knowledge base, voice options, call history, stats, and admin op
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from services.spoken_time import spoken_date, spoken_time
 from typing import Optional, Dict, Any, TYPE_CHECKING
 from uuid import UUID
 
@@ -1168,7 +1169,8 @@ CORE IDENTITY:
 {personality_block}
 
 CURRENT CONTEXT:
-- Current time: {now.strftime('%H:%M on %A, %d %B %Y')}
+- Current time: {spoken_time(now, str(tz))} on {spoken_date(now, str(tz), now=now, full=True)}
+- Date for tool arguments only (do not read aloud): {now.date().isoformat()}
 - {hours_ctx}
 - Timezone: {cfg.timezone or 'Europe/London'}
 

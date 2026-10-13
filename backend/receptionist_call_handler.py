@@ -10,6 +10,7 @@ Endpoints:
   GET  /v1/receptionist/health          — system health check
 """
 
+from services.spoken_time import spoken_date, spoken_time
 import os
 import json
 import asyncio
@@ -366,11 +367,13 @@ async def handle_receptionist_function_call(
 
             date_str = arguments.get("date")
             day = date.fromisoformat(date_str)
+            spoken_day = spoken_date(day, str(rules.tz), now=bk.now(rules.tz))
+            day_phrase = spoken_day if spoken_day in ("today", "tomorrow") else f"on {spoken_day}"
             duration = bk.duration_for(rules, arguments.get("appointment_type"))
             if bk.opening(rules, day) is None:
                 return {
                     "success": True,
-                    "message": f"Sorry, we're not open on {day.strftime('%A')}s. Would you like to try another day?",
+                    "message": f"Sorry, we're not open {day_phrase}. Would you like to try another day?",
                 }
             avail = await assistant_tools.booking_availability(business_id, rules, day, duration)
             if avail.get("error"):
@@ -380,12 +383,14 @@ async def handle_receptionist_function_call(
             if not starts:
                 return {
                     "success": True,
-                    "message": f"Unfortunately there are no available times on {date_str}. Would you like to try another day?",
+                    "message": f"Unfortunately there are no available times {day_phrase}. Would you like to try another day?",
                 }
-            slot_text = ", ".join(s.strftime("%H:%M") for s in starts[:6])
+            slot_text = ", ".join(spoken_time(s, str(rules.tz)) for s in starts[:6])
             return {
                 "success": True,
-                "message": f"Available times on {date_str}: {slot_text}. Which time works best for you?",
+                "message": f"Available times {day_phrase}: {slot_text}. Which time works best for you?",
+                "slots": [{"start": s.isoformat(), "spoken": spoken_time(s, str(rules.tz))}
+                          for s in starts[:6]],
             }
         except Exception as e:
             logger.error(f"[Receptionist Fn] check_availability failed: {e}")
@@ -479,7 +484,8 @@ async def handle_receptionist_function_call(
                     "success": True,
                     "message": (
                         f"I've booked a {appointment_type} for {caller_name} "
-                        f"on {date_str} at {time_str}. {confirmation}"
+                        f"for {spoken_date(day, str(rules.tz), now=bk.now(rules.tz))} "
+                        f"at {spoken_time(start, str(rules.tz))}. {confirmation}"
                     ),
                 }
             return {

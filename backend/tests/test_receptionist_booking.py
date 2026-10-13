@@ -331,8 +331,8 @@ def test_availability_offered_to_a_caller_is_in_uk_time(monkeypatch, google, now
         business_id=BIZ, caller_number=CALLER, config={"timezone": "Europe/London"},
     ))
     assert result["success"] is True
-    assert "10:00" not in result["message"]
-    assert "11:00" in result["message"]
+    assert "10am" not in result["message"]
+    assert "11am" in result["message"]
 
 
 # --------------------------------------------- Aria's chat availability tool ---

@@ -5,6 +5,7 @@ import re
 import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import quote
 import pytz
 import httpx
 from cryptography.fernet import Fernet
@@ -1529,7 +1530,7 @@ def _list_calendar_events(engine, business_id: str, args: dict) -> dict:
     except Exception as e:
         return {"error": f"Failed to decrypt token: {str(e)}"}
     
-    return _fetch_google_calendar_events(
+    primary = _fetch_google_calendar_events(
         engine, 
         str(account_id), 
         access_token, 
@@ -1538,6 +1539,42 @@ def _list_calendar_events(engine, business_id: str, args: dict) -> dict:
         days_ahead,
         include_past
     )
+    if "error" in primary:
+        return primary
+    with engine.connect() as conn:
+        booking = conn.execute(text("""
+            SELECT calendar_id FROM booking_settings
+            WHERE business_id = :business_id
+        """), {"business_id": business_id}).fetchone()
+    calendar_id = booking[0] if booking else None
+    if not calendar_id or calendar_id == "primary":
+        return primary
+    extra = _fetch_google_calendar_events(
+        engine, str(account_id), access_token, refresh_token_ciphertext,
+        email_address, days_ahead, include_past, calendar_id=calendar_id,
+    )
+    if "error" in extra:
+        primary["warnings"] = ["The booking calendar could not be read. These results only include the main calendar."]
+        return primary
+    events = []
+    seen = set()
+    for event in primary["events"] + extra["events"]:
+        event_id = event.get("id")
+        if event_id and event_id in seen:
+            continue
+        if event_id:
+            seen.add(event_id)
+        events.append(event)
+
+    def start_key(event):
+        value = datetime.fromisoformat(event["start"].replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=pytz.utc)
+        return value.astimezone(pytz.utc)
+
+    primary["events"] = sorted(events, key=start_key)
+    primary["count"] = len(events)
+    return primary
 
 
 def _fetch_google_calendar_events(
@@ -1547,7 +1584,8 @@ def _fetch_google_calendar_events(
     refresh_token_ciphertext: Optional[str], 
     email_address: str, 
     days_ahead: int,
-    include_past: bool = False
+    include_past: bool = False,
+    calendar_id: str = "primary",
 ) -> dict:
     """Fetch events from Google Calendar API."""
     
@@ -1572,7 +1610,7 @@ def _fetch_google_calendar_events(
         }
         
         response = httpx.get(
-            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            f"https://www.googleapis.com/calendar/v3/calendars/{quote(calendar_id, safe='')}/events",
             headers=headers,
             params=params,
             timeout=30
@@ -1613,6 +1651,8 @@ def _fetch_google_calendar_events(
             
             events.append({
                 "id": event.get("id"),
+                "calendar_id": calendar_id,
+                "calendar": "main calendar" if calendar_id == "primary" else (data.get("summary") or "booking calendar"),
                 "title": event.get("summary", "No title"),
                 "description": event.get("description", "")[:200] if event.get("description") else None,
                 "location": event.get("location"),
@@ -1715,6 +1755,7 @@ def _get_calendar_briefing(engine, business_id: str, args: dict, timezone: str =
     
     return {
         "date": today_str,
+        "warnings": list(dict.fromkeys(today_result.get("warnings", []) + week_result.get("warnings", []))),
         "timezone": timezone,
         "today": {
             "total": len(today_events),
