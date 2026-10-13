@@ -18,7 +18,9 @@ any caller that is not this approval path).
 """
 
 import asyncio
+import hashlib
 import json
+import re
 import logging
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -96,6 +98,14 @@ def _is_postgres(session) -> bool:
 
 def _json_param(session) -> str:
     return "CAST(:payload AS jsonb)" if _is_postgres(session) else ":payload"
+
+
+def version_of(payload: dict) -> str:
+    """A short fingerprint of exactly what a card will do. Approval carries
+    the version the owner saw; a different stored version is refused (Codex
+    NS-B10 review 1, finding 1)."""
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 def _loads(value):
@@ -237,8 +247,9 @@ def _build(session, business, action_type: str, args: dict, owner_name, tz_name)
 
 def _view(row) -> dict:
     (aid, action_type, payload, status, expires_at, error, result, created_at) = row
+    preview = _loads(payload)
     return {"id": str(aid), "action_type": action_type, "status": status,
-            "preview": _loads(payload), "expires_at": _iso(expires_at),
+            "preview": preview, "version": version_of(preview), "expires_at": _iso(expires_at),
             "error": error, "result": _loads(result), "created_at": _iso(created_at)}
 
 
@@ -273,7 +284,8 @@ def propose(session, business, user_id, action_type: str, args: dict, *,
          "payload": json.dumps(payload), "expires_at": moment + EXPIRY, "now": moment})
     session.commit()
     return {"proposal": {"id": aid, "action_type": action_type, "status": "proposed",
-                         "preview": payload, "expires_at": (moment + EXPIRY).isoformat(),
+                         "preview": payload, "version": version_of(payload),
+                         "expires_at": (moment + EXPIRY).isoformat(),
                          "error": None, "result": None, "created_at": moment.isoformat()}}
 
 
@@ -298,27 +310,49 @@ def _is_expired(expires_at) -> bool:
     return expires_at <= now()
 
 
-def _set(session, action_id: str, **fields) -> None:
+def _set(session, business, action_id: str, **fields) -> None:
     fields["updated_at"] = now()
     result_sql = "CAST(:result AS jsonb)" if _is_postgres(session) else ":result"
     assignments = ", ".join(
         f"result = {result_sql}" if k == "result" else f"{k} = :{k}" for k in fields)
     params = {k: (json.dumps(v, default=str) if k == "result" and v is not None else v)
               for k, v in fields.items()}
-    session.execute(text(f"UPDATE aria_actions SET {assignments} WHERE id = :action_id"),
-                    {**params, "action_id": str(action_id)})
+    session.execute(text(f"UPDATE aria_actions SET {assignments} "
+                         "WHERE id = :action_id AND business_id = :business_id"),
+                    {**params, "action_id": str(action_id), "business_id": str(business.id)})
 
 
-def _refuse_unclaimable(session, row):
+def _refuse_unclaimable(session, business, row):
     status, expires_at = row[3], row[4]
     if status == "proposed" and _is_expired(expires_at):
-        _set(session, row[0], status="expired")
+        _set(session, business, row[0], status="expired")
         session.commit()
         raise ActionRefused(409, "This card has expired. Ask Aria again.")
+    if status == "proposed":
+        session.rollback()
+        raise ActionRefused(409, CHANGED)
     session.rollback()
     if status == "executing":
         raise ActionRefused(409, "This is already being sent.")
     raise ActionRefused(409, f"This card is already {status}.")
+
+
+CHANGED = "This card has changed since you saw it. Check it again before approving."
+
+_STATUS_IN_ERROR = re.compile(r"Failed to create event: (\d{3})")
+
+
+def _unknown_outcome(action_type: str, error: str) -> bool:
+    """True when the provider may have acted although we have no
+    confirmation (Codex review 1, finding 2). Only a definite rejection, or a
+    failure before anything was sent, may be called a failure: calling an
+    unconfirmed send 'not done' invites a second chase."""
+    if action_type in ("send_email", "send_invoice_chase"):
+        return error.startswith("Send failed") or "did not confirm" in error
+    if action_type == "create_calendar_event":
+        status = _STATUS_IN_ERROR.search(error)
+        return bool(status) and (int(status.group(1)) >= 500 or status.group(1) == "429")
+    return False
 
 
 def _succeeded(result) -> bool:
@@ -326,55 +360,79 @@ def _succeeded(result) -> bool:
         and not result.get("error")
 
 
-def approve(session, business, action_id: str, user_id) -> dict:
-    """The tap. Executes exactly the stored payload, at most once."""
+def approve(session, business, action_id: str, user_id, version: Optional[str] = None) -> dict:
+    """The tap. Executes exactly the stored payload — the version the owner
+    saw, when they say which — at most once."""
     row = _scoped(session, business, action_id)
     action_type = row[1]
     problem = _feature_problem(business, action_type)
     if problem:
         session.rollback()
         raise ActionRefused(403, problem)
+    stored = row[2] if isinstance(row[2], str) else json.dumps(row[2])
+    if version is not None and version != version_of(_loads(row[2])):
+        session.rollback()
+        raise ActionRefused(409, CHANGED)
+    seen = "CAST(:seen AS jsonb)" if _is_postgres(session) else ":seen"
 
     moment = now()
     claimed = session.execute(text(
         "UPDATE aria_actions SET status = 'executing', approved_by = :user_id, "
         "approved_at = :now, updated_at = :now "
         "WHERE id = :id AND business_id = :business_id AND status = 'proposed' "
-        "AND expires_at > :now RETURNING payload"),
+        f"AND expires_at > :now AND payload = {seen} RETURNING payload"),
         {"id": str(action_id), "business_id": str(business.id),
-         "user_id": str(user_id) if user_id else None, "now": moment}).fetchone()
+         "user_id": str(user_id) if user_id else None, "now": moment,
+         "seen": stored}).fetchone()
     if claimed is None:
         session.rollback()
-        _refuse_unclaimable(session, _scoped(session, business, action_id))
+        _refuse_unclaimable(session, business, _scoped(session, business, action_id))
     # The claim is durable BEFORE anything leaves the building.
     session.commit()
     payload = _loads(claimed[0])
 
     if action_type == "send_invoice_chase":
         invoice = _invoice(session, business.id, payload["invoice_id"])
-        if invoice is None or (invoice[5] or "").lower() == "paid":
-            reason = ("Invoice already paid; nothing was sent." if invoice is not None
-                      else "The invoice no longer exists; nothing was sent.")
-            _set(session, action_id, status="failed", error=reason, executed_at=now())
+        reason = None
+        if invoice is None:
+            reason = "The invoice no longer exists; nothing was sent."
+        elif (invoice[5] or "").lower() == "paid":
+            reason = "Invoice already paid; nothing was sent."
+        elif (invoice[6] or 0) >= int(payload["chase_stage"]):
+            # Codex review 1, finding 6: never resend an earlier stage or
+            # move the invoice's stage backwards.
+            reason = (f"This chase is out of date: the invoice has already had stage "
+                      f"{invoice[6]}. Nothing was sent; ask Aria for a fresh one.")
+        if reason:
+            _set(session, business, action_id, status="failed", error=reason, executed_at=now())
             session.commit()
             raise ActionRefused(409, reason)
 
     try:
         result = _execute(session, business, action_type, payload)
-    except Exception as exc:  # a failure, recorded; a crash is not caught here
-        logger.error("[AriaActions] %s %s failed: %s", action_type, action_id, exc)
-        result = {"success": False, "error": str(exc)}
+    except Exception as exc:
+        # We do not know whether the provider acted. Leave it `executing`
+        # (never retried) and say so — not "failed" (review 1, finding 2).
+        # A crash (BaseException) skips this and also leaves `executing`.
+        logger.error("[AriaActions] %s %s outcome unknown: %s", action_type, action_id, exc)
+        _set(session, business, action_id, error=f"Outcome unknown: {exc}")
+        session.commit()
+        return _view(_scoped(session, business, action_id))
 
     if not _succeeded(result):
         error = str(result.get("error") if isinstance(result, dict) else result) or "Failed"
-        _set(session, action_id, status="failed", error=error, executed_at=now(),
-             result=result if isinstance(result, dict) else None)
+        if _unknown_outcome(action_type, error):
+            _set(session, business, action_id, error=f"Outcome unknown: {error}",
+                 result=result if isinstance(result, dict) else None)
+        else:
+            _set(session, business, action_id, status="failed", error=error,
+                 executed_at=now(), result=result if isinstance(result, dict) else None)
         session.commit()
         return _view(_scoped(session, business, action_id))
 
     if action_type in ("send_email", "send_invoice_chase"):
         _bookkeep_email(session, business, action_type, payload, result)
-    _set(session, action_id, status="done", executed_at=now(), result=result)
+    _set(session, business, action_id, status="done", executed_at=now(), result=result)
     session.commit()
     return _view(_scoped(session, business, action_id))
 
@@ -433,8 +491,10 @@ def _bookkeep_email(session, business, action_type: str, payload: dict, result: 
                  "chase_stage": payload.get("chase_stage"),
                  "provider_id": result.get("gmail_message_id"), "sent_at": sent_at})
         if action_type == "send_invoice_chase":
+            # Never backwards (review 1, finding 6).
             session.execute(text(
-                "UPDATE invoices SET chase_stage = :stage, last_chased_at = :now, "
+                "UPDATE invoices SET chase_stage = CASE WHEN COALESCE(chase_stage, 0) < :stage "
+                "THEN :stage ELSE chase_stage END, last_chased_at = :now, "
                 "updated_at = :now WHERE id = :invoice_id AND business_id = :business_id"),
                 {"stage": payload["chase_stage"], "now": sent_at,
                  "invoice_id": payload["invoice_id"], "business_id": str(business.id)})
@@ -471,19 +531,30 @@ def edit(session, business, action_id: str, changes: dict) -> dict:
             new_payload["sign_off"] = payload["sign_off"]
     session.execute(text(
         f"UPDATE aria_actions SET payload = {_json_param(session)}, updated_at = :now "
-        "WHERE id = :id AND status = 'proposed'"),
-        {"payload": json.dumps(new_payload), "now": now(), "id": str(action_id)})
+        "WHERE id = :id AND business_id = :business_id AND status = 'proposed'"),
+        {"payload": json.dumps(new_payload), "now": now(), "id": str(action_id),
+         "business_id": str(business.id)})
     session.commit()
     return _view(_scoped(session, business, action_id))
 
 
 def dismiss(session, business, action_id: str) -> dict:
-    row = _scoped(session, business, action_id)
-    if row[3] != "proposed":
+    """Conditional on `proposed`: if approval won the race, this is a
+    conflict and the action carries on (Codex review 1, finding 4)."""
+    _scoped(session, business, action_id)
+    gone = session.execute(text(
+        "UPDATE aria_actions SET status = 'dismissed', updated_at = :now "
+        "WHERE id = :id AND business_id = :business_id AND status = 'proposed' RETURNING id"),
+        {"now": now(), "id": str(action_id), "business_id": str(business.id)}).fetchone()
+    if gone is None:
         session.rollback()
-        raise ActionRefused(409, f"This card is already {row[3]}.")
-    _set(session, action_id, status="dismissed")
+        current = _scoped(session, business, action_id)[3]
+        raise ActionRefused(409, f"This card is already {current}.")
     session.commit()
+    return _view(_scoped(session, business, action_id))
+
+
+def get(session, business, action_id: str) -> dict:
     return _view(_scoped(session, business, action_id))
 
 

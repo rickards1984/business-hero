@@ -17,6 +17,7 @@ export interface Proposal {
   action_type: 'send_email' | 'send_invoice_chase' | 'create_calendar_event' | 'create_task';
   status: string;
   preview: Record<string, any>;
+  version: string;
   expires_at: string;
   error?: string | null;
 }
@@ -69,7 +70,19 @@ export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
   const [draft, setDraft] = useState<Record<string, any>>({});
   const kind = KIND[card.action_type];
   const p = card.preview || {};
-  const open = card.status === 'proposed';
+  const expired = new Date(card.expires_at).getTime() <= Date.now();
+  const open = card.status === 'proposed' && !expired;
+
+  // The server is the authority. After a conflict or a lost reply, re-read
+  // the card rather than keep showing a live Approve button (Codex review 1).
+  const reconcile = async () => {
+    try {
+      const r = await apiRequest('GET', `/v1/aria/actions/${card.id}`);
+      setCard(await r.json());
+    } catch {
+      // Still unknown: keep the controls off.
+    }
+  };
 
   const act = async (method: 'POST' | 'PATCH', path: string, body?: unknown) => {
     setBusy(true);
@@ -80,12 +93,16 @@ export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
       setEditing(false);
     } catch (err) {
       const status = err instanceof Error ? Number((err.message.match(/^(\d{3}):/) || [])[1]) : NaN;
-      if (path === '/approve' && !(status >= 400 && status < 500)) {
-        // No answer, or a server error: it may or may not have gone. Never invite a second tap.
+      const definite = status >= 400 && status < 500;
+      if (!definite) {
+        // No answer, or a server error: it may or may not have happened.
+        // Never invite a second tap; show what the server now says.
         setUncertain(true);
+        setEditing(false);
       } else {
         setMessage(detail(err, 'That did not work. Please try again.'));
       }
+      await reconcile();
     } finally {
       setBusy(false);
     }
@@ -132,8 +149,18 @@ export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
                 <Typography variant="body2">{whenText(p)} · {p.duration_minutes} minutes</Typography>
                 <Typography variant="body2" color="text.secondary">
                   Calendar: {p.calendar_id === 'primary' ? 'main calendar' : p.calendar_id}
-                  {p.attendee_email ? ` · invitation to ${p.attendee_email}` : ''}
                 </Typography>
+                {p.attendee_email && (
+                  <Typography variant="body2">Google will email an invitation to <strong>{p.attendee_email}</strong>.</Typography>
+                )}
+                {p.description && (
+                  <Box sx={{ bgcolor: 'action.hover', borderRadius: 2, p: 1.5, mt: 1 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      {p.attendee_email ? 'Included in the invitation' : 'Event notes'}
+                    </Typography>
+                    <Typography variant="body2" sx={{ whiteSpace: 'pre-line' }}>{p.description}</Typography>
+                  </Box>
+                )}
               </>
             )}
             {card.action_type === 'create_task' && (
@@ -161,7 +188,8 @@ export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
             </Stack>
           ) : (
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-              <Button variant="contained" disabled={busy} onClick={() => act('POST', '/approve')}>{kind.approve}</Button>
+              <Button variant="contained" disabled={busy}
+                onClick={() => act('POST', '/approve', { version: card.version })}>{kind.approve}</Button>
               <Button variant="outlined" disabled={busy} onClick={startEdit}>Edit</Button>
               <Button disabled={busy} onClick={() => act('POST', '/dismiss')}>Not now</Button>
             </Stack>
@@ -176,13 +204,15 @@ export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
         {card.status === 'failed' && (
           <Alert severity="error">Not done: {card.error || 'it failed'}. Nothing will be retried automatically.</Alert>
         )}
-        {card.status === 'executing' && (
+        {card.status === 'executing' && !uncertain && (
           <Alert severity="warning">
-            We can't confirm this finished. Check your Sent folder or calendar before trying again.
+            We can't confirm this finished. Check your Sent folder or calendar before asking Aria again.
           </Alert>
         )}
         {card.status === 'dismissed' && <Typography variant="body2" color="text.secondary">Dismissed.</Typography>}
-        {card.status === 'expired' && <Typography variant="body2" color="text.secondary">Expired. Ask Aria again.</Typography>}
+        {(card.status === 'expired' || (card.status === 'proposed' && expired)) && (
+          <Typography variant="body2" color="text.secondary">Expired. Ask Aria again.</Typography>
+        )}
       </Stack>
     </Paper>
   );

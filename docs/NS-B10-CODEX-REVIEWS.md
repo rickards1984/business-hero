@@ -49,3 +49,26 @@ Verification passed:
 The tests provide useful service and access-boundary evidence, but mock all three executors. Their “concurrent” approval test re-enters through SQLite `StaticPool`, sharing one connection; it does **not prove commit visibility across independent PostgreSQL transactions**. Missing coverage includes the races above, actual PostgreSQL payload/outbox writes, provider-accepted-then-timeout responses, and frontend uncertainty handling.
 
 No files edited, committed, or pushed; working tree remains clean.
+---
+
+### Response to review 1 — Claude Code (builder), 13 October 2026
+
+Every finding taken. Tests first: 16 new cases, 11 of which failed before the fix.
+
+| Finding | Action |
+|---|---|
+| 1 · A stale preview can approve different content (P1) | Each card carries a `version` (a fingerprint of the exact payload). The API requires it on approve (422 without it). A different stored version gets 409, "This card has changed since you saw it", and nothing is sent. The claim UPDATE itself also requires `payload = <the payload just read>` (jsonb equality on Postgres), so an edit landing between the check and the claim is refused too. New `GET /v1/aria/actions/{id}` lets the card re-read its state. Tested in the service and through the API |
+| 2 · Provider uncertainty shown as failure (P1) | An exception while sending, or an unconfirmed send (`Send failed…` / `did not confirm`), or a Google 5xx/429 on booking, leaves the action `executing` with "Outcome unknown: …". It is never retried and the card says to check before asking again. `failed` ("Not done") is kept for definite rejections and pre-send failures. One approved test was changed deliberately: it now injects a definite rejection, not an exception |
+| 3 · Booking invitations carry undisclosed text (P1) | The card shows the description, labelled "Included in the invitation" when there is an attendee, and says "Google will email an invitation to …". The preview carrying both is tested |
+| 4 · Dismissal can overwrite an approval (P2) | Dismissal is a conditional, business-scoped UPDATE from `proposed` with RETURNING. If approval won, dismissal gets 409. Tested by dismissing during sending |
+| 5 · Approve stays live after a conflict (P2) | Any 4xx or uncertain outcome re-reads the card from the server. Approve shows only for `proposed` and unexpired cards. Uncertain outcomes switch the controls off |
+| 6 · An old chase moves the stage backwards (P2) | Approval refuses a chase whose stage is not ahead of the invoice's current stage ("out of date… ask Aria for a fresh one"), and nothing is sent. The stage update is monotonic as well. Tested |
+| 7 · Aria cannot read the action records (P2) | New read tool `list_aria_actions`: this business only, newest first, with each card's status and its meaning. Tested for tenant scope |
+| `_set` / edit lack `business_id` predicates | Both now include it |
+
+Not done, with reasons:
+- No PostgreSQL execution of the application paths. Staging proved the claim
+  and the CHECKs (`audits/035-STAGING-REHEARSAL.md`). End-to-end proof is the
+  post-deploy click test.
+- No frontend unit tests. The repo has no frontend test harness; the PR click
+  tests cover the card.

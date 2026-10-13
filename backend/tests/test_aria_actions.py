@@ -562,17 +562,19 @@ def client_for(database, monkeypatch, biz):
 
 
 def test_the_api_approves_once_then_conflicts(database, monkeypatch, clock, doers):
-    aid = proposal_id(propose(database, business(), "send_email"))
+    result = propose(database, business(), "send_email")
+    aid, seen = proposal_id(result), {"version": result["proposal"]["version"]}
     client = client_for(database, monkeypatch, business())
-    assert client.post(f"/v1/aria/actions/{aid}/approve").status_code == 200
-    assert client.post(f"/v1/aria/actions/{aid}/approve").status_code == 409
+    assert client.post(f"/v1/aria/actions/{aid}/approve", json=seen).status_code == 200
+    assert client.post(f"/v1/aria/actions/{aid}/approve", json=seen).status_code == 409
     assert len([c for c in doers if c[0] == "email"]) == 1
 
 
 def test_the_api_hides_another_business_action(database, monkeypatch, clock, doers):
     aid = proposal_id(propose(database, business(B), "send_email"))
     client = client_for(database, monkeypatch, business(A))
-    assert client.post(f"/v1/aria/actions/{aid}/approve").status_code == 404
+    assert client.post(f"/v1/aria/actions/{aid}/approve",
+                       json={"version": "any"}).status_code == 404
     assert client.patch(f"/v1/aria/actions/{aid}", json={"body": "x"}).status_code == 404
     assert client.post(f"/v1/aria/actions/{aid}/dismiss").status_code == 404
     assert [p["id"] for p in client.get("/v1/aria/actions").json()["actions"]] == []
@@ -588,7 +590,8 @@ def test_a_read_only_or_suspended_account_cannot_approve(database, monkeypatch, 
     blocked = business()
     blocked.subscription_status, blocked.is_active = status, active
     client = client_for(database, monkeypatch, blocked)
-    assert client.post(f"/v1/aria/actions/{aid}/approve").status_code == 403
+    assert client.post(f"/v1/aria/actions/{aid}/approve",
+                       json={"version": "any"}).status_code == 403
     assert doers == [] and row(database, aid)[0] == "proposed"
 
 

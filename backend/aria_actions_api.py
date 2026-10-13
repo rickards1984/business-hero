@@ -1,7 +1,10 @@
 """Aria's approval cards — NS-B10.
 
 GET   /v1/aria/actions               this business's cards awaiting approval
-POST  /v1/aria/actions/{id}/approve  the tap: do exactly what the card shows, once
+GET   /v1/aria/actions/{id}          one card's authoritative state (to reconcile)
+POST  /v1/aria/actions/{id}/approve  the tap: do exactly what the card shows, once.
+                                     The body names the `version` on screen; a card
+                                     changed since is refused (409), never sent
 PATCH /v1/aria/actions/{id}          edit a card before approving it
 POST  /v1/aria/actions/{id}/dismiss  "Not now"
 
@@ -15,6 +18,7 @@ a worker thread, where approve() may run a calendar booking to completion.
 from typing import Any, Dict
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel
 from sqlmodel import Session
 
 from auth import get_user_business_context, require_feature
@@ -47,13 +51,27 @@ def list_actions(auth_ctx: dict = Depends(get_user_business_context),
     return {"actions": aria_actions.list_open(session, _business(session, auth_ctx))}
 
 
+class Approval(BaseModel):
+    version: str
+
+
+@router.get("/{action_id}")
+def get_action(action_id: str,
+               auth_ctx: dict = Depends(get_user_business_context),
+               session: Session = Depends(get_session)):
+    try:
+        return aria_actions.get(session, _business(session, auth_ctx), action_id)
+    except aria_actions.ActionRefused as exc:
+        raise _refused(exc)
+
+
 @router.post("/{action_id}/approve")
-def approve_action(action_id: str,
+def approve_action(action_id: str, approval: Approval,
                    auth_ctx: dict = Depends(get_user_business_context),
                    session: Session = Depends(get_session)):
     try:
         return aria_actions.approve(session, _business(session, auth_ctx), action_id,
-                                    auth_ctx.get("user_id"))
+                                    auth_ctx.get("user_id"), approval.version)
     except aria_actions.ActionRefused as exc:
         raise _refused(exc)
 

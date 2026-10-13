@@ -420,7 +420,19 @@ TOOL_DEFINITIONS = [
                 "required": ["quote_number", "method"]
             }
         }
-    },    # NS-B10: the four approvable actions. Calling one does NOT act: the chat
+    },    {
+        "type": "function",
+        "function": {
+            "name": "list_aria_actions",
+            "description": "What happened to your approval cards: each card's type, what it was for, and whether it is awaiting approval, done, not done, dismissed, expired, or not confirmed. Use it to answer 'did that chase go?' from the record.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "description": "Most recent first; default 20, max 50"}},
+                "required": []
+            }
+        }
+    },
+    # NS-B10: the four approvable actions. Calling one does NOT act: the chat
     # boundary stores it as a card the owner approves with a tap
     # (services/aria_actions.py). execute_tool still refuses them.
     {
@@ -610,6 +622,8 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _list_quotes(engine, business_id, arguments)
     elif tool_name == "get_receptionist_usage":
         return _get_receptionist_usage(engine, business_id, arguments)
+    elif tool_name == "list_aria_actions":
+        return _list_aria_actions(engine, business_id, arguments)
     elif tool_name == "send_quote":
         return _send_quote_via_aria(engine, business_id, arguments)
     else:
@@ -2892,6 +2906,36 @@ def _get_cashflow_forecast(engine, business_id: str, args: dict) -> dict:
 
 
 # ── Quoting ──────────────────────────────────────────────
+
+def _list_aria_actions(engine, business_id: str, args: dict) -> dict:
+    """NS-B10 (Codex review 1, finding 7): what happened to Aria's approval
+    cards, from the record — this business only, newest first."""
+    import json as _json
+    limit = max(1, min(int(args.get("limit") or 20), 50))
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT action_type, status, payload, error, created_at, executed_at
+            FROM aria_actions WHERE business_id = :business_id
+            ORDER BY created_at DESC LIMIT :limit
+        """), {"business_id": str(business_id), "limit": limit}).fetchall()
+    meaning = {
+        "proposed": "awaiting the owner's approval", "executing": "outcome not confirmed",
+        "done": "done", "failed": "not done", "dismissed": "dismissed by the owner",
+        "expired": "expired without approval",
+    }
+    actions = []
+    for action_type, status, payload, error, created_at, executed_at in rows:
+        p = _json.loads(payload) if isinstance(payload, str) else (payload or {})
+        actions.append({
+            "action_type": action_type, "status": status, "meaning": meaning.get(status, status),
+            "to": p.get("to"), "subject": p.get("subject"), "title": p.get("title"),
+            "invoice_number": p.get("invoice_number"), "start": p.get("start"),
+            "error": error,
+            "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            "executed_at": executed_at.isoformat() if hasattr(executed_at, "isoformat") else executed_at,
+        })
+    return {"actions": actions, "count": len(actions)}
+
 
 def _get_receptionist_usage(engine, business_id: str, args: dict) -> dict:
     """This month's receptionist minutes, extra minutes and cap (BH-012;
