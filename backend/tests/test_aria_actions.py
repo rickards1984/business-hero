@@ -376,15 +376,23 @@ def test_a_feature_removed_since_proposing_is_refused_at_approval(database, cloc
     assert doers == [] and row(database, aid)[0] == "proposed"
 
 
-def test_a_failed_send_is_recorded_and_never_retried(database, clock, doers):
+def test_a_failed_send_is_recorded_and_never_retried(database, clock, doers, monkeypatch):
     """Acceptance 4."""
+    import assistant_tools
+    sends = []
+
+    def rejected(engine, bid, args):
+        # A definite rejection, before anything reached the provider (Codex
+        # review 1 finding 2: an EXCEPTION is no longer a definite failure —
+        # see test_an_unknown_outcome_is_never_called_a_failure).
+        sends.append(args)
+        return {"success": False, "error": "No email account connected. Please connect Google."}
+    monkeypatch.setattr(assistant_tools, "_send_email", rejected)
     aid = proposal_id(propose(database, business(), "send_email"))
-    doers.behaviour["fail"] = RuntimeError("Gmail said no")
     result = approve(database, business(), aid)
-    assert result["status"] == "failed" and "Gmail said no" in result["error"]
-    doers.behaviour["fail"] = None
+    assert result["status"] == "failed" and "No email account connected" in result["error"]
     assert refused(approve, database, business(), aid).status_code == 409
-    assert len([c for c in doers if c[0] == "email"]) == 1
+    assert len(sends) == 1
 
 
 def test_a_provider_refusal_is_a_failure_not_a_success(database, clock, doers, monkeypatch):
@@ -690,3 +698,157 @@ def test_a_chat_reply_carries_its_proposals_to_the_app(chat_db, clock, doers, mo
         SimpleNamespace(id=OWNER, email="owner@example.com"), "chase Harper"))
     assert [p["action_type"] for p in result["proposals"]] == ["send_invoice_chase"]
     assert doers == []
+
+
+# ------------------------------------------- Codex NS-B10 review 1 additions ---
+
+def _version(result):
+    return result["proposal"]["version"]
+
+
+def test_approval_is_bound_to_the_version_the_owner_saw(database, clock, doers):
+    """Finding 1: an edit the owner never saw (a lost PATCH response, another
+    member) must not be what is sent. Approval carries the version of the
+    card on screen; a different stored version is refused and nothing goes."""
+    result = propose(database, business(), "send_email")
+    aid, seen = proposal_id(result), _version(result)
+    with Session(database) as s:
+        actions().edit(s, business(), aid, {"to": "someone.else@example.com"})
+    with Session(database) as s:
+        err = refused(actions().approve, s, business(), aid, OWNER, seen)
+    assert err.status_code == 409 and "changed" in err.detail.lower()
+    assert doers == [] and row(database, aid)[0] == "proposed"
+
+
+def test_the_current_version_approves(database, clock, doers):
+    result = propose(database, business(), "send_email")
+    with Session(database) as s:
+        done = actions().approve(s, business(), proposal_id(result), OWNER, _version(result))
+    assert done["status"] == "done"
+
+
+def test_an_edit_returns_a_new_version(database, clock, doers):
+    result = propose(database, business(), "send_email")
+    with Session(database) as s:
+        edited = actions().edit(s, business(), proposal_id(result), {"body": "New words."})
+    assert edited["version"] != _version(result)
+
+
+def test_the_api_requires_the_version(database, monkeypatch, clock, doers):
+    result = propose(database, business(), "send_email")
+    aid = proposal_id(result)
+    client = client_for(database, monkeypatch, business())
+    assert client.post(f"/v1/aria/actions/{aid}/approve").status_code == 422
+    r = client.post(f"/v1/aria/actions/{aid}/approve", json={"version": "stale"})
+    assert r.status_code == 409 and doers == []
+    r = client.post(f"/v1/aria/actions/{aid}/approve", json={"version": _version(result)})
+    assert r.status_code == 200 and r.json()["status"] == "done"
+
+
+def test_the_api_returns_one_card_for_reconciling(database, monkeypatch, clock, doers):
+    """Finding 5: after a conflict or a lost response the card re-reads its
+    authoritative state rather than keeping a live Approve button."""
+    mine = proposal_id(propose(database, business(A), "create_task"))
+    theirs = proposal_id(propose(database, business(B), "create_task"))
+    client = client_for(database, monkeypatch, business(A))
+    got = client.get(f"/v1/aria/actions/{mine}")
+    assert got.status_code == 200 and got.json()["status"] == "proposed" and got.json()["version"]
+    assert client.get(f"/v1/aria/actions/{theirs}").status_code == 404
+
+
+@pytest.mark.parametrize("outcome", [
+    {"success": False, "error": "Send failed: The read operation timed out"},
+    {"success": False, "error": "Gmail API did not confirm send"},
+])
+def test_an_unknown_outcome_is_never_called_a_failure(database, clock, monkeypatch, outcome):
+    """Finding 2: Gmail may have accepted the message even though we got no
+    confirmation. The card must say 'check before trying again', never 'not
+    done' — the action stays `executing`, with the reason recorded."""
+    import assistant_tools
+    monkeypatch.setattr(assistant_tools, "_send_email", lambda engine, bid, args: outcome)
+    aid = proposal_id(propose(database, business(), "send_email"))
+    result = approve(database, business(), aid)
+    assert result["status"] == "executing" and result["error"]
+    assert refused(approve, database, business(), aid).status_code == 409
+
+
+def test_an_exception_while_sending_is_an_unknown_outcome(database, clock, doers):
+    aid = proposal_id(propose(database, business(), "send_email"))
+    doers.behaviour["fail"] = RuntimeError("connection reset")
+    result = approve(database, business(), aid)
+    assert result["status"] == "executing" and "connection reset" in result["error"]
+
+
+@pytest.mark.parametrize("outcome,status", [
+    ({"success": False, "error": "Failed to create event: 400 Bad Request"}, "failed"),
+    ({"success": False, "error": "Failed to create event: 503 Service Unavailable"}, "executing"),
+    ({"success": False, "error": "Google Calendar not connected"}, "failed"),
+])
+def test_a_booking_failure_is_definite_only_when_google_said_no(
+        database, clock, monkeypatch, outcome, status):
+    import assistant_tools
+
+    async def create(*a, **k):
+        return outcome
+    monkeypatch.setattr(assistant_tools, "create_calendar_event", create)
+    aid = proposal_id(propose(database, business(), "create_calendar_event"))
+    assert approve(database, business(), aid)["status"] == status
+
+
+def test_the_booking_card_shows_everything_the_invitation_carries(database, clock, doers):
+    """Finding 3: the description and the attendee go to Google with the
+    invitation, so the card's preview must carry them."""
+    preview = propose(database, business(), "create_calendar_event",
+                      dict(EVENT, description="Bring ID. Gate code 4471.",
+                           attendee_email="sam@example.com"))["proposal"]["preview"]
+    assert preview["description"] == "Bring ID. Gate code 4471."
+    assert preview["attendee_email"] == "sam@example.com"
+
+
+def test_dismissing_cannot_overwrite_an_approval_in_progress(database, clock, doers):
+    """Finding 4: dismissal is conditional on `proposed`; if approval won,
+    dismissal is a conflict and the action ends `done`."""
+    aid = proposal_id(propose(database, business(), "send_email"))
+    raced = {}
+
+    def dismiss_now():
+        try:
+            with Session(database) as s:
+                actions().dismiss(s, business(), aid)
+            raced["result"] = "dismissed"
+        except actions().ActionRefused as exc:
+            raced["result"] = exc.status_code
+    doers.behaviour["during"] = dismiss_now
+    approve(database, business(), aid)
+    assert raced["result"] == 409 and row(database, aid)[0] == "done"
+
+
+def test_an_out_of_date_chase_is_refused_not_rewound(database, clock, doers):
+    """Finding 6: a stage-1 card approved after the invoice reached stage 3
+    must not send stage 1 again or move the stage backwards."""
+    aid = proposal_id(propose(database, business(), "send_invoice_chase"))
+    with Session(database) as s:
+        s.execute(text("UPDATE invoices SET chase_stage = 3 WHERE id = :i"), {"i": INV_A})
+        s.commit()
+    err = refused(approve, database, business(), aid)
+    assert err.status_code == 409 and "out of date" in err.detail.lower()
+    assert [c for c in doers if c[0] == "email"] == []
+    with Session(database) as s:
+        assert s.execute(text("SELECT chase_stage FROM invoices WHERE id=:i"),
+                         {"i": INV_A}).scalar() == 3
+
+
+def test_aria_can_read_what_happened_to_her_cards(database, clock, doers, monkeypatch):
+    """Finding 7 (AGENTS.md North Star rule 2): new stored data ships with a
+    tenant-scoped read tool, so 'did that chase go?' is answered from the
+    record."""
+    import assistant_tools
+    done = proposal_id(propose(database, business(A), "send_email"))
+    approve(database, business(A), done)
+    proposal_id(propose(database, business(A), "create_task"))
+    proposal_id(propose(database, business(B), "create_task"))
+    monkeypatch.setattr(assistant_tools, "engine", database)
+    result = assistant_tools.execute_tool("list_aria_actions", {}, A, "Europe/London")
+    statuses = sorted((a["action_type"], a["status"]) for a in result["actions"])
+    assert statuses == [("create_task", "proposed"), ("send_email", "done")]
+    assert "list_aria_actions" in {t["function"]["name"] for t in assistant_tools.TOOL_DEFINITIONS}
