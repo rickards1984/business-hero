@@ -2401,7 +2401,8 @@ async def assistant_chat(
             name=result["business"]["name"],
             timezone=result["business"]["timezone"]
         ),
-        conversation_id=result.get("conversation_id")
+        conversation_id=result.get("conversation_id"),
+        proposals=result.get("proposals") or [],
     )
 
 
