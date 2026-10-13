@@ -42,6 +42,7 @@ import {
   MenuBook as MenuBookIcon,
 } from '@mui/icons-material';
 import { apiRequest } from '@/lib/queryClient';
+import ReceptionistUsage from '@/components/ReceptionistUsage';
 
 interface ReceptionistTabProps {
   businessId: string;
@@ -753,6 +754,9 @@ export default function ReceptionistTab({ onViewCalls }: ReceptionistTabProps) {
 
   return (
     <Box>
+      {/* BH-012: the month's minutes, visible before the limit. */}
+      {configExists && <ReceptionistUsage />}
+
       {/* ================================================================
           Contextual banners based on config state
           ================================================================ */}

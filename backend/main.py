@@ -452,6 +452,10 @@ app.include_router(executive_meeting_router)
 from invoices_api import router as invoices_router
 app.include_router(invoices_router)
 
+# BH-012: GET /v1/usage, PUT /v1/usage/metering.
+from usage_api import router as usage_router
+app.include_router(usage_router)
+
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])

@@ -51,6 +51,41 @@ async def start_briefing_scheduler():
     asyncio.create_task(_scheduler_loop())
 
 
+_last_metering_reconcile = None
+
+
+async def _reconcile_metering_if_due():
+    global _last_metering_reconcile
+    current = datetime.utcnow()
+    if _last_metering_reconcile and (current - _last_metering_reconcile).total_seconds() < 900:
+        return
+    _last_metering_reconcile = current
+
+    def _run():
+        from db import get_session_context
+        from services import metering
+        with get_session_context() as session:
+            count = metering.reconcile_unmetered_calls(session)
+            session.commit()
+        if count:
+            logger.warning(f"[Scheduler] Metering reconciliation counted {count} missed call(s)")
+
+    await asyncio.to_thread(_run)
+
+
+async def _deliver_metering_notices():
+    """BH-012: send pending usage notices every tick, in a worker thread. In a
+    thread there is no running event loop, so the WhatsApp send is awaited to
+    completion and its result is a real acknowledgement."""
+    def _run():
+        from db import get_session_context
+        from services import metering
+        with get_session_context() as session:
+            metering.deliver_pending_notices(session)
+
+    await asyncio.to_thread(_run)
+
+
 async def _scheduler_loop():
     """Main scheduler loop — runs every 60 seconds.
 
@@ -92,6 +127,17 @@ async def _scheduler_loop():
             _run_background_sync_jobs_nonblocking()
         except Exception as e:
             logger.error(f"[Scheduler] Error scheduling background sync: {e}")
+
+        # BH-012: meter any finished receptionist call that missed metering
+        # at call end. Every 15 minutes, off the event loop (sync DB work).
+        try:
+            await _reconcile_metering_if_due()
+        except Exception as e:
+            logger.error(f"[Scheduler] Metering reconciliation failed: {e}")
+        try:
+            await _deliver_metering_notices()
+        except Exception as e:
+            logger.error(f"[Scheduler] Metering notice delivery failed: {e}")
 
         # Executive Board Meeting prep (Prompt 2). Wrapped in its own try/except
         # so a failure here can never break the existing scheduler.

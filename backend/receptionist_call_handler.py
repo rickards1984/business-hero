@@ -14,7 +14,7 @@ import os
 import json
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 
@@ -91,6 +91,21 @@ router = APIRouter(prefix="/v1/receptionist", tags=["Receptionist Calls"])
 # Helper: save a call record using raw SQL (Call model lacks migration-only cols)
 # ---------------------------------------------------------------------------
 
+_CLOSE_TIMEOUT_SECONDS = 2  # a slow peer's close handshake is not waited on
+
+
+def _load_call_setup(business_id: str):
+    """The call's prompt and config id, read synchronously — the handler runs
+    this in a thread so the event loop (and the call's deadline) keeps
+    running while the database answers."""
+    with Session(engine) as session:
+        prompt_data = asyncio.run(build_receptionist_system_prompt(business_id, session))
+        cfg = session.exec(
+            select(ReceptionistConfig).where(ReceptionistConfig.business_id == business_id)
+        ).first()
+        return prompt_data, (str(cfg.id) if cfg else None)
+
+
 def _save_call_record(
     business_id: str,
     caller_number: str,
@@ -103,9 +118,10 @@ def _save_call_record(
     intent: str,
     outcome: str,
     receptionist_config_id: Optional[str],
-) -> None:
+) -> Optional[str]:
+    """Save the call and return its id (BH-012 meters each call once by it)."""
     with Session(engine) as session:
-        session.execute(
+        row = session.execute(
             sa_text("""
                 INSERT INTO calls (
                     business_id, source, caller_number, caller_name,
@@ -117,6 +133,7 @@ def _save_call_record(
                     :archived, :duration_seconds, :outcome,
                     CAST(:receptionist_config_id AS uuid)
                 )
+                RETURNING id
             """),
             {
                 "business_id": business_id,
@@ -133,8 +150,9 @@ def _save_call_record(
                 "outcome": outcome,
                 "receptionist_config_id": receptionist_config_id,
             },
-        )
+        ).fetchone()
         session.commit()
+    return str(row[0]) if row is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +592,35 @@ async def receptionist_incoming_call(request: Request):
         vr.hangup()
         return Response(content=str(vr), media_type="application/xml")
 
+    # BH-012: the month's minutes. A call already running is never cut off
+    # for the allowance (only by the 20-minute cap); this refuses the NEXT
+    # call once the allowance — or, with extra minutes on, the owner's cap —
+    # is used up. The owner was told when it ran out (metering.record_call).
+    # Fail OPEN, by Mike's decision (12 Oct 2026), as the access check above
+    # does: if the meter cannot be read, answer — one unmetered call costs
+    # pennies, a missed customer costs the business. The call is still capped.
+    try:
+        from services import metering as _metering
+        with Session(engine) as _session:
+            _mb = _metering.load_business(_session, business_id)
+            _admitted, _reason = (_metering.admit_call(_session, _mb)
+                                  if _mb is not None else (True, None))
+    except Exception as e:
+        logger.error(f"[Receptionist] Meter check failed, answering anyway: {e}")
+        _admitted, _reason = True, None
+
+    if not _admitted:
+        logger.warning("[Receptionist] Refusing call for business %s: %s",
+                       business_id, _reason)
+        vr = VoiceResponse()
+        vr.say(
+            "I'm sorry, this number is not currently accepting calls. "
+            "Please try again later.",
+            voice="alice",
+        )
+        vr.hangup()
+        return Response(content=str(vr), media_type="application/xml")
+
     host = request.headers.get("host", "")
     if not host:
         host = str(request.base_url).replace("http://", "").replace("https://", "").rstrip("/")
@@ -623,6 +670,9 @@ async def receptionist_media_stream(ws: WebSocket):
     tasks_created: List[dict] = []
     messages_taken: List[dict] = []
     receptionist_config_id: Optional[str] = None
+    timed_out = False
+    call_limit_seconds: float = 0
+    twilio_task = openai_task = None
 
     try:
         # ---- PHASE 1: Receive Twilio 'start' event ----
@@ -669,17 +719,41 @@ async def receptionist_media_stream(ws: WebSocket):
 
         call_start_time = datetime.utcnow()
 
+        # BH-012: the call's deadline covers EVERYTHING from here, setup
+        # included (Codex BH-012 review 2). When time is up the watchdog
+        # closes both sockets, which ends every loop reading them. Starts at
+        # the 20-minute cap; shortened below once the business's own limit is
+        # known. Cancelled in `finally`.
+        from services import metering as _metering
+
+        handler_task = asyncio.current_task()
+
+        async def _close_call():
+            if openai_ws is not None:
+                await openai_ws.close()
+            await ws.close()
+
+        async def _end_handler():
+            # Closing sockets does not end an await that is not reading them
+            # (e.g. a hung OpenAI connect), so stop the handler itself; its
+            # `finally` still saves and meters the call (review 3).
+            nonlocal timed_out
+            timed_out = True
+            handler_task.cancel()
+
+        # The handler is stopped FIRST, so a slow close cannot hold the call
+        # open (Codex BH-012 review 4); `finally` bounds the closing.
+        call_limit_seconds = _metering.CALL_HARD_CAP_SECONDS
+        watchdog = asyncio.create_task(_metering.call_watchdog(
+            call_limit_seconds, [_end_handler, _close_call]))
+
         # ---- PHASE 2: Build system prompt & connect to OpenAI ----
+        # In a thread: the prompt build's queries are synchronous, and on the
+        # event loop a stalled query would stop the watchdog from firing
+        # (Codex BH-012 review 3).
         try:
-            with Session(engine) as session:
-                prompt_data = await build_receptionist_system_prompt(business_id, session)
-                cfg = session.exec(
-                    select(ReceptionistConfig).where(
-                        ReceptionistConfig.business_id == business_id
-                    )
-                ).first()
-                if cfg:
-                    receptionist_config_id = str(cfg.id)
+            prompt_data, receptionist_config_id = await asyncio.to_thread(
+                _load_call_setup, business_id)
         except Exception as e:
             logger.error(f"[Receptionist WS] Failed to build system prompt: {e}")
             await ws.close()
@@ -689,6 +763,14 @@ async def receptionist_media_stream(ws: WebSocket):
         voice = prompt_data["voice"]
         greeting = prompt_data["greeting"]
         config_data = prompt_data["config"]
+        _configured_limit = _metering.call_time_limit_seconds(
+            (config_data or {}).get("max_call_duration_seconds"))
+        if _configured_limit < _metering.CALL_HARD_CAP_SECONDS:
+            call_limit_seconds = _configured_limit
+            watchdog.cancel()
+            watchdog = asyncio.create_task(_metering.call_watchdog(
+                _metering.seconds_left_in_call(_configured_limit, call_start_time),
+                [_end_handler, _close_call]))
         preset_id = prompt_data.get("voice_preset_id")
         accent_name = prompt_data.get("accent")
         preset_verified = prompt_data.get("preset_verified", True)
@@ -1151,11 +1233,28 @@ async def receptionist_media_stream(ws: WebSocket):
 
         twilio_task = asyncio.create_task(forward_twilio_to_openai())
         openai_task = asyncio.create_task(forward_openai_to_twilio())
+        # BH-012 / DECISION 2: no call runs past 20 minutes (a business's own
+        # max_call_duration_seconds may shorten it, never lengthen it). An AI
+        # talking to a voicemail loop can otherwise burn a day's budget.
+        from services import metering as _metering
+        _limit = _metering.call_time_limit_seconds(
+            (config_data or {}).get("max_call_duration_seconds"))
+        # The limit counts from the call's START: setup (prompt, OpenAI
+        # connection) is inside the 20 minutes, not added to it.
+        limit_task = asyncio.create_task(asyncio.sleep(
+            _metering.seconds_left_in_call(_limit, call_start_time)
+            if call_start_time else _limit))
 
         done, pending = await asyncio.wait(
-            [twilio_task, openai_task],
+            [twilio_task, openai_task, limit_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
+        if limit_task in done:
+            # Logged, not written as a new `calls.outcome` value: production's
+            # constraints on that column are not verified (staging has none,
+            # and staging has lacked prod's constraints before — AGENTS.md §3.9),
+            # and a rejected value would lose the whole call record.
+            logger.warning("[Receptionist WS] Call reached its %ss limit; ending it", _limit)
 
         for task in pending:
             task.cancel()
@@ -1164,6 +1263,11 @@ async def receptionist_media_stream(ws: WebSocket):
             except asyncio.CancelledError:
                 pass
 
+    except asyncio.CancelledError:
+        if not timed_out:
+            raise  # a shutdown, not our deadline
+        asyncio.current_task().uncancel()
+        logger.warning("[Receptionist WS] Call reached its time limit; ended it")
     except WebSocketDisconnect:
         logger.info("[Receptionist WS] WebSocket disconnected")
     except Exception as e:
@@ -1172,19 +1276,31 @@ async def receptionist_media_stream(ws: WebSocket):
     finally:
         # ---- PHASE 6: Cleanup & persist call record ----
         logger.info("[Receptionist WS] Cleaning up...")
+        try:
+            watchdog.cancel()
+        except NameError:
+            pass  # the call ended before the watchdog started
+        for _task in (twilio_task, openai_task):
+            if _task is not None and not _task.done():
+                _task.cancel()
+
+        # The call ends now — or, if the deadline ended it, at the deadline:
+        # teardown is never metered (Codex BH-012 review 4).
+        call_end_time = datetime.utcnow()
+        if timed_out and call_start_time:
+            call_end_time = min(call_end_time,
+                                call_start_time + timedelta(seconds=call_limit_seconds))
 
         if openai_ws:
             try:
-                await openai_ws.close()
-            except Exception:
+                await asyncio.wait_for(openai_ws.close(), _CLOSE_TIMEOUT_SECONDS)
+            except (Exception, asyncio.TimeoutError):
                 pass
 
         try:
-            await ws.close()
-        except Exception:
+            await asyncio.wait_for(ws.close(), _CLOSE_TIMEOUT_SECONDS)
+        except (Exception, asyncio.TimeoutError):
             pass
-
-        call_end_time = datetime.utcnow()
         duration_seconds: Optional[int] = None
         if call_start_time:
             duration_seconds = int((call_end_time - call_start_time).total_seconds())
@@ -1215,9 +1331,10 @@ async def receptionist_media_stream(ws: WebSocket):
         if call_outcome == "transferred":
             intent = "transfer requested"
 
+        saved_call_id: Optional[str] = None
         if business_id:
             try:
-                _save_call_record(
+                saved_call_id = _save_call_record(
                     business_id=business_id,
                     caller_number=caller_number or "Unknown",
                     caller_name=caller_name,
@@ -1236,6 +1353,22 @@ async def receptionist_media_stream(ws: WebSocket):
                 )
             except Exception as e:
                 logger.error(f"[Receptionist WS] Failed to save call record: {e}")
+
+            # BH-012: count the call's actual minutes against the month it
+            # ended in, once, by the saved call's id. A failure here is logged,
+            # never raised — the call has happened — and the scheduler's
+            # reconciliation meters any saved call that missed this.
+            try:
+                from services import metering as _metering
+                from datetime import timezone as _tz
+                with Session(engine) as _session:
+                    _mb = _metering.load_business(_session, business_id)
+                    if _mb is not None:
+                        _metering.record_call(
+                            _session, _mb, duration_seconds, call_id=saved_call_id,
+                            at=call_end_time.replace(tzinfo=_tz.utc))
+            except Exception as e:
+                logger.error(f"[Receptionist WS] Failed to meter the call: {e}")
 
         logger.info("[Receptionist WS] Call session ended")
 
