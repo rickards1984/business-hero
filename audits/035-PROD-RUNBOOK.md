@@ -209,3 +209,17 @@ Send me STEP 0's row and STEP 2's row, and drag in the CSV. I will then:
 1. regenerate `audits/live-schema-public.txt`;
 2. record the run here;
 3. finish the NS-B10 code against it for review.
+
+---
+
+## RESULT — run by Mike in production, 13 October 2026
+
+| Step | Result |
+|---|---|
+| STEP 0–3 | Mike reports every EXPECT met ("all steps passed so far"). The individual row values were not sent, so they are not recorded here |
+| STEP 4 | Dump exported with "No limit": **832 rows**. Compared with the 9 Oct (after-034) dump: exactly **14 added**, all `aria_actions.*`, matching VERIFY 1a; **none removed or changed** |
+| STEP 5 | not needed |
+
+`audits/live-schema-public.txt` regenerated from that export (parsed as CSV,
+never `grep`); `test_schema_conformance.py` green against it. **Migration 035
+is live in production.** The raw CSV export was deleted after parsing.

@@ -10,7 +10,7 @@
 # that nothing is left unchecked. Keep UNGUARDED_BUDGET at 0 while this says
 # FULL — the test enforces that too.
 #
-# Captured 2026-10-09 (after migration 034): 818 columns across 59 tables, covering all 39 tables
+# Captured 2026-10-13 (after migration 035): 832 columns across 60 tables, covering all 40 tables
 # the backend writes. Supersedes the businesses-only bootstrap.
 #
 # The Supabase editor exports CSV, which QUOTES any field containing a comma —
@@ -87,6 +87,20 @@ col   accounting_transactions.reference character varying(100) null=YES def=-
 col   accounting_transactions.transaction_date date null=NO def=-
 col   accounting_transactions.type character varying(20) null=NO def=-
 col   accounting_transactions.updated_at timestamp with time zone null=YES def=now()
+col   aria_actions.action_type text null=NO def=-
+col   aria_actions.approved_at timestamp with time zone null=YES def=-
+col   aria_actions.approved_by uuid null=YES def=-
+col   aria_actions.business_id uuid null=NO def=-
+col   aria_actions.created_at timestamp with time zone null=NO def=now()
+col   aria_actions.error text null=YES def=-
+col   aria_actions.executed_at timestamp with time zone null=YES def=-
+col   aria_actions.expires_at timestamp with time zone null=NO def=-
+col   aria_actions.id uuid null=NO def=gen_random_uuid()
+col   aria_actions.payload jsonb null=NO def=-
+col   aria_actions.proposed_by uuid null=YES def=-
+col   aria_actions.result jsonb null=YES def=-
+col   aria_actions.status text null=NO def='proposed'::text
+col   aria_actions.updated_at timestamp with time zone null=NO def=now()
 col   assistant_conversations.business_id uuid null=NO def=-
 col   assistant_conversations.created_at timestamp with time zone null=NO def=now()
 col   assistant_conversations.id uuid null=NO def=gen_random_uuid()
