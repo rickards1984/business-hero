@@ -762,7 +762,7 @@ class _FakeTwilioSocket:
         self.closed = True
 
 
-def _drive_handler(monkeypatch, setup, connect=None, cap=None, within=3.0):
+def _drive_handler(monkeypatch, setup, connect=None, cap=None, within=3.0, ws=None):
     """Run the REAL receptionist media-stream handler with the edges faked:
     stream token, call setup, OpenAI connection, saving and metering."""
     import asyncio
@@ -783,7 +783,7 @@ def _drive_handler(monkeypatch, setup, connect=None, cap=None, within=3.0):
     monkeypatch.setattr(m, "record_call",
                         lambda session, biz, seconds, call_id=None, at=None:
                         recorded.append((seconds, call_id)))
-    ws = _FakeTwilioSocket()
+    ws = ws or _FakeTwilioSocket()
 
     async def run():
         # Timed here, not around asyncio.run(): at exit asyncio.run() waits
@@ -831,3 +831,33 @@ def test_the_business_limit_ends_a_call_stuck_connecting_to_openai(monkeypatch):
     assert ws.closed
     assert len(saved) == 1 and recorded and recorded[0][1] == "call-1"
     assert saved[0]["duration_seconds"] <= 2
+
+
+# ------------------------------------------- Codex BH-012 review 4 additions ---
+# Repair cycle 5, authorised by Mike on 13 Oct 2026. Below-P1 findings from
+# here go to the backlog, not another cycle.
+
+class _SlowClosingTwilioSocket(_FakeTwilioSocket):
+    """Closing takes 5 seconds — a slow peer. The socket stops reading at
+    once; only the close handshake is slow."""
+
+    async def close(self, code=None, reason=None):
+        import asyncio
+        self.closed = True
+        await asyncio.sleep(5)
+
+
+def test_a_slow_socket_close_neither_delays_the_deadline_nor_is_billed(monkeypatch):
+    """Review 4: the deadline stops the handler first, teardown is bounded,
+    and the call's end is the deadline, not whenever closing finished."""
+    import asyncio
+
+    async def hung_connect(*a, **k):
+        await asyncio.sleep(3600)
+    ws, saved, recorded = _drive_handler(
+        monkeypatch, lambda business_id: _setup_result(limit_seconds=1),
+        connect=hung_connect, within=4.0, ws=_SlowClosingTwilioSocket())
+    assert ws.elapsed < 4.0, "a slow close must not hold the call open"
+    assert len(saved) == 1 and recorded and recorded[0][1] == "call-1"
+    assert saved[0]["duration_seconds"] <= 1, \
+        "teardown after the deadline must not become metered minutes"
