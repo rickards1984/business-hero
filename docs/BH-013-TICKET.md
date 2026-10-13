@@ -46,7 +46,13 @@ booking logic:
    receptionist system prompt (`receptionist_api.py`).
 4. `services/booking.py` is NOT changed: it compares instants in UTC, rejects
    clock-change times, and holds a per-calendar lock (NS-R1). Every existing
-   booking test stays green untouched. Machine-readable values the model
+   booking test stays green untouched, with ONE exception (Codex, build 1,
+   13 Oct: the ticket contradicted itself): in
+   `test_receptionist_booking.py::test_availability_offered_to_a_caller_is_in_uk_time`
+   the two wording assertions `"10:00" not in` / `"11:00" in` the spoken
+   message become `"10am" not in` / `"11am" in`. Its fixture, its busy
+   period and its meaning (the occupied 10am BST slot is not offered; 11am
+   is) stay exactly as they are. No other existing test changes. Machine-readable values the model
    passes BACK to the booking tool (ISO start times) are unchanged — only the
    human-facing words change. If the model needs both, give both
    (e.g. `"2pm (14:00)"` is NOT acceptable to speak; pass the spoken text and
