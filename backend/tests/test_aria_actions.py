@@ -56,10 +56,8 @@ class MissingActions(AssertionError):
     """Only this precise, intentional Stage 1 absence may be xfailed."""
 
 
-pending = pytest.mark.xfail(
-    strict=True, raises=MissingActions,
-    reason="NS-B10: tests first; implementation follows Mike's review",
-)
+# Stage 1's strict-xfail marker was removed once the implementation landed:
+# every test below must now pass outright.
 
 A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -227,7 +225,6 @@ def row(engine, action_id):
 
 # ------------------------------------------------------------ proposing ---
 
-@pending
 @pytest.mark.parametrize("action_type", sorted(ARGS))
 def test_proposing_acts_on_nothing(database, clock, doers, action_type):
     """Acceptance 1: a proposal is stored; nothing is sent, booked or created."""
@@ -239,7 +236,6 @@ def test_proposing_acts_on_nothing(database, clock, doers, action_type):
     assert result["proposal"]["expires_at"].startswith("2026-10-16T09:00")
 
 
-@pending
 def test_the_email_card_shows_exactly_what_will_go_out(database, clock, doers):
     preview = propose(database, business(), "send_email")["proposal"]["preview"]
     assert preview["to"] == EMAIL["to"] and preview["subject"] == EMAIL["subject"]
@@ -247,7 +243,6 @@ def test_the_email_card_shows_exactly_what_will_go_out(database, clock, doers):
     assert preview["sign_off"] == actions().sign_off("Aria", "Mike", "New Body Gym")
 
 
-@pending
 def test_the_sign_off_is_option_a():
     """Mike's decision 2. Every line is true: Aria sends from the owner's own
     mailbox, so a reply reaches them."""
@@ -257,7 +252,6 @@ def test_the_sign_off_is_option_a():
         "I pass every message straight to Mike. Reply to this email and it reaches Mike.")
 
 
-@pending
 def test_a_chase_card_uses_the_existing_chase_template_and_this_business_invoice(
         database, clock, doers):
     from email_templates import get_chase_email_template
@@ -272,13 +266,11 @@ def test_a_chase_card_uses_the_existing_chase_template_and_this_business_invoice
     assert preview["chase_stage"] == 1
 
 
-@pending
 def test_another_business_invoice_cannot_be_proposed(database, clock, doers):
     result = propose(database, business(A), "send_invoice_chase", {"invoice_id": INV_B})
     assert "proposal" not in result and result.get("error")
 
 
-@pending
 def test_a_paid_invoice_cannot_be_proposed(database, clock, doers):
     with Session(database) as s:
         s.execute(text("UPDATE invoices SET status='paid' WHERE id=:i"), {"i": INV_A})
@@ -286,14 +278,12 @@ def test_a_paid_invoice_cannot_be_proposed(database, clock, doers):
     assert "proposal" not in propose(database, business(), "send_invoice_chase")
 
 
-@pending
 @pytest.mark.parametrize("to", ["Tom Harper", "tom@localhost", ""])
 def test_an_email_without_a_real_address_cannot_be_proposed(database, clock, doers, to):
     result = propose(database, business(), "send_email", dict(EMAIL, to=to))
     assert "proposal" not in result and result.get("error")
 
 
-@pending
 @pytest.mark.parametrize("day,start", [("2026-03-29", "01:30"),   # spring forward: no such time
                                        ("2026-10-25", "01:30")])  # fall back: happens twice
 def test_a_booking_at_a_clock_change_time_cannot_be_proposed(database, clock, doers, day, start):
@@ -304,7 +294,6 @@ def test_a_booking_at_a_clock_change_time_cannot_be_proposed(database, clock, do
     assert "proposal" not in result and result.get("error")
 
 
-@pending
 def test_a_feature_the_plan_lacks_cannot_be_proposed(database, clock, doers):
     no_email = business(feature_flags={"email": False})
     assert "proposal" not in propose(database, no_email, "send_email")
@@ -312,7 +301,6 @@ def test_a_feature_the_plan_lacks_cannot_be_proposed(database, clock, doers):
 
 # ------------------------------------------------------------ approving ---
 
-@pending
 def test_approving_sends_exactly_the_stored_email_with_the_sign_off_once(database, clock, doers):
     """Acceptance 2."""
     aid = proposal_id(propose(database, business(), "send_email"))
@@ -327,7 +315,6 @@ def test_approving_sends_exactly_the_stored_email_with_the_sign_off_once(databas
     assert status == "done" and approved_by == OWNER
 
 
-@pending
 def test_a_second_approval_does_nothing(database, clock, doers):
     aid = proposal_id(propose(database, business(), "send_email"))
     approve(database, business(), aid)
@@ -336,7 +323,6 @@ def test_a_second_approval_does_nothing(database, clock, doers):
     assert len([c for c in doers if c[0] == "email"]) == 1
 
 
-@pending
 def test_an_approval_arriving_while_the_first_is_sending_does_nothing(database, clock, doers):
     """Two taps in flight at once: the second is refused because the first
     CLAIMED the action, and committed that claim, before sending."""
@@ -355,7 +341,6 @@ def test_an_approval_arriving_while_the_first_is_sending_does_nothing(database, 
     assert len([c for c in doers if c[0] == "email"]) == 1
 
 
-@pending
 def test_another_business_action_is_not_found(database, clock, doers):
     """Acceptance 3: 404, not 403 — its existence is not leaked."""
     aid = proposal_id(propose(database, business(B), "send_email"))
@@ -363,7 +348,6 @@ def test_another_business_action_is_not_found(database, clock, doers):
     assert doers == [] and row(database, aid)[0] == "proposed"
 
 
-@pending
 def test_an_expired_proposal_cannot_be_approved(database, clock, doers):
     aid = proposal_id(propose(database, business(), "send_email"))
     clock(T0 + timedelta(hours=72, minutes=1))
@@ -371,14 +355,12 @@ def test_an_expired_proposal_cannot_be_approved(database, clock, doers):
     assert doers == []
 
 
-@pending
 def test_a_proposal_can_still_be_approved_just_before_it_expires(database, clock, doers):
     aid = proposal_id(propose(database, business(), "send_email"))
     clock(T0 + timedelta(hours=71, minutes=59))
     assert approve(database, business(), aid)["status"] == "done"
 
 
-@pending
 def test_a_dismissed_proposal_cannot_be_approved(database, clock, doers):
     aid = proposal_id(propose(database, business(), "send_email"))
     with Session(database) as s:
@@ -387,7 +369,6 @@ def test_a_dismissed_proposal_cannot_be_approved(database, clock, doers):
     assert doers == [] and row(database, aid)[0] == "dismissed"
 
 
-@pending
 def test_a_feature_removed_since_proposing_is_refused_at_approval(database, clock, doers):
     aid = proposal_id(propose(database, business(), "send_email"))
     downgraded = business(feature_flags={"email": False})
@@ -395,7 +376,6 @@ def test_a_feature_removed_since_proposing_is_refused_at_approval(database, cloc
     assert doers == [] and row(database, aid)[0] == "proposed"
 
 
-@pending
 def test_a_failed_send_is_recorded_and_never_retried(database, clock, doers):
     """Acceptance 4."""
     aid = proposal_id(propose(database, business(), "send_email"))
@@ -407,7 +387,6 @@ def test_a_failed_send_is_recorded_and_never_retried(database, clock, doers):
     assert len([c for c in doers if c[0] == "email"]) == 1
 
 
-@pending
 def test_a_provider_refusal_is_a_failure_not_a_success(database, clock, doers, monkeypatch):
     import assistant_tools
     monkeypatch.setattr(assistant_tools, "_send_email",
@@ -421,7 +400,6 @@ class _Crash(BaseException):
     """The process dying mid-send: no handler runs."""
 
 
-@pending
 def test_a_crash_mid_send_is_never_sent_again(database, clock, doers):
     """Mike's decision 4, at most once: the action stays `executing`; nothing
     retries it, and a later tap is refused."""
@@ -437,7 +415,6 @@ def test_a_crash_mid_send_is_never_sent_again(database, clock, doers):
 
 # --------------------------------------------------------------- the chase ---
 
-@pending
 def test_an_approved_chase_is_sent_recorded_and_advances_the_stage_once(database, clock, doers):
     """Acceptance 6."""
     aid = proposal_id(propose(database, business(), "send_invoice_chase"))
@@ -455,7 +432,6 @@ def test_an_approved_chase_is_sent_recorded_and_advances_the_stage_once(database
     assert out[0][3] == "acct-aaaa" and "accounts@harperbuilds.example" in out[0][4]
 
 
-@pending
 def test_a_chase_for_an_invoice_paid_since_proposing_is_not_sent(database, clock, doers):
     aid = proposal_id(propose(database, business(), "send_invoice_chase"))
     with Session(database) as s:
@@ -469,7 +445,6 @@ def test_a_chase_for_an_invoice_paid_since_proposing_is_not_sent(database, clock
                          {"i": INV_A}).scalar() == 0
 
 
-@pending
 def test_a_plain_email_is_recorded_in_the_outbox(database, clock, doers):
     aid = proposal_id(propose(database, business(), "send_email"))
     approve(database, business(), aid)
@@ -481,7 +456,6 @@ def test_a_plain_email_is_recorded_in_the_outbox(database, clock, doers):
 
 # ---------------------------------------------------- bookings and tasks ---
 
-@pending
 def test_an_approved_booking_is_made_in_the_business_timezone(database, clock, doers):
     """Acceptance 7: 2pm on 20 October is 2pm London time (BST), sent to the
     calendar with the business's timezone."""
@@ -496,7 +470,6 @@ def test_an_approved_booking_is_made_in_the_business_timezone(database, clock, d
     assert ev.get("calendar_id", "primary") == "primary"
 
 
-@pending
 def test_an_approved_task_is_created_once(database, clock, doers):
     aid = proposal_id(propose(database, business(), "create_task"))
     approve(database, business(), aid)
@@ -506,7 +479,6 @@ def test_an_approved_task_is_created_once(database, clock, doers):
 
 # ---------------------------------------------------------------- editing ---
 
-@pending
 def test_an_edit_is_what_gets_sent(database, clock, doers):
     """Acceptance 5."""
     aid = proposal_id(propose(database, business(), "send_email"))
@@ -518,7 +490,6 @@ def test_an_edit_is_what_gets_sent(database, clock, doers):
     assert sent["body"].endswith("Reply to this email and it reaches Mike.")
 
 
-@pending
 def test_the_sign_off_cannot_be_edited_away(database, clock, doers):
     aid = proposal_id(propose(database, business(), "send_email"))
     with Session(database) as s:
@@ -526,7 +497,6 @@ def test_the_sign_off_cannot_be_edited_away(database, clock, doers):
     assert err.status_code == 422
 
 
-@pending
 def test_an_edit_is_validated_like_a_proposal(database, clock, doers):
     aid = proposal_id(propose(database, business(), "send_email"))
     with Session(database) as s:
@@ -534,7 +504,6 @@ def test_an_edit_is_validated_like_a_proposal(database, clock, doers):
     assert err.status_code == 422
 
 
-@pending
 def test_a_sent_action_cannot_be_edited(database, clock, doers):
     aid = proposal_id(propose(database, business(), "send_email"))
     approve(database, business(), aid)
@@ -584,7 +553,6 @@ def client_for(database, monkeypatch, biz):
     return client
 
 
-@pending
 def test_the_api_approves_once_then_conflicts(database, monkeypatch, clock, doers):
     aid = proposal_id(propose(database, business(), "send_email"))
     client = client_for(database, monkeypatch, business())
@@ -593,7 +561,6 @@ def test_the_api_approves_once_then_conflicts(database, monkeypatch, clock, doer
     assert len([c for c in doers if c[0] == "email"]) == 1
 
 
-@pending
 def test_the_api_hides_another_business_action(database, monkeypatch, clock, doers):
     aid = proposal_id(propose(database, business(B), "send_email"))
     client = client_for(database, monkeypatch, business(A))
@@ -604,7 +571,6 @@ def test_the_api_hides_another_business_action(database, monkeypatch, clock, doe
     assert doers == []
 
 
-@pending
 @pytest.mark.parametrize("status,active", [("unpaid", True), ("active", False)])
 def test_a_read_only_or_suspended_account_cannot_approve(database, monkeypatch, clock, doers,
                                                          status, active):
@@ -618,7 +584,6 @@ def test_a_read_only_or_suspended_account_cannot_approve(database, monkeypatch, 
     assert doers == [] and row(database, aid)[0] == "proposed"
 
 
-@pending
 def test_the_api_lists_this_business_open_proposals_only(database, monkeypatch, clock, doers):
     mine = proposal_id(propose(database, business(A), "create_task"))
     done = proposal_id(propose(database, business(A), "send_email"))
@@ -648,7 +613,6 @@ def chat_db(database, monkeypatch):
     return database
 
 
-@pending
 @pytest.mark.parametrize("name", sorted(ARGS))
 def test_chat_turns_each_action_into_a_proposal(chat_db, clock, doers, name):
     """D9/D11/D15: the NS-A1 refusal becomes a proposal at the chat boundary.
@@ -664,7 +628,6 @@ def test_chat_turns_each_action_into_a_proposal(chat_db, clock, doers, name):
     assert doers == []
 
 
-@pending
 def test_delete_task_is_still_refused_in_chat(chat_db, clock, doers):
     """D11."""
     import assistant_chat
@@ -684,7 +647,6 @@ def test_the_shared_dispatcher_still_refuses(doers, name):
     assert result.get("refused") is True and doers == []
 
 
-@pending
 def test_chat_advertises_the_four_actions_and_not_delete_task():
     """The model must be able to propose; descriptions say a card is shown."""
     import assistant_tools
@@ -696,7 +658,6 @@ def test_chat_advertises_the_four_actions_and_not_delete_task():
         assert "approv" in tools[name].lower(), f"{name} must say the owner approves it"
 
 
-@pending
 def test_a_chat_reply_carries_its_proposals_to_the_app(chat_db, clock, doers, monkeypatch):
     """The card needs the proposal: process_chat_message returns `proposals`."""
     import assistant_chat

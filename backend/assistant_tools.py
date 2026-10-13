@@ -420,6 +420,75 @@ TOOL_DEFINITIONS = [
                 "required": ["quote_number", "method"]
             }
         }
+    },    # NS-B10: the four approvable actions. Calling one does NOT act: the chat
+    # boundary stores it as a card the owner approves with a tap
+    # (services/aria_actions.py). execute_tool still refuses them.
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "Draft an email for the owner to approve. It appears as a card showing the recipient, subject, body and your sign-off; nothing is sent unless the owner taps Approve. Write the body only: the sign-off is added for you.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Recipient's email address (a real address, e.g. from list_emails)"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string", "description": "Plain text, no sign-off"}
+                },
+                "required": ["to", "subject", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_invoice_chase",
+            "description": "Prepare an invoice chase for the owner to approve. It uses the business's chase template for the next stage and appears as a card; nothing is sent unless the owner taps Approve.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "invoice_id": {"type": "string", "description": "The invoice's id from list_invoices or get_overdue_invoices"},
+                    "chase_stage": {"type": "integer", "description": "Optional stage 1-4; defaults to the next stage"}
+                },
+                "required": ["invoice_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_calendar_event",
+            "description": "Propose a calendar booking for the owner to approve. It appears as a card; nothing is booked unless the owner taps Approve. Check availability first.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "start_time": {"type": "string", "description": "HH:MM, 24-hour, in the business's timezone"},
+                    "duration_minutes": {"type": "integer", "description": "Default 60"},
+                    "description": {"type": "string"},
+                    "attendee_email": {"type": "string", "description": "Optional; Google emails them an invitation once approved"},
+                    "calendar_id": {"type": "string", "description": "Optional; 'primary' by default"}
+                },
+                "required": ["title", "date", "start_time"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_task",
+            "description": "Propose a task for the owner's list. It appears as a card; it is added only if the owner taps Approve.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "due_at": {"type": "string", "description": "Optional due date, YYYY-MM-DD"}
+                },
+                "required": ["title"]
+            }
+        }
     },
 ]
 

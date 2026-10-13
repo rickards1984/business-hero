@@ -5,6 +5,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
+import asyncio
 from typing import Optional, Tuple
 from openai import OpenAI
 from sqlalchemy import text
@@ -16,8 +17,17 @@ from assistant_tools import TOOL_DEFINITIONS, execute_tool
 logger = logging.getLogger(__name__)
 
 
-async def _execute_tool_async(tool_name: str, arguments: dict, business_id: str, timezone: str = "Europe/London") -> dict:
+async def _execute_tool_async(tool_name: str, arguments: dict, business_id: str, timezone: str = "Europe/London",
+                              user_id: Optional[str] = None, user_name: Optional[str] = None) -> dict:
     """Wrapper that handles async booking tools, delegating everything else to the sync execute_tool."""
+    # NS-B10: the four approvable actions become approval cards — stored,
+    # never executed here. Only a caller that says who is asking may
+    # propose; anything else falls through to the NS-A1 refusal.
+    from services import aria_actions
+    if tool_name in aria_actions.ACTION_TYPES and user_id:
+        return await asyncio.to_thread(
+            aria_actions.propose_from_chat, str(business_id), user_id, tool_name,
+            dict(arguments or {}), owner_name=user_name, timezone=timezone)
     # NS-A1: refuse before anything else. This wrapper handles calendar
     # booking itself, so the shared dispatcher's check alone would not cover it.
     from assistant_tools import refusal
@@ -777,6 +787,7 @@ async def process_chat_message(
     
     MAX_TOOL_ROUNDS = 5
     assistant_reply = None
+    proposals: list = []  # NS-B10 approval cards raised this turn
     tool_round = 0
 
     while tool_round < MAX_TOOL_ROUNDS:
@@ -825,7 +836,11 @@ async def process_chat_message(
             logger.info(f"Executing tool (round {tool_round}): {tool_name} with args: {arguments}")
 
             try:
-                tool_result = await _execute_tool_async(tool_name, arguments, business.id, business.timezone)
+                tool_result = await _execute_tool_async(
+                    tool_name, arguments, business.id, business.timezone,
+                    user_id=user.id, user_name=user_name)
+                if isinstance(tool_result, dict) and tool_result.get("proposal"):
+                    proposals.append(tool_result["proposal"])
             except Exception as e:
                 logger.error(f"Tool execution error: {e}")
                 tool_result = {"success": False, "error": str(e)}
@@ -870,5 +885,6 @@ async def process_chat_message(
             "name": business.name,
             "timezone": business.timezone
         },
-        "conversation_id": resolved_conv_id
+        "conversation_id": resolved_conv_id,
+        "proposals": proposals,
     }
