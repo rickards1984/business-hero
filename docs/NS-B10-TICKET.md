@@ -166,3 +166,16 @@ rename flows in. Every line in it must be true. Three options for Mike:
 5. **Who may approve:**
    - *Recommended:* any member of the business with full access.
    - *Alternative:* owner role only.
+
+## Mike's decisions — 13 October 2026
+
+"I agree with all five above."
+
+1. New `aria_actions` table, migration 035, runbook as for 034.
+2. Sign-off **A**:
+   > {assistant_name}
+   > AI assistant to {owner_name} at {business_name}
+   > I pass every message straight to {owner_name}. Reply to this email and it reaches them.
+3. Proposals expire after 72 hours.
+4. At most once: an action interrupted mid-send is never retried automatically.
+5. Any member of the business with full access may approve.

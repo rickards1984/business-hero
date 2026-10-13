@@ -165,7 +165,13 @@ def _assert_refused(result):
 
 # ------------------------------------------------------------------- chat ---
 
-@pytest.mark.parametrize("name", sorted(PROHIBITED_CHAT))
+# NS-B10 (Mike, 13 Oct 2026): in chat the four approvable actions become
+# approval cards (tests in test_aria_actions.py). Only delete_task is still
+# refused there (D11). The shared dispatcher and voice still refuse all five.
+CHAT_STILL_REFUSED = {"delete_task": PROHIBITED_CHAT["delete_task"]}
+
+
+@pytest.mark.parametrize("name", sorted(CHAT_STILL_REFUSED))
 def test_chat_refuses_each_action(tripwire, name):
     result = asyncio.run(
         assistant_chat._execute_tool_async(name, dict(PROHIBITED_CHAT[name]), BIZ, TZ))
@@ -183,8 +189,10 @@ def test_the_shared_dispatcher_refuses_each_action_too(tripwire, name):
 
 
 def test_chat_advertises_none_of_the_actions():
+    """NS-B10: the four approvable actions are advertised as proposals
+    (test_aria_actions.py); delete_task is never advertised."""
     names = {t["function"]["name"] for t in assistant_tools.TOOL_DEFINITIONS}
-    assert names.isdisjoint(PROHIBITED_CHAT), names & set(PROHIBITED_CHAT)
+    assert names.isdisjoint(CHAT_STILL_REFUSED), names & set(CHAT_STILL_REFUSED)
 
 
 def test_chat_prompt_does_not_offer_the_actions():
