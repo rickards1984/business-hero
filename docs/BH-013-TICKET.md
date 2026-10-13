@@ -70,3 +70,70 @@ booking logic:
   entitlement, or Stripe.
 - Finish with a short report: what changed, test counts, anything you were
   unsure of.
+
+## Builder completion — Codex, 13 Oct 2026
+
+**North Star:** P2 (grounded calendar reads), P3 (natural British wording),
+P9 (business-scoped booking calendar lookup); Phase 1 tool layer.
+**Status:** Built; awaiting Claude's independent review. Changes left in the
+working tree, without committing or pushing, per Mike's worktree instruction.
+
+Tests were written and run before implementation: the first focused run had
+33 failures and 3 passes. Added coverage subsequently includes a missing
+booking-settings row and grounding the merged briefing counts. New coverage
+comprises 38 parameterised cases across `test_bh013_calendar.py` and
+`test_bh013_spoken_time.py`. Only the two explicitly authorised wording
+assertions changed in `test_receptionist_booking.py`.
+
+Implementation decisions:
+- Google event-list `summary` supplies each calendar's display name, with
+  the ticket's fallback labels when absent. Duplicate event IDs retain the
+  primary calendar's copy. Offset-aware start times are ordered by instant;
+  all-day dates sort at midnight UTC.
+- Read the configured booking calendar even if receptionist booking is
+  disabled: disabling new bookings does not hide existing events from Aria.
+- Keep the existing six spoken availability choices, adding separate ISO
+  start values for those choices. Keep today's ISO date separately labelled
+  for tool arguments in the system prompt, since spoken "today" alone loses
+  the model's date anchor. No booking calculation or write path changed.
+
+Manual behaviour check after review/deployment: open Aria and ask for upcoming
+appointments and a calendar briefing; check that an induction on the booking
+calendar appears with its calendar name. In an authorised receptionist test
+call, ask for availability and confirm a booking; listen for natural dates
+and times. `check.sh` verifies the offline inputs and outputs, not live Google
+permissions or the voice model's pronunciation. No live calls or external
+writes were performed during this build.
+
+**Completion evidence:** `./check.sh full` using this worktree's `.venv`:
+1,663 passed, 33 skipped, 854 warnings, 220 subtests passed (pytest, 14.02s).
+Gate summary: 5 passed, 0 failed, 1 skipped (optional eslint: no lint script).
+TypeScript, Python compilation, Ruff and all five preflight traps passed.
+`git diff --check` passed. `test_aria_no_unapproved_actions.py` and all booking
+logic tests are included in that full run; the former is untouched.
+
+## Claude review corrections — Codex, 13 Oct 2026
+
+Addressed the two requested findings only (North Star P2/P3):
+- The prompt's current time includes the full local weekday, ordinal day,
+  month and year, using the shared formatter's explicit full-date mode.
+  The separate ISO date for tool arguments remains unchanged.
+- Primary calendar events always use "main calendar", even when Google returns
+  the owner's email or another summary. Booking calendars retain their summary
+  with "booking calendar" as the fallback. This supersedes the primary-summary
+  naming decision recorded above.
+
+Tests first: extended `test_system_prompt_current_time_is_spoken` to three
+cases (BST, GMT and local midnight), and
+`test_calendar_reads_merge_sort_deduplicate_and_label` to two primary summaries
+(email and display name). Before fixing: 5 failed, 36 passed. After fixing:
+41 passed. Existing booking-calendar name and fallback coverage remains green.
+
+Verification: `./check.sh full` exited 0: 1,666 passed, 33 skipped,
+860 warnings, 220 subtests passed. Gate summary: 5 passed, 0 failed,
+1 optional eslint skip; all five preflight traps passed.
+No commit, push or live external actions performed. For a post-deployment
+behaviour check, open Aria and ask which calendar an appointment is on;
+primary events should say "main calendar". In an authorised receptionist test
+call, ask about "next Tuesday" or "the 20th". Offline checks verify the prompt
+context, not the live voice model's interpretation.
