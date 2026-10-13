@@ -855,3 +855,135 @@ def test_aria_can_read_what_happened_to_her_cards(database, clock, doers, monkey
     statuses = sorted((a["action_type"], a["status"]) for a in result["actions"])
     assert statuses == [("create_task", "proposed"), ("send_email", "done")]
     assert "list_aria_actions" in {t["function"]["name"] for t in assistant_tools.TOOL_DEFINITIONS}
+
+
+# ------------------------------------------- Codex NS-B10 review 2 additions ---
+
+def test_a_booking_retried_after_a_token_refresh_that_times_out_is_unknown(
+        database, clock, monkeypatch):
+    """Review 2 finding 1: Google says 401, the token refreshes, the RETRIED
+    booking may have created the event but its response times out. That is
+    an unknown outcome, not 'token expired' — calling it failed invites a
+    second booking and duplicate invitations. Drives the real
+    create_calendar_event with only its HTTP edge faked."""
+    import httpx
+    import assistant_tools
+    posts = []
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, **kw):
+            posts.append(kw["headers"]["Authorization"])
+            if len(posts) == 1:
+                return SimpleNamespace(status_code=401, text="expired", json=lambda: {})
+            raise httpx.ReadTimeout("timed out")
+    monkeypatch.setattr(assistant_tools, "_get_google_calendar_token",
+                        lambda engine, bid: ("old-token", "acct", "refresh-cipher"))
+    monkeypatch.setattr(assistant_tools, "_refresh_google_token",
+                        lambda engine, acct, cipher: "new-token")
+    monkeypatch.setattr(assistant_tools.httpx, "AsyncClient", _Client)
+    aid = proposal_id(propose(database, business(), "create_calendar_event"))
+    result = approve(database, business(), aid)
+    assert posts == ["Bearer old-token", "Bearer new-token"]
+    assert result["status"] == "executing", result
+    assert "token expired" not in (result["error"] or "").lower()
+
+
+def test_a_refresh_that_fails_before_retrying_is_a_definite_failure(
+        database, clock, monkeypatch):
+    """The other side of finding 1: if the token cannot be refreshed, the
+    retry never happened, so 'not done, reconnect Google' is true."""
+    import assistant_tools
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, **kw):
+            return SimpleNamespace(status_code=401, text="expired", json=lambda: {})
+
+    def refresh(engine, acct, cipher):
+        raise RuntimeError("invalid_grant")
+    monkeypatch.setattr(assistant_tools, "_get_google_calendar_token",
+                        lambda engine, bid: ("old-token", "acct", "refresh-cipher"))
+    monkeypatch.setattr(assistant_tools, "_refresh_google_token", refresh)
+    monkeypatch.setattr(assistant_tools.httpx, "AsyncClient", _Client)
+    aid = proposal_id(propose(database, business(), "create_calendar_event"))
+    result = approve(database, business(), aid)
+    assert result["status"] == "failed" and "reconnect" in result["error"].lower()
+
+
+def test_an_edit_landing_between_approvals_read_and_its_claim_is_refused(
+        database, clock, doers, monkeypatch):
+    """Review 2 finding 3: the edit happens AFTER approve() has read the card
+    and checked its version, but BEFORE it claims. Only the claim's own
+    payload predicate can catch this; nothing may be sent."""
+    m = actions()
+    result = propose(database, business(), "send_email")
+    aid, seen = proposal_id(result), result["proposal"]["version"]
+    original = m._feature_problem
+    fired = []
+
+    def edit_then_check(biz, action_type):
+        if not fired:
+            fired.append(True)
+            with Session(database) as s:
+                m.edit(s, business(), aid, {"to": "someone.else@example.com"})
+        return original(biz, action_type)
+    monkeypatch.setattr(m, "_feature_problem", edit_then_check)
+    with Session(database) as s:
+        err = refused(m.approve, s, business(), aid, OWNER, seen)
+    assert fired and err.status_code == 409
+    assert doers == [] and row(database, aid)[0] == "proposed"
+
+
+def test_an_approval_landing_between_dismissals_read_and_its_write_wins(
+        database, clock, doers, monkeypatch):
+    """Review 2 finding 3: dismissal has read the card as `proposed`; an
+    approval then claims and completes; dismissal's write must not
+    overwrite it."""
+    m = actions()
+    aid = proposal_id(propose(database, business(), "send_email"))
+    original = m._scoped
+    fired = []
+
+    def scoped_then_approve(session, biz, action_id):
+        found = original(session, biz, action_id)
+        if not fired:
+            fired.append(True)
+            with Session(database) as s:
+                m.approve(s, business(), aid, OWNER)
+        return found
+    monkeypatch.setattr(m, "_scoped", scoped_then_approve)
+    with Session(database) as s:
+        err = refused(m.dismiss, s, business(), aid)
+    assert fired and err.status_code == 409
+    assert row(database, aid)[0] == "done"
+    assert len([c for c in doers if c[0] == "email"]) == 1
+
+
+def test_arias_read_tool_reports_an_untouched_expired_card_as_expired(
+        database, clock, doers, monkeypatch):
+    """Review 2 finding 4: the stored status stays `proposed` after 72 hours,
+    but approval is impossible, so Aria must not call it awaiting approval."""
+    import assistant_tools
+    proposal_id(propose(database, business(A), "create_task"))
+    clock(T0 + timedelta(hours=73))
+    monkeypatch.setattr(assistant_tools, "engine", database)
+    result = assistant_tools.execute_tool("list_aria_actions", {}, A, "Europe/London")
+    assert [(a["status"], a["meaning"]) for a in result["actions"]] == [
+        ("expired", "expired without approval")]

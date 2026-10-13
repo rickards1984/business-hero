@@ -72,3 +72,39 @@ Not done, with reasons:
   post-deploy click test.
 - No frontend unit tests. The repo has no frontend test harness; the PR click
   tests cover the card.
+
+## Review 2 (repair cycle 1 of 3)
+
+| | |
+|---|---|
+| Reviewed commit | `6a54b1a` |
+| Session id | `01a1375a-e3e2-7da1-93f7-a94bb20c426e` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 42,672` |
+| **Verdict** | **REQUEST-CHANGES** |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** — reviewed `6a54b1a1376585472e40b9f751e77be83ab4eb5c`.
+
+1. **P1 — Calendar uncertainty can still become “Not done”.** `backend/services/aria_actions.py:352`; `backend/assistant_tools.py:2047`.  
+   Scenario: Google returns 401, token refresh succeeds, the retried booking creates the event but its response times out. The calendar helper catches that exception and returns “Calendar token expired”. `_unknown_outcome` classifies this as definite failure, inviting another booking and duplicate invitations. Preserve uncertainty for exceptions during the retried POST. The new tests mock the entire calendar helper, missing this path.
+
+2. **P2 — Failed reconciliation leaves Approve enabled after a conflict.** `frontend/client/src/components/ApprovalCard.tsx:81`, `:96`.  
+   Scenario: another member approves; this card receives 409; the reconciliation GET fails. Its catch changes nothing, `uncertain` remains false, and local status remains `proposed`. Approve becomes active again. Disable controls until authoritative reconciliation succeeds.
+
+3. **P2 — The regression tests do not exercise the repaired races.** `backend/tests/test_aria_actions.py:712`, `:811`.  
+   The version test edits **before** approval reads the row; removing the claim’s payload predicate would still pass. The dismissal test starts dismissal **after** approval claims; the original broken dismissal would also pass. Add interleavings between approval’s read and claim, and between dismissal’s read and UPDATE, respectively.
+
+4. **P3 — The new read tool describes expired cards as awaiting approval.** `backend/assistant_tools.py:2917`.  
+   Scenario: an untouched proposal passes its 72-hour expiry. Its stored status remains `proposed`; the tool neither selects nor evaluates `expires_at`, so Aria reports it as awaiting approval although approval is impossible. Derive effective expiry and test it.
+
+Original findings **1, 3, 4 and 6 are fixed in code**; **2 and 5 remain incomplete**. Finding **7’s tenant-scoped tool exists and its scope is tested**, with the expiry defect above. The version fingerprint, PostgreSQL JSONB equality versus SQLite’s preserved stored text, and monotonic chase update look correct on inspection; PostgreSQL execution remains unverified. The stale-chase test covers the reported stage-1/stage-3 scenario.
+
+The deliberate approved-test changes do **not** weaken their contracts: API requests now supply versions, definite rejection remains tested, and exceptions separately assert uncertainty.
+
+Verification: `./check.sh full` passed (**1,687 passed, 33 skipped**); focused tests **111 passed**. Frontend reviewed by inspection, not browser execution.
+
+Otherwise: no additional findings; no files edited, committed or pushed; working tree clean.
