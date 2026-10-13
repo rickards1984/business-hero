@@ -225,3 +225,33 @@ Review 3 finding 2 confirmed resolved; finding 1 confirmed resolved for
 blocked setup and a hung connect. One new, narrower P2 (a slow socket close
 delays the cancel and can add teardown to metered time). Escalated to Mike
 before any fifth cycle.
+
+## Review 5 (confirm-only, repair cycle 5, authorised by Mike)
+
+| | |
+|---|---|
+| Reviewed commit | `3ad6b23` |
+| Session id | `01a134ff-189a-7f13-a3e9-194efbbe56fb` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 37,761` |
+| **Verdict** | **ACCEPT** |
+
+Verbatim:
+
+---
+
+**ACCEPT** — `3ad6b237f2a4d8d7068b0a0d1b183b3eb7708af2`.
+
+P1 findings: **none introduced by this repair**.
+
+Review 4 is resolved: cancellation precedes socket closure; `finally` bounds each close to two seconds; call end is captured before teardown and clamped to the deadline on watchdog timeout.
+
+The new test is real handler-level regression evidence: hung connection, five-second socket close, return within four seconds, and saved duration ≤ one second. Save/meter operations are mocked.
+
+Permitted pytest: **62 passed, 10 warnings**. No edits, pushes or network use; working tree clean.
+
+Backlog: Add established-stream coverage with slow OpenAI closure.
+Backlog: Assert exact deadline clamping under delayed watchdog execution and equality of saved/metered duration.
+---
+
+Both backlog notes recorded in `docs/BACKLOG.md`.
