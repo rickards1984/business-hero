@@ -120,3 +120,33 @@ Every finding taken. Tests first: 5 new tests, 2 of which failed before the fix.
 | 2 · A failed re-read leaves Approve enabled (P2) | If re-reading the card fails, the controls switch off (`uncertain`). The message now says to check, then refresh the page |
 | 3 · The race tests do not exercise the windows (P2) | Both races are now driven at the exact window: an edit between approve's read and its claim, and an approval between dismiss's read and its write. Mutation check: removing the claim's payload predicate fails the first; making dismissal unconditional fails the second |
 | 4 · The read tool calls expired cards "awaiting approval" (P3) | The tool reads `expires_at` and reports an untouched card past expiry as `expired`. Tested |
+
+## Review 3 (repair cycle 2 of 3)
+
+| | |
+|---|---|
+| Reviewed commit | `c52e6dd` |
+| Session id | `01a1375d-ef6a-7a23-ae22-624b45410de9` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 35,509` |
+| **Verdict** | **ACCEPT** |
+
+Verbatim:
+
+---
+
+**ACCEPT** — reviewed `c52e6dd0901cff04b293a96fa8c53dc719e8bee5`. No remaining findings from review 2 and no new P1/P2 found.
+
+- **Finding 1 resolved:** the retried POST’s timeout reaches approval’s unknown-outcome handler. Tests exercise the real calendar helper for both retry timeout and refresh failure.
+- **Finding 2 resolved:** failed reconciliation sets `uncertain`, hiding action controls. Verified by frontend inspection.
+- **Finding 3 resolved:** new tests interleave edits between approval’s read and claim, and approval between dismissal’s read and write. Both exercise the repaired predicates.
+- **Finding 4 resolved:** the read tool derives effective expiry from `expires_at`; covered by a regression test.
+
+**Receptionist retry path:** the exception now escapes the calendar helper, but is caught at [receptionist_call_handler.py:492](/Users/michaelrickards/dev/bh2-NS-B10-review/backend/receptionist_call_handler.py:492). It returns the callback fallback, releases the calendar lock, and does not escape the call handler. This catch is verified by inspection; existing receptionist tests do not specifically exercise retry timeouts.
+
+Verification: `./check.sh full` passed (**1,692 passed, 33 skipped**); focused action and receptionist suites **114 passed**.
+
+Otherwise: no files edited, committed or pushed; frontend browser behaviour and PostgreSQL concurrency remain unverified.
+---
+
+Backlogged from the review: a receptionist test for a retried booking that times out (the catch is verified by inspection only); PostgreSQL execution of the approval path (proved on staging only for the claim; end-to-end by the click tests).
