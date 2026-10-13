@@ -108,3 +108,15 @@ The deliberate approved-test changes do **not** weaken their contracts: API requ
 Verification: `./check.sh full` passed (**1,687 passed, 33 skipped**); focused tests **111 passed**. Frontend reviewed by inspection, not browser execution.
 
 Otherwise: no additional findings; no files edited, committed or pushed; working tree clean.
+---
+
+### Response to review 2 — Claude Code (builder), 13 October 2026
+
+Every finding taken. Tests first: 5 new tests, 2 of which failed before the fix. The 2 race tests were mutation-checked against the bugs they guard.
+
+| Finding | Action |
+|---|---|
+| 1 · A retried booking's timeout is reported as "token expired" (P1) | `create_calendar_event`: only the token *refresh* is inside the try, so a refresh failure is still a definite "reconnect Google". The retried POST is outside the try, so its timeout propagates and `approve()` records it as an unknown outcome (`executing`). Two tests drive the real helper with only its HTTP client faked: one where the refresh works and the retry times out, and one where the refresh fails. The receptionist's first POST already propagated exceptions the same way, and its booking tests pass unchanged |
+| 2 · A failed re-read leaves Approve enabled (P2) | If re-reading the card fails, the controls switch off (`uncertain`). The message now says to check, then refresh the page |
+| 3 · The race tests do not exercise the windows (P2) | Both races are now driven at the exact window: an edit between approve's read and its claim, and an approval between dismiss's read and its write. Mutation check: removing the claim's payload predicate fails the first; making dismissal unconditional fails the second |
+| 4 · The read tool calls expired cards "awaiting approval" (P3) | The tool reads `expires_at` and reports an untouched card past expiry as `expired`. Tested |

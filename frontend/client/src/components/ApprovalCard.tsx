@@ -80,7 +80,9 @@ export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
       const r = await apiRequest('GET', `/v1/aria/actions/${card.id}`);
       setCard(await r.json());
     } catch {
-      // Still unknown: keep the controls off.
+      // The authoritative state is unknown: switch the controls off rather
+      // than fall back to a stale `proposed` (Codex review 2, finding 2).
+      setUncertain(true);
     }
   };
 
@@ -176,7 +178,7 @@ export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
         {message && <Alert severity="warning">{message}</Alert>}
         {uncertain && (
           <Alert severity="warning">
-            We couldn't confirm whether this went through. Check your Sent folder or calendar before asking Aria again.
+            We couldn't confirm what happened to this card. Check your Sent folder or calendar, then refresh the page before asking Aria again.
           </Alert>
         )}
 

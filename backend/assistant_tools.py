@@ -2047,9 +2047,12 @@ async def create_calendar_event(
     if resp.status_code == 401 and refresh_ciphertext:
         try:
             access_token = _refresh_google_token(engine, account_id, refresh_ciphertext)
-            resp = await _create(access_token)
         except Exception:
             return {"error": "Calendar token expired — please reconnect Google", "success": False}
+        # Outside the try: if the RETRIED booking times out, Google may have
+        # created the event. That must surface as an unknown outcome, not as
+        # "token expired" (Codex NS-B10 review 2, finding 1).
+        resp = await _create(access_token)
 
     if resp.status_code not in (200, 201):
         return {"error": f"Failed to create event: {resp.status_code} {resp.text}", "success": False}
@@ -2912,9 +2915,10 @@ def _list_aria_actions(engine, business_id: str, args: dict) -> dict:
     cards, from the record — this business only, newest first."""
     import json as _json
     limit = max(1, min(int(args.get("limit") or 20), 50))
+    from services import aria_actions as _aria_actions
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT action_type, status, payload, error, created_at, executed_at
+            SELECT action_type, status, payload, error, created_at, executed_at, expires_at
             FROM aria_actions WHERE business_id = :business_id
             ORDER BY created_at DESC LIMIT :limit
         """), {"business_id": str(business_id), "limit": limit}).fetchall()
@@ -2924,7 +2928,11 @@ def _list_aria_actions(engine, business_id: str, args: dict) -> dict:
         "expired": "expired without approval",
     }
     actions = []
-    for action_type, status, payload, error, created_at, executed_at in rows:
+    for action_type, status, payload, error, created_at, executed_at, expires_at in rows:
+        # An untouched card past its expiry is still stored as `proposed`,
+        # but it can no longer be approved (review 2, finding 4).
+        if status == "proposed" and _aria_actions._is_expired(expires_at):
+            status = "expired"
         p = _json.loads(payload) if isinstance(payload, str) else (payload or {})
         actions.append({
             "action_type": action_type, "status": status, "meaning": meaning.get(status, status),
