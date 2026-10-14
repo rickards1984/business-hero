@@ -110,3 +110,12 @@ API rejects this. The phone receptionist was moved to GA in July
    as an error.
 8. **`ARIA_VOICE_ENABLED` still switches voice off completely**, before any
    provider connection.
+
+## Mike's decisions — 14 October 2026
+
+"Voice - I agree with V1-V4."
+
+- **V1 — one pool of voice minutes**, shared by Aria voice and the receptionist, shown split.
+- **V2 — a 20-minute cap per voice session.**
+- **V3 — fail closed:** if the meter can't be read, the voice session is refused.
+- **V4 — no Aria voice on Starter.**
