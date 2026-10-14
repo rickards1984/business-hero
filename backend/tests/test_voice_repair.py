@@ -832,3 +832,59 @@ def test_a_second_cancellation_during_teardown_still_closes_the_browser(voice, m
             while True:
                 ws.receive_json()  # the browser connection is closed
     assert _wait(lambda: len(voice["recorded"]) == 1, timeout=2.0)
+
+
+# ------------------------------------------- Codex NS-V1 review 3 additions ---
+
+def test_a_hanging_heartbeat_counts_as_a_failure_and_ends_the_session(voice, monkeypatch):
+    """Review 3 finding 1: a write that hangs (not raises) must still count
+    toward the three-strikes stop."""
+    rv = repaired()
+    monkeypatch.setattr(rv, "VOICE_HEARTBEAT_SECONDS", 0.05)
+    from services import metering
+    client = voice["make"]()
+    calls = []
+
+    def first_then_hang(*a, **k):
+        calls.append(1)
+        if len(calls) > 1:
+            time.sleep(3)
+    monkeypatch.setattr(metering, "voice_session_heartbeat", first_then_hang)
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        assert ws.receive_json() == {"type": "ready"}
+        assert _wait(lambda: not voice["connects"][0].open, timeout=2.0), \
+            "a hanging heartbeat let the session run unrecorded"
+
+
+def test_cancelling_the_handler_mid_close_still_finishes_closing_openai(voice, monkeypatch):
+    """Review 3 finding 2: the handler itself is cancelled while the OpenAI
+    close is still in progress; the close must still complete, the browser
+    close and the accrual still happen. Driven on one loop with the real
+    handler (the earlier test cancelled the close task itself)."""
+    rv = repaired()
+    monkeypatch.setattr(rv, "VOICE_SESSION_CAP_SECONDS", 0.05)
+    voice["make"]()
+    closing = {}
+
+    async def slow_close(self):
+        closing["started"] = True
+        await asyncio.sleep(0.3)
+        self.open = False
+    monkeypatch.setattr(_FakeUpstream, "close", slow_close)
+
+    async def scenario():
+        browser = _FakeBrowser()
+        session = asyncio.create_task(rv.realtime_voice_endpoint(browser))
+        while not closing.get("started"):
+            await asyncio.sleep(0.01)
+        session.cancel()  # a second cancellation, mid-close
+        try:
+            await asyncio.wait_for(session, 5)
+        except asyncio.CancelledError:
+            pass
+        return browser
+    browser = asyncio.run(scenario())
+    assert not voice["connects"][0].open, "the OpenAI close was abandoned"
+    assert browser.closed
+    assert _wait(lambda: len(voice["recorded"]) == 1, timeout=2.0)

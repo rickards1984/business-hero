@@ -118,3 +118,33 @@ Harness changes:
 - The voice fixture now records through `accrue_session`, the voice path, and
   stubs the heartbeat.
 - Three round-1 tests were updated to the same contract.
+
+## Review 3 (repair cycle 2 of 3)
+
+| | |
+|---|---|
+| Reviewed commit | `6114530` |
+| Session id | `01a13b36-01fc-71d2-8202-a29e2be83b46` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 44,623` |
+| **Verdict** | **REQUEST-CHANGES** (no P1) |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** — `6114530b8f54108a1341bc5d00a80a9fce6585fa`. No P1 established; two P2 gaps remain.
+
+1. **P2 — A stalled heartbeat bypasses the heartbeat-failure stop.** [realtime_voice.py:863](/Users/michaelrickards/dev/bh2-NS-V1-review/backend/realtime_voice.py:863)  
+   If a database write hangs rather than raises, the unbounded `to_thread` await never increments `failures`. The session continues without fresh recovery data until the independent 20-minute cap. **Probe:** with 50ms heartbeat intervals, after seven intervals the second write remained blocked and upstream remained open. The new test covers immediate exceptions only. Bound heartbeat completion or enforce a maximum age since the last successful write. Review-2 finding 2 is only partially resolved.
+
+2. **P2 — Absorbing cancellation still abandons provider closure.** [realtime_voice.py:1087](/Users/michaelrickards/dev/bh2-NS-V1-review/backend/realtime_voice.py:1087)  
+   A second cancellation cancels the `wait_for` close operation; `_bounded` then proceeds without finishing or retrying closure. **Probe:** cancelling the handler during delayed provider closure left upstream open, while browser closure and accrual completed. The [new test:822](/Users/michaelrickards/dev/bh2-NS-V1-review/backend/tests/test_voice_repair.py:822) cancels the close task itself and sets `open=False` before yielding, masking unfinished closure. Preserve bounded provider cleanup across handler cancellation and test cancellation before closure completes. This demonstrates incomplete cleanup, not proven continued live-provider billing. Review-2 finding 5 remains partial.
+
+Review-2 findings **1 and 4 are resolved**: start-month accounting is consistent, and meaningful tests cover recovery-first, final-first and duplicate accrual. The PostgreSQL business/period advisory lock encloses the marker read, allocation and marker update through commit; no concurrency defect found by inspection. **Actual PostgreSQL concurrency was not exercised**—the tests use SQLite and a mocked lock check.
+
+Finding **3 is resolved in code**: both sign-in database operations run in threads. The same-loop canary genuinely tests the slow business lookup; it does not separately delay the feature-gate query.
+
+**Verification:** `./check.sh full` passed—**1,776 passed, 33 skipped**, all five preflight traps passed. Four focused suites: **187 passed**.
+
+Otherwise: no additional P1/P2 found; live audio and browser behaviour remain unverified; no source edits, commits or pushes, and worktree clean.
