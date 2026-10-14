@@ -462,3 +462,187 @@ def test_receptionist_accruals_are_unchanged_by_the_pool(meters):
         rows = {m: D(v) for m, v in s.execute(text("SELECT meter, value FROM usage_meters "
                                    "WHERE meter NOT LIKE '%:%'")).fetchall()}
     assert rows == {"receptionist_minutes": D("5")}
+
+
+# ------------------------------------------- Codex NS-V1 review 1 additions ---
+
+def test_a_live_session_leaves_a_durable_heartbeat_that_recovery_bills(meters):
+    """Review 1 finding 1: if the end-of-session accrual fails, the minutes
+    are not lost. A heartbeat records elapsed time while the session runs;
+    recovery bills a session whose heartbeat stopped, once, from the pool."""
+    m = pool()
+    with Session(meters) as s:
+        m.voice_session_heartbeat(s, biz(), "s1", 9 * 60)
+        m.voice_session_heartbeat(s, biz(), "s1", 10 * 60)   # the latest wins
+        m.voice_session_heartbeat(s, biz(), "s2", 60)        # still alive
+    later = OCT.replace(minute=30)
+    with Session(meters) as s:
+        billed = m.reconcile_open_voice_sessions(
+            s, lookup=lambda session, bid: biz(), stale_after_seconds=600,
+            at=later, alive={"s2"})
+        u = m.usage(s, biz())
+    assert billed == 1
+    assert u["by_source"]["aria_voice"] == D("10.0000")
+    with Session(meters) as s:
+        again = m.reconcile_open_voice_sessions(
+            s, lookup=lambda session, bid: biz(), stale_after_seconds=600,
+            at=later, alive={"s2"})
+        assert again == 0 and m.usage(s, biz())["by_source"]["aria_voice"] == D("10.0000")
+
+
+def test_a_closed_session_is_not_billed_twice_by_recovery(meters):
+    m = pool()
+    with Session(meters) as s:
+        m.voice_session_heartbeat(s, biz(), "s1", 5 * 60)
+        m.record_call(s, biz(), 6 * 60, call_id="voice-s1", source="aria_voice")
+        m.voice_session_closed(s, biz(), "s1")
+    with Session(meters) as s:
+        assert m.reconcile_open_voice_sessions(
+            s, lookup=lambda session, bid: biz(), stale_after_seconds=0,
+            at=OCT.replace(hour=23), alive=set()) == 0
+        assert m.usage(s, biz())["by_source"]["aria_voice"] == D("6.0000")
+
+
+def test_a_failed_end_accrual_leaves_the_heartbeat_for_recovery(voice, monkeypatch):
+    """The endpoint beats at session start and closes the heartbeat only
+    after a successful accrual."""
+    from services import metering
+    beats, closed = [], []
+    monkeypatch.setattr(metering, "voice_session_heartbeat",
+                        lambda s, b, sid, seconds: beats.append((sid, seconds)))
+    monkeypatch.setattr(metering, "voice_session_closed",
+                        lambda s, b, sid: closed.append(sid))
+    client = voice["make"]()
+
+    def failing_record(*a, **k):
+        raise RuntimeError("database unavailable")
+    monkeypatch.setattr(metering, "record_call", failing_record)
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        assert ws.receive_json() == {"type": "ready"}
+    assert _wait(lambda: beats)
+    time.sleep(0.3)
+    assert beats[0][1] == 0 and closed == [], "the heartbeat must survive a failed accrual"
+
+
+def test_a_browser_that_will_not_take_the_limit_notice_cannot_hold_the_session_open(
+        voice, monkeypatch):
+    """Review 1 finding 2: at the cap, forwarding stops and OpenAI is closed
+    BEFORE the notice is attempted; the notice is bounded."""
+    rv = repaired()
+    monkeypatch.setattr(rv, "VOICE_SESSION_CAP_SECONDS", 0.05)
+    from starlette.websockets import WebSocket
+    original = WebSocket.send_json
+
+    async def stuck(self, data, mode="text"):
+        if isinstance(data, dict) and data.get("type") == "session_limit":
+            await asyncio.sleep(3600)
+        return await original(self, data, mode)
+    monkeypatch.setattr(WebSocket, "send_json", stuck)
+    client = voice["make"]()
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        assert ws.receive_json() == {"type": "ready"}
+        assert _wait(lambda: voice["connects"] and not voice["connects"][0].open, timeout=2.0), \
+            "OpenAI stayed open behind a stuck notice"
+        assert _wait(lambda: len(voice["recorded"]) == 1, timeout=2.0)
+
+
+def test_slow_tools_do_not_stop_the_cap(voice, monkeypatch):
+    """Review 1 finding 3: Aria's tools run off the event loop, so a slow
+    database cannot stall the session's deadline."""
+    rv = repaired()
+    monkeypatch.setattr(rv, "VOICE_SESSION_CAP_SECONDS", 0.3)
+    import assistant_tools
+
+    def slow_tool(name, args, bid, tz="Europe/London"):
+        time.sleep(1.5)
+        return {"tasks": []}
+    monkeypatch.setattr(assistant_tools, "execute_tool", slow_tool)
+    client = voice["make"](script=[{"type": "response.function_call_arguments.done",
+                                    "call_id": "c1", "name": "get_tasks", "arguments": "{}"}])
+    started = time.monotonic()
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        assert ws.receive_json() == {"type": "ready"}
+        assert _wait(lambda: not voice["connects"][0].open, timeout=1.2), \
+            "the cap did not fire while a slow tool ran"
+    assert time.monotonic() - started < 1.4
+
+
+def test_a_slow_final_accrual_does_not_hold_the_provider_open(voice, monkeypatch):
+    rv = repaired()
+    monkeypatch.setattr(rv, "VOICE_SESSION_CAP_SECONDS", 0.05)
+    from services import metering
+    done = []
+
+    def slow_record(*a, **k):
+        time.sleep(1.0)
+        done.append(True)
+    monkeypatch.setattr(metering, "record_call", slow_record)
+    client = voice["make"]()
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        assert ws.receive_json() == {"type": "ready"}
+        assert _wait(lambda: not voice["connects"][0].open, timeout=0.6), \
+            "a slow accrual held the provider connection open"
+    assert _wait(lambda: done, timeout=3.0), "the accrual must still complete"
+
+
+def test_time_spent_reporting_an_error_is_not_billed(voice, monkeypatch):
+    """Review 1 finding 4: the session's end is taken before any notice."""
+    repaired()
+    from starlette.websockets import WebSocket
+    original = WebSocket.send_json
+
+    async def slow_error(self, data, mode="text"):
+        if isinstance(data, dict) and data.get("type") == "error":
+            await asyncio.sleep(1.2)
+        return await original(self, data, mode)
+    monkeypatch.setattr(WebSocket, "send_json", slow_error)
+
+    async def broken_send(self, data):
+        raise RuntimeError("upstream rejected the session")
+    monkeypatch.setattr(_FakeUpstream, "send", broken_send)
+    client = voice["make"]()
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        with pytest.raises(Exception):
+            while True:
+                ws.receive_json()
+    assert _wait(lambda: len(voice["recorded"]) == 1, timeout=3.0)
+    assert voice["recorded"][0][0] == 0
+
+
+def test_aria_receives_the_card_she_is_asked_to_read_aloud(voice):
+    """Review 1 finding 5: the canonical draft (for a chase, the server's
+    template and recipient) goes to the model as well as to the screen, so
+    what she says matches the card."""
+    repaired()
+    client = voice["make"](script=[{"type": "response.function_call_arguments.done",
+                                    "call_id": "c1", "name": "create_task",
+                                    "arguments": json.dumps({"title": "Ring the plumber"})}])
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        assert ws.receive_json() == {"type": "ready"}
+        card = ws.receive_json()["proposal"]
+        up = voice["connects"][0]
+
+        def _answer():
+            for m in up.sent:
+                e = json.loads(m)
+                if e.get("type") == "conversation.item.create" and e["item"].get("call_id") == "c1":
+                    return json.loads(e["item"]["output"])
+        assert _wait(lambda: _answer() is not None)
+        assert _answer()["card"] == card["preview"]
+
+
+@pytest.mark.parametrize("phrase", ["does not exist", "only emails that exist",
+                                    "only real data that exists", "the only data that exists"])
+def test_aria_is_never_told_that_unfetched_data_does_not_exist(phrase):
+    """Review 1 finding 6: a sample of recent emails is not every email."""
+    rv = repaired()
+    import inspect
+    told = (rv.build_system_instructions("New Body Gym", "Mike")
+            + inspect.getsource(rv.execute_tool)).lower()
+    assert phrase not in told
