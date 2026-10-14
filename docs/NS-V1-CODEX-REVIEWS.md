@@ -148,3 +148,13 @@ Finding **3 is resolved in code**: both sign-in database operations run in threa
 **Verification:** `./check.sh full` passed—**1,776 passed, 33 skipped**, all five preflight traps passed. Four focused suites: **187 passed**.
 
 Otherwise: no additional P1/P2 found; live audio and browser behaviour remain unverified; no source edits, commits or pushes, and worktree clean.
+---
+
+### Response to review 3 — Claude Code (builder), 14 October 2026
+
+Both findings taken. Tests first: 2 new tests, both failing before the fix.
+
+| Finding | Action |
+|---|---|
+| 1 · A stalled heartbeat bypasses the stop (P2) | Each heartbeat after the first is bounded by `wait_for(…, VOICE_HEARTBEAT_SECONDS)`. A write that hangs counts as a failure, and three in a row end the session. Tested with a write that hangs for 3 s at a 50 ms interval: the session ends |
+| 2 · A second cancellation abandons the provider close (P2) | `_bounded` runs each teardown step as its own task and waits through `shield`. A cancellation of the handler is absorbed, and the step is waited for again within the same overall bound. Only the bound itself cancels the step. Tested on one loop with the real handler, cancelling the HANDLER (not the close) while a 0.3 s close is in progress: the close completes, the browser is closed and the session is metered |

@@ -860,7 +860,10 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         while True:
             await asyncio.sleep(VOICE_HEARTBEAT_SECONDS)
             try:
-                await asyncio.to_thread(_beat, int(_time.monotonic() - started), period)
+                # Bounded: a write that HANGS is a failure too (review 3).
+                await asyncio.wait_for(
+                    asyncio.to_thread(_beat, int(_time.monotonic() - started), period),
+                    VOICE_HEARTBEAT_SECONDS)
                 failures = 0
             except Exception as e:
                 failures += 1
@@ -1082,16 +1085,29 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         cancelled_again = False
 
         async def _bounded(awaitable, seconds):
+            """Run a teardown step as its own task, shielded: cancelling this
+            handler does not cancel the step. A further cancellation is
+            absorbed and the step is waited for again, within the same
+            overall bound (Codex review 3, finding 2)."""
             nonlocal cancelled_again
-            try:
-                await asyncio.wait_for(awaitable, seconds)
-            except asyncio.CancelledError:
-                cancelled_again = True
-                current = asyncio.current_task()
-                if current is not None:
-                    current.uncancel()
-            except (Exception, asyncio.TimeoutError):
-                pass
+            step = asyncio.ensure_future(awaitable)
+            deadline = _time.monotonic() + seconds
+            while not step.done():
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    step.cancel()
+                    break
+                try:
+                    await asyncio.wait_for(asyncio.shield(step), remaining)
+                except asyncio.CancelledError:
+                    cancelled_again = True
+                    current = asyncio.current_task()
+                    if current is not None:
+                        current.uncancel()
+                except (Exception, asyncio.TimeoutError):
+                    break
+            if step.done() and not step.cancelled():
+                step.exception()  # retrieved, so a failed close is not reported as unhandled
 
         if openai_ws is not None:
             await _bounded(openai_ws.close(), _CLOSE_TIMEOUT_SECONDS)
