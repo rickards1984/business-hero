@@ -38,6 +38,15 @@ LONDON = ZoneInfo("Europe/London")
 
 RECEPTIONIST_METER = "receptionist_minutes"
 OVERAGE_METER = "receptionist_overage_minutes"
+# NS-V1 / Mike's V1 (14 Oct 2026): Aria's voice draws on the SAME pool of
+# voice minutes as the receptionist. Its own meters keep the split visible;
+# the allowance, the overage and the cap are judged on the total.
+ARIA_VOICE_METER = "aria_voice_minutes"
+ARIA_VOICE_OVERAGE_METER = "aria_voice_overage_minutes"
+_SOURCES = {
+    "receptionist": (RECEPTIONIST_METER, OVERAGE_METER),
+    "aria_voice": (ARIA_VOICE_METER, ARIA_VOICE_OVERAGE_METER),
+}
 # "Told this month" markers live in the same table, so they reset with it.
 _NOTIFIED_PREFIX = "notified:"
 # One row per metered call ("accrued:<calls.id>"), so a call is counted once.
@@ -46,6 +55,17 @@ _ACCRUED_PREFIX = "accrued:"
 # cleared only when a delivery is acknowledged (Codex BH-012 review 2).
 _PENDING_PREFIX = "pending:"
 RECONCILE_BATCH = 500
+# NS-V1 (Codex review 1, finding 1): a live Aria voice session keeps a
+# durable heartbeat — "voice-open:<session id>", value = minutes so far — so
+# that if its end-of-session accrual fails, recovery bills it from the last
+# beat. Removed only after a successful accrual. Not a meter: the ':' keeps
+# it out of every usage sum, like the other markers.
+_VOICE_OPEN_PREFIX = "voice-open:"
+# Minutes already billed for one voice session (Codex NS-V1 review 2): the
+# accrual TOPS UP to the session's total, so the end-of-session accrual and
+# recovery can arrive in either order, or twice, and the session is billed
+# exactly its total, once, in the month it STARTED.
+_VOICE_ACCRUED_PREFIX = "voice-accrued:"
 
 CALL_HARD_CAP_SECONDS = 1200
 OVERAGE_RATE_GBP = Decimal("0.45")
@@ -162,8 +182,14 @@ def usage(session, business) -> dict:
 
 def _usage_for(session, business, period: str) -> dict:
     bid = str(business.id)
-    used = _read(session, bid, RECEPTIONIST_METER, period)
-    overage = _read(session, bid, OVERAGE_METER, period)
+    by_source = {}
+    used = overage = Decimal("0")
+    for source, (inside_meter, over_meter) in _SOURCES.items():
+        inside = _read(session, bid, inside_meter, period)
+        over = _read(session, bid, over_meter, period)
+        used += inside
+        overage += over
+        by_source[source] = inside + over
     allowance = allowance_minutes(getattr(business, "plan_tier", None))
     metered = bool(getattr(business, "metered_usage_enabled", False))
     spend = (overage * OVERAGE_RATE_GBP).quantize(_TWO_DP, rounding=ROUND_HALF_UP)
@@ -179,6 +205,7 @@ def _usage_for(session, business, period: str) -> dict:
         "spend_cap_gbp": cap,
         "overage_rate_gbp": OVERAGE_RATE_GBP,
         "state": _state(used, allowance, metered, spend, cap),
+        "by_source": by_source,
     }
 
 
@@ -316,6 +343,7 @@ def display(u: dict) -> dict:
         "metered_usage_enabled": u["metered_usage_enabled"],
         "spend_cap_gbp": f"{u['spend_cap_gbp']:.2f}",
         "state": u["state"],
+        "by_source": {k: f"{v:.1f}" for k, v in (u.get("by_source") or {}).items()},
     }
 
 
@@ -342,7 +370,8 @@ def admit_call(session, business) -> Tuple[bool, Optional[str]]:
 
 
 def record_call(session, business, duration_seconds: Optional[int],
-                call_id: Optional[str] = None, at: Optional[datetime] = None) -> dict:
+                call_id: Optional[str] = None, at: Optional[datetime] = None,
+                source: str = "receptionist") -> dict:
     """Accrue a finished call from its actual duration, in the month it
     happened. Inside the allowance it counts there; past it, with metering
     on, the rest goes to overage; with metering off it still counts as used
@@ -358,18 +387,48 @@ def record_call(session, business, duration_seconds: Optional[int],
         session.commit()  # end the transaction: release the advisory lock
         return current
 
-    minutes = minutes_from_seconds(duration_seconds)
+    _allocate(session, business, period, minutes_from_seconds(duration_seconds), source)
+    after = _usage_for(session, business, period)
+    if after["state"] != STATE_OK and period == period_for(now()):
+        _queue_notice(session, business, after["state"], period)
+    session.commit()
+    return after
+
+
+def _allocate(session, business, period: str, minutes: Decimal, source: str) -> None:
+    """Inside the allowance it counts there; past it, with metering on, the
+    rest goes to overage; with metering off it still counts as used. The
+    allowance is the shared pool (Mike's V1), judged on every source."""
+    bid = str(business.id)
+    inside_meter, over_meter = _SOURCES[source]
     before = _usage_for(session, business, period)
     remaining = max(before["allowance_minutes"] - before["used_minutes"], Decimal("0"))
     if before["metered_usage_enabled"]:
         inside = min(minutes, remaining)
-        _add(session, bid, RECEPTIONIST_METER, period, inside)
-        _add(session, bid, OVERAGE_METER, period, minutes - inside)
+        _add(session, bid, inside_meter, period, inside)
+        _add(session, bid, over_meter, period, minutes - inside)
     else:
-        _add(session, bid, RECEPTIONIST_METER, period, minutes)
+        _add(session, bid, inside_meter, period, minutes)
 
+
+def accrue_session(session, business, session_key: str, seconds,
+                   period: Optional[str] = None, source: str = "aria_voice") -> dict:
+    """Bill a voice session up to `seconds` in total, in `period` (the month
+    it started). Tops up: only minutes beyond those already billed for this
+    session are added, so a recovered heartbeat followed by the real total,
+    the real total followed by a late heartbeat, or a repeat, all end at
+    exactly the session's total. Locked per business and month. Commits."""
+    period = period or period_for(now())
+    bid = str(business.id)
+    _lock(session, bid, period)
+    marker = f"{_VOICE_ACCRUED_PREFIX}{session_key}"
+    minutes = minutes_from_seconds(seconds)
+    extra = minutes - _read(session, bid, marker, period)
+    if extra > 0:
+        _allocate(session, business, period, extra, source)
+        _add(session, bid, marker, period, extra)
     after = _usage_for(session, business, period)
-    if after["state"] != STATE_OK and period == period_for(now()):
+    if extra > 0 and after["state"] != STATE_OK and period == period_for(now()):
         _queue_notice(session, business, after["state"], period)
     session.commit()
     return after
@@ -439,3 +498,65 @@ def _parse_moment(value) -> Optional[datetime]:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=ZoneInfo("UTC"))
+
+
+def voice_session_heartbeat(session, business, session_id: str, seconds,
+                            period: Optional[str] = None) -> None:
+    """Record how long a live voice session has run (replacing, not adding).
+    `period` pins the session to the month it started in. Commits."""
+    moment = now()
+    session.execute(
+        text("""
+            INSERT INTO usage_meters (business_id, meter, period, value, updated_at)
+            VALUES (:business_id, :meter, :period, :value, :now)
+            ON CONFLICT (business_id, meter, period)
+            DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """),
+        {"business_id": str(business.id), "meter": f"{_VOICE_OPEN_PREFIX}{session_id}",
+         "period": period or period_for(moment), "value": minutes_from_seconds(seconds),
+         "now": moment},
+    )
+    session.commit()
+
+
+def voice_session_closed(session, business, session_id: str) -> None:
+    """The session's accrual succeeded: its heartbeat is no longer needed."""
+    session.execute(
+        text("DELETE FROM usage_meters WHERE business_id = :business_id AND meter = :meter"),
+        {"business_id": str(business.id), "meter": f"{_VOICE_OPEN_PREFIX}{session_id}"},
+    )
+    session.commit()
+
+
+def reconcile_open_voice_sessions(session, lookup=None, stale_after_seconds: int = 300,
+                                  at: Optional[datetime] = None, alive=()) -> int:
+    """Bill every voice session whose heartbeat stopped without a closing
+    accrual (the process died, or the database failed at the end), from its
+    last beat, once (`voice-<id>` is the accrual's idempotency key). Sessions
+    still running here (`alive`) or beating recently are left alone."""
+    lookup = lookup or load_business
+    moment = at or now()
+    rows = session.execute(
+        text("SELECT business_id, meter, period, value, updated_at FROM usage_meters "
+             "WHERE meter LIKE :prefix"),
+        {"prefix": f"{_VOICE_OPEN_PREFIX}%"},
+    ).fetchall()
+    billed = 0
+    for business_id, meter, period, value, updated_at in rows:
+        sid = meter[len(_VOICE_OPEN_PREFIX):]
+        beat = _parse_moment(updated_at)
+        if sid in alive or beat is None or (moment - beat).total_seconds() < stale_after_seconds:
+            continue
+        business = lookup(session, str(business_id))
+        if business is None:
+            continue
+        # The heartbeat's own period is the session's start month.
+        accrue_session(session, business, sid, int(Decimal(str(value)) * 60),
+                       period=period, source="aria_voice")
+        session.execute(
+            text("DELETE FROM usage_meters WHERE business_id = :business_id "
+                 "AND meter = :meter AND period = :period"),
+            {"business_id": str(business_id), "meter": meter, "period": period})
+        session.commit()
+        billed += 1
+    return billed

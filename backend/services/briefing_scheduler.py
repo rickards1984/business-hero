@@ -95,6 +95,13 @@ async def _reconcile_metering_if_due():
             session.commit()
         if count:
             logger.warning(f"[Scheduler] Metering reconciliation counted {count} missed call(s)")
+        # NS-V1: Aria voice sessions whose end-of-session accrual never landed.
+        import realtime_voice
+        with get_session_context() as session:
+            voice = metering.reconcile_open_voice_sessions(
+                session, alive=realtime_voice.live_sessions())
+        if voice:
+            logger.warning(f"[Scheduler] Metering recovered {voice} voice session(s)")
 
     await asyncio.to_thread(_run)
 

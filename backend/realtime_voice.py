@@ -15,18 +15,17 @@ _logger = logging.getLogger("realtime_voice")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # Model and voice are env-configurable; defaults preserve existing behaviour.
-ARIA_REALTIME_MODEL = os.getenv("ARIA_REALTIME_MODEL", "gpt-realtime")
+ARIA_REALTIME_MODEL = os.getenv("ARIA_REALTIME_MODEL", "gpt-realtime-2")
 ARIA_REALTIME_VOICE = os.getenv("ARIA_REALTIME_VOICE", "shimmer")
 OPENAI_REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={ARIA_REALTIME_MODEL}"
 
-# NS-A2 — the kill switch. This module still speaks the Realtime BETA
-# protocol, which OpenAI refuses: production, 2 Oct 2026, every session got
-# `beta_api_shape_disabled` ("The Realtime Beta API is no longer supported").
-# Until the GA migration lands (after P0-2 metering — decision 0001 D2), voice
-# is OFF, and off is enforced HERE, before authentication or any provider
-# connection, not by hiding a button (Codex review 1, finding 5). Read per
-# request so a Railway variable change needs no code change. Only the exact
-# string "1" turns it on: a forgotten or mistyped variable leaves it off.
+# NS-A2 — the kill switch. Production, 2 Oct 2026: every session got
+# `beta_api_shape_disabled` because this module spoke the Realtime BETA
+# protocol. NS-V1 moved it to GA (build_session_config, FORWARDED_EVENTS) and
+# metered it; the switch stays, enforced HERE before authentication or any
+# provider connection (Codex review 1, finding 5). Read per request so a
+# Railway variable change needs no code change. Only the exact string "1"
+# turns it on: a forgotten or mistyped variable leaves it off.
 VOICE_UNAVAILABLE_CODE = 4010
 VOICE_UNAVAILABLE_MESSAGE = (
     "Voice chat with Aria is being upgraded. Type your message instead "
@@ -36,6 +35,70 @@ VOICE_UNAVAILABLE_MESSAGE = (
 
 def aria_voice_enabled() -> bool:
     return os.getenv("ARIA_VOICE_ENABLED", "0") == "1"
+
+
+# NS-V1 / Mike's V2: no voice session runs past 20 minutes, setup included.
+VOICE_SESSION_CAP_SECONDS = 1200
+_CLOSE_TIMEOUT_SECONDS = 2
+_NOTICE_TIMEOUT_SECONDS = 1
+# A durable heartbeat per live session (metering.voice_session_heartbeat), so
+# a failed end-of-session accrual is recovered, not lost (review 1, finding 1).
+VOICE_HEARTBEAT_SECONDS = 60
+_LIVE_SESSIONS: set = set()
+
+
+def live_sessions() -> set:
+    """Sessions running in this process; recovery leaves them alone."""
+    return set(_LIVE_SESSIONS)
+
+# GA server events the browser renders (RealtimeVoice.tsx). Everything else
+# from OpenAI (session.created with its config, rate limits, …) stays here.
+FORWARDED_EVENTS = frozenset({
+    "response.output_audio.delta",
+    "response.output_audio.done",
+    "response.output_audio_transcript.delta",
+    "response.output_audio_transcript.done",
+    "input_audio_buffer.speech_started",
+    "input_audio_buffer.speech_stopped",
+    "conversation.item.input_audio_transcription.completed",
+    "error",
+})
+
+# PCM16 at 24 kHz both ways — what the browser records and plays.
+_AUDIO_FORMAT = {"type": "audio/pcm", "rate": 24000}
+
+
+def _turn_detection(quiet_mode: bool) -> dict:
+    if quiet_mode:  # less sensitive, longer pauses
+        return {"type": "server_vad", "threshold": 0.7,
+                "prefix_padding_ms": 500, "silence_duration_ms": 800}
+    return {"type": "server_vad", "threshold": 0.6,
+            "prefix_padding_ms": 350, "silence_duration_ms": 600}
+
+
+def build_session_config(instructions: str, voice: str, quiet_mode: bool, tools: list) -> dict:
+    """The GA `session.update` (the receptionist's PHASE 3 is the worked
+    example). GA has no `modalities`, top-level `voice`, `*_audio_format` or
+    `temperature`; audio settings live under `session.audio`."""
+    return {
+        "type": "session.update",
+        "session": {
+            "type": "realtime",
+            "model": ARIA_REALTIME_MODEL,
+            "output_modalities": ["audio"],
+            "instructions": instructions,
+            "audio": {
+                "input": {
+                    "format": _AUDIO_FORMAT,
+                    "transcription": {"model": "whisper-1"},
+                    "turn_detection": _turn_detection(quiet_mode),
+                },
+                "output": {"format": _AUDIO_FORMAT, "voice": voice},
+            },
+            "tools": tools,
+            "tool_choice": "auto",
+        },
+    }
 
 # Tool definitions for the Realtime API
 # NOTE: Realtime API format is different from Chat Completions API
@@ -241,7 +304,45 @@ REALTIME_TOOLS = [
             },
             "required": []
         }
-    }
+    },
+    # NS-V1 (D18): the four approvable actions. Calling one does NOT act: the
+    # socket turns it into an NS-B10 approval card on the owner's screen.
+    {
+        "type": "function",
+        "name": "send_email",
+        "description": "Draft an email for the owner to approve on screen. Nothing is sent unless they tap Approve. Write the body only: the sign-off is added for you.",
+        "parameters": {"type": "object", "properties": {
+            "to": {"type": "string", "description": "A real email address, e.g. from list_emails"},
+            "subject": {"type": "string"}, "body": {"type": "string"}},
+            "required": ["to", "subject", "body"]},
+    },
+    {
+        "type": "function",
+        "name": "send_invoice_chase",
+        "description": "Prepare an invoice chase for the owner to approve on screen, using the chase template for the next stage. Nothing is sent unless they tap Approve.",
+        "parameters": {"type": "object", "properties": {
+            "invoice_id": {"type": "string", "description": "From list_invoices or get_overdue"}},
+            "required": ["invoice_id"]},
+    },
+    {
+        "type": "function",
+        "name": "create_calendar_event",
+        "description": "Propose a calendar booking for the owner to approve on screen. Nothing is booked unless they tap Approve.",
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string"}, "date": {"type": "string", "description": "YYYY-MM-DD"},
+            "start_time": {"type": "string", "description": "HH:MM, 24-hour, business timezone"},
+            "duration_minutes": {"type": "integer"}, "description": {"type": "string"}},
+            "required": ["title", "date", "start_time"]},
+    },
+    {
+        "type": "function",
+        "name": "create_task",
+        "description": "Propose a task for the owner's list, approved on screen. It is added only if they tap Approve.",
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string"}, "description": {"type": "string"},
+            "due_at": {"type": "string", "description": "YYYY-MM-DD"}},
+            "required": ["title"]},
+    },
 ]
 
 
@@ -340,21 +441,27 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
         _logger.info(f"Mapped tool call: {mapped_name} with args: {mapped_args}")
         
         # Get timezone for the business
-        from assistant_chat import get_business_for_user
-        try:
-            business = get_business_for_user(user_id, business_id)
-            timezone = business.timezone
-        except:
-            timezone = "Europe/London"
-        
-        # Execute using the shared tool executor
-        result = execute_assistant_tool(mapped_name, mapped_args, business_id, timezone)
+        # Off the event loop (Codex NS-V1 review 1, finding 3): these are
+        # synchronous database and provider calls, and on the loop they would
+        # stall every voice session's deadline while they ran.
+        def _run_tool():
+            from assistant_chat import get_business_for_user
+            try:
+                timezone = get_business_for_user(user_id, business_id).timezone
+            except Exception:
+                timezone = "Europe/London"
+            return execute_assistant_tool(mapped_name, mapped_args, business_id, timezone)
+        result = await asyncio.to_thread(_run_tool)
         
         # Add explicit instruction wrapper for email results to prevent hallucination
+        if tool_name == "list_emails" and isinstance(result, dict) and result.get("error"):
+            # NS-V1 (Codex NS-A1 review 2): a connection failure must reach
+            # Aria as an error, never as an empty inbox.
+            return json.dumps({"error": result["error"]})
         if tool_name == "list_emails" and isinstance(result, dict):
             emails = result.get("emails", [])
             result = {
-                "IMPORTANT": "Below are the ONLY emails that exist. Do NOT invent, fabricate, or mention any other emails. Only discuss emails from this list.",
+                "IMPORTANT": "These are the most recent emails fetched, not every email. Only discuss emails from this list and never invent any. If something isn't here, say you couldn't find it in the recent emails — it may be older.",
                 "email_count": len(emails),
                 "emails": emails
             }
@@ -374,9 +481,9 @@ def build_system_instructions(business_name: str, user_name: str) -> str:
 
 YOU ARE CONNECTED TO REAL BUSINESS DATA THROUGH TOOLS.
 
-When you call a tool like list_emails, the response contains THE ONLY REAL DATA THAT EXISTS.
+When you call a tool like list_emails, the response is the ONLY business data you have.
 Your memory does NOT contain any emails, calls, invoices, or other business data.
-If data is not in the tool response, IT DOES NOT EXIST.
+If data is not in the tool response, you do not know it: say you couldn't find it, or that the source isn't connected. Never guess.
 
 UNDER NO CIRCUMSTANCES should you:
 - Mention emails not in the tool response
@@ -425,7 +532,7 @@ Your personality:
    - "reply", "draft a reply", "respond to that email" → draft_reply (requires email_id from list_emails)
    - "business overview", "how's the business", "give me a summary" → business_overview
    - "cash flow", "cashflow", "forecast", "will I have enough" → cashflow_forecast
-   - "send", "chase", "book", "add a task", "remind me" → you cannot do these yourself yet; see WHAT YOU CANNOT DO YET
+   - "send", "chase", "book", "add a task", "remind me" → prepare an approval card; see APPROVAL CARDS
 
 6. **EMAIL FETCHING RULE** - When calling list_emails, ALWAYS set limit=20. Never use limit=1, limit=5, or any small number. You need enough emails to give a proper briefing.
 
@@ -503,24 +610,23 @@ When presenting Xero data, frame it like a financial advisor:
 - "Looking at Xero, your profit's up 15% on last month - mainly driven by that big invoice from Carter & Sons coming through."
 - Highlight trends and comparisons when available.
 
-**WHAT YOU CANNOT DO YET:**
-You can read and draft, but you cannot send emails, chase invoices, book
-calendar events, or add or remove tasks. A tap-to-approve button is coming.
-When asked, say so plainly and point them to the right place:
-- Email: "I can't send emails myself just yet. I can read you a draft to copy into a reply from your own email." (Drafts are not saved anywhere; never say they are.)
-- Chase: "I can't send chases myself just yet. Open the invoice in Finance and use Send Chase Email."
-- Calendar: "I can't book that myself yet. I can tell you what's already in your diary - add the new one in your calendar." (You cannot work out free slots in voice.)
-- Tasks: "I can't add tasks myself just yet. Add it in the Tasks panel (Dashboard, Tasks, View all) and I can check your tasks whenever you ask."
-Never say or imply you have sent, booked, chased or added something.
+**APPROVAL CARDS:**
+You can prepare an email, an invoice chase, a calendar booking or a new task
+as an approval card. Preparing one does nothing by itself: a card appears on
+{user_name}'s screen and it happens only when they tap Approve there.
+- After preparing a card, read the draft aloud briefly and say it's on the screen for them to approve.
+- A spoken "yes" or "send it" is not an approval. Tell them to tap Approve on the card.
+- Never say or imply you have sent, booked, chased or added something.
+- You cannot remove tasks; a finished task can be marked complete in the Tasks panel (Dashboard, Tasks, View all).
 
 **Reporting overdue invoices:**
 Lead with the total and then get specific:
-- "You've got 3 overdue invoices right now, totalling £4,200. The biggest one is £2,500 from Davidson Ltd - that's been sitting there for 28 days. You can chase it from the invoice in Finance."
-- Offer the next step: "Want me to pull up the details so you can chase them from Finance?"
+- "You've got 3 overdue invoices right now, totalling £4,200. The biggest one is £2,500 from Davidson Ltd - that's been sitting there for 28 days."
+- Offer the next step: "Want me to prepare a chase for you to approve?"
 
 **Drafting email replies:**
 When drafting, be collaborative:
-- "I've drafted a reply to Sarah's email - it's professional but firm about the deadline. Want me to read it out so you can copy it into your reply?"
+- "I've drafted a reply to Sarah's email - it's professional but firm about the deadline. Shall I put it on your screen to approve?"
 - "Here's what I'd suggest sending back to John..." then read key points.
 - Always offer to adjust the tone: "I can make it more formal or more casual if you prefer."
 
@@ -579,7 +685,7 @@ Be honest and helpful:
 "Let me pull up the numbers... Right, so this month you're looking at a profit of about £1,500. Not your biggest month, but solid. Income's been steady, though expenses crept up a bit - looks like that was mainly the new equipment purchase. On the invoice side, you've got £800 outstanding but nothing overdue, so cash flow's healthy. Overall? You're in good shape."
 
 **Asked to chase an overdue invoice:**
-"I can't send chases myself just yet. Davidson Ltd owe £2,500 and it's 28 days overdue - open that invoice in Finance and use Send Chase Email. I can check it again whenever you ask."
+"Davidson Ltd owe £2,500 and it's 28 days overdue. I've put a chase on your screen - it's the stage-one reminder, signed as me. Tap Approve if you're happy and it goes from your email."
 
 **Cash flow forecast:**
 "Looking ahead 30 days - you've got around £6,800 expected in from three outstanding invoices, and your usual outgoings sit at about £4,200. So you should be comfortable. The only thing to watch is that Carter invoice - if it slips past the 15th, you'll want to chase it sharpish."
@@ -647,7 +753,9 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         # Get business for user
         from assistant_chat import get_business_for_user
         try:
-            business = get_business_for_user(user_id)
+            # Off the event loop (Codex NS-V1 review 2, finding 3): a slow
+            # lookup must not freeze other live sessions' deadlines.
+            business = await asyncio.to_thread(get_business_for_user, user_id)
             business_id = str(business.id)
             business_name = business.name
         except Exception as e:
@@ -666,10 +774,12 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             from auth import assert_feature_access
             from models import Business as _Business
             from sqlmodel import select as _select
-            with get_session_context() as _session:
-                _fresh = _session.exec(
-                    _select(_Business).where(_Business.id == business.id)).first()
-                assert_feature_access(_fresh, "aria_voice")
+            def _gate():
+                with get_session_context() as _session:
+                    _fresh = _session.exec(
+                        _select(_Business).where(_Business.id == business.id)).first()
+                    assert_feature_access(_fresh, "aria_voice")
+            await asyncio.to_thread(_gate)
         except HTTPException as exc:
             _logger.info("realtime voice refused for business %s: %s",
                          business_id, exc.detail)
@@ -694,130 +804,140 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         await websocket.close(code=4001, reason="Auth failed")
         return
     
-    # Connect to OpenAI Realtime API
+    # NS-V1: the meter decides before anything is spent. Mike's V3: if it
+    # cannot be read, the session is refused (fail closed) — the owner can
+    # still type to Aria, and no customer is affected.
+    def _admit():
+        from services import metering as _metering
+        from db import get_session_context as _meter_session
+        with _meter_session() as _ms:
+            _mb = _metering.load_business(_ms, business_id)
+            return _metering.admit_call(_ms, _mb)
+    try:
+        admitted, limit_state = await asyncio.to_thread(_admit)
+    except Exception as e:
+        _logger.error("Voice usage check failed for %s, refusing: %s", business_id, e)
+        await websocket.close(code=4003, reason="Voice usage could not be checked")
+        return
+    if not admitted:
+        reason = ("This month's spending cap for extra minutes has been reached"
+                  if limit_state == "spend_cap_reached"
+                  else "This month's voice minutes are used up")
+        await websocket.close(code=4003, reason=reason)
+        return
+
+    import time as _time
+    import uuid as _uuid
+    business_tz = getattr(business, "timezone", None) or "Europe/London"
+    owner_name = None if user_name == "there" else user_name
+    session_id = str(_uuid.uuid4())
+    from services import metering as _m0
+    # The session is billed in the month it STARTS (Codex review 2, finding 1).
+    _period = _m0.period_for(_m0.now())
     openai_ws = None
+    started = None
+    ended = None
+    timed_out = False
+    stop_reason = None  # "cap" or "meter": why WE ended the session
+    handler_task = asyncio.current_task()
+    watchdog = None
+    heartbeat = None
+    forwarders = []
+
+    def _beat(seconds, period):
+        from services import metering as _m
+        from db import get_session_context as _hs
+        with _hs() as _s:
+            _b = _m.load_business(_s, business_id)
+            if _b is not None:
+                _m.voice_session_heartbeat(_s, _b, session_id, seconds, period=period)
+
+    async def _beat_forever(period):
+        """The durable heartbeat, every VOICE_HEARTBEAT_SECONDS after the first.
+        Off the loop. Three failures in a row end the session (Codex NS-V1
+        review 2, finding 2): unrecorded voice is bounded, not open-ended."""
+        failures = 0
+        while True:
+            await asyncio.sleep(VOICE_HEARTBEAT_SECONDS)
+            try:
+                # Bounded: a write that HANGS is a failure too (review 3).
+                await asyncio.wait_for(
+                    asyncio.to_thread(_beat, int(_time.monotonic() - started), period),
+                    VOICE_HEARTBEAT_SECONDS)
+                failures = 0
+            except Exception as e:
+                failures += 1
+                _logger.warning("Voice heartbeat failed for %s (%s in a row): %s",
+                                business_id, failures, e)
+                if failures >= 3:
+                    _stop("meter")
+                    return
+
+    async def _end_at_cap():
+        nonlocal timed_out
+        await asyncio.sleep(max(0.0, VOICE_SESSION_CAP_SECONDS))
+        _logger.warning("Voice session reached its %ss cap; ending it", VOICE_SESSION_CAP_SECONDS)
+        _stop("cap")
+
+    def _stop(reason):
+        nonlocal timed_out, stop_reason
+        if stop_reason is None:
+            stop_reason = reason
+            timed_out = True
+            handler_task.cancel()
+
     try:
         import websockets
-        
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "OpenAI-Beta": "realtime=v1"
-        }
-        
+
+        # Billing starts as the provider connection opens; the cap covers
+        # setup too (BH-012's pattern), and stops the handler itself.
+        # The first beat must land BEFORE the provider connection opens: no
+        # durable record, no session (Mike's V3; Codex review 2, finding 2).
+        try:
+            await asyncio.to_thread(_beat, 0, _period)
+        except Exception as e:
+            _logger.error("Voice heartbeat could not be written for %s, refusing: %s",
+                          business_id, e)
+            await websocket.close(code=4003, reason="Voice usage could not be recorded")
+            return
+        started = _time.monotonic()
+        _LIVE_SESSIONS.add(session_id)
+        watchdog = asyncio.create_task(_end_at_cap())
+        heartbeat = asyncio.create_task(_beat_forever(_period))
         openai_ws = await websockets.connect(
             OPENAI_REALTIME_URL,
-            additional_headers=headers,
+            additional_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
             ping_interval=20,
-            ping_timeout=10,
+            ping_timeout=20,
         )
-        _logger.info("Connected to OpenAI Realtime API")
-        
-        # Configure turn detection based on quiet mode
-        if quiet_mode:
-            # Quiet mode - less sensitive, longer pauses required
-            turn_detection_config = {
-                "type": "server_vad",
-                "threshold": 0.7,  # Higher threshold = less sensitive
-                "prefix_padding_ms": 500,  # More padding before speech detected
-                "silence_duration_ms": 800  # Longer silence before turn ends
-            }
-        else:
-            # Normal mode settings
-            turn_detection_config = {
-                "type": "server_vad",
-                "threshold": 0.6,  # Slightly higher to avoid cutting off
-                "prefix_padding_ms": 350,  # A bit more padding
-                "silence_duration_ms": 600  # Slightly longer pause before responding
-            }
-        
-        # Configure the session
-        session_config = {
-            "type": "session.update",
-            "session": {
-                "modalities": ["text", "audio"],
-                "instructions": build_system_instructions(business_name, user_name),
-                "voice": ARIA_REALTIME_VOICE,
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "input_audio_transcription": {
-                    "model": "whisper-1"
-                },
-                "turn_detection": turn_detection_config,
-                "tools": REALTIME_TOOLS,
-                "tool_choice": "auto",
-                "temperature": 0.6  # Lower to reduce hallucination
-            }
-        }
-        await openai_ws.send(json.dumps(session_config))
+        _logger.info("Connected to OpenAI Realtime API (GA)")
+
+        await openai_ws.send(json.dumps(build_session_config(
+            build_system_instructions(business_name, user_name),
+            ARIA_REALTIME_VOICE, quiet_mode, REALTIME_TOOLS)))
         _logger.info(f"Session configured with quiet_mode={quiet_mode}")
-        
-        # Notify client that we're ready
+
         await websocket.send_json({"type": "ready"})
-        
-        # Keepalive task to prevent timeout
-        async def send_keepalive():
-            """Send periodic pings to keep connection alive."""
-            try:
-                while True:
-                    await asyncio.sleep(20)  # Send ping every 20 seconds
-                    if openai_ws and openai_ws.open:
-                        try:
-                            # Send a minimal event to keep connection alive
-                            # input_audio_buffer.commit is a safe no-op if buffer is empty
-                            await openai_ws.send(json.dumps({
-                                "type": "input_audio_buffer.commit"
-                            }))
-                            _logger.debug("Keepalive ping sent")
-                        except Exception as e:
-                            _logger.debug(f"Keepalive send failed: {e}")
-                            break
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                _logger.debug(f"Keepalive ended: {e}")
-        
-        # Handle bidirectional communication
+
         async def forward_to_openai():
-            """Forward messages from client to OpenAI."""
+            """Client -> OpenAI: raw audio, and `config` (quiet mode) only."""
             nonlocal quiet_mode
             try:
                 while True:
                     data = await websocket.receive()
-                    
-                    if "text" in data:
+                    if data.get("type") == "websocket.disconnect":
+                        return
+                    if data.get("text") is not None:
                         message = json.loads(data["text"])
-                        msg_type = message.get('type')
-                        _logger.debug(f"Client -> OpenAI: {msg_type}")
-                        
-                        # Handle config updates (e.g., quiet mode toggle)
+                        msg_type = message.get("type")
                         if msg_type == "config":
-                            new_quiet_mode = message.get("quietMode", False)
-                            quiet_mode = new_quiet_mode
-                            
-                            # Update turn detection settings based on quiet mode
-                            if new_quiet_mode:
-                                new_config = {
-                                    "type": "server_vad",
-                                    "threshold": 0.7,
-                                    "prefix_padding_ms": 500,
-                                    "silence_duration_ms": 800
-                                }
-                            else:
-                                new_config = {
-                                    "type": "server_vad",
-                                    "threshold": 0.6,
-                                    "prefix_padding_ms": 350,
-                                    "silence_duration_ms": 600
-                                }
-                            
-                            # Send session update to OpenAI
+                            quiet_mode = message.get("quietMode", False)
                             await openai_ws.send(json.dumps({
                                 "type": "session.update",
-                                "session": {
-                                    "turn_detection": new_config
-                                }
+                                "session": {"type": "realtime", "audio": {"input": {
+                                    "turn_detection": _turn_detection(quiet_mode)}}},
                             }))
-                            _logger.info(f"Updated turn detection - quiet_mode: {new_quiet_mode}")
+                            _logger.info(f"Updated turn detection - quiet_mode: {quiet_mode}")
                         else:
                             # NS-A1: never forward client JSON to the model
                             # session. The browser sends only `auth`, `config`
@@ -826,85 +946,69 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                             # an injected conversation item, a response.create
                             # — would let a client steer Aria and her tools.
                             _logger.warning(
-                                "Dropped client message type %r on voice socket",
-                                msg_type)
-                        
-                    elif "bytes" in data:
-                        # Raw audio data - wrap in proper format
-                        audio_base64 = base64.b64encode(data["bytes"]).decode()
-                        audio_event = {
+                                "Dropped client message type %r on voice socket", msg_type)
+                    elif data.get("bytes") is not None:
+                        await openai_ws.send(json.dumps({
                             "type": "input_audio_buffer.append",
-                            "audio": audio_base64
-                        }
-                        await openai_ws.send(json.dumps(audio_event))
-                        
+                            "audio": base64.b64encode(data["bytes"]).decode(),
+                        }))
             except WebSocketDisconnect:
                 _logger.info("Client disconnected")
             except Exception as e:
                 _logger.error(f"Forward to OpenAI error: {e}")
-        
+
+        async def _answer_tool(name: str, arguments: dict) -> str:
+            from services import aria_actions
+            if name in aria_actions.ACTION_TYPES:
+                # D18: a spoken action becomes the NS-B10 card on screen. It
+                # is approved by a tap, never by a spoken yes.
+                proposed = await asyncio.to_thread(
+                    aria_actions.propose_from_chat, business_id, user_id, name,
+                    dict(arguments or {}), owner_name=owner_name, timezone=business_tz)
+                if proposed.get("proposal"):
+                    await websocket.send_json({"type": "proposal",
+                                               "proposal": proposed["proposal"]})
+                    # The card itself goes to the model too, so what Aria
+                    # reads aloud is exactly what the screen shows (review 1,
+                    # finding 5): for a chase, the server's template.
+                    return json.dumps({"message": proposed["message"] + (
+                        " It is on the owner's screen now. Read the card's draft "
+                        "aloud briefly and tell them to tap Approve on the "
+                        "screen if they're happy."),
+                        "card": proposed["proposal"].get("preview")}, default=str)
+                return json.dumps({"error": proposed.get("error") or "That could not be prepared."})
+            try:
+                return await asyncio.wait_for(
+                    execute_tool(name, arguments, user_id, business_id), timeout=25.0)
+            except asyncio.TimeoutError:
+                _logger.warning(f"Tool {name} timed out after 25s")
+                return json.dumps({"error": f"Tool {name} timed out. Please try again."})
+
         async def forward_to_client():
-            """Forward messages from OpenAI to client, handling tool calls."""
-            import websockets as _ws_lib
+            """OpenAI -> client: GA events the browser renders; tool calls."""
             try:
                 async for message in openai_ws:
                     event = json.loads(message)
-                    event_type = event.get("type")
-                    _logger.debug(f"OpenAI event received: {event_type}")
-                    
-                    if "function" in event_type or "tool" in event_type:
-                        _logger.info(f"Function/Tool event details: {json.dumps(event)[:500]}")
-                    
+                    event_type = event.get("type") or ""
                     if event_type == "error":
                         _logger.error(f"OpenAI Realtime API error: {json.dumps(event)}")
-                    
                     if event_type == "response.function_call_arguments.done":
                         call_id = event.get("call_id")
                         name = event.get("name")
-                        arguments = json.loads(event.get("arguments", "{}"))
-                        
-                        _logger.info(f"Tool call received: {name}({arguments})")
-                        
                         try:
-                            result = await asyncio.wait_for(
-                                execute_tool(name, arguments, user_id, business_id),
-                                timeout=25.0,
-                            )
-                        except asyncio.TimeoutError:
-                            _logger.warning(f"Tool {name} timed out after 25s")
-                            result = json.dumps({"error": f"Tool {name} timed out. Please try again."})
-                        
-                        _logger.info(f"Tool result: {result[:200]}...")
-                        
-                        tool_response = {
+                            arguments = json.loads(event.get("arguments") or "{}")
+                        except json.JSONDecodeError:
+                            arguments = {}
+                        _logger.info(f"Tool call received: {name}")
+                        result = await _answer_tool(name, arguments)
+                        await openai_ws.send(json.dumps({
                             "type": "conversation.item.create",
-                            "item": {
-                                "type": "function_call_output",
-                                "call_id": call_id,
-                                "output": result
-                            }
-                        }
-                        await openai_ws.send(json.dumps(tool_response))
-                        _logger.info(f"Sent tool response for {name}")
-                        
+                            "item": {"type": "function_call_output",
+                                     "call_id": call_id, "output": result},
+                        }))
                         await openai_ws.send(json.dumps({"type": "response.create"}))
-                        
-                    elif event_type in [
-                        "response.audio.delta",
-                        "response.audio.done", 
-                        "response.audio_transcript.delta",
-                        "response.audio_transcript.done",
-                        "response.text.delta",
-                        "response.text.done",
-                        "input_audio_buffer.speech_started",
-                        "input_audio_buffer.speech_stopped",
-                        "conversation.item.input_audio_transcription.completed",
-                        "error"
-                    ]:
+                    elif event_type in FORWARDED_EVENTS:
                         await websocket.send_json(event)
-            
-            except (_ws_lib.exceptions.ConnectionClosed, _ws_lib.exceptions.ConnectionClosedOK):
-                _logger.info("OpenAI WebSocket closed")
             except WebSocketDisconnect:
                 _logger.info("Client disconnected while forwarding from OpenAI")
             except Exception as e:
@@ -913,38 +1017,116 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                     _logger.info("WebSocket connection closed")
                 else:
                     _logger.error(f"Forward to client error: {e}")
-        
-        # Run both directions concurrently with keepalive;
-        # cancel the other direction when one finishes
-        keepalive_task = asyncio.create_task(send_keepalive())
-        forward_oai_task = asyncio.create_task(forward_to_openai())
-        forward_client_task = asyncio.create_task(forward_to_client())
-        try:
-            done, pending = await asyncio.wait(
-                [forward_oai_task, forward_client_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-        finally:
-            keepalive_task.cancel()
-            try:
-                await keepalive_task
-            except asyncio.CancelledError:
-                pass
-        
+
+        forwarders = [asyncio.create_task(forward_to_openai()),
+                      asyncio.create_task(forward_to_client())]
+        await asyncio.wait(forwarders, return_when=asyncio.FIRST_COMPLETED)
+
+    except asyncio.CancelledError:
+        if ended is None and started is not None:
+            ended = _time.monotonic()
+        if not timed_out:
+            raise  # a shutdown, not our cap
+        asyncio.current_task().uncancel()
     except Exception as e:
+        # The session's end is taken BEFORE any notice: time spent telling
+        # the browser is never billed (review 1, finding 4).
+        if started is not None:
+            ended = _time.monotonic()
         _logger.error(f"Realtime API error: {e}")
         try:
-            await websocket.send_json({"type": "error", "message": str(e)})
-        except:
+            await asyncio.wait_for(
+                websocket.send_json({"type": "error", "message": "Voice connection failed"}),
+                _NOTICE_TIMEOUT_SECONDS)
+        except (Exception, asyncio.TimeoutError):
             pass
-        
+
     finally:
-        if openai_ws:
-            await openai_ws.close()
-        _logger.info("Connection closed")
+        # Order matters (Codex NS-V1 review 1, findings 2-4):
+        # 1. stop everything that could keep the session alive;
+        # 2. take the end time (if not taken already) — only up to the cap is
+        #    billed, and teardown or notices never are;
+        # 3. start the accrual in a worker thread — it runs to completion even
+        #    if this handler is cancelled, and never blocks the event loop;
+        # 4. close OpenAI, bounded; only THEN try the limit notice, bounded;
+        # 5. close the browser, bounded; wait for the accrual if allowed.
+        for task in (watchdog, heartbeat, *forwarders):
+            if task is not None and not task.done():
+                task.cancel()
+        accrual = None
+        if started is not None:
+            if ended is None:
+                ended = _time.monotonic()
+            seconds = int(min(ended - started, VOICE_SESSION_CAP_SECONDS))
+
+            def _record():
+                from services import metering as _m
+                from db import get_session_context as _rs
+                with _rs() as _s:
+                    _b = _m.load_business(_s, business_id)
+                    if _b is None:
+                        return
+                    _m.accrue_session(_s, _b, session_id, seconds, period=_period,
+                                      source="aria_voice")
+                    # Only after a successful accrual: otherwise the heartbeat
+                    # stays for recovery (review 1, finding 1).
+                    _m.voice_session_closed(_s, _b, session_id)
+
+            accrual = asyncio.ensure_future(asyncio.to_thread(_record))
+
+            def _log_failure(done):
+                if not done.cancelled() and done.exception() is not None:
+                    _logger.error("Failed to meter voice session for %s: %s",
+                                  business_id, done.exception())
+            accrual.add_done_callback(_log_failure)
+        _LIVE_SESSIONS.discard(session_id)
+        # Each teardown step survives a further cancellation (Codex review 2,
+        # finding 5): it is noted and the remaining steps still run.
+        cancelled_again = False
+
+        async def _bounded(awaitable, seconds):
+            """Run a teardown step as its own task, shielded: cancelling this
+            handler does not cancel the step. A further cancellation is
+            absorbed and the step is waited for again, within the same
+            overall bound (Codex review 3, finding 2)."""
+            nonlocal cancelled_again
+            step = asyncio.ensure_future(awaitable)
+            deadline = _time.monotonic() + seconds
+            while not step.done():
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    step.cancel()
+                    break
+                try:
+                    await asyncio.wait_for(asyncio.shield(step), remaining)
+                except asyncio.CancelledError:
+                    cancelled_again = True
+                    current = asyncio.current_task()
+                    if current is not None:
+                        current.uncancel()
+                except (Exception, asyncio.TimeoutError):
+                    break
+            if step.done() and not step.cancelled():
+                step.exception()  # retrieved, so a failed close is not reported as unhandled
+
+        if openai_ws is not None:
+            await _bounded(openai_ws.close(), _CLOSE_TIMEOUT_SECONDS)
+        if stop_reason is not None:
+            message = ("That's the 20-minute limit for one voice chat. Start a new one any time."
+                       if stop_reason == "cap" else
+                       "Voice usage couldn't be recorded, so this chat has ended. "
+                       "You can still type to Aria.")
+            await _bounded(websocket.send_json({"type": "session_limit", "message": message}),
+                           _NOTICE_TIMEOUT_SECONDS)
+        await _bounded(websocket.close(), _CLOSE_TIMEOUT_SECONDS)
+        if accrual is not None:
+            try:
+                await asyncio.shield(accrual)
+            except asyncio.CancelledError:
+                cancelled_again = True  # the thread still finishes; the heartbeat backs it up
+            except Exception:
+                pass  # logged by the callback; the heartbeat stays for recovery
+        # A further cancellation was absorbed so every step above still ran;
+        # the handler ends here either way, so there is nothing left for it
+        # to stop and it is not re-raised.
+        _logger.info("Connection closed%s", " (after a further cancellation)" if cancelled_again else "")

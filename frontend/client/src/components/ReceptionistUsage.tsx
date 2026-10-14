@@ -31,6 +31,7 @@ export interface Usage {
   metered_usage_enabled: boolean;
   spend_cap_gbp: string;
   state: 'ok' | 'allowance_exhausted' | 'spend_cap_reached';
+  by_source?: { receptionist?: string; aria_voice?: string };
 }
 
 export function monthLabel(period: string): string {
@@ -115,11 +116,13 @@ export default function ReceptionistUsage() {
     <Card sx={{ mb: 2 }}>
       <CardContent>
         <Typography variant="subtitle1" fontWeight={600}>
-          Receptionist minutes — {monthLabel(usage.period)}
+          Voice minutes — {monthLabel(usage.period)}
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
           {usage.used_minutes} of {usage.allowance_minutes} minutes used · {usage.remaining_minutes} left.
-          Resets at the start of each month. Calls are limited to 20 minutes each.
+          {usage.by_source && ` Receptionist ${usage.by_source.receptionist ?? '0.0'} · Aria voice ${usage.by_source.aria_voice ?? '0.0'}.`}
+          {' '}Shared by the receptionist and Aria's voice; resets at the start of each month.
+          Calls and voice chats are limited to 20 minutes each.
         </Typography>
         {allowance > 0 && (
           <LinearProgress variant="determinate" value={percent} sx={{ height: 8, borderRadius: 4, mb: 2 }}
@@ -128,14 +131,14 @@ export default function ReceptionistUsage() {
 
         {usage.state === 'allowance_exhausted' && isBlocking(usage) && (
           <Alert severity="error" sx={{ mb: 2 }}>
-            This month's minutes are used up, so new calls are not being answered. Switch on extra
+            This month's voice minutes are used up, so new calls are not being answered and Aria's voice is paused. Switch on extra
             minutes below to keep answering, or wait for the month to reset.
           </Alert>
         )}
         {usage.state === 'spend_cap_reached' && (
           <Alert severity="error" sx={{ mb: 2 }}>
             Your monthly cap for extra minutes (£{usage.spend_cap_gbp}) has been reached, so new calls
-            are not being answered. Raise the cap below, or wait for the month to reset.
+            are not being answered and Aria's voice is paused. Raise the cap below, or wait for the month to reset.
           </Alert>
         )}
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
