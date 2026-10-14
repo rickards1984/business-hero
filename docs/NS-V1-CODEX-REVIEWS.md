@@ -158,3 +158,33 @@ Both findings taken. Tests first: 2 new tests, both failing before the fix.
 |---|---|
 | 1 · A stalled heartbeat bypasses the stop (P2) | Each heartbeat after the first is bounded by `wait_for(…, VOICE_HEARTBEAT_SECONDS)`. A write that hangs counts as a failure, and three in a row end the session. Tested with a write that hangs for 3 s at a 50 ms interval: the session ends |
 | 2 · A second cancellation abandons the provider close (P2) | `_bounded` runs each teardown step as its own task and waits through `shield`. A cancellation of the handler is absorbed, and the step is waited for again within the same overall bound. Only the bound itself cancels the step. Tested on one loop with the real handler, cancelling the HANDLER (not the close) while a 0.3 s close is in progress: the close completes, the browser is closed and the session is metered |
+
+## Review 4 (confirm-only, repair cycle 3 of 3)
+
+| | |
+|---|---|
+| Reviewed commit | `1a6dd08` |
+| Session id | `01a13b3a-6986-7173-aea1-12d71aae8851` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 33,401` |
+| **Verdict** | **ACCEPT-WITH-CHANGES** (backlog only) |
+
+Verbatim:
+
+---
+
+**ACCEPT-WITH-CHANGES** — `1a6dd086ef9957fe7c845b324473264a1a94af9d`. Backlog only; no further repair cycle requested.
+
+Review-3 findings **1 and 2 are resolved and genuinely tested**. Both new tests pass now and fail against `6114530` loaded in memory, reproducing the original defects.
+
+**No new P1 established**: no demonstrated money loss/double-billing, uncapped conversation, or action without the owner’s tap.
+
+Four focused suites: **189 passed**. Full `check.sh` not rerun. No source edits, commits or pushes; worktree clean.
+
+Backlog notes:
+
+- **P2:** [realtime_voice.py:1107](/Users/michaelrickards/dev/bh2-NS-V1-review/backend/realtime_voice.py:1107) — timeout exits without cancelling the shielded cleanup task; probe confirms a pending close after handler completion, but does not establish continued live-provider billing.
+- Live audio/browser behaviour and actual PostgreSQL concurrency remain unverified.
+---
+
+Both backlog notes recorded in `docs/BACKLOG.md`.
