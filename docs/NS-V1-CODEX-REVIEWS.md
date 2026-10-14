@@ -61,3 +61,40 @@ Every finding taken. Tests first: 13 new cases, 10 of which failed before the fi
 **Test-harness notes:**
 - The slow-tool test times inside the session. On exit, the test harness waits for the still-sleeping tool thread; a live server does not.
 - The slow-accrual test installs its fake after the shared fixture, because the fixture installs its own recorder.
+
+## Review 2 (repair cycle 1 of 3)
+
+| | |
+|---|---|
+| Reviewed commit | `f1fab90` |
+| Session id | `01a13b2e-02a2-7b81-8c17-58da0941350b` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 50,792` |
+| **Verdict** | **REQUEST-CHANGES** |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** — `f1fab906de953cef1afafb29bfc3d218d2a11333`.
+
+1. **P1 — Recovery can double-bill across months.** [metering.py:519](/Users/michaelrickards/dev/bh2-NS-V1-review/backend/services/metering.py:519), [realtime_voice.py:1043](/Users/michaelrickards/dev/bh2-NS-V1-review/backend/realtime_voice.py:1043)  
+   Normal accrual uses the current month; recovery uses the last heartbeat’s timestamp. Idempotency is scoped to month. If a session ends after midnight on 1 November, accrual succeeds, but `voice_session_closed` fails, an October heartbeat is billed again in October. **Probe: one 12-minute session produced 12 November minutes plus 10 October minutes.** The heartbeat’s stored `period` does not control either accrual. The existing “not billed twice” test successfully deletes the heartbeat before recovery, so misses this failure.
+
+2. **P1 — Failed heartbeats still permit unrecoverable usage.** [realtime_voice.py:876](/Users/michaelrickards/dev/bh2-NS-V1-review/backend/realtime_voice.py:876)  
+   The initial durable write is optional in practice: its exception is logged and OpenAI opens anyway. If admission succeeds but database writes fail throughout the session and final accrual, recovery has no record. **Probe confirmed OpenAI opens after the initial heartbeat fails.** Repeated heartbeat failures also invalidate the claimed “less than a minute” maximum loss. Original finding 1 remains unresolved for these paths.
+
+3. **P1 — Synchronous authentication still defeats other sessions’ caps.** [realtime_voice.py:756](/Users/michaelrickards/dev/bh2-NS-V1-review/backend/realtime_voice.py:756), [realtime_voice.py:775](/Users/michaelrickards/dev/bh2-NS-V1-review/backend/realtime_voice.py:775)  
+   Business lookup and the feature-gate database query still execute on the event loop. A new connection’s slow authentication blocks every existing watchdog. **Probe: a 350ms lookup delayed a 20ms timer to 357ms; another session with a 100ms cap still had its upstream open.** The slow-tool test passes but does not establish that original finding 3 is fully resolved.
+
+4. **P2 — Recovery can permanently replace a full accrual with a partial heartbeat.** [metering.py:514](/Users/michaelrickards/dev/bh2-NS-V1-review/backend/services/metering.py:514), [realtime_voice.py:1056](/Users/michaelrickards/dev/bh2-NS-V1-review/backend/realtime_voice.py:1056)  
+   A stale heartbeat is treated as final unless its session appears in this process’s live set. A session running elsewhere with stalled heartbeats can therefore be recovered prematurely. The same race exists locally when the final accounting thread is delayed: the session leaves the live set before that thread completes. Recovery claims the final idempotency key, so the later actual duration is discarded. **Probe: recovery of a 10-minute heartbeat followed by a 20-minute final accrual left only 10 minutes billed.** Cancelling heartbeat tasks also does not stop their worker threads; a late write can recreate a deleted marker.
+
+5. **P2 — Repeated cancellation escapes teardown.** [realtime_voice.py:1059](/Users/michaelrickards/dev/bh2-NS-V1-review/backend/realtime_voice.py:1059)  
+   A second cancellation during provider closure raises `CancelledError`, which the `Exception` handler does not catch. Browser closure and the remaining cleanup are skipped. **Probe: cancelling during a delayed provider close left the fake upstream open and browser closure uncalled; accrual completed.** This demonstrates the ordering defect, not verified behaviour of a live OpenAI transport. The existing tests do not exercise repeated cancellation.
+
+Original findings **2, 4, 5 and 6** are addressed with relevant tests; **7** is addressed by frontend inspection. Findings **1 and 3** remain incomplete as above.
+
+**Verification:** `./check.sh full` passed: **1,768 passed, 33 skipped**, all five preflight traps passed. Four focused suites passed **151 tests**. These green suites omit the fault scenarios above.
+
+Otherwise: no additional P1/P2 found in the scheduler import; frontend rendering and live audio remain unverified. No source edits, commits or pushes; worktree clean.

@@ -212,10 +212,14 @@ def voice(monkeypatch):
                 raise state["admit"]
             return state["admit"]
         monkeypatch.setattr(metering, "admit_call", _admit)
+        # Voice sessions accrue through accrue_session since Codex review 2
+        # (top-up, billed in the month the session started). Harness only.
         monkeypatch.setattr(
-            metering, "record_call",
-            lambda session, business, seconds, call_id=None, at=None, source="receptionist":
-            state["recorded"].append((seconds, call_id, source)))
+            metering, "accrue_session",
+            lambda session, business, key, seconds, period=None, source="aria_voice":
+            state["recorded"].append((seconds, key, source)))
+        monkeypatch.setattr(metering, "voice_session_heartbeat", lambda *a, **k: None)
+        monkeypatch.setattr(metering, "voice_session_closed", lambda *a, **k: None)
         from services import aria_actions
 
         def _propose(business_id, user_id, action_type, args, **kw):
@@ -494,7 +498,7 @@ def test_a_closed_session_is_not_billed_twice_by_recovery(meters):
     m = pool()
     with Session(meters) as s:
         m.voice_session_heartbeat(s, biz(), "s1", 5 * 60)
-        m.record_call(s, biz(), 6 * 60, call_id="voice-s1", source="aria_voice")
+        m.accrue_session(s, biz(), "s1", 6 * 60, period="2026-10")
         m.voice_session_closed(s, biz(), "s1")
     with Session(meters) as s:
         assert m.reconcile_open_voice_sessions(
@@ -508,15 +512,15 @@ def test_a_failed_end_accrual_leaves_the_heartbeat_for_recovery(voice, monkeypat
     after a successful accrual."""
     from services import metering
     beats, closed = [], []
+    client = voice["make"]()  # first: it installs its own heartbeat stubs
     monkeypatch.setattr(metering, "voice_session_heartbeat",
                         lambda s, b, sid, seconds, period=None: beats.append((sid, seconds)))
     monkeypatch.setattr(metering, "voice_session_closed",
                         lambda s, b, sid: closed.append(sid))
-    client = voice["make"]()
 
     def failing_record(*a, **k):
         raise RuntimeError("database unavailable")
-    monkeypatch.setattr(metering, "record_call", failing_record)
+    monkeypatch.setattr(metering, "accrue_session", failing_record)
     with client.websocket_connect("/v1/realtime/voice") as ws:
         ws.send_json({"type": "auth", "token": "t"})
         assert ws.receive_json() == {"type": "ready"}
@@ -579,8 +583,8 @@ def test_a_slow_final_accrual_does_not_hold_the_provider_open(voice, monkeypatch
     def slow_record(*a, **k):
         time.sleep(1.0)
         done.append(True)
-    client = voice["make"]()  # first: it installs its own record_call recorder
-    monkeypatch.setattr(metering, "record_call", slow_record)
+    client = voice["make"]()  # first: it installs its own accrual recorder
+    monkeypatch.setattr(metering, "accrue_session", slow_record)
     with client.websocket_connect("/v1/realtime/voice") as ws:
         ws.send_json({"type": "auth", "token": "t"})
         assert ws.receive_json() == {"type": "ready"}
@@ -646,3 +650,154 @@ def test_aria_is_never_told_that_unfetched_data_does_not_exist(phrase):
     told = (rv.build_system_instructions("New Body Gym", "Mike")
             + inspect.getsource(rv.execute_tool)).lower()
     assert phrase not in told
+
+
+
+# ------------------------------------------- Codex NS-V1 review 2 additions ---
+
+def test_a_session_across_midnight_at_month_end_is_billed_once_in_its_start_month(
+        meters, monkeypatch):
+    """Review 2 finding 1: started 31 Oct 23:55, ended 1 Nov 00:07; the
+    final accrual succeeded but removing the heartbeat failed. Recovery must
+    not bill it again — and both use the session's START month."""
+    m = pool()
+    london = ZoneInfo("Europe/London")
+    monkeypatch.setattr(m, "now", lambda: datetime(2026, 10, 31, 23, 55, tzinfo=london))
+    with Session(meters) as s:
+        m.voice_session_heartbeat(s, biz(), "s1", 0, period="2026-10")
+    monkeypatch.setattr(m, "now", lambda: datetime(2026, 11, 1, 0, 5, tzinfo=london))
+    with Session(meters) as s:
+        m.voice_session_heartbeat(s, biz(), "s1", 10 * 60, period="2026-10")
+    monkeypatch.setattr(m, "now", lambda: datetime(2026, 11, 1, 0, 7, tzinfo=london))
+    with Session(meters) as s:
+        m.accrue_session(s, biz(), "s1", 12 * 60, period="2026-10")
+        # voice_session_closed "failed": the heartbeat is still there
+    later = datetime(2026, 11, 1, 1, 0, tzinfo=london)
+    monkeypatch.setattr(m, "now", lambda: later)
+    with Session(meters) as s:
+        m.reconcile_open_voice_sessions(s, lookup=lambda session, bid: biz(),
+                                        stale_after_seconds=0, at=later, alive=set())
+        october = m._usage_for(s, biz(), "2026-10")["by_source"]["aria_voice"]
+        november = m._usage_for(s, biz(), "2026-11")["by_source"]["aria_voice"]
+    assert (october, november) == (D("12.0000"), D("0"))
+
+
+def test_recovery_then_the_real_total_bills_the_real_total(meters):
+    """Review 2 finding 4: recovery billed a 10-minute heartbeat; the real
+    20-minute accrual arrives later and tops it up — never discarded."""
+    m = pool()
+    with Session(meters) as s:
+        m.voice_session_heartbeat(s, biz(), "s1", 10 * 60, period="2026-10")
+    with Session(meters) as s:
+        m.reconcile_open_voice_sessions(s, lookup=lambda session, bid: biz(),
+                                        stale_after_seconds=0, at=OCT.replace(hour=23),
+                                        alive=set())
+        m.accrue_session(s, biz(), "s1", 20 * 60, period="2026-10")
+        assert m.usage(s, biz())["by_source"]["aria_voice"] == D("20.0000")
+
+
+def test_the_real_total_then_a_late_heartbeat_adds_nothing(meters):
+    """A heartbeat thread that outlived the session recreates its marker
+    after the final accrual; recovery then finds less than was billed."""
+    m = pool()
+    with Session(meters) as s:
+        m.accrue_session(s, biz(), "s1", 12 * 60, period="2026-10")
+        m.voice_session_closed(s, biz(), "s1")
+        m.voice_session_heartbeat(s, biz(), "s1", 10 * 60, period="2026-10")  # late
+    with Session(meters) as s:
+        m.reconcile_open_voice_sessions(s, lookup=lambda session, bid: biz(),
+                                        stale_after_seconds=0, at=OCT.replace(hour=23),
+                                        alive=set())
+        assert m.usage(s, biz())["by_source"]["aria_voice"] == D("12.0000")
+
+
+def test_accruing_the_same_session_twice_adds_nothing(meters):
+    m = pool()
+    with Session(meters) as s:
+        m.accrue_session(s, biz(), "s1", 12 * 60, period="2026-10")
+        m.accrue_session(s, biz(), "s1", 12 * 60, period="2026-10")
+        assert m.usage(s, biz())["by_source"]["aria_voice"] == D("12.0000")
+
+
+def test_no_session_opens_if_the_first_heartbeat_cannot_be_written(voice, monkeypatch):
+    """Review 2 finding 2 / V3: no durable record, no session."""
+    repaired()
+    from services import metering
+    client = voice["make"]()
+
+    def failing_beat(*a, **k):
+        raise RuntimeError("database unavailable")
+    monkeypatch.setattr(metering, "voice_session_heartbeat", failing_beat)
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        with pytest.raises(Exception):
+            ws.receive_json()
+    assert voice["connects"] == []
+
+
+def test_a_session_whose_heartbeats_keep_failing_is_ended(voice, monkeypatch):
+    """Review 2 finding 2: loss is bounded — three failed beats in a row end
+    the session rather than let it run unrecorded."""
+    rv = repaired()
+    monkeypatch.setattr(rv, "VOICE_HEARTBEAT_SECONDS", 0.05)
+    from services import metering
+    client = voice["make"]()
+    calls = []
+
+    def first_only(*a, **k):
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("database unavailable")
+    monkeypatch.setattr(metering, "voice_session_heartbeat", first_only)
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        assert ws.receive_json() == {"type": "ready"}
+        assert _wait(lambda: not voice["connects"][0].open, timeout=2.0), \
+            "the session kept running without a durable record"
+
+
+def test_a_slow_sign_in_does_not_stall_another_sessions_cap(voice, monkeypatch):
+    """Review 2 finding 3: sign-in's business lookup and feature-gate query
+    run off the event loop, so a new connection cannot freeze a live
+    session's deadline."""
+    rv = repaired()
+    monkeypatch.setattr(rv, "VOICE_SESSION_CAP_SECONDS", 0.15)
+    client = voice["make"]()
+    import assistant_chat
+    lookups = []
+    fast = assistant_chat.get_business_for_user
+
+    def lookup(uid, bid=None):
+        lookups.append(1)
+        if len(lookups) == 2:
+            time.sleep(1.0)
+        return fast(uid, bid)
+    monkeypatch.setattr(assistant_chat, "get_business_for_user", lookup)
+    with client.websocket_connect("/v1/realtime/voice") as first:
+        first.send_json({"type": "auth", "token": "t"})
+        assert first.receive_json() == {"type": "ready"}
+        with client.websocket_connect("/v1/realtime/voice") as second:
+            second.send_json({"type": "auth", "token": "t"})  # its sign-in is slow
+            assert _wait(lambda: not voice["connects"][0].open, timeout=0.6), \
+                "a slow sign-in stalled another session's cap"
+
+
+def test_a_second_cancellation_during_teardown_still_closes_the_browser(voice, monkeypatch):
+    """Review 2 finding 5: if the handler is cancelled again while closing
+    OpenAI, the browser is still closed and the session still metered."""
+    rv = repaired()
+    monkeypatch.setattr(rv, "VOICE_SESSION_CAP_SECONDS", 0.05)
+
+    async def cancelled_close(self):
+        asyncio.current_task().cancel()
+        self.open = False
+        await asyncio.sleep(0.5)
+    monkeypatch.setattr(_FakeUpstream, "close", cancelled_close)
+    client = voice["make"]()
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        assert ws.receive_json() == {"type": "ready"}
+        with pytest.raises(Exception):
+            while True:
+                ws.receive_json()  # the browser connection is closed
+    assert _wait(lambda: len(voice["recorded"]) == 1, timeout=2.0)
