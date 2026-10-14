@@ -215,8 +215,12 @@ def test_voice_refuses_each_action(tripwire, name):
 
 
 def test_voice_advertises_none_of_the_actions():
+    """NS-V1 (Mike, 14 Oct 2026): voice advertises the four approvable
+    actions as approval cards (test_voice_repair.py). Never delete_task, and
+    never the old voice aliases that went straight to the senders."""
     names = {t["name"] for t in realtime_voice.REALTIME_TOOLS}
-    assert names.isdisjoint(PROHIBITED_VOICE), names & set(PROHIBITED_VOICE)
+    never = {"delete_task", "send_email_reply", "send_chase"}
+    assert names.isdisjoint(never), names & never
 
 
 def test_voice_prompt_does_not_offer_the_actions():
