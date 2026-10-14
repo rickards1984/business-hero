@@ -172,3 +172,27 @@ Completion evidence (14 October 2026): targeted suite **24 xfailed**;
 `./check.sh full` exit 0: **5 passed, 0 failed, 1 skipped** (optional eslint).
 Pytest: **1733 passed, 33 skipped, 24 xfailed, 220 subtests passed**, 1243
 warnings. All five preflight traps passed. No implementation, commit or push.
+
+## Mike's decisions — 14 October 2026
+
+"I agree on D1 and D3 and your suggestion for D2 and D4, as long as it keeps
+it sleek and looking good within the UI."
+
+- **D1 — report only.** Accepted.
+- **D3 — daily run, with a 48-hour "possible silence" warning.** Accepted.
+- **D2 + D4 — Claude's counter-proposal, accepted.** The alert is BOTH:
+  - the structured ERROR log, as designed; AND
+  - a **platform-admin dashboard banner** showing the last run.
+  The banner shows:
+  - the last run's result and its age;
+  - "not run since restart" when that is true;
+  - an incomplete run;
+  - each divergence.
+  It is never an implicit green.
+  - Storage: an in-memory last result (a single replica; no schema change).
+  - The endpoint is read-only and gated by `get_platform_admin_context`.
+  - It must look sleek and consistent with the admin UI (Mike).
+  - No Aria read tool: this is platform-operations data across tenants, not
+    a business's own data. North Star §8 applies to business data.
+  - Later: a proactive WhatsApp alert to the platform admin, which needs an
+    approved template and a configured recipient. Backlogged.
