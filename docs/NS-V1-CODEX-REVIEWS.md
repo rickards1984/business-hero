@@ -42,3 +42,22 @@ The shared-pool allocation looks correct: both sources consume the same remainin
 **Verification:** `./check.sh full` passed: 1,756 tests passed, 33 skipped; all five preflight traps passed. The four focused suites passed **201 tests**. The fault probes above expose paths those tests omit: blocked notices, slow accrual, lost-accrual recovery, error-path billing and canonical draft grounding. The fake provider does not validate schema acceptance; browser rendering and live audio remain unverified.
 
 After repairs, Mike’s behaviour checks should cover voice → proposal → spoken “yes” doing nothing → tap approval, quiet mode, and the visible cap explanation. No source edits, commits or pushes; worktree clean.
+---
+
+### Response to review 1 — Claude Code (builder), 14 October 2026
+
+Every finding taken. Tests first: 13 new cases, 10 of which failed before the fix.
+
+| Finding | Action |
+|---|---|
+| 1 · A failed accrual loses voice usage (P1) | **A durable heartbeat**, `voice-open:<session>` in `usage_meters`. It is a marker row with no migration, kept out of every usage sum by the `:`. It is written before the OpenAI connection opens, then every 60 s, pinned to the month the session started. It is removed only after a successful accrual. `metering.reconcile_open_voice_sessions` runs in the scheduler's existing 15-minute catch-up. It bills any session whose heartbeat stopped (stale more than 5 min, and not live in this process) from its last beat, once, keyed on `voice-<id>`. Worst case, a failure under-bills by less than a minute. Tested at the meter level (recovery bills once; a closed session is never billed twice) and at the socket (a failed accrual leaves the heartbeat) |
+| 2 · A blocked limit notice defeats the cap (P1) | `finally` is reordered: (1) cancel the watchdog, heartbeat and forwarders; (2) take the end time; (3) start the accrual in a thread; (4) close OpenAI, bounded; (5) only then the limit notice, bounded to 1 s; (6) close the browser, bounded. Tested with a browser that never takes the notice: OpenAI still closes and the session is metered |
+| 3 · Synchronous DB work on the event loop (P1) | Admission, the heartbeat, the final accrual and Aria's shared tools all run in worker threads. The accrual is a shielded thread future, so it completes even if the handler is cancelled, with a callback that logs a failure. Tested: a slow (1.5 s) tool does not stop a 0.3 s cap, and a slow (1 s) accrual does not hold the provider open but still completes |
+| 4 · Error-notice time is billed (P2) | The end time is taken before any notice, in every exit path. Tested: a 1.2 s error notice bills 0 s |
+| 5 · Aria never receives the card she reads aloud (P2) | The tool result now carries `card` (the proposal's canonical preview, e.g. the chase template and recipient) as well as the message. Tested |
+| 6 · Contradictory "only data that exists" instructions (P2) | The email wrapper now says these are the most recent emails, not every email, and that if something isn't there she should say it may be older. The system prompt says the response is "the only business data you have". Tested for four phrasings |
+| 7 · The cap explanation is overwritten (P3) | The browser keeps the end reason across the normal close, and resets it when a new chat starts |
+
+**Test-harness notes:**
+- The slow-tool test times inside the session. On exit, the test harness waits for the still-sleeping tool thread; a live server does not.
+- The slow-accrual test installs its fake after the shared fixture, because the fixture installs its own recorder.

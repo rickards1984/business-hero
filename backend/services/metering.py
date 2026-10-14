@@ -55,6 +55,12 @@ _ACCRUED_PREFIX = "accrued:"
 # cleared only when a delivery is acknowledged (Codex BH-012 review 2).
 _PENDING_PREFIX = "pending:"
 RECONCILE_BATCH = 500
+# NS-V1 (Codex review 1, finding 1): a live Aria voice session keeps a
+# durable heartbeat — "voice-open:<session id>", value = minutes so far — so
+# that if its end-of-session accrual fails, recovery bills it from the last
+# beat. Removed only after a successful accrual. Not a meter: the ':' keeps
+# it out of every usage sum, like the other markers.
+_VOICE_OPEN_PREFIX = "voice-open:"
 
 CALL_HARD_CAP_SECONDS = 1200
 OVERAGE_RATE_GBP = Decimal("0.45")
@@ -458,3 +464,64 @@ def _parse_moment(value) -> Optional[datetime]:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=ZoneInfo("UTC"))
+
+
+def voice_session_heartbeat(session, business, session_id: str, seconds,
+                            period: Optional[str] = None) -> None:
+    """Record how long a live voice session has run (replacing, not adding).
+    `period` pins the session to the month it started in. Commits."""
+    moment = now()
+    session.execute(
+        text("""
+            INSERT INTO usage_meters (business_id, meter, period, value, updated_at)
+            VALUES (:business_id, :meter, :period, :value, :now)
+            ON CONFLICT (business_id, meter, period)
+            DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """),
+        {"business_id": str(business.id), "meter": f"{_VOICE_OPEN_PREFIX}{session_id}",
+         "period": period or period_for(moment), "value": minutes_from_seconds(seconds),
+         "now": moment},
+    )
+    session.commit()
+
+
+def voice_session_closed(session, business, session_id: str) -> None:
+    """The session's accrual succeeded: its heartbeat is no longer needed."""
+    session.execute(
+        text("DELETE FROM usage_meters WHERE business_id = :business_id AND meter = :meter"),
+        {"business_id": str(business.id), "meter": f"{_VOICE_OPEN_PREFIX}{session_id}"},
+    )
+    session.commit()
+
+
+def reconcile_open_voice_sessions(session, lookup=None, stale_after_seconds: int = 300,
+                                  at: Optional[datetime] = None, alive=()) -> int:
+    """Bill every voice session whose heartbeat stopped without a closing
+    accrual (the process died, or the database failed at the end), from its
+    last beat, once (`voice-<id>` is the accrual's idempotency key). Sessions
+    still running here (`alive`) or beating recently are left alone."""
+    lookup = lookup or load_business
+    moment = at or now()
+    rows = session.execute(
+        text("SELECT business_id, meter, period, value, updated_at FROM usage_meters "
+             "WHERE meter LIKE :prefix"),
+        {"prefix": f"{_VOICE_OPEN_PREFIX}%"},
+    ).fetchall()
+    billed = 0
+    for business_id, meter, period, value, updated_at in rows:
+        sid = meter[len(_VOICE_OPEN_PREFIX):]
+        beat = _parse_moment(updated_at)
+        if sid in alive or beat is None or (moment - beat).total_seconds() < stale_after_seconds:
+            continue
+        business = lookup(session, str(business_id))
+        if business is None:
+            continue
+        record_call(session, business, int(Decimal(str(value)) * 60),
+                    call_id=f"voice-{sid}", at=beat, source="aria_voice")
+        session.execute(
+            text("DELETE FROM usage_meters WHERE business_id = :business_id "
+                 "AND meter = :meter AND period = :period"),
+            {"business_id": str(business_id), "meter": meter, "period": period})
+        session.commit()
+        billed += 1
+    return billed

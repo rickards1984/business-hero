@@ -40,6 +40,16 @@ def aria_voice_enabled() -> bool:
 # NS-V1 / Mike's V2: no voice session runs past 20 minutes, setup included.
 VOICE_SESSION_CAP_SECONDS = 1200
 _CLOSE_TIMEOUT_SECONDS = 2
+_NOTICE_TIMEOUT_SECONDS = 1
+# A durable heartbeat per live session (metering.voice_session_heartbeat), so
+# a failed end-of-session accrual is recovered, not lost (review 1, finding 1).
+VOICE_HEARTBEAT_SECONDS = 60
+_LIVE_SESSIONS: set = set()
+
+
+def live_sessions() -> set:
+    """Sessions running in this process; recovery leaves them alone."""
+    return set(_LIVE_SESSIONS)
 
 # GA server events the browser renders (RealtimeVoice.tsx). Everything else
 # from OpenAI (session.created with its config, rate limits, …) stays here.
@@ -431,15 +441,17 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
         _logger.info(f"Mapped tool call: {mapped_name} with args: {mapped_args}")
         
         # Get timezone for the business
-        from assistant_chat import get_business_for_user
-        try:
-            business = get_business_for_user(user_id, business_id)
-            timezone = business.timezone
-        except:
-            timezone = "Europe/London"
-        
-        # Execute using the shared tool executor
-        result = execute_assistant_tool(mapped_name, mapped_args, business_id, timezone)
+        # Off the event loop (Codex NS-V1 review 1, finding 3): these are
+        # synchronous database and provider calls, and on the loop they would
+        # stall every voice session's deadline while they ran.
+        def _run_tool():
+            from assistant_chat import get_business_for_user
+            try:
+                timezone = get_business_for_user(user_id, business_id).timezone
+            except Exception:
+                timezone = "Europe/London"
+            return execute_assistant_tool(mapped_name, mapped_args, business_id, timezone)
+        result = await asyncio.to_thread(_run_tool)
         
         # Add explicit instruction wrapper for email results to prevent hallucination
         if tool_name == "list_emails" and isinstance(result, dict) and result.get("error"):
@@ -449,7 +461,7 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
         if tool_name == "list_emails" and isinstance(result, dict):
             emails = result.get("emails", [])
             result = {
-                "IMPORTANT": "Below are the ONLY emails that exist. Do NOT invent, fabricate, or mention any other emails. Only discuss emails from this list.",
+                "IMPORTANT": "These are the most recent emails fetched, not every email. Only discuss emails from this list and never invent any. If something isn't here, say you couldn't find it in the recent emails — it may be older.",
                 "email_count": len(emails),
                 "emails": emails
             }
@@ -469,7 +481,7 @@ def build_system_instructions(business_name: str, user_name: str) -> str:
 
 YOU ARE CONNECTED TO REAL BUSINESS DATA THROUGH TOOLS.
 
-When you call a tool like list_emails, the response contains THE ONLY REAL DATA THAT EXISTS.
+When you call a tool like list_emails, the response is the ONLY business data you have.
 Your memory does NOT contain any emails, calls, invoices, or other business data.
 If data is not in the tool response, you do not know it: say you couldn't find it, or that the source isn't connected. Never guess.
 
@@ -791,12 +803,14 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     # NS-V1: the meter decides before anything is spent. Mike's V3: if it
     # cannot be read, the session is refused (fail closed) — the owner can
     # still type to Aria, and no customer is affected.
-    try:
+    def _admit():
         from services import metering as _metering
         from db import get_session_context as _meter_session
         with _meter_session() as _ms:
             _mb = _metering.load_business(_ms, business_id)
-            admitted, limit_state = _metering.admit_call(_ms, _mb)
+            return _metering.admit_call(_ms, _mb)
+    try:
+        admitted, limit_state = await asyncio.to_thread(_admit)
     except Exception as e:
         _logger.error("Voice usage check failed for %s, refusing: %s", business_id, e)
         await websocket.close(code=4003, reason="Voice usage could not be checked")
@@ -815,10 +829,30 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     session_id = str(_uuid.uuid4())
     openai_ws = None
     started = None
+    ended = None
     timed_out = False
     handler_task = asyncio.current_task()
     watchdog = None
+    heartbeat = None
     forwarders = []
+
+    def _beat(seconds, period):
+        from services import metering as _m
+        from db import get_session_context as _hs
+        with _hs() as _s:
+            _b = _m.load_business(_s, business_id)
+            if _b is not None:
+                _m.voice_session_heartbeat(_s, _b, session_id, seconds, period=period)
+
+    async def _beat_forever(period):
+        """The durable heartbeat, every VOICE_HEARTBEAT_SECONDS after the first.
+        Off the loop; a failed beat is logged and the next one tries again."""
+        while True:
+            await asyncio.sleep(VOICE_HEARTBEAT_SECONDS)
+            try:
+                await asyncio.to_thread(_beat, int(_time.monotonic() - started), period)
+            except Exception as e:
+                _logger.warning("Voice heartbeat failed for %s: %s", business_id, e)
 
     async def _end_at_cap():
         nonlocal timed_out
@@ -833,7 +867,17 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         # Billing starts as the provider connection opens; the cap covers
         # setup too (BH-012's pattern), and stops the handler itself.
         started = _time.monotonic()
+        _LIVE_SESSIONS.add(session_id)
         watchdog = asyncio.create_task(_end_at_cap())
+        # The first beat lands BEFORE the provider connection opens, so a
+        # durable record exists before anything billable happens.
+        from services import metering as _m0
+        _period = _m0.period_for(_m0.now())
+        try:
+            await asyncio.to_thread(_beat, 0, _period)
+        except Exception as e:
+            _logger.warning("Voice heartbeat failed for %s: %s", business_id, e)
+        heartbeat = asyncio.create_task(_beat_forever(_period))
         openai_ws = await websockets.connect(
             OPENAI_REALTIME_URL,
             additional_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
@@ -898,10 +942,14 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                 if proposed.get("proposal"):
                     await websocket.send_json({"type": "proposal",
                                                "proposal": proposed["proposal"]})
+                    # The card itself goes to the model too, so what Aria
+                    # reads aloud is exactly what the screen shows (review 1,
+                    # finding 5): for a chase, the server's template.
                     return json.dumps({"message": proposed["message"] + (
-                        " It is on the owner's screen now. Read the draft aloud "
-                        "briefly and tell them to tap Approve on the screen if "
-                        "they're happy.")})
+                        " It is on the owner's screen now. Read the card's draft "
+                        "aloud briefly and tell them to tap Approve on the "
+                        "screen if they're happy."),
+                        "card": proposed["proposal"].get("preview")}, default=str)
                 return json.dumps({"error": proposed.get("error") or "That could not be prepared."})
             try:
                 return await asyncio.wait_for(
@@ -949,50 +997,85 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         await asyncio.wait(forwarders, return_when=asyncio.FIRST_COMPLETED)
 
     except asyncio.CancelledError:
+        if ended is None and started is not None:
+            ended = _time.monotonic()
         if not timed_out:
             raise  # a shutdown, not our cap
         asyncio.current_task().uncancel()
-        try:
-            await websocket.send_json({"type": "session_limit",
-                                       "message": "That's the 20-minute limit for one voice chat. Start a new one any time."})
-        except Exception:
-            pass
     except Exception as e:
+        # The session's end is taken BEFORE any notice: time spent telling
+        # the browser is never billed (review 1, finding 4).
+        if started is not None:
+            ended = _time.monotonic()
         _logger.error(f"Realtime API error: {e}")
         try:
-            await websocket.send_json({"type": "error", "message": "Voice connection failed"})
-        except Exception:
+            await asyncio.wait_for(
+                websocket.send_json({"type": "error", "message": "Voice connection failed"}),
+                _NOTICE_TIMEOUT_SECONDS)
+        except (Exception, asyncio.TimeoutError):
             pass
 
     finally:
-        if watchdog is not None:
-            watchdog.cancel()
-        for task in forwarders:
-            if not task.done():
+        # Order matters (Codex NS-V1 review 1, findings 2-4):
+        # 1. stop everything that could keep the session alive;
+        # 2. take the end time (if not taken already) — only up to the cap is
+        #    billed, and teardown or notices never are;
+        # 3. start the accrual in a worker thread — it runs to completion even
+        #    if this handler is cancelled, and never blocks the event loop;
+        # 4. close OpenAI, bounded; only THEN try the limit notice, bounded;
+        # 5. close the browser, bounded; wait for the accrual if allowed.
+        for task in (watchdog, heartbeat, *forwarders):
+            if task is not None and not task.done():
                 task.cancel()
+        accrual = None
         if started is not None:
-            # Metered FIRST, synchronously, before anything awaits: if the
-            # handler is being cancelled (a server restart, the client gone),
-            # every later await in this block can be cancelled too, and a
-            # session that happened must still be counted. Only time up to
-            # the cap is billed; teardown never is. One accrual per session,
-            # from the shared voice pool (Mike's V1). A failure is logged.
-            seconds = int(min(_time.monotonic() - started, VOICE_SESSION_CAP_SECONDS))
-            try:
+            if ended is None:
+                ended = _time.monotonic()
+            seconds = int(min(ended - started, VOICE_SESSION_CAP_SECONDS))
+
+            def _record():
                 from services import metering as _m
                 from db import get_session_context as _rs
                 with _rs() as _s:
                     _b = _m.load_business(_s, business_id)
-                    if _b is not None:
-                        _m.record_call(_s, _b, seconds, call_id=f"voice-{session_id}",
-                                       source="aria_voice")
-            except Exception as e:
-                _logger.error("Failed to meter voice session for %s: %s", business_id, e)
-        for closing in ((openai_ws.close() if openai_ws else None), websocket.close()):
-            if closing is None:
-                continue
+                    if _b is None:
+                        return
+                    _m.record_call(_s, _b, seconds, call_id=f"voice-{session_id}",
+                                   source="aria_voice")
+                    # Only after a successful accrual: otherwise the heartbeat
+                    # stays for recovery (review 1, finding 1).
+                    _m.voice_session_closed(_s, _b, session_id)
+
+            accrual = asyncio.ensure_future(asyncio.to_thread(_record))
+
+            def _log_failure(done):
+                if not done.cancelled() and done.exception() is not None:
+                    _logger.error("Failed to meter voice session for %s: %s",
+                                  business_id, done.exception())
+            accrual.add_done_callback(_log_failure)
+        _LIVE_SESSIONS.discard(session_id)
+        if openai_ws is not None:
             try:
-                await asyncio.wait_for(closing, _CLOSE_TIMEOUT_SECONDS)
+                await asyncio.wait_for(openai_ws.close(), _CLOSE_TIMEOUT_SECONDS)
             except (Exception, asyncio.TimeoutError):
                 pass
+        if timed_out:
+            try:
+                await asyncio.wait_for(websocket.send_json({
+                    "type": "session_limit",
+                    "message": "That's the 20-minute limit for one voice chat. Start a new one any time."}),
+                    _NOTICE_TIMEOUT_SECONDS)
+            except (Exception, asyncio.TimeoutError):
+                pass
+        try:
+            await asyncio.wait_for(websocket.close(), _CLOSE_TIMEOUT_SECONDS)
+        except (Exception, asyncio.TimeoutError):
+            pass
+        if accrual is not None:
+            try:
+                await asyncio.shield(accrual)
+            except asyncio.CancelledError:
+                pass  # the thread still finishes; the heartbeat backs it up
+            except Exception:
+                pass  # logged by the callback; the heartbeat stays for recovery
         _logger.info("Connection closed")

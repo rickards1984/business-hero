@@ -509,7 +509,7 @@ def test_a_failed_end_accrual_leaves_the_heartbeat_for_recovery(voice, monkeypat
     from services import metering
     beats, closed = [], []
     monkeypatch.setattr(metering, "voice_session_heartbeat",
-                        lambda s, b, sid, seconds: beats.append((sid, seconds)))
+                        lambda s, b, sid, seconds, period=None: beats.append((sid, seconds)))
     monkeypatch.setattr(metering, "voice_session_closed",
                         lambda s, b, sid: closed.append(sid))
     client = voice["make"]()
@@ -561,13 +561,13 @@ def test_slow_tools_do_not_stop_the_cap(voice, monkeypatch):
     monkeypatch.setattr(assistant_tools, "execute_tool", slow_tool)
     client = voice["make"](script=[{"type": "response.function_call_arguments.done",
                                     "call_id": "c1", "name": "get_tasks", "arguments": "{}"}])
-    started = time.monotonic()
     with client.websocket_connect("/v1/realtime/voice") as ws:
         ws.send_json({"type": "auth", "token": "t"})
         assert ws.receive_json() == {"type": "ready"}
+        # Timed here, inside the session: on exit the test harness waits for
+        # the still-sleeping tool thread, which a live server does not.
         assert _wait(lambda: not voice["connects"][0].open, timeout=1.2), \
             "the cap did not fire while a slow tool ran"
-    assert time.monotonic() - started < 1.4
 
 
 def test_a_slow_final_accrual_does_not_hold_the_provider_open(voice, monkeypatch):
@@ -579,8 +579,8 @@ def test_a_slow_final_accrual_does_not_hold_the_provider_open(voice, monkeypatch
     def slow_record(*a, **k):
         time.sleep(1.0)
         done.append(True)
+    client = voice["make"]()  # first: it installs its own record_call recorder
     monkeypatch.setattr(metering, "record_call", slow_record)
-    client = voice["make"]()
     with client.websocket_connect("/v1/realtime/voice") as ws:
         ws.send_json({"type": "auth", "token": "t"})
         assert ws.receive_json() == {"type": "ready"}

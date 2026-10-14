@@ -40,6 +40,8 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
   const audioQueueRef = useRef<ArrayBuffer[]>([]);
   const isPlayingRef = useRef(false);
   const isMutedRef = useRef(false);
+  // Why the session ended, kept so the normal close doesn't overwrite it.
+  const endReasonRef = useRef<string | null>(null);
 
   // Keep muted ref in sync with state
   useEffect(() => {
@@ -151,7 +153,11 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
         break;
 
       case 'session_limit':
-        setStatus(data.message || 'That voice chat reached its time limit.');
+        {
+          const reason: string = data.message || 'That voice chat reached its time limit.';
+          endReasonRef.current = reason;
+          setStatus(reason);
+        }
         break;
 
       case 'error':
@@ -172,6 +178,7 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
 
   // Start the realtime session
   const startSession = useCallback(async () => {
+    endReasonRef.current = null;  // a new chat starts with no end reason
     try {
       setStatus('Connecting...');
       
@@ -201,7 +208,7 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
         // 4010 = voice switched off server-side (NS-A2); say why, not just "Disconnected".
         // 4003 = refused before connecting (plan, voice minutes used up, or
         // usage couldn't be checked); the server's reason says which.
-        setStatus(event.code === 4010
+        setStatus(endReasonRef.current ? endReasonRef.current : event.code === 4010
           ? 'Voice chat is being upgraded. Please type to Aria instead.'
           : event.code === 4003 && event.reason
             ? `${event.reason}. You can still type to Aria.`
