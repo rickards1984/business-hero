@@ -65,10 +65,8 @@ class MissingVoiceRepair(AssertionError):
     """Only this precise, intentional Stage 1 absence may be xfailed."""
 
 
-pending = pytest.mark.xfail(
-    strict=True, raises=MissingVoiceRepair,
-    reason="NS-V1: tests first; implementation follows Mike's review",
-)
+# Stage 1's strict-xfail marker was removed once the repair landed: every
+# test below must now pass outright.
 
 
 def repaired():
@@ -86,7 +84,6 @@ def pool():
 
 # ------------------------------------------------------------ GA protocol ---
 
-@pending
 def test_the_session_is_configured_in_the_ga_shape():
     """Acceptance 1. The beta shape (`modalities`, top-level `voice`,
     `input_audio_format`, `temperature`) is what broke voice."""
@@ -107,7 +104,6 @@ def test_the_session_is_configured_in_the_ga_shape():
         assert beta not in s, f"beta field {beta!r} in a GA session"
 
 
-@pending
 def test_quiet_mode_is_less_sensitive():
     rv = repaired()
     loud = rv.build_session_config("i", "v", False, [])["session"]["audio"]["input"]["turn_detection"]
@@ -116,14 +112,12 @@ def test_quiet_mode_is_less_sensitive():
     assert quiet["silence_duration_ms"] > loud["silence_duration_ms"]
 
 
-@pending
 def test_voice_tools_are_in_the_ga_function_shape():
     rv = repaired()
     for tool in rv.REALTIME_TOOLS:
         assert tool["type"] == "function" and tool["name"] and "parameters" in tool
 
 
-@pending
 def test_no_beta_protocol_remains_on_either_side():
     """Acceptance 2: the browser renders GA event names, and neither side
     names the beta ones or sends the beta header."""
@@ -248,7 +242,6 @@ def _wait(predicate, timeout=5.0):
     return False
 
 
-@pending
 def test_the_live_socket_connects_without_the_beta_header_and_configures_ga(voice):
     repaired()
     client = voice["make"]()
@@ -261,7 +254,6 @@ def test_the_live_socket_connects_without_the_beta_header_and_configures_ga(voic
         assert first["type"] == "session.update" and first["session"]["type"] == "realtime"
 
 
-@pending
 @pytest.mark.parametrize("why", ["feature", "allowance", "meter_unreadable"])
 def test_no_openai_connection_when_voice_is_not_allowed(voice, why):
     """Acceptance 3 / V3 / V4: refused before anything is spent."""
@@ -279,7 +271,6 @@ def test_no_openai_connection_when_voice_is_not_allowed(voice, why):
     assert voice["recorded"] == []
 
 
-@pending
 def test_a_session_is_metered_once_from_the_aria_voice_source(voice):
     """Acceptance 4: one accrual per session, against the shared pool, with
     an id that makes a retried accrual count once."""
@@ -293,7 +284,6 @@ def test_a_session_is_metered_once_from_the_aria_voice_source(voice):
     assert source == "aria_voice" and call_id and isinstance(seconds, int)
 
 
-@pending
 def test_a_session_ends_at_the_cap_and_only_the_cap_is_billed(voice, monkeypatch):
     """Acceptance 5 / V2."""
     rv = repaired()
@@ -311,7 +301,6 @@ def test_a_session_ends_at_the_cap_and_only_the_cap_is_billed(voice, monkeypatch
     assert voice["recorded"][0][0] <= 1
 
 
-@pending
 def test_the_browser_receives_the_ga_events_it_renders(voice):
     repaired()
     script = [{"type": "response.output_audio.delta", "delta": "AAAA"},
@@ -325,7 +314,6 @@ def test_the_browser_receives_the_ga_events_it_renders(voice):
     assert got == ["response.output_audio.delta", "response.output_audio_transcript.done"]
 
 
-@pending
 @pytest.mark.parametrize("name,args", [
     ("send_email", {"to": "tom@example.com", "subject": "Hi", "body": "Hello"}),
     ("send_invoice_chase", {"invoice_id": "33333333-3333-4333-8333-333333333333"}),
@@ -360,7 +348,6 @@ def test_a_spoken_action_becomes_a_card_on_screen(voice, name, args):
     assert "screen" in json.dumps(answer).lower()
 
 
-@pending
 def test_voice_advertises_the_four_card_actions_and_not_delete_task():
     rv = repaired()
     names = {t["name"] for t in rv.REALTIME_TOOLS}
@@ -373,7 +360,6 @@ def test_voice_advertises_the_four_card_actions_and_not_delete_task():
 
 # --------------------------------------------------------------- grounding ---
 
-@pending
 def test_voice_never_tells_aria_that_absent_data_does_not_exist():
     """Acceptance 7: absent from a tool result means 'I couldn't find it' or
     'not connected', never a claim that it does not exist."""
@@ -382,7 +368,6 @@ def test_voice_never_tells_aria_that_absent_data_does_not_exist():
     assert "does not exist" not in text_.lower()
 
 
-@pending
 def test_an_email_error_reaches_aria_as_an_error(monkeypatch):
     """Acceptance 7: a connection failure must not read as an empty inbox."""
     rv = repaired()
@@ -435,7 +420,6 @@ def accrue(engine, business, seconds, source, call_id):
         return pool().record_call(s, business, seconds, call_id=call_id, source=source)
 
 
-@pending
 def test_aria_voice_and_the_receptionist_share_one_allowance(meters):
     """V1: 70 minutes of calls plus 50 of Aria voice use up Pro's 120."""
     accrue(meters, biz(), 70 * 60, "receptionist", "call-1")
@@ -446,7 +430,6 @@ def test_aria_voice_and_the_receptionist_share_one_allowance(meters):
         assert pool().admit_call(s, biz())[0] is False, "the receptionist is blocked too"
 
 
-@pending
 def test_usage_shows_the_split(meters):
     accrue(meters, biz(), 30 * 60, "receptionist", "call-1")
     accrue(meters, biz(), 12 * 60, "aria_voice", "voice-1")
@@ -457,7 +440,6 @@ def test_usage_shows_the_split(meters):
     assert shown["by_source"] == {"receptionist": "30.0", "aria_voice": "12.0"}
 
 
-@pending
 def test_aria_voice_overage_is_billed_and_capped_with_the_pool(meters):
     accrue(meters, biz(metered=True, cap="100"), 118 * 60, "receptionist", "call-1")
     after = accrue(meters, biz(metered=True, cap="100"), 10 * 60, "aria_voice", "voice-1")
@@ -466,14 +448,12 @@ def test_aria_voice_overage_is_billed_and_capped_with_the_pool(meters):
     assert after["overage_spend_gbp"] == D("3.60")
 
 
-@pending
 def test_a_voice_session_is_counted_once(meters):
     accrue(meters, biz(), 10 * 60, "aria_voice", "voice-1")
     again = accrue(meters, biz(), 10 * 60, "aria_voice", "voice-1")
     assert again["used_minutes"] == D("10.0000")
 
 
-@pending
 def test_receptionist_accruals_are_unchanged_by_the_pool(meters):
     """BH-012's meters keep their names and meaning: no migration, no
     rewrite of existing rows."""

@@ -340,6 +340,11 @@ def voice_socket(tripwire, monkeypatch):
 
         import auth
         monkeypatch.setattr(auth, "assert_feature_access", lambda business, feature: None)
+        # NS-V1 added a meter check before connecting; admit, as the gate
+        # above is admitted (harness only — these tests are about forwarding).
+        from services import metering
+        monkeypatch.setattr(metering, "admit_call", lambda session, business: (True, None))
+        monkeypatch.setattr(metering, "record_call", lambda *a, **k: None)
 
         app = FastAPI()
         app.include_router(realtime_voice.router)

@@ -38,6 +38,15 @@ LONDON = ZoneInfo("Europe/London")
 
 RECEPTIONIST_METER = "receptionist_minutes"
 OVERAGE_METER = "receptionist_overage_minutes"
+# NS-V1 / Mike's V1 (14 Oct 2026): Aria's voice draws on the SAME pool of
+# voice minutes as the receptionist. Its own meters keep the split visible;
+# the allowance, the overage and the cap are judged on the total.
+ARIA_VOICE_METER = "aria_voice_minutes"
+ARIA_VOICE_OVERAGE_METER = "aria_voice_overage_minutes"
+_SOURCES = {
+    "receptionist": (RECEPTIONIST_METER, OVERAGE_METER),
+    "aria_voice": (ARIA_VOICE_METER, ARIA_VOICE_OVERAGE_METER),
+}
 # "Told this month" markers live in the same table, so they reset with it.
 _NOTIFIED_PREFIX = "notified:"
 # One row per metered call ("accrued:<calls.id>"), so a call is counted once.
@@ -162,8 +171,14 @@ def usage(session, business) -> dict:
 
 def _usage_for(session, business, period: str) -> dict:
     bid = str(business.id)
-    used = _read(session, bid, RECEPTIONIST_METER, period)
-    overage = _read(session, bid, OVERAGE_METER, period)
+    by_source = {}
+    used = overage = Decimal("0")
+    for source, (inside_meter, over_meter) in _SOURCES.items():
+        inside = _read(session, bid, inside_meter, period)
+        over = _read(session, bid, over_meter, period)
+        used += inside
+        overage += over
+        by_source[source] = inside + over
     allowance = allowance_minutes(getattr(business, "plan_tier", None))
     metered = bool(getattr(business, "metered_usage_enabled", False))
     spend = (overage * OVERAGE_RATE_GBP).quantize(_TWO_DP, rounding=ROUND_HALF_UP)
@@ -179,6 +194,7 @@ def _usage_for(session, business, period: str) -> dict:
         "spend_cap_gbp": cap,
         "overage_rate_gbp": OVERAGE_RATE_GBP,
         "state": _state(used, allowance, metered, spend, cap),
+        "by_source": by_source,
     }
 
 
@@ -316,6 +332,7 @@ def display(u: dict) -> dict:
         "metered_usage_enabled": u["metered_usage_enabled"],
         "spend_cap_gbp": f"{u['spend_cap_gbp']:.2f}",
         "state": u["state"],
+        "by_source": {k: f"{v:.1f}" for k, v in (u.get("by_source") or {}).items()},
     }
 
 
@@ -342,7 +359,8 @@ def admit_call(session, business) -> Tuple[bool, Optional[str]]:
 
 
 def record_call(session, business, duration_seconds: Optional[int],
-                call_id: Optional[str] = None, at: Optional[datetime] = None) -> dict:
+                call_id: Optional[str] = None, at: Optional[datetime] = None,
+                source: str = "receptionist") -> dict:
     """Accrue a finished call from its actual duration, in the month it
     happened. Inside the allowance it counts there; past it, with metering
     on, the rest goes to overage; with metering off it still counts as used
@@ -358,15 +376,16 @@ def record_call(session, business, duration_seconds: Optional[int],
         session.commit()  # end the transaction: release the advisory lock
         return current
 
+    inside_meter, over_meter = _SOURCES[source]
     minutes = minutes_from_seconds(duration_seconds)
     before = _usage_for(session, business, period)
     remaining = max(before["allowance_minutes"] - before["used_minutes"], Decimal("0"))
     if before["metered_usage_enabled"]:
         inside = min(minutes, remaining)
-        _add(session, bid, RECEPTIONIST_METER, period, inside)
-        _add(session, bid, OVERAGE_METER, period, minutes - inside)
+        _add(session, bid, inside_meter, period, inside)
+        _add(session, bid, over_meter, period, minutes - inside)
     else:
-        _add(session, bid, RECEPTIONIST_METER, period, minutes)
+        _add(session, bid, inside_meter, period, minutes)
 
     after = _usage_for(session, business, period)
     if after["state"] != STATE_OK and period == period_for(now()):

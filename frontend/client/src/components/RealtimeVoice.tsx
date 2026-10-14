@@ -14,6 +14,7 @@ import {
   VolumeOff as VolumeOffIcon,
 } from '@mui/icons-material';
 import { supabase } from '@/lib/supabase';
+import ApprovalCard, { Proposal } from '@/components/ApprovalCard';
 import { config } from '@/config/env';
 
 interface RealtimeVoiceProps {
@@ -29,6 +30,8 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
   const [currentTranscript, setCurrentTranscript] = useState('');
   const [isMuted, setIsMuted] = useState(false);
   const [quietMode, setQuietMode] = useState(false);
+  // NS-V1 (D18): drafts Aria prepares while speaking, shown for a tap.
+  const [proposals, setProposals] = useState<Proposal[]>([]);
   
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -122,18 +125,19 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
         onTranscript?.(userText, true);
         break;
         
-      case 'response.audio_transcript.delta':
+      // OpenAI's GA Realtime event names (NS-V1); the beta names are gone.
+      case 'response.output_audio_transcript.delta':
         setCurrentTranscript(prev => prev + (data.delta || ''));
         break;
         
-      case 'response.audio_transcript.done':
+      case 'response.output_audio_transcript.done':
         const assistantText = data.transcript;
         setCurrentTranscript('');
         onTranscript?.(assistantText, false);
         setStatus('Listening...');
         break;
         
-      case 'response.audio.delta':
+      case 'response.output_audio.delta':
         setStatus('Aria is speaking...');
         // Decode base64 audio and queue for playback
         const audioData = Uint8Array.from(atob(data.delta), c => c.charCodeAt(0));
@@ -141,6 +145,15 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
         playNextAudio();
         break;
         
+      case 'proposal':
+        // A card to approve with a tap; a spoken "yes" never approves.
+        setProposals(prev => [...prev, data.proposal]);
+        break;
+
+      case 'session_limit':
+        setStatus(data.message || 'That voice chat reached its time limit.');
+        break;
+
       case 'error':
         console.error('Realtime API error:', data);
         setStatus(`Error: ${data.message || 'Unknown error'}`);
@@ -186,7 +199,13 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
       ws.onclose = (event) => {
         setIsConnected(false);
         // 4010 = voice switched off server-side (NS-A2); say why, not just "Disconnected".
-        setStatus(event.code === 4010 ? 'Voice chat is being upgraded. Please type to Aria instead.' : 'Disconnected');
+        // 4003 = refused before connecting (plan, voice minutes used up, or
+        // usage couldn't be checked); the server's reason says which.
+        setStatus(event.code === 4010
+          ? 'Voice chat is being upgraded. Please type to Aria instead.'
+          : event.code === 4003 && event.reason
+            ? `${event.reason}. You can still type to Aria.`
+            : 'Disconnected');
         stopAudioCapture();
       };
       
@@ -406,6 +425,12 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
           {currentTranscript}
         </Typography>
       </Fade>
+
+      {proposals.length > 0 && (
+        <Box sx={{ width: '100%', maxWidth: 560, display: 'flex', flexDirection: 'column', gap: 1.5, px: 2 }}>
+          {proposals.map((p) => <ApprovalCard key={p.id} proposal={p} />)}
+        </Box>
+      )}
       
       {/* Main action button */}
       {!isConnected ? (
