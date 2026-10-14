@@ -622,6 +622,12 @@ async def list_businesses(
     ]
 
 
+@app.get("/v1/admin/stripe-reconciliation", tags=["Admin"])
+def admin_stripe_reconciliation(auth_ctx=Depends(get_platform_admin_context)):
+    from services.stripe_reconciliation import last_run
+    return JSONResponse(last_run(), headers={"Cache-Control": "no-store"})
+
+
 @app.get("/v1/admin/me", tags=["Admin"])
 async def admin_me(auth_ctx=Depends(get_platform_admin_context)):
     return {

@@ -51,6 +51,32 @@ async def start_briefing_scheduler():
     asyncio.create_task(_scheduler_loop())
 
 
+_last_stripe_reconcile = None
+_stripe_reconcile_task = None
+
+
+async def _reconcile_stripe_if_due():
+    global _last_stripe_reconcile, _stripe_reconcile_task
+    if _stripe_reconcile_task is not None and not _stripe_reconcile_task.done():
+        return
+    current = datetime.now(timezone.utc)
+    if _last_stripe_reconcile and current - _last_stripe_reconcile < timedelta(days=1):
+        return
+    _last_stripe_reconcile = current
+
+    def _run():
+        from db import get_session_context
+        from services import stripe_reconciliation
+        try:
+            with get_session_context() as session:
+                stripe_reconciliation.run(session)
+        except Exception:
+            stripe_reconciliation.record_failure()
+
+    # Retain the task and skip overlapping runs without holding up other jobs.
+    _stripe_reconcile_task = asyncio.create_task(asyncio.to_thread(_run))
+
+
 _last_metering_reconcile = None
 
 
@@ -127,6 +153,11 @@ async def _scheduler_loop():
             _run_background_sync_jobs_nonblocking()
         except Exception as e:
             logger.error(f"[Scheduler] Error scheduling background sync: {e}")
+
+        try:
+            await _reconcile_stripe_if_due()
+        except Exception:
+            logger.error("[Scheduler] Stripe reconciliation failed")
 
         # BH-012: meter any finished receptionist call that missed metering
         # at call end. Every 15 minutes, off the event loop (sync DB work).
