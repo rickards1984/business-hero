@@ -113,3 +113,74 @@ passed, 1243 warnings; all five preflight traps passed.
 Status: Stage 1 ready for Claude/Mike review; implementation not started.
 No product click test exists at this stage. Changes left uncommitted and
 unpushed as instructed.
+
+## Stage 2 completion — Codex, 14 October 2026
+
+**Status:** ready for Claude review; uncommitted and unpushed.
+**Authority:** Mike approved D1/D3 and the log + admin-banner alternative in
+`BH-014-DESIGN.md`; Claude approved correcting the single Stage 1 fixture
+statement to install a real fail-closed SDK default HTTP client. The xfail
+marker is removed; all Stage 1 test assertions remain unchanged.
+**North Star:** correctness/stability prerequisites, P8 and P9.
+
+Implemented read-only reconciliation, daily scheduler worker, process-local
+last-attempt snapshot, admin-gated GET and MUI dashboard banner. No migration,
+webhook behaviour change, billing correction, production action or deployment.
+Implementation decisions and manual behaviour checks are recorded at the end
+of `BH-014-DESIGN.md`. Internal read-only review found no blocking defect;
+Claude remains the designated independent reviewer.
+
+Verification using this worktree's `.venv`:
+- Targeted reconciliation suites: **37 passed**, 65 warnings, no xfails.
+- `./check.sh full`: exit 0; **5 passed, 0 failed, 1 skipped** (optional eslint).
+- Full pytest: **1770 passed, 33 skipped, 220 subtests passed**, 1305 warnings.
+- All five preflight traps passed; frontend typecheck, py_compile and Ruff passed.
+- `git -c core.whitespace=cr-at-eol diff --check`: clean (scheduler retains
+  its existing CRLF convention).
+
+New Stage 2 tests in `backend/tests/test_stripe_reconciliation_admin.py`:
+- `test_normal_business_user_cannot_read_last_run`
+- `test_admin_sees_not_run_since_restart`
+- `test_last_result_has_age_completeness_and_each_divergence`
+- `test_incomplete_or_errored_result_is_never_healthy` (two cases)
+- `test_clean_result_becomes_stale_and_snapshot_is_defensive`
+- `test_scheduler_session_failure_replaces_previous_green`
+- `test_unplanned_sdk_request_is_refused`
+- `test_requests_use_configured_key_and_bounded_retries`
+- `test_partial_inventory_keeps_findings_and_reports_failure`
+- `test_customer_ambiguity_never_compares_arbitrary_subscription`
+- `test_logging_failure_preserves_last_attempt`
+- `test_anonymous_user_cannot_read_last_run`
+
+Mike's click check: open the platform-admin dashboard and inspect the Stripe
+reconciliation banner above Businesses, including narrow-screen and dark-mode
+layout. Check restart, incomplete, divergence and age displays against the
+run result. Automated checks do not verify rendered appearance or real Stripe
+behaviour; neither was exercised in this offline task.
+
+## Claude review fixes — Codex, 14 October 2026
+
+Authority: Mike requested the P2 scheduler isolation and P3 business-name fixes.
+North Star: correctness and stability prerequisites. Scope remains Stage 2.
+
+- P2: retained background reconciliation task; running tasks skip due ticks
+  without advancing the daily timestamp. Existing daily due-check is unchanged.
+- P3: business names come from the existing businesses query and accompany
+  findings/errors; the banner shows the name with ID fallback. Unmapped or
+  run-wide findings have no business name. No Stripe customer reads added.
+- Tests first: six new regression cases failed before implementation.
+- Added `test_slow_stripe_run_does_not_delay_next_scheduler_job`,
+  `test_due_tick_skips_running_stripe_reconciliation`,
+  `test_findings_carry_database_business_name` (three cases), and
+  `test_business_errors_carry_database_business_name`.
+- Existing scheduler tests now wait explicitly for the background task;
+  business fixtures include the name column.
+- Targeted suites: 43 passed. `./check.sh full`: exit 0, 5 passed,
+  0 failed, 1 optional eslint skip. Full pytest: 1776 passed, 33 skipped,
+  220 subtests passed. All five preflight traps passed.
+- Manual click check: platform-admin dashboard → Stripe reconciliation banner;
+  confirm named businesses display their name, missing names fall back to ID,
+  and narrow-screen/dark-mode appearance remains readable. Rendered appearance
+  and real Stripe behaviour were not exercised by automated checks.
+
+Uncommitted and unpushed; ready for Claude's re-review.

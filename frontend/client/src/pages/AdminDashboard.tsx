@@ -131,6 +131,99 @@ const FEATURE_PRESETS: Record<string, { feature_flags: Record<string, any>; limi
   },
 };
 
+interface ReconciliationSnapshot {
+  status: 'not_run' | 'healthy' | 'attention' | 'incomplete' | 'stale';
+  age_seconds: number | null;
+  result: {
+    finished_at: string;
+    complete: boolean;
+    counts: { businesses_checked: number; subscriptions_checked: number; divergences: number; errors: number };
+    divergences: Array<{ kind: string; business_id: string | null; business_name: string | null; subscription_id: string | null; local?: unknown; remote?: unknown; last_received_at?: string | null }>;
+    errors: Array<{ scope: string; business_id: string | null; business_name: string | null; code: string }>;
+  } | null;
+}
+
+function StripeReconciliationBanner() {
+  const [snapshot, setSnapshot] = useState<ReconciliationSnapshot | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  useEffect(() => {
+    let mounted = true;
+    const refresh = async () => {
+      try {
+        const response = await apiRequest('GET', '/v1/admin/stripe-reconciliation');
+        if (!response.ok) throw new Error('Unavailable');
+        const data: ReconciliationSnapshot = await response.json();
+        if (mounted) { setSnapshot(data); setUnavailable(false); }
+      } catch {
+        if (mounted) setUnavailable(true);
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 60000);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, []);
+  const result = snapshot?.result;
+  const incomplete = result && (!result.complete || result.errors.length > 0);
+  const healthy = !unavailable && snapshot?.status === 'healthy' && result?.complete
+    && result.errors.length === 0 && result.divergences.length === 0 && (snapshot.age_seconds ?? Infinity) <= 86400;
+  const title = unavailable ? 'Status unavailable — latest check could not be loaded'
+    : !snapshot ? 'Loading latest check…'
+    : snapshot.status === 'not_run' || !result ? 'Not run since restart'
+    : incomplete ? 'Incomplete — needs attention'
+    : result.divergences.length ? `${result.divergences.length} finding${result.divergences.length === 1 ? '' : 's'} to review`
+    : healthy ? 'Last check: all in agreement' : 'Last check is overdue';
+  const age = snapshot?.age_seconds;
+  const ageLabel = age == null ? '' : age < 60 ? 'less than a minute ago'
+    : age < 3600 ? `${Math.floor(age / 60)} minutes ago`
+    : age < 86400 ? `${Math.floor(age / 3600)} hours ago` : `${Math.floor(age / 86400)} days ago`;
+  const labels: Record<string, string> = {
+    subscription_status: 'Subscription status differs', plan_tier: 'Plan tier differs',
+    current_period_end: 'Billing period differs', unresolved_price: 'Unrecognised Stripe price',
+    unresolved_period: 'Stripe billing period unavailable', missing_subscription: 'Subscription missing in Stripe',
+    orphan_subscription: 'Unmapped Stripe subscription', identity_conflict: 'Business identity conflict',
+    webhook_silence: 'Possible webhook silence',
+  };
+  const value = (v: unknown) => v == null ? 'not set' : String(v);
+  return (
+    <Alert severity={unavailable || incomplete ? 'error' : healthy ? 'success' : snapshot && result ? 'warning' : 'info'}
+      variant="outlined" sx={{ mb: 3, borderRadius: 2, '& .MuiAlert-message': { width: '100%', minWidth: 0 } }}
+      data-testid="stripe-reconciliation-banner">
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+        <Typography variant="subtitle2">Stripe reconciliation</Typography>
+        <Chip label="Daily · report only" size="small" variant="outlined" />
+      </Box>
+      <Typography variant="body2" sx={{ mt: 0.5 }}>{title}</Typography>
+      {result && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+        {unavailable ? 'Last loaded result: ' : ''}{new Date(result.finished_at).toLocaleString('en-GB')}
+        {!unavailable && ageLabel ? ` · ${ageLabel}` : ''}
+        {` · ${result.counts.businesses_checked} businesses · ${result.counts.subscriptions_checked} subscriptions`}
+      </Typography>}
+      {result && (result.divergences.length > 0 || result.errors.length > 0) && (
+        <Box component="ul" sx={{ mb: 0, mt: 1.5, pl: 2.5, overflowWrap: 'anywhere' }}>
+          {result.divergences.map((finding, index) => (
+            <Box component="li" key={`finding-${index}`} sx={{ mb: 0.75 }}>
+              <Typography variant="body2">{labels[finding.kind] || finding.kind}
+                {finding.business_id ? ` · ${finding.business_name || finding.business_id}` : ''}
+                {finding.subscription_id ? ` · ${finding.subscription_id}` : ''}
+              </Typography>
+              {('local' in finding || 'remote' in finding) && <Typography variant="caption" color="text.secondary">
+                Local: {value(finding.local)} · Stripe: {value(finding.remote)}
+              </Typography>}
+              {finding.kind === 'webhook_silence' && <Typography variant="caption" color="text.secondary">
+                {finding.last_received_at ? `Last event received ${new Date(finding.last_received_at).toLocaleString('en-GB')}.` : 'No webhook events received.'}
+                {' Active subscriptions found; 48-hour warning is not proof of a broken webhook.'}
+              </Typography>}
+            </Box>
+          ))}
+          {result.errors.map((error, index) => <Box component="li" key={`error-${index}`}>
+            <Typography variant="body2">Check failed: {error.scope}{error.business_id ? ` · ${error.business_name || error.business_id}` : ''} · {error.code}</Typography>
+          </Box>)}
+        </Box>
+      )}
+    </Alert>
+  );
+}
+
 export default function AdminDashboard() {
   const navigate = useNavigate();
   const { user, signOut, isAdmin, loading: authLoading, adminLoading } = useAuth();
@@ -571,6 +664,7 @@ export default function AdminDashboard() {
 
       <Box component="main" sx={{ flexGrow: 1, minWidth: 0, p: 3, mt: 8, ml: isMobile ? 0 : '240px', overflowX: 'auto' }}>
         <Container maxWidth="xl" sx={{ px: { xs: 1, sm: 2, md: 3 } }}>
+          {user && isAdmin && <StripeReconciliationBanner />}
           {error && (
             <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')} data-testid="alert-error">
               {error}

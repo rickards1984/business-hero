@@ -196,3 +196,35 @@ it sleek and looking good within the UI."
     a business's own data. North Star §8 applies to business data.
   - Later: a proactive WhatsApp alert to the platform admin, which needs an
     approved template and a configured recipient. Backlogged.
+
+## Stage 2 implementation decisions — Codex, 14 October 2026
+
+Mike's decisions above supersede the original logs-only recommendation.
+The implementation serves correctness/stability and P8/P9. Platform operations
+results remain in memory; no business-data storage or Aria tool is added.
+
+- GET `/v1/admin/stripe-reconciliation` uses `get_platform_admin_context`
+  and `Cache-Control: no-store`. Reads never start a Stripe scan.
+- A completed clean result becomes stale after 24 hours; incomplete results
+  and errors always take precedence over healthy. The banner polls every
+  minute and labels failed loads as unavailable, retaining explicitly labelled
+  last-loaded findings. Findings are visible without opening a disclosure.
+- Stripe 15.6.1 resources are converted with `to_dict()` before comparison,
+  matching the existing webhook boundary. No webhook behaviour changes.
+- Sequential SDK calls carry the configured API key and two network retries.
+  The installed SDK default client's bounded 80-second timeout is checked by
+  a local construction-only test. This bounds individual request attempts,
+  not the duration of an inventory of arbitrary size.
+- The Stage 1 fixture installs a fake default HTTP client whose sync/async and
+  streaming request methods raise. An unrelated Customer retrieval proves the
+  SDK reaches that guard. Apart from this fixture statement and removal of
+  the Stage 1 xfail marker, Stage 1 tests are unchanged.
+- Scheduler session failures publish an incomplete attempt; logging failures
+  cannot prevent dashboard publication. Last results are defensive copies.
+
+Manual behaviour check after a separately authorised deployment: open the
+platform-admin dashboard. Check the reconciliation banner above Businesses
+in light/dark themes and a narrow viewport. On restart it must say “Not run
+since restart”; after a run it must show time/age and all findings. A failed
+or partial run must never show success. No browser visual or live Stripe
+verification was performed in this offline worktree.

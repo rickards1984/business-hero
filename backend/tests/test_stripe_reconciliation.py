@@ -23,10 +23,6 @@ class MissingReconciliation(AssertionError):
     """The sole permitted expected failure."""
 
 
-pytestmark = pytest.mark.xfail(
-    strict=True, raises=MissingReconciliation,
-    reason="BH-014 Stage 1: module absent pending Mike's decisions/test review",
-)
 NOW = datetime(2026, 10, 14, 12, tzinfo=timezone.utc)
 END = int((NOW + timedelta(days=20)).timestamp())
 
@@ -58,8 +54,11 @@ def rig(monkeypatch):
     mod = service()
     # Patch the official SDK, not an internal fetch helper. Any unplanned HTTP
     # request fails even if future code uses a different SDK resource.
-    monkeypatch.setattr(stripe.http_client.RequestsClient, "request",
-                        Mock(side_effect=AssertionError("Network forbidden")))
+    monkeypatch.setattr(stripe, "default_http_client", type("NoNetwork", (), {"name": "no-network", **{
+        method: Mock(side_effect=AssertionError("Network forbidden"))
+        for method in ("request_with_retries", "request_stream_with_retries",
+                       "request_with_retries_async", "request_stream_with_retries_async")
+    }})())
     rows = {"sub_a": subscription()}
     retrieve = Mock(side_effect=lambda sid, **kw: rows[sid])
     listing = Mock(side_effect=lambda **kw: Page([
@@ -75,12 +74,12 @@ def rig(monkeypatch):
     engine = create_engine("sqlite://")
     with Session(engine) as session:
         session.execute(text("""CREATE TABLE businesses (
-            id TEXT PRIMARY KEY, stripe_subscription_id TEXT,
+            id TEXT PRIMARY KEY, name TEXT, stripe_subscription_id TEXT,
             stripe_customer_id TEXT, subscription_status TEXT,
             plan_tier TEXT, current_period_end TIMESTAMP)"""))
         session.execute(text("CREATE TABLE stripe_events (created_at TIMESTAMP)"))
         session.execute(text("INSERT INTO businesses VALUES "
-                             "('a','sub_a','cus_a','active','pro',:end)"),
+                             "('a','Acme Trades','sub_a','cus_a','active','pro',:end)"),
                         {"end": datetime.fromtimestamp(END, timezone.utc).replace(tzinfo=None)})
         session.execute(text("INSERT INTO stripe_events VALUES (:at)"),
                         {"at": NOW.replace(tzinfo=None)})
@@ -184,7 +183,7 @@ def test_customer_without_subscription_is_reported(rig):
 
 
 def add_b(rig):
-    rig[1].execute(text("INSERT INTO businesses SELECT 'b','sub_b','cus_b',"
+    rig[1].execute(text("INSERT INTO businesses SELECT 'b','Beta Trades','sub_b','cus_b',"
                        "subscription_status,plan_tier,current_period_end FROM businesses WHERE id='a'"))
     rig[2]["sub_b"] = subscription("sub_b", "cus_b", "b")
 
@@ -234,6 +233,7 @@ def test_scheduler_runs_in_worker_and_only_when_due(monkeypatch):
     monkeypatch.setattr(mod, "run", lambda *a, **kw: threads.append(threading.get_ident()))
     async def exercise():
         await scheduler._reconcile_stripe_if_due()
+        await scheduler._stripe_reconcile_task
         await scheduler._reconcile_stripe_if_due()
     asyncio.run(exercise())
     assert len(threads) == 1
@@ -295,5 +295,81 @@ def test_inventory_iterator_consumed_beyond_first_subscription(rig):
 
 def test_no_stripe_identifiers_excluded(rig):
     rig[1].execute(text("INSERT INTO businesses VALUES "
-                       "('local',NULL,NULL,NULL,'starter',NULL)"))
+                       "('local','Local Trades',NULL,NULL,NULL,'starter',NULL)"))
     assert run(rig)["counts"]["businesses_checked"] == 1
+
+
+@pytest.mark.parametrize("name", ["Acme Trades", None, ""])
+def test_findings_carry_database_business_name(rig, name):
+    rig[1].execute(text("UPDATE businesses SET name=:name, subscription_status='past_due'"), {"name": name})
+    assert run(rig)["divergences"][0]["business_name"] == name
+
+
+def test_business_errors_carry_database_business_name(rig):
+    rig[3].side_effect = stripe.APIConnectionError("offline")
+    assert run(rig)["errors"][0]["business_name"] == "Acme Trades"
+
+
+def test_slow_stripe_run_does_not_delay_next_scheduler_job(monkeypatch):
+    from services import briefing_scheduler as scheduler
+    from contextlib import nullcontext
+    import db
+    import threading
+    release = threading.Event()
+    started = threading.Event()
+    finished = threading.Event()
+    def slow_run(*args):
+        started.set()
+        release.wait(5)
+        finished.set()
+    monkeypatch.setattr(service(), "run", slow_run)
+    monkeypatch.setattr(db, "get_session_context", lambda: nullcontext(object()))
+    monkeypatch.setattr(scheduler, "_last_stripe_reconcile", None)
+    monkeypatch.setattr(scheduler, "_stripe_reconcile_task", None, raising=False)
+    async def noop(*args):
+        pass
+    observed = []
+    async def next_job():
+        observed.append(await asyncio.to_thread(started.wait, 1) and not finished.is_set())
+        raise asyncio.CancelledError
+    monkeypatch.setattr(scheduler.asyncio, "sleep", noop)
+    monkeypatch.setattr(scheduler, "_check_and_send_scheduled_messages", noop)
+    monkeypatch.setattr(scheduler, "_run_background_sync_jobs_nonblocking", lambda: None)
+    monkeypatch.setattr(scheduler, "_reconcile_metering_if_due", next_job)
+    async def exercise():
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await scheduler._scheduler_loop()
+        finally:
+            release.set()
+            if scheduler._stripe_reconcile_task:
+                await scheduler._stripe_reconcile_task
+    asyncio.run(exercise())
+    assert observed == [True], "Stripe delayed the next scheduler job"
+
+
+def test_due_tick_skips_running_stripe_reconciliation(monkeypatch):
+    from services import briefing_scheduler as scheduler
+    monkeypatch.setattr(scheduler, "_last_stripe_reconcile", None)
+    monkeypatch.setattr(scheduler, "_stripe_reconcile_task", None, raising=False)
+    async def exercise():
+        release = asyncio.Event()
+        calls = []
+        async def slow_worker(*args):
+            calls.append(1)
+            await release.wait()
+        monkeypatch.setattr(scheduler.asyncio, "to_thread", slow_worker)
+        try:
+            await asyncio.wait_for(scheduler._reconcile_stripe_if_due(), 0.2)
+            await asyncio.sleep(0)
+            previous = datetime.now(timezone.utc) - timedelta(days=2)
+            monkeypatch.setattr(scheduler, "_last_stripe_reconcile", previous)
+            await asyncio.wait_for(scheduler._reconcile_stripe_if_due(), 0.2)
+            await asyncio.sleep(0)
+            assert calls == [1]
+            assert scheduler._last_stripe_reconcile == previous
+        finally:
+            release.set()
+            if scheduler._stripe_reconcile_task:
+                await scheduler._stripe_reconcile_task
+    asyncio.run(exercise())
