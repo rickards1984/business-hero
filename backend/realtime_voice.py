@@ -753,7 +753,9 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         # Get business for user
         from assistant_chat import get_business_for_user
         try:
-            business = get_business_for_user(user_id)
+            # Off the event loop (Codex NS-V1 review 2, finding 3): a slow
+            # lookup must not freeze other live sessions' deadlines.
+            business = await asyncio.to_thread(get_business_for_user, user_id)
             business_id = str(business.id)
             business_name = business.name
         except Exception as e:
@@ -772,10 +774,12 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             from auth import assert_feature_access
             from models import Business as _Business
             from sqlmodel import select as _select
-            with get_session_context() as _session:
-                _fresh = _session.exec(
-                    _select(_Business).where(_Business.id == business.id)).first()
-                assert_feature_access(_fresh, "aria_voice")
+            def _gate():
+                with get_session_context() as _session:
+                    _fresh = _session.exec(
+                        _select(_Business).where(_Business.id == business.id)).first()
+                    assert_feature_access(_fresh, "aria_voice")
+            await asyncio.to_thread(_gate)
         except HTTPException as exc:
             _logger.info("realtime voice refused for business %s: %s",
                          business_id, exc.detail)
@@ -827,10 +831,14 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     business_tz = getattr(business, "timezone", None) or "Europe/London"
     owner_name = None if user_name == "there" else user_name
     session_id = str(_uuid.uuid4())
+    from services import metering as _m0
+    # The session is billed in the month it STARTS (Codex review 2, finding 1).
+    _period = _m0.period_for(_m0.now())
     openai_ws = None
     started = None
     ended = None
     timed_out = False
+    stop_reason = None  # "cap" or "meter": why WE ended the session
     handler_task = asyncio.current_task()
     watchdog = None
     heartbeat = None
@@ -846,37 +854,52 @@ async def realtime_voice_endpoint(websocket: WebSocket):
 
     async def _beat_forever(period):
         """The durable heartbeat, every VOICE_HEARTBEAT_SECONDS after the first.
-        Off the loop; a failed beat is logged and the next one tries again."""
+        Off the loop. Three failures in a row end the session (Codex NS-V1
+        review 2, finding 2): unrecorded voice is bounded, not open-ended."""
+        failures = 0
         while True:
             await asyncio.sleep(VOICE_HEARTBEAT_SECONDS)
             try:
                 await asyncio.to_thread(_beat, int(_time.monotonic() - started), period)
+                failures = 0
             except Exception as e:
-                _logger.warning("Voice heartbeat failed for %s: %s", business_id, e)
+                failures += 1
+                _logger.warning("Voice heartbeat failed for %s (%s in a row): %s",
+                                business_id, failures, e)
+                if failures >= 3:
+                    _stop("meter")
+                    return
 
     async def _end_at_cap():
         nonlocal timed_out
         await asyncio.sleep(max(0.0, VOICE_SESSION_CAP_SECONDS))
         _logger.warning("Voice session reached its %ss cap; ending it", VOICE_SESSION_CAP_SECONDS)
-        timed_out = True
-        handler_task.cancel()
+        _stop("cap")
+
+    def _stop(reason):
+        nonlocal timed_out, stop_reason
+        if stop_reason is None:
+            stop_reason = reason
+            timed_out = True
+            handler_task.cancel()
 
     try:
         import websockets
 
         # Billing starts as the provider connection opens; the cap covers
         # setup too (BH-012's pattern), and stops the handler itself.
-        started = _time.monotonic()
-        _LIVE_SESSIONS.add(session_id)
-        watchdog = asyncio.create_task(_end_at_cap())
-        # The first beat lands BEFORE the provider connection opens, so a
-        # durable record exists before anything billable happens.
-        from services import metering as _m0
-        _period = _m0.period_for(_m0.now())
+        # The first beat must land BEFORE the provider connection opens: no
+        # durable record, no session (Mike's V3; Codex review 2, finding 2).
         try:
             await asyncio.to_thread(_beat, 0, _period)
         except Exception as e:
-            _logger.warning("Voice heartbeat failed for %s: %s", business_id, e)
+            _logger.error("Voice heartbeat could not be written for %s, refusing: %s",
+                          business_id, e)
+            await websocket.close(code=4003, reason="Voice usage could not be recorded")
+            return
+        started = _time.monotonic()
+        _LIVE_SESSIONS.add(session_id)
+        watchdog = asyncio.create_task(_end_at_cap())
         heartbeat = asyncio.create_task(_beat_forever(_period))
         openai_ws = await websockets.connect(
             OPENAI_REALTIME_URL,
@@ -1040,8 +1063,8 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                     _b = _m.load_business(_s, business_id)
                     if _b is None:
                         return
-                    _m.record_call(_s, _b, seconds, call_id=f"voice-{session_id}",
-                                   source="aria_voice")
+                    _m.accrue_session(_s, _b, session_id, seconds, period=_period,
+                                      source="aria_voice")
                     # Only after a successful accrual: otherwise the heartbeat
                     # stays for recovery (review 1, finding 1).
                     _m.voice_session_closed(_s, _b, session_id)
@@ -1054,28 +1077,40 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                                   business_id, done.exception())
             accrual.add_done_callback(_log_failure)
         _LIVE_SESSIONS.discard(session_id)
+        # Each teardown step survives a further cancellation (Codex review 2,
+        # finding 5): it is noted and the remaining steps still run.
+        cancelled_again = False
+
+        async def _bounded(awaitable, seconds):
+            nonlocal cancelled_again
+            try:
+                await asyncio.wait_for(awaitable, seconds)
+            except asyncio.CancelledError:
+                cancelled_again = True
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+            except (Exception, asyncio.TimeoutError):
+                pass
+
         if openai_ws is not None:
-            try:
-                await asyncio.wait_for(openai_ws.close(), _CLOSE_TIMEOUT_SECONDS)
-            except (Exception, asyncio.TimeoutError):
-                pass
-        if timed_out:
-            try:
-                await asyncio.wait_for(websocket.send_json({
-                    "type": "session_limit",
-                    "message": "That's the 20-minute limit for one voice chat. Start a new one any time."}),
-                    _NOTICE_TIMEOUT_SECONDS)
-            except (Exception, asyncio.TimeoutError):
-                pass
-        try:
-            await asyncio.wait_for(websocket.close(), _CLOSE_TIMEOUT_SECONDS)
-        except (Exception, asyncio.TimeoutError):
-            pass
+            await _bounded(openai_ws.close(), _CLOSE_TIMEOUT_SECONDS)
+        if stop_reason is not None:
+            message = ("That's the 20-minute limit for one voice chat. Start a new one any time."
+                       if stop_reason == "cap" else
+                       "Voice usage couldn't be recorded, so this chat has ended. "
+                       "You can still type to Aria.")
+            await _bounded(websocket.send_json({"type": "session_limit", "message": message}),
+                           _NOTICE_TIMEOUT_SECONDS)
+        await _bounded(websocket.close(), _CLOSE_TIMEOUT_SECONDS)
         if accrual is not None:
             try:
                 await asyncio.shield(accrual)
             except asyncio.CancelledError:
-                pass  # the thread still finishes; the heartbeat backs it up
+                cancelled_again = True  # the thread still finishes; the heartbeat backs it up
             except Exception:
                 pass  # logged by the callback; the heartbeat stays for recovery
-        _logger.info("Connection closed")
+        # A further cancellation was absorbed so every step above still ran;
+        # the handler ends here either way, so there is nothing left for it
+        # to stop and it is not re-raised.
+        _logger.info("Connection closed%s", " (after a further cancellation)" if cancelled_again else "")

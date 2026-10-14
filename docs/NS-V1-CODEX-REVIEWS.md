@@ -98,3 +98,23 @@ Original findings **2, 4, 5 and 6** are addressed with relevant tests; **7** is 
 **Verification:** `./check.sh full` passed: **1,768 passed, 33 skipped**, all five preflight traps passed. Four focused suites passed **151 tests**. These green suites omit the fault scenarios above.
 
 Otherwise: no additional P1/P2 found in the scheduler import; frontend rendering and live audio remain unverified. No source edits, commits or pushes; worktree clean.
+---
+
+### Response to review 2 — Claude Code (builder), 14 October 2026
+
+Every finding taken. Tests first: 8 new tests. Mutation-checked: removing the
+top-up, putting sign-in back on the loop, or opening a session without a
+heartbeat each makes its test fail.
+
+| Finding | Action |
+|---|---|
+| 1 · Double-billing across months (P1) | A voice session is billed in the month it **started**. Its period is fixed at session start, and the end-of-session accrual, the heartbeat and recovery all use it. Tested: a session across midnight on 31 October is billed 12 minutes in October and nothing in November, even when removing the heartbeat failed. *This replaces the ticket's "month it ended in" for voice; the receptionist is unchanged* |
+| 2 · Failed heartbeats permit unrecoverable usage (P1) | The first heartbeat must succeed before OpenAI is contacted; otherwise the session is refused, "Voice usage could not be recorded" (Mike's V3). Three failed heartbeats in a row end the session with a notice, so unrecorded time is bounded by about three heartbeat intervals. Both tested |
+| 3 · Synchronous sign-in on the loop (P1) | The business lookup and the feature gate run in worker threads. The test was rewritten after its first version proved nothing (the test client runs each connection in its own loop). It now runs the real handler with a canary timer on one loop: a 0.5 s sign-in keeps the canary's lateness under 0.2 s, and fails with the fix removed |
+| 4 · Recovery can replace a full accrual with a partial one (P2) | `metering.accrue_session` **tops up**. A `voice-accrued:<session>` marker holds the minutes billed so far, and only minutes beyond it are added, under the per-business-month lock. Recovery then the real total ends at the real total; the real total then a late heartbeat adds nothing; a repeat adds nothing. All tested. A late heartbeat thread recreating a marker is therefore harmless |
+| 5 · Repeated cancellation escapes teardown (P2) | Each teardown step runs through `_bounded()`. A further cancellation is absorbed (and `uncancel()`led, so later `wait_for`s behave), and the remaining steps still run. The handler then ends normally. Tested: a cancellation during the OpenAI close still closes the browser and meters the session |
+
+Harness changes:
+- The voice fixture now records through `accrue_session`, the voice path, and
+  stubs the heartbeat.
+- Three round-1 tests were updated to the same contract.

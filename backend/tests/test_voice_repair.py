@@ -756,30 +756,61 @@ def test_a_session_whose_heartbeats_keep_failing_is_ended(voice, monkeypatch):
             "the session kept running without a durable record"
 
 
-def test_a_slow_sign_in_does_not_stall_another_sessions_cap(voice, monkeypatch):
+class _FakeBrowser:
+    """Just enough of Starlette's WebSocket to drive the real handler in ONE
+    event loop (the test client gives each connection its own loop, so it
+    cannot show one connection stalling another)."""
+
+    def __init__(self):
+        self.sent, self.closed = [], False
+
+    async def accept(self):
+        pass
+
+    async def receive_json(self):
+        return {"type": "auth", "token": "t"}
+
+    async def receive(self):
+        while not self.closed:
+            await asyncio.sleep(0.01)
+        return {"type": "websocket.disconnect"}
+
+    async def send_json(self, data):
+        self.sent.append(data)
+
+    async def close(self, code=1000, reason=None):
+        self.closed = True
+
+
+def test_a_slow_sign_in_does_not_stall_the_event_loop(voice, monkeypatch):
     """Review 2 finding 3: sign-in's business lookup and feature-gate query
-    run off the event loop, so a new connection cannot freeze a live
-    session's deadline."""
+    run off the event loop. A canary timer on the same loop shows whether a
+    slow (0.5s) lookup froze every other session's deadline with it."""
     rv = repaired()
-    monkeypatch.setattr(rv, "VOICE_SESSION_CAP_SECONDS", 0.15)
-    client = voice["make"]()
+    voice["make"]()  # installs the edge fakes; its test client is not used
     import assistant_chat
-    lookups = []
     fast = assistant_chat.get_business_for_user
 
-    def lookup(uid, bid=None):
-        lookups.append(1)
-        if len(lookups) == 2:
-            time.sleep(1.0)
+    def slow_lookup(uid, bid=None):
+        time.sleep(0.5)
         return fast(uid, bid)
-    monkeypatch.setattr(assistant_chat, "get_business_for_user", lookup)
-    with client.websocket_connect("/v1/realtime/voice") as first:
-        first.send_json({"type": "auth", "token": "t"})
-        assert first.receive_json() == {"type": "ready"}
-        with client.websocket_connect("/v1/realtime/voice") as second:
-            second.send_json({"type": "auth", "token": "t"})  # its sign-in is slow
-            assert _wait(lambda: not voice["connects"][0].open, timeout=0.6), \
-                "a slow sign-in stalled another session's cap"
+    monkeypatch.setattr(assistant_chat, "get_business_for_user", slow_lookup)
+
+    async def scenario():
+        lateness = []
+
+        async def canary():
+            for _ in range(30):
+                before = time.monotonic()
+                await asyncio.sleep(0.02)
+                lateness.append(time.monotonic() - before - 0.02)
+        browser = _FakeBrowser()
+        session = asyncio.create_task(rv.realtime_voice_endpoint(browser))
+        await canary()
+        browser.closed = True
+        await asyncio.wait_for(session, 5)
+        return max(lateness)
+    assert asyncio.run(scenario()) < 0.2, "a slow sign-in froze the event loop"
 
 
 def test_a_second_cancellation_during_teardown_still_closes_the_browser(voice, monkeypatch):
