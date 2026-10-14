@@ -100,3 +100,16 @@ A reconciliation job:
 - No production SQL and no network.
 - Do not modify `stripe_webhook`'s behaviour. If you find a defect in it,
   report it; don't fix it here.
+
+## Stage 1 completion — Codex, 14 October 2026
+
+Design: `docs/BH-014-DESIGN.md`; proposed decisions D1–D4 await Mike.
+Tests: `backend/tests/test_stripe_reconciliation.py`, 17 test functions / 24
+cases, strict xfail exclusively on the reconciliation module's absence.
+`.venv/bin/python -m pytest backend/tests/test_stripe_reconciliation.py -q`:
+24 xfailed. `./check.sh full`: exit 0; 5 passed, 0 failed, 1 skipped
+(optional eslint); pytest 1733 passed, 33 skipped, 24 xfailed, 220 subtests
+passed, 1243 warnings; all five preflight traps passed.
+Status: Stage 1 ready for Claude/Mike review; implementation not started.
+No product click test exists at this stage. Changes left uncommitted and
+unpushed as instructed.
