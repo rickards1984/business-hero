@@ -294,6 +294,11 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
         audio: { sampleRate: 24000, channelCount: 1, echoCancellation: true, noiseSuppression: true },
       }));
       micPromiseRef.current = null;
+      if (unmountedRef.current) {
+        // The page was left while permission was pending: release, adopt nothing.
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       mediaStreamRef.current = stream;
 
       const audioContext = audioContextRef.current && audioContextRef.current.state !== 'closed'
@@ -301,6 +306,11 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
         : new AudioContext({ sampleRate: 24000 });
       audioContextRef.current = audioContext;
       if (audioContext.state === 'suspended') await audioContext.resume();
+      if (unmountedRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        mediaStreamRef.current = null;
+        return;
+      }
       
       const source = audioContext.createMediaStreamSource(stream);
       const processor = audioContext.createScriptProcessor(4096, 1, 1);
