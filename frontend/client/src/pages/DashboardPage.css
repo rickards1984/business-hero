@@ -1,0 +1,33 @@
+/* NS-B7 Stage 2 — the Aria home body (below the hero). Follows the app's
+   light/dark theme through its existing CSS variables. */
+.home { display: flex; flex-direction: column; gap: 28px; max-width: 1180px; margin: 0 auto; padding-top: 8px; }
+.home-section { display: flex; flex-direction: column; gap: 14px; }
+.home-section-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+.home-section-head h2 { margin: 0; font-size: 18px; font-weight: 700; color: hsl(var(--foreground)); }
+.home-section-head span { font-size: 13px; color: hsl(var(--muted-foreground)); }
+.home-empty { padding: 18px 20px; border-radius: 16px; border: 1px dashed hsl(var(--border)); color: hsl(var(--muted-foreground));
+  font-size: 14px; line-height: 1.5; }
+.home-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; align-items: start; }
+.home-cards > * { max-width: none !important; }
+.home-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+.home-tile { display: flex; flex-direction: column; gap: 8px; text-align: left; padding: 18px; border-radius: 16px; cursor: pointer;
+  background: hsl(var(--card)); border: 1px solid hsl(var(--border)); color: hsl(var(--foreground)); font: inherit;
+  transition: border-color .15s ease, transform .15s ease; min-height: 118px; }
+.home-tile:hover { border-color: hsl(var(--primary) / .5); transform: translateY(-1px); }
+.home-tile:focus-visible { outline: 2px solid #8E7CFF; outline-offset: 2px; }
+.home-tile-name { font-size: 13px; font-weight: 600; color: hsl(var(--muted-foreground)); }
+.home-tile-figure { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.home-tile-line { font-size: 13px; line-height: 1.4; color: hsl(var(--muted-foreground)); }
+.home-link { background: none; border: 0; padding: 0; font: inherit; font-size: 13px; font-weight: 600; color: hsl(var(--primary)); cursor: pointer; }
+@media (prefers-reduced-motion: reduce) { .home-tile { transition: none; } .home-tile:hover { transform: none; } }
+.home-tile-age { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10.5px; letter-spacing: .4px;
+  color: hsl(var(--muted-foreground)); text-transform: uppercase; }
+.home-tasks { list-style: none; margin: 0; padding: 4px 16px; border-radius: 16px; background: hsl(var(--card)); border: 1px solid hsl(var(--border)); }
+.home-tasks li { display: flex; align-items: center; gap: 10px; padding: 12px 0; font-size: 14px; color: hsl(var(--foreground)); }
+.home-tasks li + li { border-top: 1px solid hsl(var(--border)); }
+.home-task-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-task-priority { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; background: hsl(var(--muted-foreground)); }
+.home-task-high { background: #E5484D; }
+.home-task-medium { background: #F5B14C; }
+.home-task-chip { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: rgba(124,108,246,.15); color: hsl(var(--primary)); white-space: nowrap; }
+.home-task-due { font-size: 12px; color: hsl(var(--muted-foreground)); white-space: nowrap; }

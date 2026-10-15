@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<title>Aria home with a menu row</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&amp;family=Newsreader:opsz,wght@6..72,500&amp;family=JetBrains+Mono:wght@500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#F4F5F7}
+a{color:#4B36C9}a:hover{color:#2E1F8F}
+button{font:inherit;cursor:pointer}
+input{font:inherit}
+.hero-grid{background-color:#0B0C12;background-image:radial-gradient(rgba(150,140,255,0.14) 1px, transparent 1px);background-size:22px 22px}
+@keyframes aria-breathe{0%,100%{box-shadow:0 0 0 2px #7C6CF6,0 0 28px 4px rgba(124,108,246,0.45)}50%{box-shadow:0 0 0 2px #9C8FFF,0 0 44px 10px rgba(124,108,246,0.6)}}
+.aria-ring{animation:aria-breathe 4.5s ease-in-out infinite}
+@keyframes live-dot{0%,100%{opacity:1}50%{opacity:0.35}}
+.live-dot{animation:live-dot 2s ease-in-out infinite}
+@media (prefers-reduced-motion: reduce){.aria-ring,.live-dot{animation:none}}
+.nav-row{scrollbar-width:none}
+.nav-row::-webkit-scrollbar{display:none}
+</style>
+</helmet>
+<div style="font-family: 'Plus Jakarta Sans', system-ui, sans-serif; color: #15161A; background: #F4F5F7; min-height: 100vh;">
+
+  <header class="hero-grid" style="color: #EEEEF6; padding: 20px clamp(16px, 4vw, 56px) 0;">
+    <div style="max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 28px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <div style="width: 28px; height: 28px; border-radius: 8px; background: #6E56F0; display: flex; align-items: center; justify-content: center; font-weight: 700; color: #fff; font-size: 14px;">B</div>
+          <span style="font-weight: 600; font-size: 14px; letter-spacing: 0.2px;">Business Hero</span>
+          <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; color: #8E90A8; margin-left: 8px;">NEW BODY GYM</span>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <a href="#" style="font-size: 13px; color: #C9CAD8; text-decoration: none; padding: 8px 12px; border: 1px solid #2A2B3A; border-radius: 10px;">Hold a board meeting</a>
+          <a href="#" aria-label="Settings" style="width: 38px; height: 38px; border-radius: 10px; border: 1px solid #2A2B3A; display: flex; align-items: center; justify-content: center; color: #C9CAD8;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path></svg>
+          </a>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-wrap: wrap; gap: 32px; align-items: center;">
+        <div style="flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 12px;">
+          <img class="aria-ring" src="/_blob/662ea4589a177f272197658b85ffea4b" alt="Aria, your AI business partner" style="width: 168px; height: 168px; border-radius: 50%; object-fit: cover; display: block;">
+          <span style="display: inline-flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; color: #B9BBD0; letter-spacing: 0.6px;">
+            <span class="live-dot" style="width: 7px; height: 7px; border-radius: 50%; background: #4ADE9B;"></span>ONLINE · SYNCED 2 MIN AGO</span>
+        </div>
+        <div style="flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 14px;">
+          <div style="font-size: 13px; color: #A3A5BD;">Aria · your AI business partner · Tuesday 13 October</div>
+          <h1 style="margin: 0; font-family: Newsreader, Georgia, serif; font-weight: 500; font-size: 42px; letter-spacing: -0.5px; color: #FFFFFF;">Good morning, Mike.</h1>
+          <p style="margin: 0; font-size: 18px; line-height: 1.6; color: #DADBEA; max-width: 680px;">Three things need you today. Two invoices have passed 30 days and I've drafted the chasers. Sarah Patel asked for an induction on Thursday at 2pm; the slot is free. And the Harper quote is still unanswered after a week.</p>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+            <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; padding: 5px 10px; border-radius: 999px; border: 1px solid #2E2F44; color: #B9BBD0;">XERO · 4 MIN</span>
+            <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; padding: 5px 10px; border-radius: 999px; border: 1px solid #2E2F44; color: #B9BBD0;">GMAIL · 2 MIN</span>
+            <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; padding: 5px 10px; border-radius: 999px; border: 1px solid #2E2F44; color: #B9BBD0;">CALENDAR · 2 MIN</span>
+          </div>
+          <form style="display: flex; gap: 10px; align-items: center; background: rgba(255,255,255,0.05); border: 1px solid #34355A; border-radius: 16px; padding: 8px 8px 8px 18px; margin-top: 6px; box-shadow: 0 0 0 1px rgba(124,108,246,0.15), 0 8px 30px rgba(10,10,30,0.5);">
+            <label for="ask-a" style="position: absolute; left: -9999px;">Ask Aria</label>
+            <input id="ask-a" type="text" placeholder="Ask Aria anything — “how did we do this month compared with last?”" style="flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #F2F2F8; font-size: 15px; padding: 10px 0;">
+            <button type="button" aria-label="Hold to talk to Aria" style="height: 46px; padding: 0 16px; border-radius: 12px; border: 0; background: #6E56F0; color: #fff; display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px;">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4"></path></svg>
+              Talk</button>
+          </form>
+        </div>
+      </div>
+
+      <nav aria-label="Departments" class="nav-row" style="display: flex; gap: 4px; overflow-x: auto; border-top: 1px solid #23243A; margin: 0 -8px; padding: 0 8px;">
+        <sc-for list="{{nav}}" as="n" hint-placeholder-count="8">
+          <a href="#" onClick="{{n.pick}}" style="flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; padding: 16px 14px 14px; font-size: 14px; font-weight: {{n.weight}}; color: {{n.colour}}; text-decoration: none; border-bottom: 2px solid {{n.line}};">{{n.label}}<sc-if value="{{n.hasBadge}}" hint-placeholder-val="{{false}}"><span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; padding: 1px 7px; border-radius: 999px; background: #2A2B42; color: #C9CAD8;">{{n.badge}}</span></sc-if></a>
+        </sc-for>
+      </nav>
+    </div>
+  </header>
+
+  <main style="max-width: 1180px; margin: 0 auto; box-sizing: border-box; padding: 32px clamp(16px, 4vw, 56px) 56px; display: flex; flex-direction: column; gap: 28px;">
+    <section aria-label="Needs you" style="display: flex; flex-direction: column; gap: 14px;">
+      <div style="display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px;">
+        <h2 style="margin: 0; font-size: 18px; font-weight: 700;">Needs you</h2>
+        <span style="font-size: 13px; color: #5D5F6E;">Aria drafts. You approve. She acts once, signed as your AI assistant.</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px;">
+        <sc-for list="{{cards}}" as="c" hint-placeholder-count="3">
+          <article style="background: #fff; border: 1px solid #E3E4E9; border-radius: 16px; padding: 20px; display: flex; flex-direction: column; gap: 12px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+              <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; letter-spacing: 0.6px; color: {{c.kindColour}};">{{c.kind}}</span>
+              <span style="font-size: 12px; color: #6B6D7C;">{{c.source}}</span>
+            </div>
+            <h3 style="margin: 0; font-size: 16px; font-weight: 600; line-height: 1.35;">{{c.title}}</h3>
+            <p style="margin: 0; font-size: 14px; line-height: 1.5; color: #3F4150; background: #F6F6F9; border-radius: 10px; padding: 12px;">{{c.draft}}</p>
+            <sc-if value="{{c.pending}}" hint-placeholder-val="{{true}}">
+              <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                <button type="button" onClick="{{c.approve}}" style="flex: 1 1 auto; min-height: 44px; border: 0; border-radius: 10px; background: #4B36C9; color: #fff; font-weight: 600; font-size: 14px; padding: 0 16px;">{{c.action}}</button>
+                <button type="button" style="min-height: 44px; border: 1px solid #DCDDE3; border-radius: 10px; background: #fff; color: #15161A; font-weight: 600; font-size: 14px; padding: 0 14px;">Edit</button>
+                <button type="button" onClick="{{c.dismiss}}" style="min-height: 44px; border: 0; border-radius: 10px; background: transparent; color: #5D5F6E; font-size: 14px; padding: 0 10px;">Not now</button>
+              </div>
+            </sc-if>
+            <sc-if value="{{c.done}}" hint-placeholder-val="{{false}}">
+              <div style="display: flex; align-items: center; gap: 8px; min-height: 44px; font-size: 14px; font-weight: 600; color: #11734B;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M5 12l5 5L20 7"></path></svg>{{c.doneText}}</div>
+            </sc-if>
+          </article>
+        </sc-for>
+      </div>
+    </section>
+
+    <section aria-label="Your business" style="display: flex; flex-direction: column; gap: 14px;">
+      <h2 style="margin: 0; font-size: 18px; font-weight: 700;">Your business</h2>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px;">
+        <sc-for list="{{tiles}}" as="t" hint-placeholder-count="6">
+          <a href="#" style="background: #fff; border: 1px solid #E3E4E9; border-radius: 16px; padding: 18px; display: flex; flex-direction: column; gap: 8px; text-decoration: none; color: #15161A;">
+            <span style="font-size: 13px; font-weight: 600; color: #5D5F6E;">{{t.name}}</span>
+            <span style="font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums;">{{t.figure}}</span>
+            <span style="font-size: 13px; color: #3F4150; line-height: 1.4;">{{t.line}}</span>
+            <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10.5px; letter-spacing: 0.4px; color: #6B6D7C;">{{t.age}}</span>
+          </a>
+        </sc-for>
+      </div>
+    </section>
+
+    <section aria-label="Tasks" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px;">
+      <div style="background: #fff; border: 1px solid #E3E4E9; border-radius: 16px; padding: 20px;">
+        <h2 style="margin: 0 0 12px; font-size: 16px; font-weight: 700;">Aria is on it</h2>
+        <sc-for list="{{ariaTasks}}" as="k" hint-placeholder-count="3">
+          <div style="display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid #EEEFF3; font-size: 14px;"><span>{{k.text}}</span><span style="color: #6B6D7C; white-space: nowrap;">{{k.when}}</span></div>
+        </sc-for>
+      </div>
+      <div style="background: #fff; border: 1px solid #E3E4E9; border-radius: 16px; padding: 20px;">
+        <h2 style="margin: 0 0 12px; font-size: 16px; font-weight: 700;">Yours</h2>
+        <sc-for list="{{myTasks}}" as="k" hint-placeholder-count="3">
+          <label style="display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid #EEEFF3; font-size: 14px;"><input type="checkbox" style="width: 18px; height: 18px; accent-color: #4B36C9;"><span style="flex: 1;">{{k.text}}</span><span style="color: #6B6D7C; white-space: nowrap;">{{k.when}}</span></label>
+        </sc-for>
+      </div>
+    </section>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1560}}'>
+class Component extends DCLogic {
+  constructor(props) { super(props); this.state = { status: {}, active: 'Aria' }; }
+  renderVals() {
+    const status = this.state.status;
+    const set = (id, v) => this.setState({ status: Object.assign({}, status, { [id]: v }) });
+    const raw = [
+      { id: 'chase', kind: 'INVOICE CHASE', kindColour: '#B4232C', source: 'INV-0038 · 41 days late',
+        title: 'Chase Harper Builds for £2,340', action: 'Approve and send',
+        draft: 'Hi Tom, a quick reminder that invoice INV-0038 for £2,340 was due on 2 September. Could you let me know when we can expect payment? — Aria, AI assistant to Mike at New Body Gym.',
+        doneText: 'Sent once from your mailbox, signed by Aria' },
+      { id: 'book', kind: 'BOOKING', kindColour: '#1F5FBF', source: 'From a call · 9:12am',
+        title: 'Induction for Sarah Patel, Thursday at 2pm', action: 'Approve booking',
+        draft: 'NBG Inductions: Thursday 15 October, 2pm to 3pm. Sarah Patel, 07700 900123. The slot is free and inside opening hours.',
+        doneText: 'Booked in NBG Inductions' },
+      { id: 'quote', kind: 'FOLLOW-UP', kindColour: '#8A5300', source: 'Quote Q-0112 · sent 7 days ago',
+        title: 'Nudge Harper on the refurbishment quote', action: 'Approve and send',
+        draft: 'Hi Tom, just checking you received our quote for the changing-room refurbishment. Happy to answer any questions. — Aria, AI assistant to Mike.',
+        doneText: 'Sent once, signed by Aria' }
+    ];
+    const cards = raw.filter((c) => status[c.id] !== 'dismissed').map((c) => Object.assign({}, c, {
+      pending: !status[c.id], done: status[c.id] === 'done',
+      approve: () => set(c.id, 'done'), dismiss: () => set(c.id, 'dismissed')
+    }));
+    const labels = [['Aria', ''], ['Money', ''], ['Invoices and quotes', '3'], ['Calendar and jobs', ''],
+      ['Calls', '2'], ['Email and messages', '4'], ['Tasks', ''], ['Board meeting', '']];
+    const nav = labels.map(([label, badge]) => {
+      const on = this.state.active === label;
+      return { label, badge, hasBadge: !!badge, colour: on ? '#FFFFFF' : '#A3A5BD',
+        weight: on ? '600' : '500', line: on ? '#8E7CFF' : 'transparent',
+        pick: (e) => { if (e && e.preventDefault) e.preventDefault(); this.setState({ active: label }); } };
+    });
+    return {
+      cards, nav,
+      tiles: [
+        { name: 'Money', figure: '£18,420', line: 'In the bank. Up £2,100 on last month.', age: 'XERO · 4 MIN AGO' },
+        { name: 'Invoices', figure: '£4,180 overdue', line: 'Three invoices; the oldest is 41 days late.', age: 'LIVE' },
+        { name: 'Quotes', figure: '2 awaiting reply', line: '£6,950 in play. One unanswered for a week.', age: 'LIVE' },
+        { name: 'Calendar', figure: '5 inductions', line: 'This week. Thursday afternoon is busiest.', age: 'GOOGLE · 2 MIN AGO' },
+        { name: 'Calls', figure: '42.5 of 120 min', line: 'Receptionist this month. Two messages for you.', age: 'LIVE' },
+        { name: 'Email', figure: '4 need a reply', line: 'One from a supplier about a price rise.', age: 'GMAIL · 2 MIN AGO' }
+      ],
+      ariaTasks: [
+        { text: 'Watch for payment from Harper Builds', when: 'Daily' },
+        { text: 'Prepare Friday’s cash-flow summary', when: 'Fri' },
+        { text: 'Raise the Harper call at the next board meeting', when: '3 Nov' }
+      ],
+      myTasks: [
+        { text: 'Ring the Harper quote customer', when: 'Tomorrow' },
+        { text: 'Approve the new class timetable', when: 'Thu' },
+        { text: 'Renew public liability insurance', when: '28 Oct' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

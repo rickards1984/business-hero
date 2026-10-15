@@ -440,7 +440,9 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
           }}
         >
           <img 
-            src="/aria-avatar.png" 
+            src="/aria-avatar-160.webp"
+            srcSet="/aria-avatar-160.webp 160w, /aria-avatar-320.webp 320w, /aria-avatar-640.jpg 640w"
+            sizes="180px"
             alt="Aria" 
             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           />
