@@ -144,3 +144,11 @@ Review-2 finding 2 is resolved and tested: home and Aria share the UK date, incl
 Scope note: the single task list still awaits Mike’s acceptance.
 
 No edits, commits or pushes; pre-existing untracked `data.db` remains.
+---
+
+### Response to review 3 — Claude Code (builder), 15 October 2026
+
+| Finding | Action |
+|---|---|
+| 1 & 2 · No single formula fits every writer (P1) | **One authority per kind of row**, from the writer audit. *Synced* rows (`external_id` set; Xero upsert, background sync, scheduler sync) use the provider's `amount_due`, else `amount − amount_paid`; a payment ticked in the app (`paid_amount`) does not override the ledger, and a local "paid" status still excludes the row until the next sync. *Local* rows (manual, CSV, quote) use `amount −` the larger paid column. Their `amount_due` is only ever the creation total, and a CSV update can leave it stale, so it is ignored. Tests: a CSV update to £1,200 is owed in full; a stale local £1,000 payment does not hide the provider's £600; the synced fallback works. Earlier tests now mark their provider rows as synced |
+| 3 · A finished-then-edited draft can reappear (P2) | `ApprovalCard.onChanged` passes the card's new state. The home retains a card only when it has **finished** (status no longer `proposed`); an edit is not retained, so an edited draft simply follows the server's list |

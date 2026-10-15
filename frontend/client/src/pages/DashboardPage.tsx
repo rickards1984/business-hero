@@ -52,11 +52,12 @@ export default function DashboardPage() {
   const [showTasks, setShowTasks] = useState(false);
   // The open drafts are the server's list, refreshed (an edit or dismissal
   // made elsewhere updates or removes its card — Codex NS-B7 review 2). A card
-  // the owner acted on HERE is kept on screen so it can show "Sent" rather
-  // than vanish when the list refreshes without it.
-  const [actedOn, setActedOn] = useState<Record<string, Proposal>>({});
+  // that FINISHED here (sent, failed, dismissed, unconfirmed) is kept on
+  // screen so it can show its result rather than vanish; an edit is not a
+  // finish, so an edited draft simply follows the server (review 3).
+  const [finished, setFinished] = useState<Record<string, Proposal>>({});
   const cardChanged = (card: Proposal) => {
-    setActedOn(prev => ({ ...prev, [card.id]: card }));
+    if (card.status !== 'proposed') setFinished(prev => ({ ...prev, [card.id]: card }));
     queryClient.invalidateQueries({ queryKey: ['aria-actions'] });
     queryClient.invalidateQueries({ queryKey: ['home-summary'] });
   };
@@ -71,7 +72,7 @@ export default function DashboardPage() {
 
   const usage = d.usage.data;
   const open = d.actions.data ?? [];
-  const cards = [...open, ...Object.values(actedOn).filter(c => !open.some(o => o.id === c.id))];
+  const cards = [...open, ...Object.values(finished).filter(c => !open.some(o => o.id === c.id))];
   const inv = d.summary.data?.invoices;
   const em = d.summary.data?.emails;
   const synced = d.summary.data?.synced;
@@ -108,7 +109,7 @@ export default function DashboardPage() {
             {cards.map(card => (
               // Keyed by version: a draft edited elsewhere is shown afresh.
               <ApprovalCard key={`${card.id}:${card.version}`} proposal={card}
-                onChanged={() => cardChanged(card)} />
+                onChanged={cardChanged} />
             ))}
           </div>
         )}

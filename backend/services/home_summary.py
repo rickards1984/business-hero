@@ -19,21 +19,23 @@ from sqlalchemy import text
 _NOT_OWED = ("paid", "draft", "void", "voided", "deleted", "cancelled")
 EMAIL_ACTION_WINDOW_DAYS = 14
 
-# What is still owed on an invoice: the SMALLER of
-#   (a) the recorded amount due (the provider's own balance for synced
-#       invoices; the full amount for a manual one, set at creation), and
-#   (b) the amount less what has been paid (two paid columns exist: the
-#       app's "record payment" writes paid_amount, synced rows amount_paid;
-#       the larger is taken).
-# (a) alone missed payments recorded in the app (Codex NS-B7 review 2); (b)
-# alone would deduct a synced payment twice. Never below zero (the outer
-# query counts only balances above zero).
-_PAID = """CASE WHEN COALESCE(amount_paid, 0) > COALESCE(paid_amount, 0)
-               THEN COALESCE(amount_paid, 0) ELSE COALESCE(paid_amount, 0) END"""
+# What is still owed on an invoice — one authority per kind of row, matched
+# to how each is written (Codex NS-B7 reviews 2 and 3):
+# * Synced from accounts software (external_id set): the provider's own
+#   balance, amount_due, is the ledger; failing that, amount less the
+#   provider's amount_paid. A payment ticked in the app (paid_amount) does not
+#   override it — the next sync is the truth (a local "paid" status still
+#   removes the row via the status filter until then).
+# * Local (manual, CSV, from a quote): amount less what was recorded as paid
+#   in the app. Here amount_due is only ever the full amount at creation (and
+#   a CSV update can leave it stale), so it is not used.
+# Never below zero: the outer query counts only balances above zero.
+_LOCAL_PAID = """CASE WHEN COALESCE(amount_paid, 0) > COALESCE(paid_amount, 0)
+                      THEN COALESCE(amount_paid, 0) ELSE COALESCE(paid_amount, 0) END"""
 _BALANCE = f"""
     CASE
-      WHEN amount_due IS NOT NULL AND amount_due < amount - {_PAID} THEN amount_due
-      ELSE amount - {_PAID}
+      WHEN external_id IS NOT NULL THEN COALESCE(amount_due, amount - COALESCE(amount_paid, 0))
+      ELSE amount - {_LOCAL_PAID}
     END
 """
 
