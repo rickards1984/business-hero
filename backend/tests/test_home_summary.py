@@ -25,7 +25,7 @@ def engine():
     with eng.begin() as c:
         c.execute(text("""CREATE TABLE invoices (id INTEGER PRIMARY KEY, business_id TEXT, amount NUMERIC,
             amount_due NUMERIC, amount_paid NUMERIC DEFAULT 0, paid_amount NUMERIC, status TEXT,
-            due_date DATE, archived BOOLEAN DEFAULT 0)"""))
+            due_date DATE, archived BOOLEAN DEFAULT 0, external_id TEXT)"""))
         c.execute(text("""CREATE TABLE email_messages (id INTEGER PRIMARY KEY, business_id TEXT,
             ai_category TEXT, received_at TIMESTAMP)"""))
         c.execute(text("CREATE TABLE email_accounts (id TEXT, business_id TEXT)"))
@@ -36,12 +36,14 @@ def engine():
 
 
 def invoice(eng, bid=A, amount=100, status="sent", due="2026-10-01", amount_due=None,
-            amount_paid=0, paid_amount=None, archived=False):
+            amount_paid=0, paid_amount=None, archived=False, synced=False):
+    """synced=True: a row from accounts software (external_id set), whose own
+    balance (amount_due) is the authority."""
     with eng.begin() as c:
         c.execute(text("""INSERT INTO invoices (business_id, amount, amount_due, amount_paid, paid_amount,
-            status, due_date, archived) VALUES (:b, :a, :ad, :ap, :pa, :s, :d, :ar)"""),
+            status, due_date, archived, external_id) VALUES (:b, :a, :ad, :ap, :pa, :s, :d, :ar, :x)"""),
                   {"b": bid, "a": amount, "ad": amount_due, "ap": amount_paid, "pa": paid_amount,
-                   "s": status, "d": due, "ar": archived})
+                   "s": status, "d": due, "ar": archived, "x": "ext-1" if synced else None})
 
 
 def owed(eng, bid=A):
@@ -62,7 +64,7 @@ def test_part_payments_leave_the_balance_owed(engine):
     """Finding 2: £1,000 with £400 paid is £600 owed, whichever column holds it."""
     invoice(engine, amount=1000, status="partially_paid", amount_paid=400)
     invoice(engine, amount=500, status="authorised", paid_amount=200, due="2026-11-01")
-    invoice(engine, amount=900, status="sent", amount_due=300)  # the provider's own figure
+    invoice(engine, amount=900, status="sent", amount_due=300, synced=True)  # the provider's own figure
     r = owed(engine)
     assert r["outstanding_total"] == 600 + 300 + 300
     assert r["overdue_total"] == 600 + 300 and r["overdue_count"] == 2
@@ -154,8 +156,8 @@ def test_a_payment_recorded_in_the_app_reduces_what_is_owed(engine):
 def test_a_provider_balance_is_still_respected(engine):
     """Xero's amount_due is already net of payments; it must not be reduced
     a second time when the paid column is also filled."""
-    invoice(engine, amount=900, amount_due=300, amount_paid=600, status="authorised")
-    invoice(engine, amount=900, amount_due=300, status="authorised")
+    invoice(engine, amount=900, amount_due=300, amount_paid=600, status="authorised", synced=True)
+    invoice(engine, amount=900, amount_due=300, status="authorised", synced=True)
     assert owed(engine)["outstanding_total"] == 600
 
 
@@ -176,3 +178,30 @@ def test_the_day_is_the_uk_day_for_both_the_home_and_aria(engine, monkeypatch):
     assert assistant_tools._get_invoice_summary(engine, A, {})["overdue_count"] == 1
     with engine.connect() as c:
         assert home_summary.summary(c, A, late)["invoices"]["overdue_count"] == 1
+
+
+
+# ------------------------------------------- Codex NS-B7 review 3 additions ---
+
+def test_a_csv_update_that_raises_the_total_is_owed_in_full(engine):
+    """Review 3 finding 1: created at £1,000 (amount_due set to the full
+    amount at creation), then a CSV import raises the total to £1,200 and
+    updates only `amount`. A local invoice's balance is its amount less what
+    has been recorded as paid: £1,200."""
+    invoice(engine, amount=1200, amount_due=1000, status="unpaid")
+    assert owed(engine)["outstanding_total"] == 1200
+
+
+def test_the_accounts_software_balance_overrides_a_stale_local_payment(engine):
+    """Review 3 finding 2: marked paid locally (paid_amount £1,000), then the
+    payment is corrected in Xero to £400 and synced (amount_due £600,
+    amount_paid £400, unpaid). The provider is the ledger: £600 owed."""
+    invoice(engine, amount=1000, amount_due=600, amount_paid=400, paid_amount=1000,
+            status="unpaid", synced=True)
+    assert owed(engine)["outstanding_total"] == 600
+
+
+def test_a_synced_invoice_without_a_provider_balance_falls_back_to_its_paid_amount(engine):
+    invoice(engine, amount=500, amount_due=None, amount_paid=200, paid_amount=500,
+            status="authorised", synced=True)
+    assert owed(engine)["outstanding_total"] == 300

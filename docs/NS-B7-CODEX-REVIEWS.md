@@ -109,3 +109,38 @@ Anything else: no additional blocker found; no edits, commits or pushes, and the
 | 2 · Home and Aria use different days (P2) | `home_summary.uk_today()` is used by both. Aria's summary no longer uses the server's `date.today()`. Tested at 23:30 UTC on 15 October (00:30 BST on the 16th): the invoice due on the 15th is overdue in both. Aria's result now says, in a `note`, that outstanding and overdue are balances while the per-status totals are face value |
 | 3 · Shown cards ignore refreshed changes and removals (P2) | The home renders the server's open drafts, refreshed, keyed by `id:version`, so an edit elsewhere remounts the card with its new content and a dismissal elsewhere removes it. Only cards the owner acted on **here** are retained (to show their result) |
 | 8 · Scope note | One list, "Your tasks", pending Mike's acceptance. The ticket will be updated when he decides |
+
+## Review 3 (repair cycle 2 of 3)
+
+| | |
+|---|---|
+| Reviewed commit | `cfbe0c6` |
+| Session id | `01a141a5-b45f-7241-a8ef-15986ab2206d` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 44,434` |
+| **Verdict** | **REQUEST-CHANGES** |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** at `cfbe0c693c7995fd535db5d2d6eccba5ff9df5ef`.
+
+1. **P1 — CSV updates can leave receivables understated.** [home_summary.py:35](/Users/michaelrickards/dev/bh2-NS-B7-review/backend/services/home_summary.py:35)  
+   Create a £1,000 manual invoice, then import the same invoice number with an unpaid total of £1,200. [main.py:3188](/Users/michaelrickards/dev/bh2-NS-B7-review/backend/main.py:3188) updates `amount` but leaves `amount_due=1000`. The minimum reports **£1,000 instead of £1,200** on home and to Aria. Reproduced against the aggregate in SQLite; no regression test covers this writer sequence.
+
+2. **P1 — Stale local payments override refreshed provider balances.** [home_summary.py:31](/Users/michaelrickards/dev/bh2-NS-B7-review/backend/services/home_summary.py:31)  
+   Mark a £1,000 synced invoice paid locally, leaving `paid_amount=1000`. Subsequently correct the payment in the accounting provider to £400 and sync: the row becomes `amount_due=600`, `amount_paid=400`, unpaid—but retains `paid_amount=1000`. Home and Aria report **£0 instead of £600**. Xero’s [upsert](/Users/michaelrickards/dev/bh2-NS-B7-review/backend/main.py:4614), [background sync](/Users/michaelrickards/dev/bh2-NS-B7-review/backend/services/background_sync.py:412) and [scheduler sync](/Users/michaelrickards/dev/bh2-NS-B7-review/backend/services/briefing_scheduler.py:523) all preserve that stale column. Reproduced in SQLite; reconciliation needs an explicit authority rule and regression coverage.
+
+3. **P2 — A locally edited draft can reappear after dismissal elsewhere.** [DashboardPage.tsx:59](/Users/michaelrickards/dev/bh2-NS-B7-review/frontend/client/src/pages/DashboardPage.tsx:59), [DashboardPage.tsx:110](/Users/michaelrickards/dev/bh2-NS-B7-review/frontend/client/src/pages/DashboardPage.tsx:110)  
+   Edit version A locally and save. `onChanged` retains the original proposed A; polling displays version B. Dismiss B in another tab. Once polling removes B, `actedOn` restores A and its changed key remounts an actionable, outdated card. The callback also runs for edits and failures, so retention is not restricted to completed actions. Server checks prevent an incorrect send, but review-2 finding 3 remains incomplete.
+
+Writer audit: manual creation, quote conversion, fresh CSV imports and consistent Xero/QuickBooks/FreeAgent rows fit the formula; local partial-payment recording now works and is tested. **CSV updates and provider refreshes after local payment changes do not.**
+
+Review-2 finding 2 is resolved and tested: home and Aria share the UK date, including the midnight boundary. Untouched drafts now refresh correctly by frontend inspection.
+
+`./check.sh full`: **5 gates passed, 0 failed**, ESLint skipped; **1,841 tests passed, 33 skipped**, 220 subtests passed. Targeted home-summary tests: **20 passed**. Frontend inspected only; no browser or PostgreSQL execution.
+
+Scope note: the single task list still awaits Mike’s acceptance.
+
+No edits, commits or pushes; pre-existing untracked `data.db` remains.
