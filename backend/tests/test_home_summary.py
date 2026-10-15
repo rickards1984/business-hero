@@ -139,3 +139,40 @@ def test_aria_and_the_home_agree_on_what_is_owed(engine, monkeypatch):
     assert result["total_outstanding"] == home["outstanding_total"] == 600
     assert result["total_overdue"] == home["overdue_total"]
     assert result["overdue_count"] == home["overdue_count"]
+
+
+# ------------------------------------------- Codex NS-B7 review 2 additions ---
+
+def test_a_payment_recorded_in_the_app_reduces_what_is_owed(engine):
+    """Review 2 finding 1: a manual invoice is created with amount_due = the
+    full amount, and recording a payment writes paid_amount only. £1,000
+    with £400 recorded is £600 owed — not £1,000."""
+    invoice(engine, amount=1000, amount_due=1000, paid_amount=400, status="partially_paid")
+    assert owed(engine)["outstanding_total"] == 600
+
+
+def test_a_provider_balance_is_still_respected(engine):
+    """Xero's amount_due is already net of payments; it must not be reduced
+    a second time when the paid column is also filled."""
+    invoice(engine, amount=900, amount_due=300, amount_paid=600, status="authorised")
+    invoice(engine, amount=900, amount_due=300, status="authorised")
+    assert owed(engine)["outstanding_total"] == 600
+
+
+def test_overpaid_is_never_negative(engine):
+    invoice(engine, amount=100, amount_due=100, paid_amount=150)
+    assert owed(engine) == {"outstanding_total": 0.0, "outstanding_count": 0,
+                            "overdue_total": 0.0, "overdue_count": 0}
+
+
+def test_the_day_is_the_uk_day_for_both_the_home_and_aria(engine, monkeypatch):
+    """Review 2 finding 2: at 00:30 BST on 16 October (23:30 UTC on the 15th)
+    an invoice due on the 15th is overdue — for the home AND for Aria."""
+    late = datetime(2026, 10, 15, 23, 30, tzinfo=timezone.utc)
+    assert home_summary.uk_today(late) == date(2026, 10, 16)
+    invoice(engine, amount=100, due="2026-10-15")
+    monkeypatch.setattr(home_summary, "uk_today", lambda now=None: date(2026, 10, 16))
+    import assistant_tools
+    assert assistant_tools._get_invoice_summary(engine, A, {})["overdue_count"] == 1
+    with engine.connect() as c:
+        assert home_summary.summary(c, A, late)["invoices"]["overdue_count"] == 1

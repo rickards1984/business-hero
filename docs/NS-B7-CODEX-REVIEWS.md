@@ -61,3 +61,41 @@ No authenticated browser or native-device verification was performed; 375px over
 | 7 · Hero missing at 768 px and on native tablets (P2) | `useShellMobile()` is the one decision (≤768 px or any native app), used by the shell and the home |
 | 8 · Two task lists absent (P2) | **Partly, by decision, for Mike.** "Aria is on it" would be untrue today: Aria takes no action on her own (P4; that is Phase 3). The home shows **Your tasks**: the six most pressing open tasks, by priority then due date, with an "Added by Aria" chip on those she proposed and the owner approved, and the full panel a tap away |
 | 9 · No visible focus on the ask field (P2) | `:focus-within` ring on the ask bar |
+
+## Review 2 (repair cycle 1 of 3)
+
+| | |
+|---|---|
+| Reviewed commit | `b293ab9` |
+| Session id | `01a141a2-2ad0-7853-a37f-a1595039ff9f` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 46,713` |
+| **Verdict** | **REQUEST-CHANGES** |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** at `b293ab9b87e98fe22ca89c4a2f10bdf6454da529`.
+
+1. **P1 — Partial payments are still overstated when `amount_due` is populated.** [home_summary.py:27](/Users/michaelrickards/dev/bh2-NS-B7-review/backend/services/home_summary.py:27)  
+   Create a £1,000 manual invoice, then record £400 paid through the existing status endpoint. Creation sets `amount_due=1000` ([invoices_api.py:228](/Users/michaelrickards/dev/bh2-NS-B7-review/backend/invoices_api.py:228)); recording payment changes only `paid_amount` ([main.py:3020](/Users/michaelrickards/dev/bh2-NS-B7-review/backend/main.py:3020)). The new CASE therefore reports **£1,000 owed instead of £600**, on both home and Aria. Finding 2 remains unresolved for this supported flow. Reconcile the balance rules with actual writers and add this regression case.
+
+2. **P2 — Home and Aria use different dates for overdue classification.** [assistant_tools.py:2414](/Users/michaelrickards/dev/bh2-NS-B7-review/backend/assistant_tools.py:2414)  
+   At 00:30 BST on 16 October, a UTC server’s `date.today()` is still 15 October. An invoice due on the 15th is overdue on home but not in Aria’s summary. The UK-day choice is reasonable; apply it consistently and test the midnight boundary.
+
+3. **P2 — “Shown cards” ignores refreshed changes and removals.** [DashboardPage.tsx:59](/Users/michaelrickards/dev/bh2-NS-B7-review/frontend/client/src/pages/DashboardPage.tsx:59), [ApprovalCard.tsx:65](/Users/michaelrickards/dev/bh2-NS-B7-review/frontend/client/src/components/ApprovalCard.tsx:65)  
+   Leave home open and edit or dismiss a draft in another tab. Polling updates the query and briefing, but `shown` only appends unseen IDs; the card also retains its initial proposal in local state. Home continues displaying the old preview or an actionable dismissed card. Server version checks prevent an incorrect send, but the refresh repair is incomplete. Reconcile existing cards and distinguish locally completed cards retained for confirmation from stale open cards.
+
+Prior findings: **1, 3, 5, 6, 7 and 9 are addressed by inspection; 2 and 4 remain incomplete as above.** For **8**, avoiding an unsupported “Aria is on it” claim is sound. However, P4 does not itself prohibit assigned tasks—it governs approval of actions. The single-list fallback is reasonable pending Mike’s acceptance of the scope revision; the ticket still specifies two lists.
+
+Other requested checks:
+
+- **PostgreSQL:** No syntax/type defect found in the aggregate. Numeric CASE branches, nullable payment columns, archived NULL handling and Python `date` comparison against the documented `date` column are sound. `status` is documented NOT NULL; exclusions are case-insensitive. PostgreSQL execution was not performed.
+- **Auth/access:** JWT and business-membership resolution precede tenant-scoped SELECTs. The endpoint performs no writes and permits read-only access as intended.
+- **Other Aria keys:** Existing status subtotals remain gross face-value totals, while outstanding/overdue now represent balances. That distinction should be explicit; they are no longer interchangeable.
+- **Refresh load:** Five query families every minute is reasonable at current scope, but is not five SQL statements: summary alone executes six. Calls fetch up to 500 rows and tasks fetch all returned rows. No demonstrated load blocker; no load test performed.
+
+`./check.sh full` passed: **5 gates passed, 0 failed; 1,837 tests passed, 33 skipped; 220 subtests passed.** ESLint skipped. Frontend reviewed by inspection only.
+
+Anything else: no additional blocker found; no edits, commits or pushes, and the pre-existing untracked `data.db` remains untouched.
