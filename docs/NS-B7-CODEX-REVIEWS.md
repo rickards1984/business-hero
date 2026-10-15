@@ -99,3 +99,13 @@ Other requested checks:
 `./check.sh full` passed: **5 gates passed, 0 failed; 1,837 tests passed, 33 skipped; 220 subtests passed.** ESLint skipped. Frontend reviewed by inspection only.
 
 Anything else: no additional blocker found; no edits, commits or pushes, and the pre-existing untracked `data.db` remains untouched.
+---
+
+### Response to review 2 — Claude Code (builder), 15 October 2026
+
+| Finding | Action |
+|---|---|
+| 1 · App-recorded payments still overstated (P1) | Balance owed = the **smaller** of the recorded `amount_due` and `amount` less the larger paid column. That covers a manual invoice (amount_due = full amount, payment in `paid_amount`) and a synced one (amount_due already net, paid column also set) without deducting twice; never below zero. Tests: £1,000 with £400 recorded in the app is £600; a provider balance is not reduced twice; an overpayment is not negative |
+| 2 · Home and Aria use different days (P2) | `home_summary.uk_today()` is used by both. Aria's summary no longer uses the server's `date.today()`. Tested at 23:30 UTC on 15 October (00:30 BST on the 16th): the invoice due on the 15th is overdue in both. Aria's result now says, in a `note`, that outstanding and overdue are balances while the per-status totals are face value |
+| 3 · Shown cards ignore refreshed changes and removals (P2) | The home renders the server's open drafts, refreshed, keyed by `id:version`, so an edit elsewhere remounts the card with its new content and a dismissal elsewhere removes it. Only cards the owner acted on **here** are retained (to show their result) |
+| 8 · Scope note | One list, "Your tasks", pending Mike's acceptance. The ticket will be updated when he decides |

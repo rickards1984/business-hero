@@ -19,16 +19,30 @@ from sqlalchemy import text
 _NOT_OWED = ("paid", "draft", "void", "voided", "deleted", "cancelled")
 EMAIL_ACTION_WINDOW_DAYS = 14
 
-# What is still owed on an invoice: the provider's amount due when it is
-# recorded; otherwise the amount less what has been paid (two legacy paid
-# columns exist; the larger is taken). Never below zero.
-_BALANCE = """
+# What is still owed on an invoice: the SMALLER of
+#   (a) the recorded amount due (the provider's own balance for synced
+#       invoices; the full amount for a manual one, set at creation), and
+#   (b) the amount less what has been paid (two paid columns exist: the
+#       app's "record payment" writes paid_amount, synced rows amount_paid;
+#       the larger is taken).
+# (a) alone missed payments recorded in the app (Codex NS-B7 review 2); (b)
+# alone would deduct a synced payment twice. Never below zero (the outer
+# query counts only balances above zero).
+_PAID = """CASE WHEN COALESCE(amount_paid, 0) > COALESCE(paid_amount, 0)
+               THEN COALESCE(amount_paid, 0) ELSE COALESCE(paid_amount, 0) END"""
+_BALANCE = f"""
     CASE
-      WHEN amount_due IS NOT NULL THEN amount_due
-      ELSE amount - CASE WHEN COALESCE(amount_paid, 0) > COALESCE(paid_amount, 0)
-                         THEN COALESCE(amount_paid, 0) ELSE COALESCE(paid_amount, 0) END
+      WHEN amount_due IS NOT NULL AND amount_due < amount - {_PAID} THEN amount_due
+      ELSE amount - {_PAID}
     END
 """
+
+
+def uk_today(now: Optional[datetime] = None) -> date:
+    """The UK calendar day — the one invoices are dated in. Used by the home
+    AND Aria's invoice summary, so "overdue" means the same in both."""
+    now = now or datetime.now(timezone.utc)
+    return now.astimezone(ZoneInfo("Europe/London")).date()
 
 
 def receivables(conn, business_id: str, today: date) -> dict:
@@ -68,7 +82,7 @@ def _iso(value) -> Optional[str]:
 
 def summary(conn, business_id: str, now: Optional[datetime] = None) -> dict:
     now = now or datetime.now(timezone.utc)
-    today = now.astimezone(ZoneInfo("Europe/London")).date()  # UK day, as invoices are
+    today = uk_today(now)
     bid = str(business_id)
     since = now - timedelta(days=EMAIL_ACTION_WINDOW_DAYS)
     action_required = conn.execute(text("""

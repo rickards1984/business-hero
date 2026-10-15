@@ -50,15 +50,13 @@ export default function DashboardPage() {
   const businessId = me?.id;
   const d = useDashboardData(businessId);
   const [showTasks, setShowTasks] = useState(false);
-  // Cards stay on screen once shown, so an approved one can say "Sent"
-  // instead of vanishing on the refresh; new drafts are added as they come.
-  const [shown, setShown] = useState<Proposal[]>([]);
-  useEffect(() => {
-    const fresh = d.actions.data;
-    if (!fresh) return;
-    setShown(prev => [...prev, ...fresh.filter(c => !prev.some(p => p.id === c.id))]);
-  }, [d.actions.data]);
-  const cardChanged = () => {
+  // The open drafts are the server's list, refreshed (an edit or dismissal
+  // made elsewhere updates or removes its card — Codex NS-B7 review 2). A card
+  // the owner acted on HERE is kept on screen so it can show "Sent" rather
+  // than vanish when the list refreshes without it.
+  const [actedOn, setActedOn] = useState<Record<string, Proposal>>({});
+  const cardChanged = (card: Proposal) => {
+    setActedOn(prev => ({ ...prev, [card.id]: card }));
     queryClient.invalidateQueries({ queryKey: ['aria-actions'] });
     queryClient.invalidateQueries({ queryKey: ['home-summary'] });
   };
@@ -72,7 +70,8 @@ export default function DashboardPage() {
   if (!businessId) return null;
 
   const usage = d.usage.data;
-  const cards = shown;
+  const open = d.actions.data ?? [];
+  const cards = [...open, ...Object.values(actedOn).filter(c => !open.some(o => o.id === c.id))];
   const inv = d.summary.data?.invoices;
   const em = d.summary.data?.emails;
   const synced = d.summary.data?.synced;
@@ -106,7 +105,11 @@ export default function DashboardPage() {
           </div>
         ) : (
           <div className="home-cards">
-            {cards.map(card => <ApprovalCard key={card.id} proposal={card} onChanged={cardChanged} />)}
+            {cards.map(card => (
+              // Keyed by version: a draft edited elsewhere is shown afresh.
+              <ApprovalCard key={`${card.id}:${card.version}`} proposal={card}
+                onChanged={() => cardChanged(card)} />
+            ))}
           </div>
         )}
       </section>

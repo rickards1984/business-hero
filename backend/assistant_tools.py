@@ -2409,9 +2409,6 @@ def _list_invoices(engine, business_id: str, args: dict) -> dict:
 def _get_invoice_summary(engine, business_id: str, args: dict) -> dict:
     """Get invoice summary statistics."""
     from sqlalchemy import text
-    from datetime import date
-    
-    today = date.today()
     
     with engine.connect() as conn:
         # Get counts and totals by status
@@ -2434,10 +2431,12 @@ def _get_invoice_summary(engine, business_id: str, args: dict) -> dict:
         
         # NS-B7: what is OWED (part-payments deducted, every invoice), from
         # the same function as the Aria home, so the two cannot disagree.
-        from services.home_summary import receivables
-        owed = receivables(conn, business_id, today)
+        from services.home_summary import receivables, uk_today
+        owed = receivables(conn, business_id, uk_today())
 
         return {
+            "note": ("total_outstanding and total_overdue are balances still owed "
+                     "(payments deducted); the per-status totals are face value."),
             "total_outstanding": owed["outstanding_total"],
             "outstanding_count": owed["outstanding_count"],
             "total_overdue": owed["overdue_total"],
