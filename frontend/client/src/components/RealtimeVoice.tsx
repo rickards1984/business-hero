@@ -48,6 +48,9 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
   const [connecting, setConnecting] = useState(false);
   const progressTimersRef = useRef<number[]>([]);
   const micPromiseRef = useRef<Promise<MediaStream> | null>(null);
+  // Set on unmount: a start-up still in flight stops instead of opening a
+  // socket for a page that is gone (Codex NS-V2 review).
+  const unmountedRef = useRef(false);
 
   const clearProgress = () => {
     progressTimersRef.current.forEach((t) => window.clearTimeout(t));
@@ -208,19 +211,24 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
       window.setTimeout(() => setStatus('Checking your account…'), 2500),
       window.setTimeout(() => setStatus('Almost ready…'), 6000),
     ];
-    // Ready the microphone and the audio engine now, in parallel with the
-    // server, and inside the tap (Safari only allows audio started by one).
-    micPromiseRef.current = navigator.mediaDevices.getUserMedia({
-      audio: { sampleRate: 24000, channelCount: 1, echoCancellation: true, noiseSuppression: true },
-    });
-    micPromiseRef.current.catch(() => undefined);
-    if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
-      audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-    }
     try {
+      // Ready the microphone and the audio engine now, in parallel with the
+      // server, and inside the tap (Safari only allows audio started by one).
+      // Inside the try: a failure here releases everything (Codex review).
+      micPromiseRef.current = navigator.mediaDevices.getUserMedia({
+        audio: { sampleRate: 24000, channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+      micPromiseRef.current.catch(() => undefined);
+      if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+        audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+      }
       
       // Get access token
       const token = await getAccessToken();
+      if (unmountedRef.current) {
+        releaseEarlyMic();
+        return;  // the page was left while starting: open nothing
+      }
       
       // Create WebSocket connection
       const wsUrl = config.apiBaseUrl.replace('https://', 'wss://').replace('http://', 'ws://');
@@ -350,7 +358,11 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
 
   // Cleanup on unmount
   useEffect(() => {
+    unmountedRef.current = false;
     return () => {
+      unmountedRef.current = true;
+      clearProgress();
+      releaseEarlyMic();
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
