@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
-import { Box, CircularProgress, Typography, useMediaQuery } from '@mui/material';
-import { Capacitor } from '@capacitor/core';
+import { Box, CircularProgress, Typography } from '@mui/material';
+import { useShellMobile } from '@/hooks/useShellMobile';
 import { useAuth } from '@/contexts/AuthContext';
 import { useMe } from '@/hooks/useMe';
 import { isFeatureEnabled } from '@/lib/entitlements';
@@ -19,8 +19,7 @@ export default function AppShell() {
   const location = useLocation();
   const { user, session, signOut, loading: authLoading } = useAuth();
   const { data: me } = useMe();
-  const narrowScreen = useMediaQuery('(max-width: 768px)');
-  const isMobile = narrowScreen || Capacitor.isNativePlatform();
+  const isMobile = useShellMobile();
   const [supportPanelOpen, setSupportPanelOpen] = useState(false);
 
   // Canonical key, resolved through the plan. `quoting_enabled` was renamed

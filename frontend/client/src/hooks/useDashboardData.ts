@@ -8,8 +8,30 @@ import type { Proposal } from '@/components/ApprovalCard';
  * NS-B7 — the Aria home's figures, shared by the hero (briefing) and the page
  * (tiles), so each is fetched once (react-query de-duplicates by key). Every
  * figure comes from the business's own data (North Star P2): nothing here is
- * estimated, and a query that fails reports `undefined`, never zero.
+ * estimated, and a query that fails is reported as unavailable, never zero.
  */
+
+export interface HomeSummary {
+  as_of: string;
+  invoices: { outstanding_total: number; outstanding_count: number; overdue_total: number; overdue_count: number };
+  emails: { action_required: number; window_days: number };
+  synced: { email: string | null; accounting: string | null };
+}
+
+export interface HomeTask {
+  id: string; title: string; priority?: string | null; due_at?: string | null; source?: string | null;
+}
+
+// The home is a live view (Codex NS-B7 review 1, finding 4): the app's
+// defaults never refetch, so these refresh on mount, on returning to the
+// tab, and every minute.
+const LIVE = {
+  staleTime: 30 * 1000,
+  refetchOnMount: 'always' as const,
+  refetchOnWindowFocus: true,
+  refetchInterval: 60 * 1000,
+};
+
 export function useDashboardData(businessId?: string) {
   const enabled = !!businessId;
 
@@ -35,45 +57,17 @@ export function useDashboardData(businessId?: string) {
       };
     },
     enabled,
-    staleTime: 3 * 60 * 1000,
+    ...LIVE,
   });
 
-  const emails = useQuery({
-    queryKey: ['dashboard-emails', businessId],
-    queryFn: async () => {
-      const res = await apiRequest('GET', '/v1/email/messages?limit=200');
-      const data = await res.json();
-      const list = Array.isArray(data) ? data : (data.messages || []);
-      const todayDate = new Date().toDateString();
-      return {
-        emailsToday: list.filter((e: any) => e.received_at && new Date(e.received_at).toDateString() === todayDate).length,
-        emailsActionRequired: list.filter((e: any) => e.ai_category === 'Action Required').length,
-      };
-    },
+  // Invoices and emails are computed on the server over EVERY row, with the
+  // time each source last synced (Codex NS-B7 review 1, findings 1, 2, 5, 6).
+  // The same receivables feed Aria's invoice summary.
+  const summary = useQuery({
+    queryKey: ['home-summary', businessId],
+    queryFn: async (): Promise<HomeSummary> => (await apiRequest('GET', '/v1/home/summary')).json(),
     enabled,
-    staleTime: 3 * 60 * 1000,
-  });
-
-  const invoices = useQuery({
-    queryKey: ['dashboard-invoices', businessId],
-    queryFn: async () => {
-      const res = await apiRequest('GET', '/v1/invoices');
-      const data = await res.json();
-      const list = Array.isArray(data) ? data : (data.invoices || []);
-      const unpaid = list.filter((i: any) => ['unpaid', 'authorised', 'sent'].includes(i.status) && !i.archived);
-      const today = new Date().toISOString().slice(0, 10);
-      const overdue = unpaid.filter((i: any) => i.due_date && i.due_date < today);
-      const owed = (rows: any[]) => rows.reduce((sum: number, i: any) =>
-        sum + (parseFloat(i.amount_due) || parseFloat(i.amount) || 0), 0);
-      return {
-        unpaidCount: unpaid.length,
-        unpaidAmount: owed(unpaid),
-        overdueCount: overdue.length,
-        overdueAmount: owed(overdue),
-      };
-    },
-    enabled,
-    staleTime: 5 * 60 * 1000,
+    ...LIVE,
   });
 
   const tasks = useQuery({
@@ -81,22 +75,30 @@ export function useDashboardData(businessId?: string) {
     queryFn: async () => {
       const { data: rows, error } = await supabase
         .from('tasks')
-        .select('status, priority')
+        .select('id, title, status, priority, due_at, source')
         .eq('business_id', businessId!)
         .is('deleted_at', null);
       if (error || !rows) throw error || new Error('No tasks');
       const open = rows.filter(t => t.status !== 'completed' && t.status !== 'done');
-      return { openTasks: open.length, highPriorityTasks: open.filter(t => t.priority === 'high').length };
+      const rank = (p?: string | null) => (p === 'high' ? 0 : p === 'medium' ? 1 : 2);
+      const upcoming = [...open].sort((a, b) =>
+        rank(a.priority) - rank(b.priority)
+        || (a.due_at ?? '9999').localeCompare(b.due_at ?? '9999')).slice(0, 6) as HomeTask[];
+      return {
+        openTasks: open.length,
+        highPriorityTasks: open.filter(t => t.priority === 'high').length,
+        upcoming,
+      };
     },
     enabled,
-    staleTime: 3 * 60 * 1000,
+    ...LIVE,
   });
 
   const usage = useQuery({
     queryKey: ['dashboard-usage', businessId],
     queryFn: async (): Promise<Usage> => (await apiRequest('GET', '/v1/usage')).json(),
     enabled,
-    staleTime: 3 * 60 * 1000,
+    ...LIVE,
   });
 
   const actions = useQuery({
@@ -106,11 +108,13 @@ export function useDashboardData(businessId?: string) {
       return data.actions || [];
     },
     enabled,
-    staleTime: 60 * 1000,
+    ...LIVE,
   });
 
-  return { calls, emails, invoices, tasks, usage, actions };
+  return { calls, summary, tasks, usage, actions };
 }
+
+type Dashboard = ReturnType<typeof useDashboardData>;
 
 const money = (n: number) => `£${n.toLocaleString('en-GB', { maximumFractionDigits: 0 })}`;
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -119,25 +123,51 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
  * Aria's opening lines, built only from figures that loaded. A figure that
  * is still loading or failed is left out rather than guessed (P2, P8).
  */
-export function briefingLines(d: ReturnType<typeof useDashboardData>): string[] {
+export function briefingLines(d: Dashboard): string[] {
   const lines: string[] = [];
   const cards = d.actions.data?.length ?? 0;
   if (cards > 0) {
     lines.push(`${plural(cards, 'draft is', 'drafts are')} waiting for your approval below.`);
   }
-  const inv = d.invoices.data;
-  if (inv && inv.overdueCount > 0) {
-    lines.push(`${plural(inv.overdueCount, 'invoice is', 'invoices are')} overdue, ${money(inv.overdueAmount)} in total.`);
-  } else if (inv && inv.unpaidCount > 0) {
-    lines.push(`${money(inv.unpaidAmount)} is outstanding across ${plural(inv.unpaidCount, 'invoice', 'invoices')}, none overdue.`);
+  const inv = d.summary.data?.invoices;
+  if (inv && inv.overdue_count > 0) {
+    lines.push(`${plural(inv.overdue_count, 'invoice is', 'invoices are')} overdue, ${money(inv.overdue_total)} still owed on them.`);
+  } else if (inv && inv.outstanding_count > 0) {
+    lines.push(`${money(inv.outstanding_total)} is still owed across ${plural(inv.outstanding_count, 'invoice', 'invoices')}, none overdue.`);
   }
-  const em = d.emails.data;
-  if (em && em.emailsActionRequired > 0) {
-    lines.push(`${plural(em.emailsActionRequired, 'email needs', 'emails need')} a reply.`);
+  const em = d.summary.data?.emails;
+  if (em && em.action_required > 0) {
+    lines.push(`${plural(em.action_required, 'email needs', 'emails need')} action, from the last ${em.window_days} days.`);
+  }
+  const tasks = d.tasks.data;
+  if (tasks && tasks.highPriorityTasks > 0) {
+    lines.push(`${plural(tasks.highPriorityTasks, 'high-priority task is', 'high-priority tasks are')} open.`);
   }
   const calls = d.calls.data;
   if (calls && calls.callsToday > 0) {
     lines.push(`${plural(calls.callsToday, 'call', 'calls')} came in today.`);
   }
   return lines;
+}
+
+/** Sources that failed to load, named, so the hero never implies all is well
+ *  when it could not check (Codex NS-B7 review 1, finding 3). */
+export function unavailable(d: Dashboard): string[] {
+  const named: Array<[boolean, string]> = [
+    [d.actions.isError, 'your drafts'], [d.summary.isError, 'invoices and email'],
+    [d.tasks.isError, 'tasks'], [d.calls.isError, 'calls'],
+  ];
+  return named.filter(([failed]) => failed).map(([, name]) => name);
+}
+
+/** "2 min ago", "3 hours ago", "yesterday" — for a sync timestamp. */
+export function ago(iso: string | null | undefined, now = Date.now()): string | null {
+  if (!iso) return null;
+  const mins = Math.max(0, Math.round((now - new Date(iso).getTime()) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.round(hours / 24);
+  return days === 1 ? 'yesterday' : `${days} days ago`;
 }

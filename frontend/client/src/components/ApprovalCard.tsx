@@ -61,7 +61,7 @@ function whenText(p: Record<string, any>): string {
   });
 }
 
-export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
+export default function ApprovalCard({ proposal, onChanged }: { proposal: Proposal; onChanged?: () => void }) {
   const [card, setCard] = useState<Proposal>(proposal);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -93,6 +93,7 @@ export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
       const r = await apiRequest(method, `/v1/aria/actions/${card.id}${path}`, body);
       setCard(await r.json());
       setEditing(false);
+      onChanged?.();  // e.g. the home's draft count (Codex NS-B7 review 1)
     } catch (err) {
       const status = err instanceof Error ? Number((err.message.match(/^(\d{3}):/) || [])[1]) : NaN;
       const definite = status >= 400 && status < 500;
@@ -105,6 +106,7 @@ export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
         setMessage(detail(err, 'That did not work. Please try again.'));
       }
       await reconcile();
+      onChanged?.();
     } finally {
       setBusy(false);
     }

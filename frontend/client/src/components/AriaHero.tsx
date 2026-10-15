@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMe } from '@/hooks/useMe';
 import { apiRequest } from '@/lib/queryClient';
-import { briefingLines, useDashboardData } from '@/hooks/useDashboardData';
+import { briefingLines, unavailable, useDashboardData } from '@/hooks/useDashboardData';
 
 /**
  * NS-B7 Stage 2 — Aria front and centre (round-2 option A). On desktop it
@@ -30,9 +30,18 @@ export default function AriaHero({ variant }: { variant: 'band' | 'card' }) {
       .catch(() => {});
   }, [me?.id]);
 
-  const loading = [data.actions, data.invoices, data.emails, data.calls].some(q => q.isLoading);
+  const loading = [data.actions, data.summary, data.tasks, data.calls].some(q => q.isLoading);
   const lines = briefingLines(data);
-  const failed = [data.invoices, data.emails, data.calls].filter(q => q.isError).length;
+  const missing = unavailable(data);
+  // "Updated 14:05": when the figures were last fetched — honest, unlike a
+  // permanent "online". Each tile below says when its SOURCE last synced.
+  const updatedAt = Math.max(data.summary.dataUpdatedAt || 0, data.actions.dataUpdatedAt || 0);
+  const updated = updatedAt
+    ? new Date(updatedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+    : null;
+  const missingNote = missing.length
+    ? ` I couldn't load ${missing.join(' or ')} just now.`
+    : '';
   const today = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
 
   const ask = (e: FormEvent) => {
@@ -52,7 +61,10 @@ export default function AriaHero({ variant }: { variant: 'band' | 'card' }) {
           alt="Aria, your AI business partner"
         />
         {variant === 'band' && (
-          <span className="aria-hero-status"><span className="aria-hero-dot" />ONLINE</span>
+          <span className="aria-hero-status">
+            <span className={`aria-hero-dot${missing.length ? ' aria-hero-dot-warn' : ''}`} />
+            {missing.length ? 'SOME FIGURES UNAVAILABLE' : updated ? `UPDATED ${updated}` : 'CATCHING UP'}
+          </span>
         )}
       </div>
       <div className="aria-hero-body">
@@ -62,10 +74,10 @@ export default function AriaHero({ variant }: { variant: 'band' | 'card' }) {
           {loading && lines.length === 0
             ? 'Catching up on your business…'
             : lines.length > 0
-              ? lines.join(' ')
-              : failed > 0
-                ? 'Some of your figures could not be loaded just now. Ask me and I will check directly.'
-                : 'Nothing needs you right now.'}
+              ? lines.join(' ') + missingNote
+              : missing.length > 0
+                ? `I couldn't load ${missing.join(' or ')} just now, so I can't say what needs you yet. Ask me and I'll check directly.`
+                : 'Nothing needs you right now: no drafts waiting, nothing overdue, no emails flagged for action and no high-priority tasks.'}
         </p>
         <form className="aria-hero-ask" onSubmit={ask}>
           <label htmlFor={`aria-ask-${variant}`} className="aria-hero-visually-hidden">Ask Aria</label>

@@ -1,14 +1,16 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { Alert } from '@mui/material';
 import { useMe } from '@/hooks/useMe';
-import { useIsMobile } from '@/hooks/use-mobile';
+import { useShellMobile } from '@/hooks/useShellMobile';
+import type { Proposal } from '@/components/ApprovalCard';
 import { apiRequest } from '@/lib/queryClient';
 import TasksPanel from '@/components/TasksPanel';
 import ApprovalCard from '@/components/ApprovalCard';
 import AriaHero from '@/components/AriaHero';
 import { isBlocking } from '@/components/ReceptionistUsage';
-import { useDashboardData } from '@/hooks/useDashboardData';
+import { ago, useDashboardData } from '@/hooks/useDashboardData';
 import './DashboardPage.css';
 
 /**
@@ -21,8 +23,8 @@ import './DashboardPage.css';
 
 const money = (n: number) => `£${n.toLocaleString('en-GB', { maximumFractionDigits: 0 })}`;
 
-function Tile({ name, figure, line, onClick, loading, failed }: {
-  name: string; figure?: ReactNode; line?: ReactNode; onClick: () => void;
+function Tile({ name, figure, line, age, onClick, loading, failed }: {
+  name: string; figure?: ReactNode; line?: ReactNode; age?: string | null; onClick: () => void;
   loading: boolean; failed: boolean;
 }) {
   return (
@@ -33,7 +35,8 @@ function Tile({ name, figure, line, onClick, loading, failed }: {
       ) : failed ? (
         <span className="home-tile-line">Couldn't load just now.</span>
       ) : (
-        <><span className="home-tile-figure">{figure}</span><span className="home-tile-line">{line}</span></>
+        <><span className="home-tile-figure">{figure}</span><span className="home-tile-line">{line}</span>
+          {age && <span className="home-tile-age">{age}</span>}</>
       )}
     </button>
   );
@@ -41,11 +44,24 @@ function Tile({ name, figure, line, onClick, loading, failed }: {
 
 export default function DashboardPage() {
   const { data: me } = useMe();
-  const isMobile = useIsMobile();
+  const isMobile = useShellMobile();  // the shell's own decision (review 1, finding 7)
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const businessId = me?.id;
   const d = useDashboardData(businessId);
   const [showTasks, setShowTasks] = useState(false);
+  // Cards stay on screen once shown, so an approved one can say "Sent"
+  // instead of vanishing on the refresh; new drafts are added as they come.
+  const [shown, setShown] = useState<Proposal[]>([]);
+  useEffect(() => {
+    const fresh = d.actions.data;
+    if (!fresh) return;
+    setShown(prev => [...prev, ...fresh.filter(c => !prev.some(p => p.id === c.id))]);
+  }, [d.actions.data]);
+  const cardChanged = () => {
+    queryClient.invalidateQueries({ queryKey: ['aria-actions'] });
+    queryClient.invalidateQueries({ queryKey: ['home-summary'] });
+  };
 
   // Warm the email cache in the background, non-blocking. /sync/ensure returns
   // instantly and only schedules a background sync if the cache is stale.
@@ -56,7 +72,10 @@ export default function DashboardPage() {
   if (!businessId) return null;
 
   const usage = d.usage.data;
-  const cards = d.actions.data ?? [];
+  const cards = shown;
+  const inv = d.summary.data?.invoices;
+  const em = d.summary.data?.emails;
+  const synced = d.summary.data?.synced;
 
   return (
     <div className="home">
@@ -76,9 +95,9 @@ export default function DashboardPage() {
           <h2>Needs you</h2>
           <span>Aria drafts. You approve. She acts once, signed as your AI assistant.</span>
         </div>
-        {d.actions.isLoading ? (
+        {d.actions.isLoading && cards.length === 0 ? (
           <div className="home-empty"><span className="skeleton" style={{ height: 16, width: '40%' }} /></div>
-        ) : d.actions.isError ? (
+        ) : d.actions.isError && cards.length === 0 ? (
           <div className="home-empty">Your drafts couldn't be loaded just now.</div>
         ) : cards.length === 0 ? (
           <div className="home-empty">
@@ -87,7 +106,7 @@ export default function DashboardPage() {
           </div>
         ) : (
           <div className="home-cards">
-            {cards.map(card => <ApprovalCard key={card.id} proposal={card} />)}
+            {cards.map(card => <ApprovalCard key={card.id} proposal={card} onChanged={cardChanged} />)}
           </div>
         )}
       </section>
@@ -96,16 +115,15 @@ export default function DashboardPage() {
         <div className="home-section-head"><h2>Your business</h2></div>
         <div className="home-tiles">
           <Tile name="Invoices" onClick={() => navigate('/app/finance?tab=invoices')}
-            loading={d.invoices.isLoading} failed={d.invoices.isError}
-            figure={d.invoices.data && (d.invoices.data.overdueCount > 0
-              ? `${money(d.invoices.data.overdueAmount)} overdue`
-              : money(d.invoices.data.unpaidAmount))}
-            line={d.invoices.data && `${d.invoices.data.unpaidCount} unpaid${d.invoices.data.overdueCount > 0 ? `, ${d.invoices.data.overdueCount} overdue` : ', none overdue'}`} />
+            loading={d.summary.isLoading} failed={d.summary.isError}
+            figure={inv && (inv.overdue_count > 0 ? `${money(inv.overdue_total)} overdue` : money(inv.outstanding_total))}
+            line={inv && `${money(inv.outstanding_total)} owed on ${inv.outstanding_count} invoice${inv.outstanding_count === 1 ? '' : 's'}${inv.overdue_count > 0 ? `, ${inv.overdue_count} overdue` : ', none overdue'}`}
+            age={synced && (synced.accounting ? `Accounts synced ${ago(synced.accounting)}` : 'Not synced from your accounts software')} />
           <Tile name="Email" onClick={() => navigate('/app/comms?tab=emails')}
-            loading={d.emails.isLoading} failed={d.emails.isError}
-            figure={d.emails.data && (d.emails.data.emailsActionRequired > 0
-              ? `${d.emails.data.emailsActionRequired} need a reply` : 'All clear')}
-            line={d.emails.data && `${d.emails.data.emailsToday} received today`} />
+            loading={d.summary.isLoading} failed={d.summary.isError}
+            figure={em && (em.action_required > 0 ? `${em.action_required} need action` : 'None flagged')}
+            line={em && `Flagged for action in the last ${em.window_days} days`}
+            age={synced && (synced.email ? `Email synced ${ago(synced.email)}` : 'Email not connected or not yet synced')} />
           <Tile name="Calls" onClick={() => navigate('/app/comms?tab=calls')}
             loading={d.calls.isLoading} failed={d.calls.isError}
             figure={d.calls.data && `${d.calls.data.callsToday} today`}
@@ -129,11 +147,28 @@ export default function DashboardPage() {
 
       <section className="home-section" aria-label="Tasks">
         <div className="home-section-head">
-          <h2>Tasks</h2>
+          <h2>Your tasks</h2>
           <button type="button" className="home-link" onClick={() => setShowTasks(!showTasks)}>
-            {showTasks ? 'Hide' : 'Show all'}
+            {showTasks ? 'Hide the full list' : 'Manage all tasks'}
           </button>
         </div>
+        {d.tasks.isError ? (
+          <div className="home-empty">Your tasks couldn't be loaded just now.</div>
+        ) : d.tasks.data && d.tasks.data.upcoming.length === 0 ? (
+          <div className="home-empty">No open tasks.</div>
+        ) : d.tasks.data ? (
+          <ul className="home-tasks">
+            {d.tasks.data.upcoming.map(t => (
+              <li key={t.id}>
+                <span className={`home-task-priority home-task-${t.priority || 'medium'}`} aria-hidden="true" />
+                <span className="home-task-title">{t.title}</span>
+                {t.source === 'assistant' && <span className="home-task-chip">Added by Aria</span>}
+                {t.due_at && <span className="home-task-due">
+                  {new Date(t.due_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</span>}
+              </li>
+            ))}
+          </ul>
+        ) : null}
         {showTasks && <TasksPanel businessId={businessId} />}
       </section>
     </div>
