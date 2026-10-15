@@ -722,6 +722,14 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     """
     await websocket.accept()
     _logger.info("Client WebSocket connected")
+    import time as _time
+    # NS-V2: how long each start-up stage takes, in one log line, so a slow
+    # Talk button can be traced to its cause rather than guessed at.
+    _t0 = _time.monotonic()
+    _timing = {}
+
+    def _lap(stage):
+        _timing[stage] = int((_time.monotonic() - _t0) * 1000)
 
     if not aria_voice_enabled():
         # Before auth and before any provider connection: nothing is spent.
@@ -745,6 +753,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         try:
             user = await verify_supabase_token(token)
             user_id = user.id
+            _lap("signed_in")
         except Exception as e:
             _logger.error(f"Token verification failed: {e}")
             await websocket.close(code=4001, reason="Invalid token")
@@ -758,6 +767,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             business = await asyncio.to_thread(get_business_for_user, user_id)
             business_id = str(business.id)
             business_name = business.name
+            _lap("business")
         except Exception as e:
             _logger.error(f"Business lookup failed: {e}")
             await websocket.close(code=4002, reason="No business found")
@@ -769,29 +779,6 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         # dependency — so it had no subscription check at all. A 403 is not
         # available on a WebSocket, so the socket is closed with a policy code
         # and a reason the client can show.
-        try:
-            from db import get_session_context
-            from auth import assert_feature_access
-            from models import Business as _Business
-            from sqlmodel import select as _select
-            def _gate():
-                with get_session_context() as _session:
-                    _fresh = _session.exec(
-                        _select(_Business).where(_Business.id == business.id)).first()
-                    assert_feature_access(_fresh, "aria_voice")
-            await asyncio.to_thread(_gate)
-        except HTTPException as exc:
-            _logger.info("realtime voice refused for business %s: %s",
-                         business_id, exc.detail)
-            await websocket.close(code=4003, reason=str(exc.detail)[:110])
-            return
-        except Exception as e:
-            # Fail CLOSED: if the gate cannot be evaluated we do not open a
-            # metered OpenAI connection.
-            _logger.error(f"Access check failed, refusing voice session: {e}")
-            await websocket.close(code=4003, reason="Access check failed")
-            return
-        
         user_name = getattr(user, 'user_metadata', {}).get('full_name', 'there') if hasattr(user, 'user_metadata') else 'there'
         
         _logger.info(f"Authenticated user {user_id} for business {business_name}")
@@ -804,29 +791,6 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         await websocket.close(code=4001, reason="Auth failed")
         return
     
-    # NS-V1: the meter decides before anything is spent. Mike's V3: if it
-    # cannot be read, the session is refused (fail closed) — the owner can
-    # still type to Aria, and no customer is affected.
-    def _admit():
-        from services import metering as _metering
-        from db import get_session_context as _meter_session
-        with _meter_session() as _ms:
-            _mb = _metering.load_business(_ms, business_id)
-            return _metering.admit_call(_ms, _mb)
-    try:
-        admitted, limit_state = await asyncio.to_thread(_admit)
-    except Exception as e:
-        _logger.error("Voice usage check failed for %s, refusing: %s", business_id, e)
-        await websocket.close(code=4003, reason="Voice usage could not be checked")
-        return
-    if not admitted:
-        reason = ("This month's spending cap for extra minutes has been reached"
-                  if limit_state == "spend_cap_reached"
-                  else "This month's voice minutes are used up")
-        await websocket.close(code=4003, reason=reason)
-        return
-
-    import time as _time
     import uuid as _uuid
     business_tz = getattr(business, "timezone", None) or "Europe/London"
     owner_name = None if user_name == "there" else user_name
@@ -851,6 +815,59 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             _b = _m.load_business(_s, business_id)
             if _b is not None:
                 _m.voice_session_heartbeat(_s, _b, session_id, seconds, period=period)
+
+    # NS-V2: the plan check, the minutes check and the first heartbeat in ONE
+    # worker thread and ONE database session (they were three trips, each
+    # opening its own). The order and every refusal are unchanged:
+    # DECISION 3 / BH-006 — no AI for a business that is not paying (fail
+    # CLOSED if the gate cannot be evaluated); NS-V1 / Mike's V3 — the meter
+    # decides before anything is spent, and no durable heartbeat means no
+    # session. Nothing here contacts OpenAI.
+    def _checks():
+        from db import get_session_context
+        from auth import assert_feature_access
+        from models import Business as _Business
+        from sqlmodel import select as _select
+        from services import metering as _m
+        with get_session_context() as _session:
+            try:
+                _fresh = _session.exec(
+                    _select(_Business).where(_Business.id == business.id)).first()
+                assert_feature_access(_fresh, "aria_voice")
+            except HTTPException as exc:
+                return ("refused", str(exc.detail)[:110])
+            except Exception as e:
+                _logger.error(f"Access check failed, refusing voice session: {e}")
+                return ("refused", "Access check failed")
+            try:
+                _mb = _m.load_business(_session, business_id)
+                admitted, limit_state = _m.admit_call(_session, _mb)
+            except Exception as e:
+                _logger.error("Voice usage check failed for %s, refusing: %s", business_id, e)
+                return ("refused", "Voice usage could not be checked")
+            if not admitted:
+                return ("refused", "This month's spending cap for extra minutes has been reached"
+                        if limit_state == "spend_cap_reached"
+                        else "This month's voice minutes are used up")
+            try:
+                if _mb is not None:
+                    _m.voice_session_heartbeat(_session, _mb, session_id, 0, period=_period)
+            except Exception as e:
+                _logger.error("Voice heartbeat could not be written for %s, refusing: %s",
+                              business_id, e)
+                return ("refused", "Voice usage could not be recorded")
+        return ("ok", None)
+
+    try:
+        verdict, reason = await asyncio.to_thread(_checks)
+    except Exception as e:
+        _logger.error("Voice start-up checks failed for %s, refusing: %s", business_id, e)
+        verdict, reason = "refused", "Access check failed"
+    _lap("checks")
+    if verdict != "ok":
+        _logger.info("realtime voice refused for business %s: %s", business_id, reason)
+        await websocket.close(code=4003, reason=reason)
+        return
 
     async def _beat_forever(period):
         """The durable heartbeat, every VOICE_HEARTBEAT_SECONDS after the first.
@@ -891,15 +908,8 @@ async def realtime_voice_endpoint(websocket: WebSocket):
 
         # Billing starts as the provider connection opens; the cap covers
         # setup too (BH-012's pattern), and stops the handler itself.
-        # The first beat must land BEFORE the provider connection opens: no
-        # durable record, no session (Mike's V3; Codex review 2, finding 2).
-        try:
-            await asyncio.to_thread(_beat, 0, _period)
-        except Exception as e:
-            _logger.error("Voice heartbeat could not be written for %s, refusing: %s",
-                          business_id, e)
-            await websocket.close(code=4003, reason="Voice usage could not be recorded")
-            return
+        # The first beat has landed (in _checks) BEFORE the provider
+        # connection opens: no durable record, no session (Mike's V3).
         started = _time.monotonic()
         _LIVE_SESSIONS.add(session_id)
         watchdog = asyncio.create_task(_end_at_cap())
@@ -910,6 +920,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             ping_interval=20,
             ping_timeout=20,
         )
+        _lap("openai")
         _logger.info("Connected to OpenAI Realtime API (GA)")
 
         await openai_ws.send(json.dumps(build_session_config(
@@ -918,6 +929,8 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         _logger.info(f"Session configured with quiet_mode={quiet_mode}")
 
         await websocket.send_json({"type": "ready"})
+        _lap("ready")
+        _logger.info("[Voice timing] %s", " ".join(f"{k}={v}ms" for k, v in _timing.items()))
 
         async def forward_to_openai():
             """Client -> OpenAI: raw audio, and `config` (quiet mode) only."""

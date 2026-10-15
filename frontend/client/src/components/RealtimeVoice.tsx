@@ -5,6 +5,7 @@ import {
   Typography,
   Button,
   Fade,
+  CircularProgress,
 } from '@mui/material';
 import {
   Mic as MicIcon,
@@ -42,6 +43,27 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
   const isMutedRef = useRef(false);
   // Why the session ended, kept so the normal close doesn't overwrite it.
   const endReasonRef = useRef<string | null>(null);
+  // NS-V2: start-up feedback. The tap is acknowledged at once, repeat taps
+  // are ignored, and the microphone is readied WHILE the server prepares.
+  const [connecting, setConnecting] = useState(false);
+  const progressTimersRef = useRef<number[]>([]);
+  const micPromiseRef = useRef<Promise<MediaStream> | null>(null);
+  // Set on unmount: a start-up still in flight stops instead of opening a
+  // socket for a page that is gone (Codex NS-V2 review).
+  const unmountedRef = useRef(false);
+
+  const clearProgress = () => {
+    progressTimersRef.current.forEach((t) => window.clearTimeout(t));
+    progressTimersRef.current = [];
+  };
+
+  const releaseEarlyMic = () => {
+    // A microphone readied for a session that never started is released.
+    micPromiseRef.current?.then((stream) => {
+      if (mediaStreamRef.current !== stream) stream.getTracks().forEach((t) => t.stop());
+    }).catch(() => undefined);
+    micPromiseRef.current = null;
+  };
 
   // Keep muted ref in sync with state
   useEffect(() => {
@@ -178,12 +200,35 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
 
   // Start the realtime session
   const startSession = useCallback(async () => {
+    if (connecting || (wsRef.current && wsRef.current.readyState <= WebSocket.OPEN)) {
+      return;  // already connecting or connected: ignore repeat taps
+    }
     endReasonRef.current = null;  // a new chat starts with no end reason
+    setConnecting(true);
+    setStatus('Connecting to Aria…');
+    clearProgress();
+    progressTimersRef.current = [
+      window.setTimeout(() => setStatus('Checking your account…'), 2500),
+      window.setTimeout(() => setStatus('Almost ready…'), 6000),
+    ];
     try {
-      setStatus('Connecting...');
+      // Ready the microphone and the audio engine now, in parallel with the
+      // server, and inside the tap (Safari only allows audio started by one).
+      // Inside the try: a failure here releases everything (Codex review).
+      micPromiseRef.current = navigator.mediaDevices.getUserMedia({
+        audio: { sampleRate: 24000, channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+      micPromiseRef.current.catch(() => undefined);
+      if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+        audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+      }
       
       // Get access token
       const token = await getAccessToken();
+      if (unmountedRef.current) {
+        releaseEarlyMic();
+        return;  // the page was left while starting: open nothing
+      }
       
       // Create WebSocket connection
       const wsUrl = config.apiBaseUrl.replace('https://', 'wss://').replace('http://', 'ws://');
@@ -204,6 +249,9 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
       };
       
       ws.onclose = (event) => {
+        setConnecting(false);
+        clearProgress();
+        releaseEarlyMic();
         setIsConnected(false);
         // 4010 = voice switched off server-side (NS-A2); say why, not just "Disconnected".
         // 4003 = refused before connecting (plan, voice minutes used up, or
@@ -221,6 +269,8 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
         const data = JSON.parse(event.data);
         if (data.type === 'ready') {
           ws.removeEventListener('message', onReadyHandler);
+          clearProgress();
+          setConnecting(false);
           setIsConnected(true);
           await startAudioCapture();
         }
@@ -229,25 +279,38 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
       
     } catch (error) {
       console.error('Failed to start session:', error);
+      clearProgress();
+      releaseEarlyMic();
+      setConnecting(false);
       setStatus('Failed to connect');
     }
-  }, [handleMessage]);
+  }, [handleMessage, connecting, quietMode]);
 
   // Start capturing audio from microphone
   const startAudioCapture = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          sampleRate: 24000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-        } 
-      });
+      // Readied at the tap (NS-V2); fall back to asking now if not.
+      const stream = await (micPromiseRef.current ?? navigator.mediaDevices.getUserMedia({
+        audio: { sampleRate: 24000, channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      }));
+      micPromiseRef.current = null;
+      if (unmountedRef.current) {
+        // The page was left while permission was pending: release, adopt nothing.
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       mediaStreamRef.current = stream;
-      
-      const audioContext = new AudioContext({ sampleRate: 24000 });
+
+      const audioContext = audioContextRef.current && audioContextRef.current.state !== 'closed'
+        ? audioContextRef.current
+        : new AudioContext({ sampleRate: 24000 });
       audioContextRef.current = audioContext;
+      if (audioContext.state === 'suspended') await audioContext.resume();
+      if (unmountedRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        mediaStreamRef.current = null;
+        return;
+      }
       
       const source = audioContext.createMediaStreamSource(stream);
       const processor = audioContext.createScriptProcessor(4096, 1, 1);
@@ -305,7 +368,11 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
 
   // Cleanup on unmount
   useEffect(() => {
+    unmountedRef.current = false;
     return () => {
+      unmountedRef.current = true;
+      clearProgress();
+      releaseEarlyMic();
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -445,6 +512,8 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
       {!isConnected ? (
         <IconButton
           onClick={startSession}
+          disabled={connecting}
+          aria-label={connecting ? 'Connecting to Aria' : 'Start talking to Aria'}
           sx={{
             width: 80,
             height: 80,
@@ -456,10 +525,17 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
               boxShadow: '0 12px 40px rgba(99, 102, 241, 0.5)',
               transform: 'scale(1.05)',
             },
+            '&.Mui-disabled': {
+              background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+              color: 'white',
+              opacity: 0.9,
+            },
             transition: 'all 0.3s ease'
           }}
         >
-          <MicIcon sx={{ fontSize: 36 }} />
+          {connecting
+            ? <CircularProgress size={36} sx={{ color: 'white' }} />
+            : <MicIcon sx={{ fontSize: 36 }} />}
         </IconButton>
       ) : (
         <Button
