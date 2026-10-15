@@ -1,28 +1,26 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
-import { Box, CircularProgress, IconButton, Typography } from '@mui/material';
-import { Settings as SettingsIcon } from '@mui/icons-material';
+import { Box, CircularProgress, Typography, useMediaQuery } from '@mui/material';
+import { Capacitor } from '@capacitor/core';
 import { useAuth } from '@/contexts/AuthContext';
 import { useMe } from '@/hooks/useMe';
-import { useIsMobile } from '@/hooks/use-mobile';
-import { resolveLogoSrc } from '@/lib/supabase';
 import { isFeatureEnabled } from '@/lib/entitlements';
-import Sidebar from './Sidebar';
+import AriaShellHeader from './AriaShellHeader';
 import MobileBottomNav from './MobileBottomNav';
 import SupportHelpButton from './SupportHelpButton';
 import SupportPanel from './SupportPanel';
-import ThemeToggle from '@/components/ThemeToggle';
 import SectionErrorBoundary from './SectionErrorBoundary';
 import SubscriptionBanner from './SubscriptionBanner';
 
-type Section = 'dashboard' | 'comms' | 'finance' | 'quotes' | 'ai';
+type Section = 'dashboard' | 'comms' | 'finance' | 'quotes' | 'ai' | '';
 
 export default function AppShell() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, session, signOut, loading: authLoading } = useAuth();
   const { data: me } = useMe();
-  const isMobile = useIsMobile();
+  const narrowScreen = useMediaQuery('(max-width: 768px)');
+  const isMobile = narrowScreen || Capacitor.isNativePlatform();
   const [supportPanelOpen, setSupportPanelOpen] = useState(false);
 
   // Canonical key, resolved through the plan. `quoting_enabled` was renamed
@@ -32,11 +30,12 @@ export default function AppShell() {
 
   const activeSection: Section = useMemo(() => {
     const path = location.pathname;
-    if (path.startsWith('/app/comms')) return 'comms';
-    if (path.startsWith('/app/finance')) return 'finance';
+    if (['/app/comms', '/app/inbox', '/app/email/outbox'].some(prefix => path.startsWith(prefix))) return 'comms';
+    if (['/app/finance', '/app/accounting'].some(prefix => path.startsWith(prefix))) return 'finance';
     if (path.startsWith('/app/quotes')) return 'quotes';
-    if (path.startsWith('/app/ai')) return 'ai';
-    return 'dashboard';
+    if (['/app/ai', '/app/board-meeting', '/app/briefings'].some(prefix => path.startsWith(prefix))) return 'ai';
+    if (['/app/dashboard', '/app/assistant/chat'].some(prefix => path.startsWith(prefix))) return 'dashboard';
+    return '';
   }, [location.pathname]);
 
   useEffect(() => {
@@ -57,45 +56,17 @@ export default function AppShell() {
   const handleNavigate = (section: string) => navigate(`/app/${section}`);
 
   return (
-    <div className="app-shell">
-      {!isMobile && (
-        <Sidebar
-          activeSection={activeSection}
-          onNavigate={handleNavigate}
-          businessName={me?.name || ''}
-          businessLogo={me?.logo_url}
-          userEmail={user.email || ''}
-          onSignOut={signOut}
-          onHelpClick={() => setSupportPanelOpen(true)}
-          showQuotes={showQuotes}
-        />
-      )}
-
+    <div className={`app-shell aria-shell${isMobile ? ' aria-shell-mobile' : ''}`}>
+      <AriaShellHeader
+        activeSection={activeSection}
+        businessName={me?.name || ''}
+        brandColor={me?.brand_color}
+        isMobile={isMobile}
+        showQuotes={showQuotes}
+        onSignOut={signOut}
+        onHelp={() => setSupportPanelOpen(true)}
+      />
       <main className="app-content">
-        {isMobile && (
-          <div className="mobile-header">
-            <div className="mobile-header-brand">
-              {me?.logo_url && (
-                <img
-                  src={resolveLogoSrc(me.logo_url) || ''}
-                  alt=""
-                  style={{ width: 28, height: 28, borderRadius: 6, objectFit: 'cover' }}
-                />
-              )}
-              <span>{me?.name || 'Business Hero'}</span>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <ThemeToggle />
-              <IconButton
-                onClick={() => navigate('/app/settings/branding')}
-                size="small"
-                sx={{ color: 'text.secondary' }}
-              >
-                <SettingsIcon fontSize="small" />
-              </IconButton>
-            </div>
-          </div>
-        )}
         <SectionErrorBoundary>
           <SubscriptionBanner />
           <Outlet />

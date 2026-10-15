@@ -216,7 +216,9 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                 }}
               />
               <img
-                src="/aria-avatar.png"
+                src="/aria-avatar-160.webp"
+                srcSet="/aria-avatar-160.webp 160w, /aria-avatar-320.webp 320w, /aria-avatar-640.jpg 640w"
+                sizes="120px"
                 alt="Aria"
                 style={{ width: 120, height: 120, borderRadius: '50%', objectFit: 'cover', boxShadow: '0 8px 30px rgba(139,92,246,0.2)', position: 'relative' }}
               />

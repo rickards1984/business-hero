@@ -105,3 +105,63 @@ On `/app/dashboard`:
 
 Each department page gets an Aria summary strip at the top and "Ask Aria
 about this" in context, starting with Invoices.
+
+## Stage 1 builder handoff — Codex, 15 October 2026
+
+**Status:** ready for Claude's review and scope check; working tree only.
+Serves P1/P6 and Phase 1. No new data, figures, provider calls, backend changes,
+commits or pushes. The pre-existing untracked `data.db` was left untouched.
+
+Implemented the dark dot-grid shell, desktop department row, compact Ask Aria
+link, and explicitly labelled Stage 2 hero slot above the unchanged dashboard.
+Mobile (including 768 px and native Capacitor at any width) retains bottom
+navigation; the slim header's Settings menu also exposes theme, board meeting,
+help and sign-out. Existing Quotes entitlement logic, support wiring,
+subscription banner and section error boundary remain in place. Nested routes
+select their department; settings/help do not falsely highlight Aria.
+
+Brand colour applies to the shell's primary board-meeting button, with contrasting
+text. The underline falls back to violet for pale colours (relative luminance
+above 0.75) or less than 3:1 contrast against the band. Reduced motion disables
+the new avatar glow animation. The shell paints the existing body top safe-area
+reservation rather than reserving it twice.
+
+**Every changed/added file:**
+- `docs/NS-B7-TICKET.md` — this handoff.
+- `frontend/client/index.html` — JetBrains Mono in the existing font request.
+- `frontend/client/src/components/AppShell.tsx` — shell integration and route selection.
+- `frontend/client/src/components/AriaShellHeader.tsx` (added) — band, menu, hero slot.
+- `frontend/client/src/components/AriaShellHeader.css` (added) — scoped shell styles.
+- `frontend/client/src/components/RealtimeVoice.tsx` — responsive compressed avatar.
+- `frontend/client/src/pages/AssistantChat.tsx` — responsive compressed avatar.
+- `frontend/client/src/pages/BusinessDashboard.tsx` — both avatar uses compressed.
+- `frontend/client/src/pages/Accounting.tsx` — both avatar uses compressed.
+- `frontend/client/public/aria-avatar-160.webp` (added, approximately 4 KB).
+- `frontend/client/public/aria-avatar-320.webp` (added, approximately 11 KB).
+- `frontend/client/public/aria-avatar-640.jpg` (added, approximately 65 KB).
+
+The original PNG remains. Source search finds no remaining frontend reference
+that loads it. Assets were resized with the existing local Pillow installation;
+no dependency was added.
+
+**Verification:** `./check.sh full`, using this worktree's `.venv/bin/python`:
+5 gates passed, 0 failed, 1 skipped (no ESLint script). Pytest: 1,821 passed,
+33 skipped, 220 subtests passed. All five preflight traps passed.
+`git diff --check` is clean. Preflight's changed-file traps inspect the committed
+branch range, so Claude must also scope-check these uncommitted files.
+
+**Mike's browser checks (not verified by check.sh):**
+- Desktop: open Aria, then each department and nested accounting/inbox/board
+  meeting routes; compare the band, dot grid, monospace labels and active
+  underline with option A. Confirm the home slot and original dashboard below.
+- Click Ask Aria, Hold a board meeting, Help, and all four Settings destinations;
+  confirm Quotes appears only for a business where quoting is enabled.
+- Phone at 375 px and 768 px, plus native iOS/Android: check slim header,
+  bottom navigation, Settings/theme access, safe areas and no horizontal page
+  scroll. Check long business names and landscape too.
+- Switch light/dark: body follows the theme while the band stays dark. Check
+  a custom brand colour and a very pale one; enable reduced motion to confirm
+  the new glow stops. Inspect avatars on chat/voice/accounting for sharpness.
+
+No authenticated browser or native-device run was performed in this sandbox;
+the command gate does not verify visual layout or end-to-end behaviour.
