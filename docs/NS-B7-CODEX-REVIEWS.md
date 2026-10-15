@@ -152,3 +152,41 @@ No edits, commits or pushes; pre-existing untracked `data.db` remains.
 |---|---|
 | 1 & 2 · No single formula fits every writer (P1) | **One authority per kind of row**, from the writer audit. *Synced* rows (`external_id` set; Xero upsert, background sync, scheduler sync) use the provider's `amount_due`, else `amount − amount_paid`; a payment ticked in the app (`paid_amount`) does not override the ledger, and a local "paid" status still excludes the row until the next sync. *Local* rows (manual, CSV, quote) use `amount −` the larger paid column. Their `amount_due` is only ever the creation total, and a CSV update can leave it stale, so it is ignored. Tests: a CSV update to £1,200 is owed in full; a stale local £1,000 payment does not hide the provider's £600; the synced fallback works. Earlier tests now mark their provider rows as synced |
 | 3 · A finished-then-edited draft can reappear (P2) | `ApprovalCard.onChanged` passes the card's new state. The home retains a card only when it has **finished** (status no longer `proposed`); an edit is not retained, so an edited draft simply follows the server's list |
+
+## Review 4 (confirm-only, repair cycle 3 of 3)
+
+| | |
+|---|---|
+| Reviewed commit | `84c12cb` |
+| Session id | `01a141a9-3c5e-7492-a28c-2b37c935e900` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 37,840` |
+| **Verdict** | **ACCEPT-WITH-CHANGES** (backlog only) |
+
+Verbatim:
+
+---
+
+**ACCEPT-WITH-CHANGES** at `84c12cbe8516f7a3c81ef086480d2932070694b7`. **No new P1 found under the stated per-row authority rule.**
+
+- **Finding 1 resolved:** the local CSV-update case reports **£1,200**.
+- **Finding 2 resolved:** the refreshed provider balance reports **£600**, despite the stale £1,000 local payment.
+- **Finding 3 resolved by inspection:** callbacks pass the updated card; proposed edits are not retained. **Not browser-tested.**
+
+The three new money tests fail against the previous formula and pass against this fix. Independent SQLite writer-sequence probes also returned the correct figures through both the aggregate and Aria.
+
+Writer audit covered manual creation, quote conversion, CSV inserts/updates, local status/payment changes, Xero upserts, and background/scheduler provider syncs. These fit the declared rule: provider balances govern externally identified rows; recorded payments govern local rows.
+
+`./check.sh full`: **5 gates passed, 0 failed; 1,844 tests passed, 33 skipped; 220 subtests passed.** Targeted tests: **23 passed**. ESLint skipped; no PostgreSQL or browser execution.
+
+Backlog notes for Mike:
+
+- Add a browser regression: edit a home draft, dismiss it in another tab, then confirm polling removes it permanently.
+- Add writer-level integration tests; committed money regressions seed resulting rows rather than invoke the writers.
+- Explain that local partial payments and CSV total edits do not override synced balances, while local paid/cancelled statuses still suppress them.
+- Resolve the outstanding single-task-list scope decision.
+
+No edits, commits or pushes; pre-existing untracked `data.db` left untouched.
+---
+
+Backlog notes recorded in `docs/BACKLOG.md`. The task-list scope decision is with Mike.
