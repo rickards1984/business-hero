@@ -25,8 +25,6 @@
 .aria-shell-ask { display: inline-flex; align-items: center; gap: 12px; color: #EEEEF6; font-size: 14px; flex-shrink: 0; }
 .aria-shell-avatar { width: 40px; height: 40px; object-fit: cover; border-radius: 50%; box-shadow: 0 0 0 2px #7C6CF6, 0 0 28px 4px rgba(124,108,246,.45); animation: shell-aria-breathe 4.5s ease-in-out infinite; }
 .aria-shell-compact { padding: 24px 0; }
-.aria-shell-hero-slot { display: flex; align-items: center; gap: 32px; min-height: 200px; padding: 28px 0; }
-.aria-shell-hero-slot p { color: #B9BBD0; margin: 10px 0 0; font-size: 16px; }
 .aria-shell-nav { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; border-top: 1px solid #23243A; }
 .aria-shell-nav::-webkit-scrollbar { display: none; }
 .aria-shell-nav a { flex: 0 0 auto; padding: 16px 14px 14px; font-size: 14px; font-weight: 500; color: #A3A5BD; border-bottom: 2px solid transparent; }
@@ -39,3 +37,37 @@
 .aria-shell-theme-option { display: flex; align-items: center; justify-content: space-between; padding: 6px 16px; }
 @keyframes shell-aria-breathe { 0%,100% { box-shadow: 0 0 0 2px #7C6CF6, 0 0 28px 4px rgba(124,108,246,.45); } 50% { box-shadow: 0 0 0 2px #9C8FFF, 0 0 44px 10px rgba(124,108,246,.6); } }
 @media (prefers-reduced-motion: reduce) { .aria-shell-avatar { animation: none; } }
+
+/* ---- NS-B7 Stage 2: the Aria hero ---- */
+.aria-hero { display: flex; flex-wrap: wrap; align-items: center; gap: 32px; }
+.aria-hero-band { padding: 28px 0 32px; }
+.aria-hero-portrait { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.aria-hero-avatar { width: 168px; height: 168px; border-radius: 50%; object-fit: cover; display: block;
+  box-shadow: 0 0 0 2px #7C6CF6, 0 0 28px 4px rgba(124,108,246,.45); animation: shell-aria-breathe 4.5s ease-in-out infinite; }
+.aria-hero-status { display: inline-flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px; letter-spacing: .6px; color: #B9BBD0; }
+.aria-hero-dot { width: 7px; height: 7px; border-radius: 50%; background: #4ADE9B; animation: aria-hero-live 2s ease-in-out infinite; }
+@keyframes aria-hero-live { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+.aria-hero-body { flex: 1 1 460px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.aria-hero-meta { font-size: 13px; color: #A3A5BD; }
+.aria-hero-greeting { margin: 0; font-family: 'Newsreader', Georgia, serif; font-weight: 500; font-size: 42px; letter-spacing: -.5px; color: #FFFFFF; line-height: 1.1; }
+.aria-hero-briefing { margin: 0; font-size: 18px; line-height: 1.6; color: #DADBEA; max-width: 680px; }
+.aria-hero-ask { display: flex; gap: 10px; align-items: center; margin-top: 6px; padding: 8px 8px 8px 18px; border-radius: 16px;
+  background: rgba(255,255,255,.05); border: 1px solid #34355A; box-shadow: 0 0 0 1px rgba(124,108,246,.15), 0 8px 30px rgba(10,10,30,.5); }
+.aria-hero-ask input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #F2F2F8; font-size: 15px; padding: 10px 0; }
+.aria-hero-ask input::placeholder { color: #8E90A8; }
+.aria-hero-send { height: 44px; padding: 0 14px; border-radius: 12px; border: 1px solid #34355A; background: transparent; color: #DADBEA; font-weight: 600; cursor: pointer; }
+.aria-hero-talk { height: 46px; padding: 0 16px; border-radius: 12px; border: 0; background: var(--shell-primary, #6E56F0);
+  color: var(--shell-primary-text, #FFFFFF); display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; cursor: pointer; }
+.aria-hero-send:focus-visible, .aria-hero-talk:focus-visible { outline: 2px solid #8E7CFF; outline-offset: 2px; }
+.aria-hero-visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* Phone: the hero is the first card on the page, still dark, more compact. */
+.aria-hero-card { gap: 16px; align-items: flex-start; margin-bottom: 20px; padding: 20px; border-radius: 20px; color: #EEEEF6;
+  background-color: #0B0C12; background-image: radial-gradient(rgba(150,140,255,0.14) 1px, transparent 1px); background-size: 22px 22px; }
+.aria-hero-card .aria-hero-avatar { width: 72px; height: 72px; }
+.aria-hero-card .aria-hero-body { flex-basis: 100%; }
+.aria-hero-card .aria-hero-greeting { font-size: 28px; }
+.aria-hero-card .aria-hero-briefing { font-size: 15px; }
+.aria-hero-card .aria-hero-ask { padding-left: 14px; }
+.aria-hero-card .aria-hero-send { display: none; }
+@media (prefers-reduced-motion: reduce) { .aria-hero-avatar, .aria-hero-dot { animation: none; } }

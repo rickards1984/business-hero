@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { Divider, IconButton, Menu, MenuItem, Tooltip } from '@mui/material';
 import { HelpOutline, SettingsOutlined } from '@mui/icons-material';
 import ThemeToggle from './ThemeToggle';
+import AriaHero from './AriaHero';
 import './AriaShellHeader.css';
 
 interface Props {
@@ -69,10 +70,7 @@ export default function AriaShellHeader({ activeSection, businessName, brandColo
         </div>
         {!isMobile && <>
           {pathname.replace(/\/$/, '') === '/app/dashboard' ? (
-            <section className="aria-shell-hero-slot" aria-label="Aria home hero — Stage 2 slot">
-              {avatar}
-              <div><span className="aria-shell-micro">Aria home · Stage 2 slot</span><p>Your Aria briefing will appear here.</p></div>
-            </section>
+            <AriaHero variant="band" />
           ) : <div className="aria-shell-compact">{avatar}</div>}
           <nav className="aria-shell-nav" aria-label="Departments">
             {departments.filter(([key]) => key !== 'quotes' || showQuotes).map(([key, label]) => (

@@ -68,6 +68,15 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
       .catch(() => setVoiceStatus({ available: false, message: null }));
   }, []);
   const voiceAvailable = voiceStatus?.available === true;
+  // NS-B7: the home's Talk button opens chat straight into voice (?voice=1),
+  // once the server says voice is available.
+  const voiceRequested = useRef(searchParams.get('voice') === '1');
+  useEffect(() => {
+    if (voiceRequested.current && voiceAvailable) {
+      voiceRequested.current = false;
+      setRealtimeMode(true);
+    }
+  }, [voiceAvailable]);
   const inputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
