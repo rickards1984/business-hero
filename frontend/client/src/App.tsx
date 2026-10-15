@@ -32,9 +32,23 @@ import QuotesPage from '@/pages/QuotesPage';
 import BoardMeeting from '@/pages/BoardMeeting';
 import MeetingDetailView from '@/components/board-meeting/MeetingDetailView';
 
+// Sizes for BOTH themes. The dark theme used to get only the font family,
+// so every heading fell back to MUI's defaults (h1 = 6rem, ~96px) — the
+// "huge font in the board meeting in dark mode" bug (Mike, 15 Oct 2026).
+// Colours stay per theme: the light theme sets its own below; the dark
+// theme's text inherits the palette's light-on-dark colours.
 const SHARED_TYPOGRAPHY = {
   fontFamily: "'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
   button: { fontWeight: 600, fontSize: '0.8125rem' },
+  h1: { fontWeight: 700, fontSize: '1.5rem', lineHeight: 1.25 },
+  h2: { fontWeight: 700, fontSize: '1.25rem', lineHeight: 1.25 },
+  h3: { fontWeight: 600, fontSize: '1.0625rem', lineHeight: 1.25 },
+  h4: { fontWeight: 600, fontSize: '0.9375rem', lineHeight: 1.25 },
+  h5: { fontWeight: 600, fontSize: '0.875rem', lineHeight: 1.25 },
+  h6: { fontWeight: 600, fontSize: '0.8125rem', lineHeight: 1.25 },
+  body1: { fontSize: '0.875rem', lineHeight: 1.5 },
+  body2: { fontSize: '0.8125rem', lineHeight: 1.5 },
+  caption: { fontSize: '0.75rem', lineHeight: 1.5 },
 };
 
 const SHARED_COMPONENTS = {
