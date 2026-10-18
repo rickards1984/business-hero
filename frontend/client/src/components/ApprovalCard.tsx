@@ -61,7 +61,7 @@ function whenText(p: Record<string, any>): string {
   });
 }
 
-export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
+export default function ApprovalCard({ proposal, onChanged }: { proposal: Proposal; onChanged?: (card: Proposal) => void }) {
   const [card, setCard] = useState<Proposal>(proposal);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -78,7 +78,9 @@ export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
   const reconcile = async () => {
     try {
       const r = await apiRequest('GET', `/v1/aria/actions/${card.id}`);
-      setCard(await r.json());
+      const fresh: Proposal = await r.json();
+      setCard(fresh);
+      onChanged?.(fresh);
     } catch {
       // The authoritative state is unknown: switch the controls off rather
       // than fall back to a stale `proposed` (Codex review 2, finding 2).
@@ -91,8 +93,10 @@ export default function ApprovalCard({ proposal }: { proposal: Proposal }) {
     setMessage('');
     try {
       const r = await apiRequest(method, `/v1/aria/actions/${card.id}${path}`, body);
-      setCard(await r.json());
+      const updated: Proposal = await r.json();
+      setCard(updated);
       setEditing(false);
+      onChanged?.(updated);  // the card's NEW state, e.g. for the home's draft count
     } catch (err) {
       const status = err instanceof Error ? Number((err.message.match(/^(\d{3}):/) || [])[1]) : NaN;
       const definite = status >= 400 && status < 500;

@@ -68,6 +68,15 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
       .catch(() => setVoiceStatus({ available: false, message: null }));
   }, []);
   const voiceAvailable = voiceStatus?.available === true;
+  // NS-B7: the home's Talk button opens chat straight into voice (?voice=1),
+  // once the server says voice is available.
+  const voiceRequested = useRef(searchParams.get('voice') === '1');
+  useEffect(() => {
+    if (voiceRequested.current && voiceAvailable) {
+      voiceRequested.current = false;
+      setRealtimeMode(true);
+    }
+  }, [voiceAvailable]);
   const inputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -216,7 +225,9 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                 }}
               />
               <img
-                src="/aria-avatar.png"
+                src="/aria-avatar-160.webp"
+                srcSet="/aria-avatar-160.webp 160w, /aria-avatar-320.webp 320w, /aria-avatar-640.jpg 640w"
+                sizes="120px"
                 alt="Aria"
                 style={{ width: 120, height: 120, borderRadius: '50%', objectFit: 'cover', boxShadow: '0 8px 30px rgba(139,92,246,0.2)', position: 'relative' }}
               />

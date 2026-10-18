@@ -2409,9 +2409,6 @@ def _list_invoices(engine, business_id: str, args: dict) -> dict:
 def _get_invoice_summary(engine, business_id: str, args: dict) -> dict:
     """Get invoice summary statistics."""
     from sqlalchemy import text
-    from datetime import date
-    
-    today = date.today()
     
     with engine.connect() as conn:
         # Get counts and totals by status
@@ -2431,28 +2428,19 @@ def _get_invoice_summary(engine, business_id: str, args: dict) -> dict:
         for row in result.fetchall():
             totals[row[0]] = {"count": int(row[1]), "total": float(row[2])}
         
-        # Get overdue invoices (sent but past due date)
-        overdue_query = text("""
-            SELECT COUNT(*), COALESCE(SUM(amount), 0)
-            FROM invoices
-            WHERE business_id = :business_id 
-              AND due_date < :today 
-              AND status NOT IN ('paid', 'cancelled', 'draft')
-              AND (archived IS NULL OR archived = false)
-        """)
-        overdue_result = conn.execute(overdue_query, {"business_id": business_id, "today": today})
-        overdue_row = overdue_result.fetchone()
         
-        outstanding = (
-            totals.get("sent", {}).get("total", 0) +
-            totals.get("overdue", {}).get("total", 0) +
-            totals.get("unpaid", {}).get("total", 0)
-        )
-        
+        # NS-B7: what is OWED (part-payments deducted, every invoice), from
+        # the same function as the Aria home, so the two cannot disagree.
+        from services.home_summary import receivables, uk_today
+        owed = receivables(conn, business_id, uk_today())
+
         return {
-            "total_outstanding": round(outstanding, 2),
-            "total_overdue": round(float(overdue_row[1]) if overdue_row else 0, 2),
-            "overdue_count": int(overdue_row[0]) if overdue_row else 0,
+            "note": ("total_outstanding and total_overdue are balances still owed "
+                     "(payments deducted); the per-status totals are face value."),
+            "total_outstanding": owed["outstanding_total"],
+            "outstanding_count": owed["outstanding_count"],
+            "total_overdue": owed["overdue_total"],
+            "overdue_count": owed["overdue_count"],
             "unpaid_count": totals.get("unpaid", {}).get("count", 0),
             "unpaid_total": round(totals.get("unpaid", {}).get("total", 0), 2),
             "sent_count": totals.get("sent", {}).get("count", 0),

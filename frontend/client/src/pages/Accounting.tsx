@@ -1324,7 +1324,9 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                   ) : (
                     <Box
                       component="img"
-                      src="/aria-avatar.png"
+                      src="/aria-avatar-160.webp"
+                      srcSet="/aria-avatar-160.webp 160w, /aria-avatar-320.webp 320w, /aria-avatar-640.jpg 640w"
+                      sizes="24px"
                       sx={{ width: 24, height: 24, borderRadius: '50%' }}
                     />
                   )
@@ -1382,7 +1384,9 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
                       <Box
                         component="img"
-                        src="/aria-avatar.png"
+                        src="/aria-avatar-160.webp"
+                        srcSet="/aria-avatar-160.webp 160w, /aria-avatar-320.webp 320w, /aria-avatar-640.jpg 640w"
+                        sizes="48px"
                         sx={{ width: 48, height: 48, borderRadius: '50%', border: '2px solid #6366f1' }}
                       />
                       <Box>
