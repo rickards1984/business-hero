@@ -636,3 +636,76 @@ def test_the_generic_settings_save_locks_the_row_too():
     import inspect
     import main
     assert "with_for_update" in inspect.getsource(main.update_business_settings)
+
+
+# ------------------------------------------- Codex AUTO-1 review 3 additions ---
+
+def test_an_owner_approving_the_same_card_first_does_not_free_the_customer(db, sent, monkeypatch):
+    """Review 3 finding 1: the owner taps the autopilot's own card before the
+    autopilot approves it. The autopilot's approval is refused because the
+    chase has ALREADY GONE — so its tickets must stay used, and the
+    customer's next invoice must not be chased in the same gap."""
+    import services.aria_actions as aa
+    real_approve = aa.approve
+    state = {"done": False}
+
+    def owner_taps_first(session, business_, action_id, user_id, version=None):
+        if not state["done"]:
+            state["done"] = True
+            with Session(db) as s:
+                real_approve(s, business(), action_id, "owner", version)
+        return real_approve(session, business_, action_id, user_id, version)
+    monkeypatch.setattr(aa, "approve", owner_taps_first)
+    invoice(db, days_overdue=30, email="pay@harper.example")
+    invoice(db, days_overdue=20, email="pay@harper.example")
+    run(db, on())
+    assert len(sent) == 1
+
+
+def test_a_lowered_cap_counts_every_slot_already_used_today(db, sent):
+    """Review 3 finding 2: slot 2 was used earlier today (slot 1 given back),
+    then the owner lowers the cap to 1: nothing more may go today."""
+    day = TUE_10.date().isoformat()
+    with db.begin() as c:
+        c.execute(text("INSERT INTO usage_meters (business_id, meter, period, value) "
+                       "VALUES (:b, :m, '2026-10', 1)"), {"b": A, "m": f"autochase-slot:{day}:2"})
+    invoice(db, days_overdue=30, email="new@example.com")
+    assert run(db, on(daily_cap=1))["sent"] == [] and sent == []
+
+
+def test_a_chase_in_progress_across_midnight_still_excludes_the_customer(db, sent, monkeypatch):
+    """Review 3 finding 3: run A reserves just before UK midnight; run B
+    starts just after and tries the same customer's other invoice."""
+    import services.aria_actions as aa
+    real_propose = aa.propose
+    before = datetime(2026, 10, 20, 23, 59, 50, tzinfo=LONDON)
+    after = datetime(2026, 10, 21, 0, 0, 10, tzinfo=LONDON)
+    clock = {"t": before}
+    monkeypatch.setattr(automations(), "now", lambda: clock["t"].astimezone(timezone.utc))
+    state = {"done": False}
+
+    def rival_after_midnight(*a, **k):
+        if not state["done"] and k.get("automation"):
+            state["done"] = True
+            clock["t"] = after
+            run(db, on(start_hour=0, end_hour=24, weekdays_only=False))
+            clock["t"] = before
+        return real_propose(*a, **k)
+    monkeypatch.setattr(aa, "propose", rival_after_midnight)
+    invoice(db, days_overdue=30, email="pay@harper.example")
+    invoice(db, days_overdue=20, email="pay@harper.example")
+    run(db, on(start_hour=0, end_hour=24, weekdays_only=False))
+    assert len(sent) == 1
+
+
+def test_an_abandoned_in_progress_ticket_frees_itself(db, sent):
+    """A run that crashed mid-chase must not block a customer for ever: an
+    in-progress ticket over an hour old, with nothing sent or unresolved for
+    the customer, is reclaimed."""
+    stale = (TUE_10 - timedelta(hours=2)).astimezone(timezone.utc).isoformat()
+    with db.begin() as c:
+        c.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) "
+                       "VALUES (:b, 'autochase-inflight:pay@harper.example', '2000-01', 1, :u)"),
+                  {"b": A, "u": stale})
+    invoice(db, days_overdue=30, email="pay@harper.example")
+    assert len(run(db, on())["sent"]) == 1

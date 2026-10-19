@@ -91,3 +91,31 @@ Every finding taken. Tests first: 7 new cases. Mutation-checked: removing the re
 | 2 · Generic save restores revoked permission (P1) | `PUT /v1/business/settings` now selects the row `with_for_update()`, the same row lock as `/v1/automations`. It reads `automations` only under the lock, so it cannot write back a stale `enabled`. Tested by source; row locks cannot be exercised on SQLite |
 | 3 · Refreshed rules not applied to the current send (P1) | The loop now refreshes **first**, then decides due date, spacing, pause, unresolved and waiting with the refreshed rules. Records-based spacing reads a fixed 31-day window, so a widened gap is honoured. Tested: `first_after_days` 7→14, `every_days` 7→14 and `customer_gap_days` 7→14 mid-run each stop the send in hand |
 | 4 · Stale business on refresh (P2) | The scheduler's refresh calls `session.expire_all()` before re-loading, so `is_active` and the plan are re-read from the database. Tested by source |
+
+## Review 3 (repair cycle 2 of 3)
+
+| | |
+|---|---|
+| Reviewed commit | `424a0e7` |
+| Session id | `01a15580-ad9b-7cb1-b417-1e4f6bf2411e` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 58,399` |
+| **Verdict** | **REQUEST-CHANGES** |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** — at `424a0e7`. Three reproduced P1 findings concern North Star P4 and correctness.
+
+1. **P1 — Tickets are returned after another caller has sent the chase.** [automations.py:311](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:311). An owner approves the newly proposed card before autopilot calls `approve()`. Autopilot receives “already done”, releases both tickets and continues without recording that customer in `chased_now`. Its customer-history snapshot predates the send. **Reproduced: the next invoice for the same customer was automatically chased, producing two emails within the seven-day gap.** An `ActionRefused` does not establish that nothing was sent.
+
+2. **P1 — Lowering the daily cap can still permit additional sends beyond it.** [automations.py:186](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:186). With cap 2, run A holds slot 1 while run B sends using slot 2. A’s invoice becomes paid, so its proposal is refused and slot 1 returned. The owner lowers the cap to 1. A subsequent reservation takes free slot 1 without counting the existing send in slot 2. **Reproduced using the actual paid-invoice refusal: two automatic emails, with the second sent after the cap became 1.**
+
+3. **P1 — Customer reservations do not protect spacing across UK midnight.** [automations.py:179](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:179), [automations.py:233](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:233). With the supported all-day window, run A reserves and proposes just before midnight. Before A approves, run B starts just after midnight and chases another invoice for the same customer using a different day ticket. A then sends from its earlier snapshot. **Reproduced across 31 October–1 November: two automatic emails to the same customer despite the seven-day gap.** A one-second clock difference straddling midnight permits the same ordering.
+
+Review-2 status: same-day interleaving, tied timestamps and one-second skew now preserve both customer exclusion and cap 1. Refreshed spacing rules pass. The identity-map reproduction confirms `expire_all()` reloads suspension correctly. Both settings writers now lock the same row; PostgreSQL compilation produces `FOR UPDATE`, but **actual PostgreSQL execution and lock concurrency remain unverified**.
+
+Ticket rows did not affect metered minutes in the probe; usage reads named meters.
+
+Verification: `./check.sh full` passed — **1,898 passed, 33 skipped**. AUTO-1: **54 passed**. Provider calls were mocked; no real emails sent. No source edits, commits or pushes; worktree clean.
