@@ -252,3 +252,26 @@ Checked against AUTO-1 as approved by Codex (review 6, commit `45b3466` on `tick
 | Migration queue | **Agreed.** One queue; OUT-3 takes the next number after 035 unless AUTO-2 needs one first, which I will flag. |
 
 AUTO-1 is approved by Codex and goes to Mike as a pull request. Autopilot stays off until he switches it on.
+
+## Independent review — Claude Code, 19 October 2026
+
+**Verdict: ACCEPT-WITH-CHANGES.** The contracts in §§2–4 are sound and match AUTO-1 as built, with the gaps recorded in the AUTO owner's agreement above. I spot-checked the cited code: `assistant_tools.py:1458–1463`, `quoting_api.py:867–872`, `metering_notify.py:73–76`, `aria_actions.py:469–477`, `google_gmail.py:88` and `email/router.py:324` all say what this document says. There is no shared model router in `backend/` (confirmed), so OUT-10's prerequisite stands. The changes below are to how OUT-3 is delivered, not to the contract.
+
+### Required before OUT-3 starts
+
+1. **Split the schema by delivery ticket.** §5 proposes 24 new tables plus keys on four live tables. As one production migration, that is one very large RED runbook for Mike, with a rollback nobody can rehearse meaningfully. Each ticket should instead bring the tables it uses:
+   - **OUT-3:** brands, settings, mailboxes, prospects, evidence, compliance, campaigns, batch reviews, sequence steps, enrolments, messages, replies, suppressions, unsubscribe tokens, dispatch jobs and daily usage, plus the `UNIQUE(business_id,id)` keys on the existing tables.
+   - **OUT-5:** import runs and items.
+   - **OUT-7:** knowledge and reply slots.
+   - **OUT-10:** integrations, research jobs and provider usage.
+
+   Codex may move a table between these groups if it can justify the move in the ticket.
+2. **The monthly allowance has one source.** The 200/500 sends and researched-prospect allowances are plan entitlement, so they are counted and enforced through `services/metering` and `usage_meters`, as every other allowance is (DECISION 3, ENTITLEMENT-SPEC PART E). `outreach_usage_events` is the per-operation ledger beneath those meters, and `outreach_daily_usage` handles the mailbox and day caps. Neither becomes a second allowance counter.
+3. **The live default-account clean-up gets its own runbook step, with an audit query first.** Before the partial unique index on `email_accounts.is_default` can be added, Mike runs a read-only count of businesses with zero or several defaults. Where it is ambiguous, Mike chooses; nothing is decided by recency (§5 already says this).
+4. **RLS and constraint tests come first, on Postgres.** Use `scripts/rls-local.sh`, which matches production byte for byte. Mike approves the tests before any SQL is written (AGENTS.md, RED tier).
+
+### Backlog, non-blocking
+
+- **30-day grant expiry (OUT-11).** Pair it with a briefing reminder three days before a grant lapses, so a running campaign doesn't silently stop. Mike to confirm at OUT-11.
+- **AUTO-2 owns complete inbox sync.** That means Gmail `history` / Graph delta with a watermark, replacing the latest-50 read. I'm taking this into AUTO-2's design now, so OUT-7 consumes it rather than building its own.
+- **Admin panel.** The admin panel must be able to grant the outreach add-on and the standalone outreach product, and show a business's mailboxes. This is recorded for the final admin-panel review before onboarding (Mike, 19 Oct).
