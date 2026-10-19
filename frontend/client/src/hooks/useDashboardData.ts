@@ -143,13 +143,17 @@ export function briefingLines(d: Dashboard): string[] {
     lines.push(`In the last week I chased ${plural(auto.length, 'invoice', 'invoices')} for you on autopilot.`);
   }
   const replies = d.summary.data?.replies ?? [];
+  // Codex AUTO-2 review 1: count the customers, not their emails.
+  const repliedCustomers = new Set(replies.map(r => r.customer_email)).size;
   if (replies.length === 1) {
     const r = replies[0];
     const what = r.category === 'paid' ? 'says they have paid' : 'replied about';
     const which = r.invoice_numbers.length ? r.invoice_numbers.join(', ') : 'an invoice';
     lines.push(`${r.customer_email} ${what} ${which}. I've paused chasing them until you decide, below.`);
   } else if (replies.length > 1) {
-    lines.push(`${plural(replies.length, 'customer has', 'customers have')} replied to chases. I've paused chasing them until you decide, below.`);
+    lines.push(repliedCustomers === 1
+      ? `${replies[0].customer_email} has replied ${replies.length} times to chases. I've paused chasing them until you decide, below.`
+      : `${plural(repliedCustomers, 'customer has', 'customers have')} replied to chases. I've paused chasing them until you decide, below.`);
   }
   const em = d.summary.data?.emails;
   if (em && em.action_required > 0) {

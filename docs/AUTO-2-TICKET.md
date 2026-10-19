@@ -37,13 +37,29 @@ Matching is on the sender's exact address, ignoring case. These are never treate
    - **Stop chasing this invoice.** The invoice is never chased automatically again. The owner can still chase it by hand.
 5. **"Says they've paid" never marks the invoice paid.** Money stays with the owner and the accounts software: payment is recorded in Xero, or with Mark as paid, as today.
 
-### Aria must have read the inbox before chasing
+### Aria searches for replies right before every chase
 
-An automatic chase goes only if the sending mailbox's inbox has synced successfully within the last 3 hours, **and** that sync was complete.
-- **Microsoft** syncs by delta, which is complete.
-- **Gmail** today reads only the latest 50 messages. A Gmail sync counts as complete only if it reached a message it had already stored, and no message failed to fetch. Otherwise there may be unseen replies, so Aria doesn't chase. The reason is shown as "inbox_not_fresh".
+*Changed after Codex review 1 (see `docs/AUTO-2-CODEX-REVIEWS.md`). The first
+design inferred "nothing was missed" from the general inbox sync; Codex showed
+five ways that inference could fail.*
 
-Each hourly run syncs the inbox, then reads replies, then chases.
+Aria now asks the mailboxes directly. Immediately before each automatic chase,
+she searches for mail from that customer since their earliest chase in the
+window. The search uses Gmail's own search, or a Microsoft Graph filter, over
+the whole mailbox: every folder and label, not just the newest 50 messages.
+
+**Which mailboxes are searched:**
+- every mailbox that customer's chases went from;
+- every connected mailbox, if a chase didn't record its mailbox (chases from before AUTO-2);
+- the mailbox this chase will go from.
+
+**If a search fails, the chase doesn't go.** That covers an error, too many results to be sure, or a message that can't be read. The reason shown is "reply_check_failed".
+
+**Approval checks again.** As a final guard, approving an automatic chase refuses it if a pause was recorded in the meantime.
+
+**Every hour, all chased customers' mailboxes are searched too.** This happens whether or not the autopilot is on, so the owner is told about replies to cards they approved themselves.
+
+**Not yet verified live:** Microsoft Graph search hasn't been run against a real Microsoft mailbox. Its results are re-checked, and any error stops chasing, so the failure mode is "doesn't chase", never "chases over a reply".
 
 ### The right mailbox
 
@@ -69,9 +85,8 @@ Outreach's OUT-3 then takes 037.
 
 ## Not in this ticket
 
-- Full Gmail history sync (the history API with a watermark). That comes before outreach replies (OUT-7), as AUTO-2b. Until then, the completeness rule above means a busy Gmail inbox makes Aria wait rather than guess.
+- Full Gmail history sync for the general inbox. The reply search above no longer depends on it; OUT-7 decides whether outreach needs it.
 - Replying to the customer. Aria flags; the owner answers.
-- Replies that land outside the inbox (filters, other folders).
 
 ## Tests
 
@@ -84,3 +99,4 @@ Outreach's OUT-3 then takes 037.
 1. With chasing on, send yourself a chase, then reply "I paid this yesterday". Within about an hour, the home page shows the reply card labelled *says they've paid*. No further chase goes to that address.
 2. Press **Stop chasing this invoice**. The card closes, and the invoice is not chased again.
 3. Repeat with a reply that asks a question, and press **Resume chasing**. Chasing continues after the 7-day gap.
+4. (Codex review 1) Chase from mailbox A. Make mailbox B the default, then reply to the chase in A. Chasing stays paused.

@@ -138,12 +138,12 @@ def invoice(eng, *, bid=A, days_overdue=10, stage=0, last_chased_days_ago=None,
 
 
 @pytest.fixture(autouse=True)
-def inbox_read_recently_enough(monkeypatch):
-    """Several tests here move the clock by days. Whether the inbox was read
-    recently enough is AUTO-2's subject, tested in test_chase_replies.py; here
-    the seeded read counts as fresh whatever the clock says."""
+def mailboxes_hold_no_replies(monkeypatch):
+    """AUTO-2 searches the mailboxes for replies before every automatic
+    chase; that is tested in test_chase_replies.py. Here the search finds
+    nothing, so AUTO-1's rules are what decide."""
     from services import chase_replies
-    monkeypatch.setattr(chase_replies, "FRESH_WITHIN", timedelta(days=3650))
+    monkeypatch.setattr(chase_replies, "lookup_with_provider", lambda *a, **k: [])
 
 
 @pytest.fixture

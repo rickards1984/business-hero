@@ -303,6 +303,13 @@ def propose(session, business, user_id, action_type: str, args: dict, *,
                          "error": None, "result": None, "created_at": moment.isoformat()}}
 
 
+def _paused_by_reply(session, business, payload) -> bool:
+    from services.chase_replies import blocked
+    replied, stopped = blocked(session, business)
+    to = str(payload.get("to") or "").strip().lower()
+    return to in replied or str(payload.get("invoice_id")) in stopped
+
+
 def _still_owed(session, business_id, invoice_id) -> bool:
     from services.home_summary import invoice_owed
     return invoice_owed(session, str(business_id), str(invoice_id))
@@ -417,6 +424,11 @@ def approve(session, business, action_id: str, user_id, version: Optional[str] =
             reason = "The invoice no longer exists; nothing was sent."
         elif (invoice[5] or "").lower() == "paid":
             reason = "Invoice already paid; nothing was sent."
+        elif payload.get("automation") and _paused_by_reply(session, business, payload):
+            # AUTO-2 (Codex review 1, P1 4): an automatic chase never goes to a
+            # customer whose reply is waiting for the owner, however late the
+            # pause was recorded. A card the owner taps is their decision.
+            reason = "The customer has replied; automatic chasing is paused. Nothing was sent."
         elif not _still_owed(session, business.id, payload["invoice_id"]):
             # The FULL receivables rule, not only a literal "paid" status: a
             # recorded payment, a synced zero balance or a cancellation since

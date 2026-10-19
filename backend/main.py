@@ -2675,7 +2675,6 @@ def _run_email_sync_for_business(business_id: str, session: Session) -> EmailSyn
         session.commit()
         session.refresh(sync_state)
 
-    started_at = datetime.utcnow()
     result = provider.sync_inbox_changes(account=account, cursor=sync_state.cursor or {})
     message_count = 0
 
@@ -2728,8 +2727,7 @@ def _run_email_sync_for_business(business_id: str, session: Session) -> EmailSyn
             session.add(record)
         message_count += 1
 
-    from services.chase_replies import completed_cursor  # AUTO-2: honest completeness
-    sync_state.cursor = completed_cursor(session, account, result, started_at)
+    sync_state.cursor = result.cursor or {}
     sync_state.last_synced_at = datetime.utcnow()
     sync_state.last_error = None
     session.add(sync_state)

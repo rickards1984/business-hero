@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,9 +36,6 @@ class ProviderMessage:
 class ProviderSyncResult:
     messages: List[ProviderMessage]
     cursor: Dict[str, Any]
-    # Every message id the provider listed, fetched or not (Gmail). Lets the
-    # sync tell whether anything can have been missed (AUTO-2).
-    listed_ids: Optional[List[str]] = None
 
 
 class BaseEmailProvider(ABC):
@@ -71,3 +69,30 @@ class BaseEmailProvider(ABC):
         provider_message_id: str,
     ) -> Optional[ProviderMessage]:
         raise NotImplementedError
+
+    def search_from(
+        self,
+        *,
+        account: Any,
+        senders: List[str],
+        since: datetime,
+    ) -> List[ProviderMessage]:
+        """Every message from any of `senders` received since `since`, from the
+        WHOLE mailbox (AUTO-2: replies to chases). Must be complete or raise:
+        a partial answer would let a chase go over an unseen reply."""
+        raise NotImplementedError(f"{type(self).__name__} cannot search a mailbox")
+
+
+SEARCHABLE_ADDRESS = re.compile(r"^[A-Za-z0-9._%+'\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+
+def checked_senders(senders: List[str]) -> List[str]:
+    """Addresses safe to put in a provider search query, or raise."""
+    out = []
+    for s in senders:
+        s = str(s or "").strip().lower()
+        if not SEARCHABLE_ADDRESS.match(s):
+            raise ValueError("an address could not be searched safely")
+        out.append(s)
+    return out
+

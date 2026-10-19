@@ -101,7 +101,8 @@ def db():
         c.execute(text("""CREATE TABLE email_messages (id TEXT PRIMARY KEY, business_id TEXT NOT NULL,
             email_account_id TEXT NOT NULL, provider_message_id TEXT NOT NULL,
             provider_thread_id TEXT, folder TEXT, from_email TEXT, from_name TEXT, to_emails TEXT,
-            subject TEXT, snippet TEXT, body_text TEXT, received_at TEXT, ai_category TEXT)"""))
+            subject TEXT, snippet TEXT, body_text TEXT, received_at TEXT, ai_category TEXT,
+            created_at TEXT, updated_at TEXT)"""))
         c.execute(text("""CREATE TABLE email_sync_states (id TEXT PRIMARY KEY,
             email_account_id TEXT NOT NULL UNIQUE, cursor TEXT DEFAULT '{}', last_synced_at TEXT,
             sync_status TEXT, last_error TEXT)"""))
@@ -159,7 +160,8 @@ def number_of(eng, iid):
         return c.execute(text("SELECT invoice_number FROM invoices WHERE id=:i"), {"i": iid}).scalar()
 
 
-def chased(eng, iid, *, days_ago=3, bid=A, automatic=True, thread=None, email=CUSTOMER):
+def chased(eng, iid, *, days_ago=3, bid=A, automatic=True, thread=None, email=CUSTOMER,
+           account=None):
     """A chase that went: the action record and the invoice's chase marks."""
     _n["i"] += 1
     at = iso(TUE_10 - timedelta(days=days_ago))
@@ -167,6 +169,8 @@ def chased(eng, iid, *, days_ago=3, bid=A, automatic=True, thread=None, email=CU
                "body": "Please pay", "sign_off": "Aria"}
     if automatic:
         payload["automation"] = "invoice_chasing"
+    if account:
+        payload["account_id"] = account
     with eng.begin() as c:
         c.execute(text("""INSERT INTO aria_actions (id, business_id, action_type, payload, status,
             approved_by, expires_at, result, created_at, updated_at) VALUES (:id, :b,
@@ -218,6 +222,43 @@ def resolve(eng, reply_id, decision, bid=A):
         return replies().resolve(s, business(bid), reply_id, "owner-uuid", decision)
 
 
+class FakeMailboxes:
+    """Every connected mailbox, as the provider search would see it."""
+
+    def __init__(self):
+        self.messages, self.broken, self.calls = {}, set(), []
+
+    def add(self, acct, *, frm, hours_ago=1, subject="Re: Reminder", snippet="Thanks",
+            thread=None, mid=None):
+        _n["i"] += 1
+        self.messages.setdefault(acct, []).append(SimpleNamespace(
+            provider_message_id=mid or f"found-{_n['i']}", provider_thread_id=thread,
+            from_email=frm, from_name=None, to_emails=[], cc_emails=[], subject=subject,
+            snippet=snippet, body_text=None, body_html=None,
+            received_at=TUE_10.astimezone(timezone.utc) - timedelta(hours=hours_ago)))
+
+    def fail(self, acct):
+        self.broken.add(acct)
+
+    def lookup(self, session, account_id, senders, since):
+        self.calls.append((str(account_id), list(senders), since))
+        if str(account_id) in self.broken:
+            raise RuntimeError("search failed")
+        want = {s_.lower() for s_ in senders}
+        return [m for m in self.messages.get(str(account_id), [])
+                if m.from_email.lower() in want and m.received_at >= since]
+
+
+@pytest.fixture
+def mail(monkeypatch):
+    box = FakeMailboxes()
+    try:
+        monkeypatch.setattr(replies(), "lookup_with_provider", box.lookup)
+    except MissingReplies:
+        pass
+    return box
+
+
 @pytest.fixture
 def sent(monkeypatch):
     import assistant_tools
@@ -229,6 +270,8 @@ def sent(monkeypatch):
                 "gmail_thread_id": f"gt-out-{len(out)}"}
     monkeypatch.setattr(assistant_tools, "_send_email", _send)
     try:
+        # Unless a test sets up its own mailboxes, every search finds nothing.
+        monkeypatch.setattr(replies(), "lookup_with_provider", lambda *a, **k: [])
         monkeypatch.setattr(replies(), "now", lambda: UTC_NOW)
         monkeypatch.setattr(automations(), "now", lambda: UTC_NOW)
         import services.aria_actions as aa
@@ -517,46 +560,122 @@ def test_the_home_summary_carries_open_replies(db, sent):
     assert [r["category"] for r in s["replies"]] == ["paid"]
 
 
-# ------------------------------------------------------------ inbox read first ---
+# ------------------------------------------------- replies looked up first ---
+# Codex AUTO-2 review 1 (P1 1-5 and the P2 on freshness): inferring "nothing
+# was missed" from the general inbox sync had holes. Instead, right before an
+# automatic chase, Aria SEARCHES every mailbox that chased the customer for
+# mail from them since the chase; a failed search means no chase. These
+# replace the approved inbox-freshness tests (recorded in AUTO-2-CODEX-REVIEWS).
 
-@pytest.mark.parametrize("ago,complete,status,ready", [
-    (timedelta(minutes=20), True, "ok", True),
-    (timedelta(hours=2, minutes=59), True, "ok", True),
-    (timedelta(hours=3, minutes=1), True, "ok", False),
-    (timedelta(minutes=20), False, "ok", False),
-    (timedelta(minutes=20), True, "error", False),
-])
-def test_chasing_waits_until_the_inbox_has_been_read(db, sent, ago, complete, status, ready):
-    with db.begin() as c:
-        fresh(c, ACCT_A, ago=ago, complete=complete, status=status)
-    iid = invoice(db)
+def test_a_reply_found_just_before_sending_stops_that_chase(db, sent, mail):
+    """P1 4: a reply that arrived after the hourly scan is still caught,
+    because the customer is looked up again right before the send."""
+    iid = invoice(db, stage=1, last_chased_days_ago=10)
+    chased(db, iid, days_ago=10, account=ACCT_A)
+    mail.add(ACCT_A, frm=CUSTOMER, hours_ago=0, snippet="Paid this morning")
     result = autopilot(db)
-    if ready:
-        assert result["sent"] == [iid]
-    else:
-        assert sent == [] and result["skipped"].get(iid) == "inbox_not_fresh"
+    assert sent == [] and result["skipped"].get(iid) == "customer_replied"
+    assert [r["customer_email"] for r in open_now(db)] == [CUSTOMER]
 
 
-def test_never_synced_is_not_fresh(db, sent):
-    with db.begin() as c:
-        c.execute(text("DELETE FROM email_sync_states WHERE email_account_id = :a"), {"a": ACCT_A})
+def test_if_the_mailbox_cannot_be_searched_nothing_is_chased(db, sent, mail):
+    """P1 1-3: no 'complete' inference — a search that fails means no chase."""
+    iid = invoice(db, stage=1, last_chased_days_ago=10)
+    chased(db, iid, days_ago=10, account=ACCT_A)
+    mail.fail(ACCT_A)
+    result = autopilot(db)
+    assert sent == [] and result["skipped"].get(iid) == "reply_check_failed"
+
+
+def test_a_first_chase_is_looked_up_in_the_default_mailbox_too(db, sent, mail):
+    """A customer never chased before can still have written in: the search
+    covers the mailbox the chase will go from."""
     iid = invoice(db)
-    assert autopilot(db)["skipped"].get(iid) == "inbox_not_fresh" and sent == []
+    mail.fail(ACCT_A)
+    assert autopilot(db)["skipped"].get(iid) == "reply_check_failed" and sent == []
 
 
-@pytest.mark.parametrize("provider,listed,fetched,known,complete", [
-    ("microsoft", 80, 80, 0, True),        # delta: complete by construction
-    ("google", 12, 12, 0, True),           # fewer than a page: the whole inbox was seen
-    ("google", 50, 50, 1, True),           # reached a message already stored
-    ("google", 50, 50, 0, False),          # a full page of new mail: there may be more
-    ("google", 12, 11, 0, False),          # a fetch failed
-])
-def test_a_sync_is_complete_only_when_nothing_can_have_been_missed(provider, listed, fetched,
-                                                                   known, complete):
-    ids = [f"m{i}" for i in range(listed)]
-    got = ids[:fetched]
-    already = set(ids[-known:]) if known else set()
-    assert replies().sync_complete(provider, ids, got, already) is complete
+def test_the_mailbox_an_earlier_chase_went_from_is_still_searched(db, sent, mail):
+    """P1 5: chase one went from A; the default is now B; the customer replies
+    to A. A is searched, so chasing stays paused."""
+    with db.begin() as c:
+        c.execute(text("INSERT INTO email_accounts (id, business_id, provider, email_address, "
+                       "is_default) VALUES ('acct-b2', :b, 'google', 'new@aaaa.example', 0)"), {"b": A})
+        c.execute(text("UPDATE email_accounts SET is_default = (id = 'acct-b2') WHERE business_id = :b"),
+                  {"b": A})
+    iid = invoice(db, stage=1, last_chased_days_ago=10)
+    chased(db, iid, days_ago=10, account=ACCT_A)
+    mail.add(ACCT_A, frm=CUSTOMER, hours_ago=5)
+    result = autopilot(db)
+    assert sent == [] and result["skipped"].get(iid) == "customer_replied"
+    assert {call[0] for call in mail.calls} >= {ACCT_A, "acct-b2"}
+
+
+def test_a_chase_with_no_recorded_mailbox_means_every_mailbox_is_searched(db, sent, mail):
+    """Chases from before AUTO-2 did not record their mailbox."""
+    with db.begin() as c:
+        c.execute(text("INSERT INTO email_accounts (id, business_id, provider, email_address, "
+                       "is_default) VALUES ('acct-old', :b, 'microsoft', 'old@aaaa.example', 0)"), {"b": A})
+    iid = invoice(db, stage=1, last_chased_days_ago=10)
+    chased(db, iid, days_ago=10)
+    mail.add("acct-old", frm=CUSTOMER, hours_ago=5)
+    assert autopilot(db)["skipped"].get(iid) == "customer_replied" and sent == []
+
+
+def test_the_search_asks_for_that_customer_since_their_earliest_chase(db, sent, mail):
+    iid = invoice(db, stage=1, last_chased_days_ago=10)
+    chased(db, iid, days_ago=20, account=ACCT_A)
+    chased(db, iid, days_ago=10, account=ACCT_A)
+    autopilot(db)
+    acct, senders, since = mail.calls[-1]
+    assert acct == ACCT_A and senders == [CUSTOMER]
+    assert since <= UTC_NOW - timedelta(days=20)
+
+
+def test_messages_found_twice_are_stored_and_flagged_once(db, sent, mail):
+    iid = invoice(db, stage=1, last_chased_days_ago=10)
+    chased(db, iid, days_ago=10, account=ACCT_A)
+    mail.add(ACCT_A, frm=CUSTOMER, hours_ago=5, mid="same")
+    with Session(db) as s:
+        replies().find_replies(s, business(), lookup=mail.lookup, classify=says("other"))
+        replies().find_replies(s, business(), lookup=mail.lookup, classify=says("other"))
+    with db.connect() as c:
+        assert c.execute(text("SELECT COUNT(*) FROM email_messages WHERE provider_message_id = 'same'")).scalar() == 1
+    assert len(open_now(db)) == 1
+
+
+def test_a_pause_recorded_while_the_card_is_drafted_still_stops_the_send(db, sent, mail, monkeypatch):
+    """P1 4, second interleaving: another scan records a pause after this
+    run's checks; approval itself refuses an automatic chase to a paused
+    customer."""
+    import services.aria_actions as aa
+    iid = invoice(db, stage=1, last_chased_days_ago=10)
+    chased(db, iid, days_ago=10, account=ACCT_A)
+    real_propose = aa.propose
+
+    def pause_lands(*a, **k):
+        out = real_propose(*a, **k)
+        mid = inbound(db, hours_ago=1)
+        with db.begin() as c:
+            c.execute(text("INSERT INTO chase_replies (id, business_id, email_message_id, customer_email, "
+                           "invoice_ids, category, status, created_at, updated_at) VALUES ('r-late', :b, "
+                           ":m, :c, '[]', 'other', 'open', :t, :t)"),
+                      {"b": A, "m": mid, "c": CUSTOMER, "t": iso(TUE_10)})
+        return out
+    monkeypatch.setattr(aa, "propose", pause_lands)
+    result = autopilot(db)
+    assert sent == [] and iid not in result["sent"]
+
+
+def test_each_send_is_checked_at_its_own_moment(db, sent, mail):
+    """P2 (once-per-run freshness): every automatic chase does its own search,
+    immediately before its own send."""
+    one = invoice(db, stage=1, last_chased_days_ago=10, email="a@one.example")
+    two = invoice(db, stage=1, last_chased_days_ago=10, email="b@two.example")
+    chased(db, one, days_ago=10, account=ACCT_A, email="a@one.example")
+    chased(db, two, days_ago=10, account=ACCT_A, email="b@two.example")
+    autopilot(db)
+    assert sorted(s for _, s, _ in mail.calls if len(s) == 1) == [["a@one.example"], ["b@two.example"]]
 
 
 # ------------------------------------------------------------ the right mailbox ---
@@ -614,28 +733,28 @@ def test_the_thread_of_a_sent_chase_is_kept_for_matching(db, sent):
 
 # ------------------------------------------------------------ the hourly order ---
 
-def test_each_run_syncs_then_reads_replies_then_chases(monkeypatch):
+def test_each_run_looks_up_replies_then_chases(monkeypatch):
     m = automations()
     order = []
-    monkeypatch.setattr(m, "_sync_inbox", lambda session, bid: order.append("sync"), raising=False)
-    monkeypatch.setattr(replies(), "scan", lambda *a, **k: order.append("scan") or [])
+    monkeypatch.setattr(replies(), "find_replies", lambda *a, **k: order.append("replies") or [])
     monkeypatch.setattr(m, "run_invoice_autopilot", lambda *a, **k: order.append("chase") or {
         "sent": [], "cards": [], "skipped": {}})
     m.run_business(None, business(), on())
-    assert order == ["sync", "scan", "chase"]
+    assert order == ["replies", "chase"]
 
 
-def test_a_failed_sync_still_reads_replies_but_does_not_chase(monkeypatch):
-    m = automations()
-    order = []
-
-    def broken(session, bid):
-        raise RuntimeError("Gmail down")
-    monkeypatch.setattr(m, "_sync_inbox", broken, raising=False)
-    monkeypatch.setattr(replies(), "scan", lambda *a, **k: order.append("scan") or [])
-    monkeypatch.setattr(m, "run_invoice_autopilot", lambda *a, **k: order.append("chase") or {})
-    m.run_business(None, business(), on())
-    assert order == ["scan"]
+def test_a_failed_lookup_does_not_stop_replies_already_found_from_pausing(db, sent, mail):
+    """The hourly lookup failing leaves earlier pauses in force, and the
+    per-chase lookup still guards every send."""
+    iid = invoice(db, stage=1, last_chased_days_ago=10)
+    chased(db, iid, days_ago=10, account=ACCT_A)
+    inbound(db, hours_ago=100)
+    scan(db)
+    mail.fail(ACCT_A)
+    with Session(db) as s:
+        result = automations().run_business(s, business(), on(), lookup=mail.lookup,
+                                            classify=says("other"))
+    assert sent == [] and result["skipped"].get(iid) == "customer_replied"
 
 
 # ---------------------------------------------------------------------------
@@ -671,28 +790,3 @@ def test_the_api_never_shows_or_resolves_another_business_reply(db, sent, monkey
     assert client.post(f"/v1/automations/replies/{r['id']}/resolve",
                        json={"decision": "resume"}).status_code == 404
     assert open_now(db)[0]["status"] == "open"
-
-
-def test_a_sync_records_whether_it_can_have_missed_anything(db):
-    """completed_cursor: a listed message stored BEFORE the sync began is
-    "known"; the provider's own cursor is kept, a stale flag is not."""
-    started = TUE_10.astimezone(timezone.utc)
-    with db.begin() as c:
-        c.execute(text("ALTER TABLE email_messages ADD COLUMN created_at TEXT"))
-        c.execute(text("INSERT INTO email_messages (id, business_id, email_account_id, "
-                       "provider_message_id, created_at) VALUES ('old', :b, :a, 'm-old', :at)"),
-                  {"b": A, "a": ACCT_A, "at": iso(TUE_10 - timedelta(days=1))})
-    acct = SimpleNamespace(id=ACCT_A, provider="google")
-    page = [f"m{i}" for i in range(49)] + ["m-old"]
-    msgs = [SimpleNamespace(provider_message_id=m) for m in page]
-    with Session(db) as s:
-        done = replies().completed_cursor(
-            s, acct, SimpleNamespace(messages=msgs, cursor={"complete": True, "x": 1},
-                                     listed_ids=page), started)
-        assert done == {"x": 1, "complete": True}
-        new_only = [f"n{i}" for i in range(50)]
-        stale = replies().completed_cursor(
-            s, acct, SimpleNamespace(messages=[SimpleNamespace(provider_message_id=m)
-                                               for m in new_only],
-                                     cursor={"complete": True}, listed_ids=new_only), started)
-        assert stale == {"complete": False}

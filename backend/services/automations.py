@@ -327,7 +327,8 @@ def _authority(business, s: dict, moment: datetime) -> Optional[str]:
 
 
 def run_invoice_autopilot(session, business, settings: Optional[dict], *,
-                          owner_name: Optional[str] = None, refresh=None) -> dict:
+                          owner_name: Optional[str] = None, refresh=None,
+                          lookup=None, classify=None) -> dict:
     """One pass of the autopilot for one business. Returns what it did.
 
     `refresh()` returns the CURRENT (settings, business). It is called before
@@ -340,17 +341,16 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
     if _authority(business, s, moment):
         return result
 
-    # AUTO-2: chase only from the default mailbox, and only once its inbox has
-    # been read completely and recently, so an unseen reply is never chased
-    # over. Otherwise nothing at all this run, cards included.
+    # AUTO-2: chase only from the default mailbox (never "the newest"). If
+    # there isn't one, nothing at all this run, cards included.
     mailbox = chase_replies.default_mailbox(session, business.id)
-    gate = "no_default_mailbox" if mailbox is None else \
-        chase_replies.inbox_ready(session, business, mailbox, moment)
-    if gate:
+    if mailbox is None:
         for invoice_id, *_ in _candidates(session, business):
-            result["skipped"][str(invoice_id)] = gate
+            result["skipped"][str(invoice_id)] = "no_default_mailbox"
         session.rollback()
         return result
+    lookup = lookup or chase_replies.lookup_with_provider
+    classify = classify or chase_replies.classify_with_model
     replied, stopped = chase_replies.blocked(session, business)
 
     waiting = _open_cards(session, business)
@@ -437,6 +437,17 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             chased_now.add(customer)
             result["skipped"][iid] = "customer_chased_recently"
             continue
+        # AUTO-2 (Codex review 1): search this customer's mailboxes NOW, just
+        # before this send — every mailbox their chases went from, and the one
+        # this chase will go from. A failed search means no chase.
+        try:
+            chase_replies.find_replies(session, business, lookup=lookup, classify=classify,
+                                       customers=[customer])
+        except chase_replies.ReplyCheckFailed as exc:
+            logger.warning("[Autopilot] %s: %s", business.id, exc)
+            _give_back(session, business, tickets)
+            result["skipped"][iid] = "reply_check_failed"
+            continue
         replied_now, stopped_now = chase_replies.blocked(session, business)
         if customer in replied_now or iid in stopped_now:
             _give_back(session, business, tickets)
@@ -518,41 +529,26 @@ def owner_first_name(session, business_id: str) -> Optional[str]:
     return None
 
 
-def _sync_inbox(session, business_id: str) -> None:
-    """Read the business's default inbox now. Raises if it cannot."""
-    from services.background_sync import _sync_email_for_business
-    _sync_email_for_business(str(business_id))
-
-
 def run_business(session, business, settings: Optional[dict], *, owner_name=None,
-                 refresh=None, classify=None) -> dict:
-    """One business's hourly pass, in order: read the inbox, find replies,
-    then chase. A sync that fails still lets replies already synced pause
-    chasing, but nothing is chased this hour; nor if reading replies fails."""
+                 refresh=None, lookup=None, classify=None) -> dict:
+    """One business's hourly pass: look up replies to its chases (so the owner
+    is told), then chase. A failed lookup does not lift earlier pauses, and
+    every chase still does its own search right before sending."""
+    lookup = lookup or chase_replies.lookup_with_provider
+    classify = classify or chase_replies.classify_with_model
     try:
-        _sync_inbox(session, business.id)
-        synced = True
-    except Exception as exc:
-        logger.warning("[Autopilot] %s: inbox sync failed, not chasing: %s", business.id, exc)
-        synced = False
-    try:
-        chase_replies.scan(session, business,
-                           classify=classify or chase_replies.classify_with_model)
+        chase_replies.find_replies(session, business, lookup=lookup, classify=classify)
     except Exception as exc:
         if session is not None:
             session.rollback()
-        logger.error("[Autopilot] %s: reading replies failed, not chasing: %s", business.id, exc)
-        return {"sent": [], "cards": [], "skipped": {}}
-    if not synced:
-        return {"sent": [], "cards": [], "skipped": {}}
+        logger.warning("[Autopilot] %s: reply lookup failed: %s", business.id, exc)
     return run_invoice_autopilot(session, business, settings, owner_name=owner_name,
-                                 refresh=refresh)
+                                 refresh=refresh, lookup=lookup, classify=classify)
 
 
 def scan_replies_everywhere(session, *, exclude=()) -> int:
     """Replies to chases are flagged whether or not the autopilot is on (Mike:
-    flag the owner on ANY reply). Inboxes are synced by the usual background
-    sync; this only reads what is already there."""
+    flag the owner on ANY reply)."""
     since = now() - timedelta(days=chase_replies.REPLY_WINDOW_DAYS)
     rows = session.execute(text(
         "SELECT DISTINCT business_id FROM aria_actions WHERE action_type = 'send_invoice_chase' "
@@ -565,8 +561,9 @@ def scan_replies_everywhere(session, *, exclude=()) -> int:
         if business is None:
             continue
         try:
-            found += len(chase_replies.scan(session, business,
-                                            classify=chase_replies.classify_with_model))
+            found += len(chase_replies.find_replies(
+                session, business, lookup=chase_replies.lookup_with_provider,
+                classify=chase_replies.classify_with_model))
         except Exception as exc:
             session.rollback()
             logger.error("[ChaseReplies] %s failed: %s", business_id, exc)

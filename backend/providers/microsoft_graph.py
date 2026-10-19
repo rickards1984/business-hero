@@ -1,13 +1,14 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 from .oauth_utils import get_valid_access_token
-from .base import BaseEmailProvider, ProviderSendResult, ProviderSyncResult, ProviderMessage
+from .base import BaseEmailProvider, ProviderSendResult, ProviderSyncResult, ProviderMessage, checked_senders
 
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
+GRAPH_SEARCH_MAX_PAGES = 10  # AUTO-2: a reply search longer than this is refused, not truncated
 
 
 def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
@@ -143,6 +144,53 @@ class MicrosoftGraphProvider(BaseEmailProvider):
                 url = None
 
         return ProviderSyncResult(messages=messages, cursor=next_cursor)
+
+    def search_from(
+        self,
+        *,
+        account: Any,
+        senders: List[str],
+        since: datetime,
+    ) -> List[ProviderMessage]:
+        """AUTO-2: every message from `senders` since `since`, across all mail
+        folders, paged to the end. UNVERIFIED against a live Microsoft
+        mailbox (19 Oct 2026): the results are re-checked here, and any error
+        or too many pages raises — which means no automatic chase, never a
+        chase over an unseen reply."""
+        addresses = checked_senders(senders)
+        if not addresses:
+            return []
+        stamp = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        who = " or ".join("from/emailAddress/address eq '" + a.replace("'", "''") + "'" for a in addresses)
+        access_token = get_valid_access_token(account)
+        headers = {"Authorization": f"Bearer {access_token}"}
+        read_scope = _get_read_scope(account)
+        url: Optional[str] = f"{GRAPH_BASE_URL}/me/messages"
+        params: Optional[Dict[str, Any]] = {
+            "$filter": f"receivedDateTime ge {stamp} and ({who})",
+            "$top": "50",
+        }
+        found: List[ProviderMessage] = []
+        with httpx.Client(timeout=30) as client:
+            for _ in range(GRAPH_SEARCH_MAX_PAGES):
+                response = client.get(url, headers=headers, params=params)
+                if response.status_code != 200:
+                    raise RuntimeError(f"Microsoft Graph search failed: {response.status_code}")
+                data = response.json()
+                for raw in data.get("value", []) or []:
+                    mapped = _map_graph_message(raw, read_scope)
+                    if mapped is None:
+                        continue
+                    sender = (mapped.from_email or "").strip().lower()
+                    when = mapped.received_at
+                    if sender in addresses and (when is None or when >= since):
+                        found.append(mapped)
+                url, params = data.get("@odata.nextLink"), None
+                if not url:
+                    break
+            else:
+                raise RuntimeError("Microsoft Graph search returned more pages than allowed")
+        return found
 
     def fetch_message(
         self,

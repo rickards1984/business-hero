@@ -10,9 +10,12 @@ customer until the owner decides: "resume" or "stop" (stop that invoice for
 good). Aria labels the reply, but the label never sends anything and never
 marks an invoice paid — money stays with the owner and the accounts software.
 
-Automatic chasing also waits until the sending mailbox's inbox has been read
-completely in the last three hours (`inbox_ready`), so an unseen reply cannot
-be chased over.
+Replies are found by SEARCHING the mailboxes themselves (Gmail search,
+Microsoft Graph filter) for mail from chased customers since their chase —
+complete by construction, not inferred from the general inbox sync (Codex
+AUTO-2 review 1). Every automatic chase does its own search of every mailbox
+that chased that customer, plus the one it will send from, immediately
+before sending; if any search fails, it does not send.
 """
 
 import json
@@ -28,10 +31,14 @@ from sqlalchemy import bindparam, text
 logger = logging.getLogger(__name__)
 
 REPLY_WINDOW_DAYS = 60
-FRESH_WITHIN = timedelta(hours=3)
-GMAIL_PAGE = 50
+SENDERS_PER_SEARCH = 20
 CATEGORIES = ("paid", "promise", "dispute", "question", "other", "unknown")
 DECISIONS = {"resume": "resumed", "stop": "stopped"}
+
+
+class ReplyCheckFailed(Exception):
+    """A mailbox could not be searched: nothing may be chased on the strength
+    of it."""
 
 
 def now() -> datetime:
@@ -80,58 +87,109 @@ def default_mailbox(session, business_id: str) -> Optional[str]:
     return None
 
 
-def sync_complete(provider: str, listed_ids: Iterable[str], fetched_ids: Iterable[str],
-                  known_ids: Iterable[str], page_size: int = GMAIL_PAGE) -> bool:
-    """Could this sync have missed a message? Microsoft's delta is complete by
-    construction. Gmail lists only the newest `page_size`: it is complete only
-    if every listed message was fetched AND either the inbox fitted in one
-    page or the page reached a message already stored before this sync."""
-    listed, fetched, known = list(listed_ids), set(fetched_ids), set(known_ids)
-    if any(mid not in fetched for mid in listed):
-        return False
-    if provider == "microsoft":
-        return True
-    if provider != "google":
-        return False
-    return len(listed) < page_size or any(mid in known for mid in listed)
+# ------------------------------------------------------------- searching ---
+
+def lookup_with_provider(session, account_id: str, senders: list, since: datetime) -> list:
+    """Search one connected mailbox for mail from `senders` since `since`.
+    Returns the provider's messages; raises if the search is incomplete."""
+    from sqlmodel import select
+    from models import EmailAccount
+    from app.email.service import get_provider_for_account
+    account = session.exec(select(EmailAccount).where(
+        EmailAccount.id == uuid.UUID(str(account_id)))).first()
+    if account is None:
+        raise ReplyCheckFailed("mailbox not found")
+    return get_provider_for_account(account).search_from(
+        account=account, senders=list(senders), since=since)
 
 
-def completed_cursor(session, account, result, started_at: datetime) -> dict:
-    """The cursor to store after a sync, with an honest `complete` flag. Called
-    after the messages are stored: a listed message whose row was created
-    before this sync started was already known."""
-    cursor = {k: v for k, v in (result.cursor or {}).items() if k != "complete"}
-    fetched = [m.provider_message_id for m in result.messages]
-    listed = list(getattr(result, "listed_ids", None) or fetched)
-    known: set = set()
-    if listed:
-        rows = session.execute(text(
-            "SELECT provider_message_id, created_at FROM email_messages "
-            "WHERE email_account_id = :a AND provider_message_id IN :ids"
-        ).bindparams(bindparam("ids", expanding=True)),
-            {"a": str(account.id), "ids": listed}).fetchall()
-        start = _parse(started_at)
-        known = {mid for mid, created in rows if _parse(created) and _parse(created) < start}
-    cursor["complete"] = sync_complete(getattr(account, "provider", ""), listed, fetched, known)
-    return cursor
+def _mailboxes(session, business) -> tuple:
+    """(every connected mailbox, the default or None)."""
+    rows = session.execute(text(
+        "SELECT id FROM email_accounts WHERE business_id = :b "
+        "AND provider IN ('google', 'microsoft')"), {"b": str(business.id)}).fetchall()
+    return [str(r[0]) for r in rows], default_mailbox(session, business.id)
 
 
-def inbox_ready(session, business, account_id: str, moment: datetime) -> Optional[str]:
-    """None when the mailbox's inbox was read completely and without error
-    within FRESH_WITHIN of `moment`; otherwise "inbox_not_fresh"."""
-    row = session.execute(text(
-        "SELECT s.cursor, s.last_synced_at, s.sync_status, s.last_error "
-        "FROM email_sync_states s JOIN email_accounts a ON a.id = s.email_account_id "
-        "WHERE s.email_account_id = :a AND a.business_id = :b"),
-        {"a": str(account_id), "b": str(business.id)}).fetchone()
-    if row is None:
-        return "inbox_not_fresh"
-    cursor, synced, status, error = row
-    synced = _parse(synced)
-    if (synced is None or moment - synced > FRESH_WITHIN or error
-            or (status or "").lower() == "error" or _loads(cursor).get("complete") is not True):
-        return "inbox_not_fresh"
-    return None
+def _store(session, business, account_id: str, messages) -> None:
+    """Keep what the search found, once per mailbox and provider message."""
+    moment = now()
+    for m in messages:
+        exists = session.execute(text(
+            "SELECT 1 FROM email_messages WHERE business_id = :b AND email_account_id = :a "
+            "AND provider_message_id = :m"),
+            {"b": str(business.id), "a": str(account_id), "m": m.provider_message_id}).fetchone()
+        if exists:
+            continue
+        session.execute(text(
+            "INSERT INTO email_messages (id, business_id, email_account_id, provider_message_id, "
+            "provider_thread_id, folder, from_email, from_name, subject, snippet, body_text, "
+            "received_at, created_at, updated_at) VALUES (:id, :b, :a, :m, :t, 'INBOX', :f, :fn, "
+            ":s, :sn, :body, :at, :now, :now)"),
+            {"id": str(uuid.uuid4()), "b": str(business.id), "a": str(account_id),
+             "m": m.provider_message_id, "t": getattr(m, "provider_thread_id", None),
+             "f": getattr(m, "from_email", None), "fn": getattr(m, "from_name", None),
+             "s": getattr(m, "subject", None), "sn": getattr(m, "snippet", None),
+             "body": getattr(m, "body_text", None), "at": getattr(m, "received_at", None),
+             "now": moment})
+    session.commit()
+
+
+def find_replies(session, business, *, lookup: Callable, classify: Callable,
+                 customers: Optional[Iterable[str]] = None) -> list:
+    """Search the mailboxes for mail from chased customers (or only
+    `customers`), store it, and record the replies. Each customer's search
+    covers every mailbox any of their recent chases went from — all
+    mailboxes when a chase did not record one — and the default mailbox,
+    which the next chase would go from. Raises ReplyCheckFailed if any
+    needed search fails."""
+    moment = now()
+    window = moment - timedelta(days=REPLY_WINDOW_DAYS)
+    chases = [c for c in _chases(session, business, window) if c[0] and c[3]]
+    accounts = _chase_accounts(session, business, window)
+    everything, default = _mailboxes(session, business)
+    wanted = [_address(c) for c in customers] if customers is not None else \
+        sorted({c[0] for c in chases})
+    plan: dict = {}
+    for who in wanted:
+        if not who:
+            continue
+        mine = [c for c in chases if c[0] == who]
+        since = min((c[3] for c in mine), default=window)
+        boxes = set(accounts.get(who, set()))
+        if None in boxes:
+            boxes = set(everything)
+        boxes.discard(None)
+        if default:
+            boxes.add(default)
+        for acct in boxes:
+            entry = plan.setdefault(acct, {"senders": [], "since": since})
+            entry["senders"].append(who)
+            entry["since"] = min(entry["since"], since)
+    for acct, entry in sorted(plan.items()):
+        senders = sorted(set(entry["senders"]))
+        for i in range(0, len(senders), SENDERS_PER_SEARCH):
+            try:
+                found = lookup(session, acct, senders[i:i + SENDERS_PER_SEARCH], entry["since"])
+            except Exception as exc:
+                session.rollback()
+                raise ReplyCheckFailed(f"mailbox {acct} could not be searched: {exc}") from exc
+            _store(session, business, acct, found or [])
+    return scan(session, business, classify=classify)
+
+
+def _chase_accounts(session, business, since: datetime) -> dict:
+    """customer -> the mailboxes their chases went from (None: not recorded)."""
+    rows = session.execute(text(
+        "SELECT payload FROM aria_actions WHERE business_id = :b "
+        "AND action_type = 'send_invoice_chase' AND status IN ('done', 'executing') "
+        "AND created_at >= :since"), {"b": str(business.id), "since": since}).fetchall()
+    out: dict = {}
+    for (payload,) in rows:
+        p = _loads(payload)
+        out.setdefault(_address(p.get("to")), set()).add(
+            str(p["account_id"]) if p.get("account_id") else None)
+    return out
 
 
 # ------------------------------------------------------------- matching ---
@@ -286,7 +344,6 @@ def blocked(session, business) -> tuple:
             customers.add(_address(who))
         else:
             invoices.update(str(i) for i in (_loads(ids) or []))
-    session.rollback()
     return customers, invoices
 
 

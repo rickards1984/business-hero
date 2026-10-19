@@ -806,7 +806,6 @@ def _run_inbox_sync(business_id: str) -> EmailSyncRunResponse:
             session.commit()
             session.refresh(sync_state)
 
-        started_at = datetime.utcnow()
         result = provider.sync_inbox_changes(account=account, cursor=sync_state.cursor or {})
         message_count = 0
 
@@ -859,8 +858,7 @@ def _run_inbox_sync(business_id: str) -> EmailSyncRunResponse:
                 session.add(record)
             message_count += 1
 
-        from services.chase_replies import completed_cursor  # AUTO-2: honest completeness
-        sync_state.cursor = completed_cursor(session, account, result, started_at)
+        sync_state.cursor = result.cursor or {}
         sync_state.last_synced_at = datetime.utcnow()
         sync_state.last_error = None
         session.add(sync_state)
@@ -1019,7 +1017,6 @@ async def sync_email_inbox(
         session.commit()
         session.refresh(sync_state)
 
-    started_at = datetime.utcnow()
     try:
         result = provider.sync_inbox_changes(account=account, cursor=sync_state.cursor or {})
     except Exception as exc:
@@ -1078,8 +1075,7 @@ async def sync_email_inbox(
             session.add(record)
         message_count += 1
 
-    from services.chase_replies import completed_cursor  # AUTO-2: honest completeness
-    sync_state.cursor = completed_cursor(session, account, result, started_at)
+    sync_state.cursor = result.cursor or {}
     sync_state.last_synced_at = datetime.utcnow()
     sync_state.last_error = None
     session.add(sync_state)
