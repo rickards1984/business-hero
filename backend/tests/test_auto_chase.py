@@ -744,14 +744,17 @@ def test_a_run_that_lost_its_ticket_stands_down(db, sent, monkeypatch):
     """Review 4: just before sending, a run confirms it still holds its own
     in-progress ticket; if another run holds it now, it sends nothing."""
     import services.aria_actions as aa
-    real_approve = aa.approve
+    real_propose = aa.propose
 
     def ticket_taken_over(*a, **k):
+        # Between this run's proposal and its send, another run takes over
+        # the customer's in-progress ticket.
+        out = real_propose(*a, **k)
         with db.begin() as c:
             c.execute(text("UPDATE usage_meters SET updated_at = '2099-01-01T00:00:00+00:00' "
                            "WHERE meter LIKE 'autochase-inflight:%'"))
-        return real_approve(*a, **k)
-    monkeypatch.setattr(aa, "approve", ticket_taken_over)
+        return out
+    monkeypatch.setattr(aa, "propose", ticket_taken_over)
     invoice(db, days_overdue=30)
     result = run(db, on())
     assert sent == [] and list(result["skipped"].values()) == ["lost_reservation"]

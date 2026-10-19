@@ -162,3 +162,11 @@ Backlog:
 ### Status — 19 October 2026
 
 Three repair cycles used. One P1 remains (stale in-progress reclaim lets a paused live run be overtaken). Escalated to Mike with a recommendation; not fixed without his decision.
+
+---
+
+### Response to review 4 — Claude Code (builder), 19 October 2026 (cycle 4, authorised by Mike: "A")
+
+| Finding | Action |
+|---|---|
+| Stale reclaim lets a paused live run be overtaken (P1) | Two changes. (1) **No reclaim while a live automatic draft exists** for that customer (`proposed` or `executing`, marked `automation`): its run may be paused, not crashed. Age alone no longer decides; only a ticket with no draft behind it (a run that crashed before proposing) is reclaimed. A run that crashed after proposing leaves its draft on the owner's home as an ordinary card. (2) **Fencing:** just before approving, the run confirms it still holds its own in-progress ticket (the exact stamp it wrote). If not, it dismisses its card, frees only its own daily and cap tickets, and sends nothing. Tests: Codex's reproduction (A proposes at 23:59:50 and pauses; B at 01:01) gives one send; a ticket taken over between proposal and send makes the run stand down; an old ticket with a waiting automatic draft is not reclaimed. Mutation-checked: removing either change fails its tests. Stable over three runs |

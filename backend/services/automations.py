@@ -182,6 +182,34 @@ def _take(session, bid: str, meter: str, period: str, moment: datetime) -> bool:
     return row is not None
 
 
+def _live_automatic_draft(session, business, customer: str) -> bool:
+    """An automatic chase for this customer that a run has proposed and not
+    yet finished (proposed or executing). While one exists, its run may be
+    alive though paused, so its in-progress ticket is never reclaimed
+    (Codex AUTO-1 review 4). A run that truly crashed leaves this draft on
+    the owner's home as a normal card, to approve or dismiss."""
+    rows = session.execute(text(
+        "SELECT payload FROM aria_actions WHERE business_id = :b "
+        "AND action_type = 'send_invoice_chase' AND status IN ('proposed', 'executing')"),
+        {"b": str(business.id)}).fetchall()
+    for (payload,) in rows:
+        p = _loads(payload)
+        if p.get("automation") == KIND and str(p.get("to") or "").strip().lower() == customer:
+            return True
+    return False
+
+
+def _still_holds(session, business, customer: str, stamp: datetime) -> bool:
+    """Fencing: does THIS run still hold the customer's in-progress ticket?"""
+    row = session.execute(text(
+        "SELECT 1 FROM usage_meters WHERE business_id = :b AND meter = :m AND period = :p "
+        "AND updated_at = :stamp"),
+        {"b": str(business.id), "m": f"autochase-inflight:{customer}",
+         "p": _INFLIGHT_PERIOD, "stamp": stamp}).fetchone()
+    session.rollback()
+    return row is not None
+
+
 def _reserve(session, business, customer: str, moment: datetime, s: dict, unresolved_now):
     """Durable, unique tickets for one automatic chase. usage_meters'
     UNIQUE (business_id, meter, period) lets exactly one run hold each:
@@ -204,7 +232,8 @@ def _reserve(session, business, customer: str, moment: datetime, s: dict, unreso
             {"b": bid, "m": inflight, "p": _INFLIGHT_PERIOD}).fetchone()
         session.rollback()
         stamp = _parse(held[0]) if held else None
-        if stamp is None or moment - stamp < _INFLIGHT_STALE or customer in unresolved_now():
+        if (stamp is None or moment - stamp < _INFLIGHT_STALE or customer in unresolved_now()
+                or _live_automatic_draft(session, business, customer)):
             return "chase_in_progress", []
         session.execute(text(
             "DELETE FROM usage_meters WHERE business_id = :b AND meter = :m AND period = :p "
@@ -359,6 +388,17 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             result["skipped"][iid] = proposed.get("error") or "not_proposed"
             continue
         card = proposed["proposal"]
+        if not _still_holds(session, business, customer, moment):
+            # Another run holds this customer now: send nothing, free only OUR
+            # daily and cap tickets, and leave theirs alone (review 4).
+            try:
+                aria_actions.dismiss(session, business, card["id"])
+            except aria_actions.ActionRefused:
+                pass
+            _give_back(session, business, [t for t in tickets
+                                           if not t[0].startswith("autochase-inflight:")])
+            result["skipped"][iid] = "lost_reservation"
+            continue
         try:
             outcome = aria_actions.approve(session, business, card["id"], None, card["version"])
         except aria_actions.ActionRefused as exc:
