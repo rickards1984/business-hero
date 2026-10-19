@@ -157,3 +157,53 @@ Tests first: 7 regression tests were written and all failed before the fix.
 | P1 2: legacy history erases a known mailbox | **Union, never replace.** The plan is every mailbox any chase went from, plus every connected mailbox when a chase recorded none, plus the default. A planned mailbox that isn't one of *this business's connected* mailboxes is never searched. It fails the plan, so there is no chase (`reply_check_failed`). Mailboxes that *can* be searched still are, and their replies are recorded before the failure is reported. Tests: `test_a_mailbox_that_chased_them_but_is_now_disconnected_stops_chasing`, `test_a_mailbox_of_another_business_is_never_searched`. This also closes the caller-invariant point: `lookup` is only ever called with this business's connected mailbox ids. **Consequence for Mike:** a customer chased from a mailbox that is later disconnected isn't chased automatically again within the 60-day window. Chasing by hand still works. |
 | P1 3: display-name addresses bypass the pause checks | **One canonical address everywhere.** `automations.py` uses `chase_replies._address` (parseaddr, then lower) for the customer key, attempts, unresolved, spacing, live drafts, the review-5 re-check and the paused list. `approve()`'s pause check uses it too. Tests: `test_a_display_name_invoice_address_is_still_paused_by_a_reply`, `test_approval_matches_a_display_name_address_to_its_pause`, `test_spacing_treats_a_display_name_and_a_bare_address_as_one_customer`. The last closes the same gap in AUTO-1's one-chase-per-week rule. |
 | P2: Graph returns success with unusable matching messages | **Fixed (fail closed).** A result whose raw sender is a searched customer but which can't be mapped, or has no date, raises. Test: `test_graph_fails_closed_on_a_matching_message_it_cannot_use`. |
+
+## Review 3 (repair cycle 2, confirm)
+
+| | |
+|---|---|
+| Reviewed commit | `e8dd4b8` |
+| Session id | `01a15663-809e-7922-81dc-85804d1af821` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 46,993` |
+| **Verdict** | **APPROVE** |
+
+Verbatim:
+
+---
+
+**APPROVE** at `e8dd4b8` for `3917d04..e8dd4b8`. Review 2’s three P1s and P2 are closed. No new P1 found. This review supports North Star P4/P8/P9.
+
+| Previous finding | Closure evidence |
+|---|---|
+| P1: Gmail excludes Spam/Trash | `backend/providers/google_gmail.py:146` includes them on every search page. Original probe now retrieves the reply. |
+| P1: legacy history drops historical mailbox | `backend/services/chase_replies.py:163` unions historical and connected mailboxes. Unavailable or foreign mailbox IDs fail coverage without being searched. |
+| P1: display-name address bypasses pauses | `backend/services/automations.py:368` and `backend/services/aria_actions.py:309` canonicalise addresses. Both pause interleavings prevent sending. |
+| P2: unusable Graph results permit chasing | `backend/providers/microsoft_graph.py:184` raises for matching messages without usable IDs or timestamps. Original malformed-response probe now prevents sending. |
+
+**P1 list:** None.
+
+**Backlog list:** No new code findings. Existing release prerequisite remains at `backend/tests/test_schema_conformance.py:222` and `:238`: the schema dump omits `chase_replies`, leaving its writes unchecked against the recorded live schema. Both expected failures remain; this approval does not establish production schema readiness.
+
+Plain-address spacing, reservation tickets, unresolved attempts and paused-list behaviour remain intact. At `backend/services/chase_replies.py:189`, successful searches persist their messages; scanning records pauses before the failure is raised. Probes confirmed those pauses survive caller rollback, and failed automatic searches release tickets without sending.
+
+Verification:
+
+- Requested focused suite: **224 passed**.
+- Original probe file rerun unchanged: all four unsafe-behaviour assertions now fail because the defects are fixed.
+- Ten additional offline probes: **10 passed**.
+- `./check.sh`: **1,972 passed, 50 skipped, two expected schema failures**. TypeScript, compilation and Ruff passed.
+
+Mike’s behavioural check: reply to a chase using a display-name invoice address, then confirm it appears under replies and automatic chasing pauses.
+
+Worktree clean. No tracked edits, commits, pushes, real email or network calls; `~/.openclaw` was not opened. Live provider behaviour remains unverified.
+---
+
+### Status — 20 October 2026
+
+Approved after two repair cycles. Before release:
+1. PR #36 (AUTO-1) merges first.
+2. Mike runs `audits/036-PROD-RUNBOOK.md`, and the schema dump is regenerated. That clears the two expected schema-conformance failures.
+3. The AUTO-2 PR then opens.
+
+Microsoft Graph search is unverified live, and its failure mode is "doesn't chase".
