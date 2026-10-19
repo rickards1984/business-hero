@@ -709,3 +709,67 @@ def test_an_abandoned_in_progress_ticket_frees_itself(db, sent):
                   {"b": A, "u": stale})
     invoice(db, days_overdue=30, email="pay@harper.example")
     assert len(run(db, on())["sent"]) == 1
+
+
+# ------------------------------------- Codex AUTO-1 review 4 (cycle 4, Mike: "A") ---
+
+def test_a_paused_live_run_is_never_overtaken(db, sent, monkeypatch):
+    """Review 4: run A reserves and proposes at 23:59:50, then pauses for over
+    an hour. Run B at 01:01 must NOT reclaim A's in-progress ticket — A's
+    automatic draft is still waiting — so the customer gets one email."""
+    import services.aria_actions as aa
+    real_approve = aa.approve
+    allday = on(start_hour=0, end_hour=24, weekdays_only=False)
+    before = datetime(2026, 10, 31, 23, 59, 50, tzinfo=LONDON)
+    later = datetime(2026, 11, 1, 1, 1, tzinfo=LONDON)
+    clock = {"t": before}
+    monkeypatch.setattr(automations(), "now", lambda: clock["t"].astimezone(timezone.utc))
+    state = {"done": False}
+
+    def b_runs_while_a_is_paused(*a, **k):
+        if not state["done"]:
+            state["done"] = True
+            clock["t"] = later
+            run(db, allday)
+            clock["t"] = before
+        return real_approve(*a, **k)
+    monkeypatch.setattr(aa, "approve", b_runs_while_a_is_paused)
+    invoice(db, days_overdue=30, email="pay@harper.example")
+    invoice(db, days_overdue=20, email="pay@harper.example")
+    run(db, allday)
+    assert len(sent) == 1
+
+
+def test_a_run_that_lost_its_ticket_stands_down(db, sent, monkeypatch):
+    """Review 4: just before sending, a run confirms it still holds its own
+    in-progress ticket; if another run holds it now, it sends nothing."""
+    import services.aria_actions as aa
+    real_approve = aa.approve
+
+    def ticket_taken_over(*a, **k):
+        with db.begin() as c:
+            c.execute(text("UPDATE usage_meters SET updated_at = '2099-01-01T00:00:00+00:00' "
+                           "WHERE meter LIKE 'autochase-inflight:%'"))
+        return real_approve(*a, **k)
+    monkeypatch.setattr(aa, "approve", ticket_taken_over)
+    invoice(db, days_overdue=30)
+    result = run(db, on())
+    assert sent == [] and list(result["skipped"].values()) == ["lost_reservation"]
+    with db.connect() as c:
+        assert c.execute(text("SELECT status FROM aria_actions")).scalar() == "dismissed"
+
+
+def test_an_old_ticket_with_a_waiting_automatic_draft_is_not_reclaimed(db, sent):
+    stale = (TUE_10 - timedelta(hours=3)).astimezone(timezone.utc).isoformat()
+    iid = invoice(db, days_overdue=30, email="pay@harper.example")
+    other = invoice(db, days_overdue=20, email="pay@harper.example")
+    import services.aria_actions as aa
+    with Session(db) as s:
+        aa.propose(s, business(), None, "send_invoice_chase", {"invoice_id": iid},
+                   owner_name="Mike", automation="invoice_chasing")
+    with db.begin() as c:
+        c.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) "
+                       "VALUES (:b, 'autochase-inflight:pay@harper.example', '2000-01', 1, :u)"),
+                  {"b": A, "u": stale})
+    result = run(db, on())
+    assert sent == [] and result["skipped"][other] == "chase_in_progress"
