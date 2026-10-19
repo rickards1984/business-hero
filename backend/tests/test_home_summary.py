@@ -32,6 +32,9 @@ def engine():
         c.execute(text("CREATE TABLE email_sync_states (email_account_id TEXT, last_synced_at TIMESTAMP)"))
         c.execute(text("CREATE TABLE xero_connections (business_id TEXT, last_sync_at TIMESTAMP)"))
         c.execute(text("CREATE TABLE accounting_connections (business_id TEXT, last_sync_at TIMESTAMP)"))
+        # AUTO-1: the summary also lists what Aria did on her own (harness).
+        c.execute(text("""CREATE TABLE aria_actions (id TEXT, business_id TEXT, action_type TEXT,
+            payload TEXT, status TEXT, executed_at TIMESTAMP)"""))
     return eng
 
 

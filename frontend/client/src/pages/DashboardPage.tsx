@@ -115,6 +115,25 @@ export default function DashboardPage() {
         )}
       </section>
 
+      {(d.summary.data?.automated?.length ?? 0) > 0 && (
+        <section className="home-section" aria-label="What Aria did on her own">
+          <div className="home-section-head">
+            <h2>What Aria did on her own</h2>
+            <button type="button" className="home-link" onClick={() => navigate('/app/settings/aria')}>Rules</button>
+          </div>
+          <ul className="home-tasks">
+            {d.summary.data!.automated!.map((a, i) => (
+              <li key={i}>
+                <span className="home-task-title">
+                  Chased {a.customer_name || 'a customer'} for {a.invoice_number || 'an invoice'} (stage {a.stage})
+                </span>
+                {a.sent_at && <span className="home-task-due">{ago(a.sent_at)}</span>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <section className="home-section" aria-label="Your business">
         <div className="home-section-head"><h2>Your business</h2></div>
         <div className="home-tiles">

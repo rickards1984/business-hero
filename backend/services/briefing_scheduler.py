@@ -106,6 +106,36 @@ async def _reconcile_metering_if_due():
     await asyncio.to_thread(_run)
 
 
+_last_invoice_autopilot = None
+_invoice_autopilot_task = None
+
+
+async def _run_invoice_autopilot_if_due():
+    """AUTO-1: Aria's invoice-chasing autopilot, hourly, for every business
+    that switched it on. In a worker thread (sync DB and email sends), in the
+    background so it never holds up the loop, and never two runs at once."""
+    global _last_invoice_autopilot, _invoice_autopilot_task
+    if _invoice_autopilot_task is not None and not _invoice_autopilot_task.done():
+        return
+    current = datetime.now(timezone.utc)
+    if _last_invoice_autopilot and current - _last_invoice_autopilot < timedelta(hours=1):
+        return
+    _last_invoice_autopilot = current
+
+    def _run():
+        from db import get_session_context
+        from services import automations
+        try:
+            with get_session_context() as session:
+                sent = automations.run_all_due(session)
+            if sent:
+                logger.info(f"[Scheduler] Invoice autopilot sent {sent} chase(s)")
+        except Exception as e:
+            logger.error(f"[Scheduler] Invoice autopilot failed: {e}")
+
+    _invoice_autopilot_task = asyncio.create_task(asyncio.to_thread(_run))
+
+
 async def _deliver_metering_notices():
     """BH-012: send pending usage notices every tick, in a worker thread. In a
     thread there is no running event loop, so the WhatsApp send is awaited to
@@ -160,6 +190,11 @@ async def _scheduler_loop():
             _run_background_sync_jobs_nonblocking()
         except Exception as e:
             logger.error(f"[Scheduler] Error scheduling background sync: {e}")
+
+        try:
+            await _run_invoice_autopilot_if_due()
+        except Exception as e:
+            logger.error(f"[Scheduler] Invoice autopilot scheduling failed: {e}")
 
         try:
             await _reconcile_stripe_if_due()

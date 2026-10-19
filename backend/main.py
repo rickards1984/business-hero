@@ -457,6 +457,8 @@ from usage_api import router as usage_router
 app.include_router(usage_router)
 from home_api import router as home_router
 app.include_router(home_router)
+from automations_api import router as automations_router
+app.include_router(automations_router)
 from aria_actions_api import router as aria_actions_router
 app.include_router(aria_actions_router)
 

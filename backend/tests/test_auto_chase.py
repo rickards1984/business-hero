@@ -41,8 +41,7 @@ class MissingAutomation(AssertionError):
     """Only this precise, intentional Stage 1 absence may be xfailed."""
 
 
-pending = pytest.mark.xfail(strict=True, raises=MissingAutomation,
-                            reason="AUTO-1: tests first; implementation follows Mike's review")
+# Stage 1's strict-xfail marker was removed once the implementation landed.
 
 A, B = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 LONDON = ZoneInfo("Europe/London")
@@ -149,14 +148,12 @@ def actions(db):
 
 # ---------------------------------------------------------------- switched ---
 
-@pending
 def test_it_is_off_by_default(db, sent):
     invoice(db, days_overdue=30)
     assert automations().chase_settings(None)["enabled"] is False
     assert run(db, automations().chase_settings(None))["sent"] == [] and sent == []
 
 
-@pending
 def test_the_defaults_are_mikes():
     d = automations().chase_settings(None)
     assert (d["first_after_days"], d["every_days"], d["max_auto_stage"]) == (7, 7, 3)
@@ -164,7 +161,6 @@ def test_the_defaults_are_mikes():
     assert (d["customer_gap_days"], d["daily_cap"], d["paused_customers"]) == (7, 20, [])
 
 
-@pending
 def test_saved_settings_override_only_what_they_name():
     d = automations().chase_settings({"enabled": True, "every_days": 10})
     assert d["enabled"] is True and d["every_days"] == 10 and d["first_after_days"] == 7
@@ -172,7 +168,6 @@ def test_saved_settings_override_only_what_they_name():
 
 # ---------------------------------------------------------------- the rules ---
 
-@pending
 @pytest.mark.parametrize("days,expected", [(6, []), (7, ["stage1"])])
 def test_stage_one_starts_at_seven_days_overdue(db, sent, days, expected):
     iid = invoice(db, days_overdue=days)
@@ -181,7 +176,6 @@ def test_stage_one_starts_at_seven_days_overdue(db, sent, days, expected):
     assert stage_of(db, iid) == (1 if expected else 0)
 
 
-@pending
 @pytest.mark.parametrize("ago,sends", [(6, False), (7, True)])
 def test_the_next_stage_waits_seven_days(db, sent, ago, sends):
     iid = invoice(db, days_overdue=30, stage=1, last_chased_days_ago=ago)
@@ -189,7 +183,6 @@ def test_the_next_stage_waits_seven_days(db, sent, ago, sends):
     assert stage_of(db, iid) == (2 if sends else 1)
 
 
-@pending
 def test_stage_four_is_always_a_card_never_sent(db, sent):
     iid = invoice(db, days_overdue=60, stage=3, last_chased_days_ago=8)
     result = run(db, on())
@@ -200,7 +193,6 @@ def test_stage_four_is_always_a_card_never_sent(db, sent):
     assert len(actions(db)) == 1
 
 
-@pending
 def test_a_chase_is_exactly_the_stage_template_with_the_sign_off(db, sent):
     from email_templates import get_chase_email_template
     invoice(db, days_overdue=10)
@@ -215,7 +207,6 @@ def test_a_chase_is_exactly_the_stage_template_with_the_sign_off(db, sent):
     assert mail["body"].startswith(expected["body"]) and "AI assistant to Mike" in mail["body"]
 
 
-@pending
 def test_it_is_recorded_as_a_standing_permission(db, sent):
     invoice(db, days_overdue=10)
     run(db, on())
@@ -224,7 +215,6 @@ def test_it_is_recorded_as_a_standing_permission(db, sent):
     assert json.loads(row.payload)["automation"] == "invoice_chasing"
 
 
-@pending
 @pytest.mark.parametrize("kwargs", [
     {"status": "paid"}, {"status": "draft"}, {"status": "cancelled"}, {"archived": True},
     {"paid": 500}, {"email": None}, {"email": ""},
@@ -234,7 +224,6 @@ def test_nothing_settled_or_unaddressable_is_chased(db, sent, kwargs):
     assert run(db, on())["sent"] == [] and sent == []
 
 
-@pending
 def test_one_chase_per_customer_per_week(db, sent):
     a = invoice(db, days_overdue=30, email="pay@harper.example")
     b = invoice(db, days_overdue=20, email="PAY@harper.example")
@@ -243,7 +232,6 @@ def test_one_chase_per_customer_per_week(db, sent):
     assert result["skipped"][b if result["sent"] == [a] else a] == "customer_chased_recently"
 
 
-@pending
 def test_a_customer_chased_by_hand_this_week_waits(db, sent):
     invoice(db, days_overdue=30, stage=1, last_chased_days_ago=2, email="pay@harper.example")
     other = invoice(db, days_overdue=30, email="pay@harper.example")
@@ -251,14 +239,12 @@ def test_a_customer_chased_by_hand_this_week_waits(db, sent):
     assert result["sent"] == [] and result["skipped"][other] == "customer_chased_recently"
 
 
-@pending
 def test_a_paused_customer_is_never_chased(db, sent):
     iid = invoice(db, days_overdue=30, email="pay@harper.example")
     result = run(db, on(paused_customers=["Pay@Harper.example"]))
     assert sent == [] and result["skipped"][iid] == "customer_paused"
 
 
-@pending
 @pytest.mark.parametrize("moment", [
     datetime(2026, 10, 24, 10, 0, tzinfo=LONDON),   # Saturday
     datetime(2026, 10, 20, 8, 59, tzinfo=LONDON),   # before 9
@@ -270,7 +256,6 @@ def test_only_weekdays_nine_to_five_uk(db, sent, monkeypatch, moment):
     assert run(db, on())["sent"] == [] and sent == []
 
 
-@pending
 def test_the_daily_cap(db, sent):
     for i in range(25):
         invoice(db, days_overdue=30, email=f"c{i}@example.com")
@@ -278,7 +263,6 @@ def test_the_daily_cap(db, sent):
     assert run(db, on(daily_cap=20))["sent"] == [], "the cap is per day, across runs"
 
 
-@pending
 def test_running_twice_sends_once(db, sent):
     invoice(db, days_overdue=30)
     run(db, on())
@@ -286,7 +270,6 @@ def test_running_twice_sends_once(db, sent):
     assert len(sent) == 1
 
 
-@pending
 @pytest.mark.parametrize("status,active", [("unpaid", True), ("active", False)])
 def test_a_read_only_or_suspended_account_is_never_chased_for(db, sent, status, active):
     invoice(db, days_overdue=30)
@@ -295,20 +278,17 @@ def test_a_read_only_or_suspended_account_is_never_chased_for(db, sent, status, 
     assert run(db, on(), biz)["sent"] == [] and sent == []
 
 
-@pending
 def test_a_plan_without_email_sends_nothing(db, sent):
     invoice(db, days_overdue=30)
     assert run(db, on(), business(feature_flags={"email": False}))["sent"] == [] and sent == []
 
 
-@pending
 def test_another_business_is_never_touched(db, sent):
     other = invoice(db, bid=B, days_overdue=30)
     run(db, on())
     assert sent == [] and stage_of(db, other) == 0
 
 
-@pending
 def test_an_invoice_with_a_card_already_waiting_is_left_alone(db, sent):
     iid = invoice(db, days_overdue=30)
     import services.aria_actions as aa
@@ -320,7 +300,6 @@ def test_an_invoice_with_a_card_already_waiting_is_left_alone(db, sent):
 
 # ------------------------------------------------------- the home and timing ---
 
-@pending
 def test_the_home_lists_what_aria_chased(db, sent):
     invoice(db, days_overdue=30)
     run(db, on())
@@ -332,10 +311,81 @@ def test_the_home_lists_what_aria_chased(db, sent):
     assert recent[0]["customer_name"] == "Harper Builds" and recent[0]["sent_at"]
 
 
-@pending
 def test_the_scheduler_runs_it_off_the_loop_and_hourly():
     automations()
     import inspect
     from services import briefing_scheduler
     source = inspect.getsource(briefing_scheduler)
     assert "_run_invoice_autopilot_if_due" in source and "to_thread" in source
+
+
+# ---------------------------------------------------- the owner's switches ---
+# Added during implementation (not in the approved Stage 1 set): the settings
+# endpoint the ticket names.
+
+def client_for(db, monkeypatch, biz):
+    import automations_api
+    import auth
+    import db as dbmod
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    with db.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS business_settings (id TEXT PRIMARY KEY,
+            business_id TEXT UNIQUE, settings TEXT NOT NULL, created_at TEXT, updated_at TEXT)"""))
+
+    async def _verify(token):
+        return SimpleNamespace(id="owner", email="owner@example.com")
+    monkeypatch.setattr(auth, "verify_supabase_token", _verify)
+    monkeypatch.setattr(auth, "is_platform_admin_user", lambda *a, **k: False)
+    monkeypatch.setattr(auth, "get_business_for_user",
+                        lambda user_id, requested_business_id=None: SimpleNamespace(id=biz.id))
+    monkeypatch.setattr(auth, "_load_business", lambda session, bid: biz)
+
+    class GateSession(Session):
+        def exec(self, statement, *a, **k):
+            from models import Business
+            if statement.column_descriptions[0]["entity"] is Business:
+                return SimpleNamespace(first=lambda: biz)
+            return super().exec(statement, *a, **k)
+
+    def sessions():
+        with GateSession(db) as s:
+            yield s
+    app = FastAPI()
+    app.include_router(automations_api.router)
+    app.dependency_overrides[dbmod.get_session] = sessions
+    client = TestClient(app)
+    client.headers["Authorization"] = "Bearer synthetic"
+    return client
+
+
+def test_the_owner_switches_it_on_and_other_settings_are_kept(db, monkeypatch):
+    client = client_for(db, monkeypatch, business())
+    with db.begin() as c:
+        c.execute(text("INSERT INTO business_settings VALUES ('s1', :b, :s, '', '')"),
+                  {"b": A, "s": json.dumps({"tone": "warm"})})
+    assert client.get("/v1/automations/invoice-chasing").json()["enabled"] is False
+    r = client.put("/v1/automations/invoice-chasing", json={"enabled": True, "every_days": 10})
+    assert r.status_code == 200 and r.json()["enabled"] is True and r.json()["every_days"] == 10
+    with db.connect() as c:
+        saved = json.loads(c.execute(text("SELECT settings FROM business_settings")).scalar())
+    assert saved["tone"] == "warm" and saved["automations"]["invoice_chasing"]["enabled"] is True
+
+
+def test_values_are_clamped_wherever_they_come_from(db, monkeypatch):
+    client = client_for(db, monkeypatch, business())
+    r = client.put("/v1/automations/invoice-chasing",
+                   json={"enabled": True, "daily_cap": 10000, "every_days": 0, "max_auto_stage": 4,
+                         "start_hour": 18, "end_hour": 8})
+    body = r.json()
+    assert (body["daily_cap"], body["every_days"], body["max_auto_stage"]) == (50, 3, 3)
+    assert (body["start_hour"], body["end_hour"]) == (9, 17)
+    assert automations().chase_settings({"enabled": "yes"})["enabled"] is False, \
+        "only a real true switches it on"
+
+
+def test_a_read_only_account_cannot_switch_it_on(db, monkeypatch):
+    biz = business()
+    biz.subscription_status = "unpaid"
+    client = client_for(db, monkeypatch, biz)
+    assert client.put("/v1/automations/invoice-chasing", json={"enabled": True}).status_code == 403

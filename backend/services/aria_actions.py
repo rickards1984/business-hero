@@ -259,8 +259,11 @@ _COLUMNS = "id, action_type, payload, status, expires_at, error, result, created
 # ------------------------------------------------------------- the API ---
 
 def propose(session, business, user_id, action_type: str, args: dict, *,
-            owner_name: Optional[str] = None, timezone: Optional[str] = None) -> dict:
-    """Store a card. Acts on nothing. Returns {"proposal": ...} or {"error": ...}."""
+            owner_name: Optional[str] = None, timezone: Optional[str] = None,
+            automation: Optional[str] = None) -> dict:
+    """Store a card. Acts on nothing. Returns {"proposal": ...} or {"error": ...}.
+    `automation` marks a card raised by a standing permission (AUTO-1), so the
+    audit trail can tell it from one Aria proposed in conversation."""
     if action_type not in ACTION_TYPES:
         return {"error": f"{action_type} cannot be proposed."}
     problem = _feature_problem(business, action_type)
@@ -272,6 +275,8 @@ def propose(session, business, user_id, action_type: str, args: dict, *,
         payload = _build(session, business, action_type, args, owner_name, tz_name)
     except ActionRefused as exc:
         return {"error": exc.detail}
+    if automation:
+        payload["automation"] = automation
     moment = now()
     aid = str(uuid.uuid4())
     session.execute(text(

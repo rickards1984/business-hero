@@ -16,6 +16,7 @@ export interface HomeSummary {
   invoices: { outstanding_total: number; outstanding_count: number; overdue_total: number; overdue_count: number };
   emails: { action_required: number; window_days: number };
   synced: { email: string | null; accounting: string | null };
+  automated?: Array<{ kind: string; invoice_number?: string; customer_name?: string; stage?: number; sent_at?: string }>;
 }
 
 export interface HomeTask {
@@ -134,6 +135,10 @@ export function briefingLines(d: Dashboard): string[] {
     lines.push(`${plural(inv.overdue_count, 'invoice is', 'invoices are')} overdue, ${money(inv.overdue_total)} still owed on them.`);
   } else if (inv && inv.outstanding_count > 0) {
     lines.push(`${money(inv.outstanding_total)} is still owed across ${plural(inv.outstanding_count, 'invoice', 'invoices')}, none overdue.`);
+  }
+  const auto = d.summary.data?.automated ?? [];
+  if (auto.length > 0) {
+    lines.push(`In the last week I chased ${plural(auto.length, 'invoice', 'invoices')} for you on autopilot.`);
   }
   const em = d.summary.data?.emails;
   if (em && em.action_required > 0) {

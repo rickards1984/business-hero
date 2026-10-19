@@ -113,4 +113,28 @@ def summary(conn, business_id: str, now: Optional[datetime] = None) -> dict:
             "email": _iso(email_synced),
             "accounting": max(accounting) if accounting else None,
         },
+        "automated": recent_automated(conn, bid, now),
     }
+
+
+def recent_automated(conn, business_id: str, now: Optional[datetime] = None,
+                     days: int = 7) -> list:
+    """What Aria did on her own lately (AUTO-1), for the home: automatic
+    chases actually sent, newest first. Cards waiting are under Needs you."""
+    import json
+    now = now or datetime.now(timezone.utc)
+    rows = conn.execute(text("""
+        SELECT payload, executed_at FROM aria_actions
+        WHERE business_id = :business_id AND action_type = 'send_invoice_chase'
+          AND status = 'done' AND executed_at >= :since
+        ORDER BY executed_at DESC
+    """), {"business_id": str(business_id), "since": now - timedelta(days=days)}).fetchall()
+    out = []
+    for payload, executed_at in rows:
+        p = payload if isinstance(payload, dict) else json.loads(payload or "{}")
+        if p.get("automation") != "invoice_chasing":
+            continue
+        out.append({"kind": "invoice_chasing", "invoice_number": p.get("invoice_number"),
+                    "customer_name": p.get("customer_name"), "stage": p.get("chase_stage"),
+                    "sent_at": _iso(executed_at)})
+    return out

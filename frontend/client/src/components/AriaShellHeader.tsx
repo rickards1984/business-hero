@@ -23,6 +23,7 @@ const departments = [
 const settings = [
   ['Branding', '/app/settings/branding'], ['Billing', '/app/settings/billing'],
   ['Email', '/app/settings/email'], ['Voice (Awaz)', '/app/settings/awaz'],
+  ['Aria automations', '/app/settings/aria'],
 ];
 
 function luminance(hex: string) {
