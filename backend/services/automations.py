@@ -168,35 +168,36 @@ def _candidates(session, business):
     """), {"b": str(business.id)}).fetchall()
 
 
-def _won_claim(session, business, mine: str, customer: str, moment: datetime,
-               s: dict) -> Optional[str]:
-    """Insert-then-check (Codex AUTO-1 review 1, finding 2): our proposal is
-    already stored, so a rival run — another process — can see it, and we
-    can see theirs. Of two in-flight claims, the earlier (created_at, id)
-    wins and the other stands down; anything already sent or unresolved wins
-    outright. Returns None if we may send, else the reason we may not."""
-    key = None
-    rows = _attempts(session, business, min(moment - timedelta(days=s["customer_gap_days"]),
-                                            _day_start(moment)))
-    for aid, _, _, created_at, _, _ in rows:
-        if aid == mine:
-            key = (created_at, aid)
-    gap_start = moment - timedelta(days=s["customer_gap_days"])
-    for aid, who, status, created_at, automatic, approved_by in rows:
-        if aid == mine or who != customer or created_at < gap_start:
-            continue
-        if status in ("executing", "done"):
-            return "customer_chased_recently"
-        if status == "proposed" and automatic and key and (created_at, aid) < key:
-            return "customer_chased_recently"
-    today = _day_start(moment)
-    used = sum(1 for aid, _, status, created_at, automatic, _ in rows
-               if aid != mine and automatic and created_at >= today and (
-                   status in ("executing", "done", "failed")
-                   or (status == "proposed" and key and (created_at, aid) < key)))
-    if used >= s["daily_cap"]:
-        return "daily_cap"
-    return None
+def _reserve(session, business, customer: str, moment: datetime, s: dict):
+    """Durable, unique tickets for one automatic chase (Codex AUTO-1 review
+    2): one per customer per UK day, and one of the day's numbered cap slots.
+    They are rows in usage_meters, whose UNIQUE (business_id, meter, period)
+    lets exactly one run hold each — so two runs, in any interleaving and
+    whatever their clocks, cannot both chase a customer or both use the last
+    slot. Returns (reason or None, tickets held, period)."""
+    from services.metering import _claim
+    day = moment.astimezone(LONDON).date()
+    period = day.strftime("%Y-%m")
+    bid = str(business.id)
+    customer_ticket = f"autochase:{customer}:{day.isoformat()}"
+    if not _claim(session, bid, customer_ticket, period):
+        session.rollback()
+        return "customer_chased_recently", [], period
+    for n in range(1, s["daily_cap"] + 1):
+        slot = f"autochase-slot:{day.isoformat()}:{n}"
+        if _claim(session, bid, slot, period):
+            session.commit()
+            return None, [customer_ticket, slot], period
+    session.rollback()  # releases the customer ticket with the transaction
+    return "daily_cap", [], period
+
+
+def _give_back(session, business, tickets: list, period: str) -> None:
+    """Nothing was sent: free the tickets for a later run."""
+    from services.metering import _release
+    for ticket in tickets:
+        _release(session, str(business.id), ticket, period)
+    session.commit()
 
 
 def _authority(business, s: dict, moment: datetime) -> Optional[str]:
@@ -227,12 +228,10 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
     if _authority(business, s, moment):
         return result
 
-    today = uk_today(moment)
     waiting = _open_cards(session, business)
     unresolved = _unresolved_customers(session, business)
     last_by_customer = _last_chase_by_customer(session, business)
-    for _, who, status, created_at, _, _ in _attempts(
-            session, business, moment - timedelta(days=s["customer_gap_days"])):
+    for _, who, status, created_at, _, _ in _attempts(session, business, moment - timedelta(days=31)):
         if status in ("executing", "done") and who and created_at and (
                 who not in last_by_customer or created_at > last_by_customer[who]):
             last_by_customer[who] = created_at
@@ -244,6 +243,19 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
         if not customer:
             result["skipped"][iid] = "no_customer_email"
             continue
+
+        # Re-read authority and rules FIRST, and decide everything below with
+        # them (Codex AUTO-1 review 1 finding 3; review 2 finding 3).
+        current_settings, business = refresh()
+        s = chase_settings(current_settings)
+        moment = now()
+        stop = _authority(business, s, moment)
+        if stop:
+            result["skipped"][iid] = stop
+            break
+        if customer in s["paused_customers"]:
+            result["skipped"][iid] = "customer_paused"
+            continue
         if customer in unresolved:
             result["skipped"][iid] = "unresolved_attempt"
             continue
@@ -254,7 +266,7 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             datetime.fromisoformat(str(due)[:10]).date()
         stage = int(stage or 0)
         if stage == 0:
-            is_due = (today - due_day).days >= s["first_after_days"]
+            is_due = (uk_today(moment) - due_day).days >= s["first_after_days"]
         else:
             last = _parse(last_chased)
             is_due = last is None or moment - last >= timedelta(days=s["every_days"])
@@ -264,18 +276,6 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
         recent = last_by_customer.get(customer)
         if customer in chased_now or (recent and moment - recent < timedelta(days=s["customer_gap_days"])):
             result["skipped"][iid] = "customer_chased_recently"
-            continue
-
-        # Re-read authority before acting on THIS invoice.
-        current_settings, business = refresh()
-        s = chase_settings(current_settings)
-        moment = now()
-        stop = _authority(business, s, moment)
-        if stop:
-            result["skipped"][iid] = stop
-            break
-        if customer in s["paused_customers"]:
-            result["skipped"][iid] = "customer_paused"
             continue
         next_stage = min(stage + 1, 4)
 
@@ -291,29 +291,28 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
                 result["skipped"][iid] = card.get("error") or "not_proposed"
             continue
 
-        proposed = aria_actions.propose(session, business, None, "send_invoice_chase",
-                                        {"invoice_id": iid, "chase_stage": next_stage},
-                                        owner_name=owner_name, automation=KIND)
-        if "proposal" not in proposed:
-            result["skipped"][iid] = proposed.get("error") or "not_proposed"
-            continue
-        card = proposed["proposal"]
-        lost = _won_claim(session, business, card["id"], customer, moment, s)
+        lost, tickets, period = _reserve(session, business, customer, moment, s)
         if lost:
-            try:
-                aria_actions.dismiss(session, business, card["id"])
-            except aria_actions.ActionRefused:
-                pass
             result["skipped"][iid] = lost
             if lost == "daily_cap":
                 break
             continue
+        proposed = aria_actions.propose(session, business, None, "send_invoice_chase",
+                                        {"invoice_id": iid, "chase_stage": next_stage},
+                                        owner_name=owner_name, automation=KIND)
+        if "proposal" not in proposed:
+            _give_back(session, business, tickets, period)
+            result["skipped"][iid] = proposed.get("error") or "not_proposed"
+            continue
+        card = proposed["proposal"]
         try:
             outcome = aria_actions.approve(session, business, card["id"], None, card["version"])
         except aria_actions.ActionRefused as exc:
+            _give_back(session, business, tickets, period)  # refused before any send
             result["skipped"][iid] = exc.detail
             continue
-        # Sent, failed or unconfirmed: this customer is done for this run.
+        # Sent, failed or unconfirmed: this customer is done for this run, and
+        # the tickets stay used.
         chased_now.add(customer)
         if outcome.get("status") == "done":
             result["sent"].append(iid)
@@ -353,6 +352,9 @@ def run_all_due(session) -> int:
         if business is None:
             continue
         def refresh(bid=str(business_id)):
+            # A real re-read: without this the ORM hands back the instance it
+            # already holds, with a stale is_active (Codex AUTO-1 review 2).
+            session.expire_all()
             row = session.execute(text(
                 "SELECT settings FROM business_settings WHERE business_id = :b"),
                 {"b": bid}).fetchone()

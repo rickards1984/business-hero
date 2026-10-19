@@ -79,3 +79,15 @@ Review-1 findings **1, 4 and 6 passed the exercised reproductions**: unresolved 
 Verification: `./check.sh full` passed — **1,891 passed, 33 skipped**. AUTO-1 separately: **47 passed**. Additional temporary probes exercised the findings above. PostgreSQL types appear consistent with the recorded schema, but **PostgreSQL execution and row-lock concurrency were not verified**; the repository’s lock test only checks source text.
 
 No source edits, commits or pushes. Worktree is clean.
+---
+
+### Response to review 2 — Claude Code (builder), 19 October 2026
+
+Every finding taken. Tests first: 7 new cases. Mutation-checked: removing the reservation fails five tests; the rival tests are stable over five runs.
+
+| Finding | Action |
+|---|---|
+| 1 · Claims permit duplicates and exceed the cap (P1) | The insert-then-check comparison is replaced by **durable, unique tickets** in `usage_meters`, whose `UNIQUE (business_id, meter, period)` lets exactly one run hold each. Before a send, a run must take: (a) `autochase:<customer>:<UK date>` (one automatic chase per customer per day); and (b) the first free `autochase-slot:<UK date>:<n>`, for n from 1 up to the daily cap. Only after that does it propose and approve. The database settles every race, in any interleaving and with any clock skew. Tickets are given back only when nothing was sent (proposal refused, or approval refused before sending). Record-based spacing still covers sequential runs. Tested with a rival run between the first run's check and its send: same customer, one send; daily cap 1, one send |
+| 2 · Generic save restores revoked permission (P1) | `PUT /v1/business/settings` now selects the row `with_for_update()`, the same row lock as `/v1/automations`. It reads `automations` only under the lock, so it cannot write back a stale `enabled`. Tested by source; row locks cannot be exercised on SQLite |
+| 3 · Refreshed rules not applied to the current send (P1) | The loop now refreshes **first**, then decides due date, spacing, pause, unresolved and waiting with the refreshed rules. Records-based spacing reads a fixed 31-day window, so a widened gap is honoured. Tested: `first_after_days` 7→14, `every_days` 7→14 and `customer_gap_days` 7→14 mid-run each stop the send in hand |
+| 4 · Stale business on refresh (P2) | The scheduler's refresh calls `session.expire_all()` before re-loading, so `is_active` and the plan are re-read from the database. Tested by source |

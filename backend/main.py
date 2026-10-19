@@ -1472,7 +1472,10 @@ async def update_business_settings(
     session: Session = Depends(get_session)
 ):
     """Update business settings. Creates settings if they don't exist."""
-    statement = select(BusinessSettings).where(BusinessSettings.business_id == business.id)
+    # Row-locked, like /v1/automations, so this save cannot read a stale
+    # `automations` and write it back over a switch-off (Codex AUTO-1 review 2).
+    statement = select(BusinessSettings).where(
+        BusinessSettings.business_id == business.id).with_for_update()
     settings = session.exec(statement).first()
     
     if not settings:
