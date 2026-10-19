@@ -243,3 +243,64 @@ Mike's click tests.
 5. **The OpenClaw history:** import all four businesses' history (Business
    Hero, New Body, MSC, FitFutures) into their Business Hero accounts?
    - FitFutures isn't a Business Hero business yet. Should it become one?
+
+---
+
+## Mike's decisions — 19 October 2026
+
+1. **Order — agreed.**
+   - AUTO-1 (invoice autopilot), then AUTO-2 (reply watching), built by
+     Claude.
+   - OUT-1 (outreach in Business Hero) in parallel, built by Codex.
+2. **Chasing defaults — agreed.**
+   - Stage 1 at 7 days overdue, then every 7 days to stage 3.
+   - Stage 4 always a card.
+   - At most 1 chase per customer per week.
+   - Weekdays 9:00–17:00 only.
+3. **Outreach is a paid add-on.**
+   - **Included** in the highest tier (Business).
+   - A **paid add-on** for the lower tiers.
+   - Also a **standalone, outreach-only** product.
+   - (Stripe products and plan wiring are RED, a separate ticket.)
+4. **Lead sources — yes, and research must be much smarter.**
+   - Find the **decision makers**, the "yes/no" people, where possible.
+     Sources:
+     - Companies House officers (directors are public, through the free
+       API);
+     - the company's own website (About us / Team pages);
+     - public search-result previews, which can include LinkedIn profile
+       snippets — but **never scraping LinkedIn itself**.
+   - Use the latest, most capable models.
+   - (Mike notes the local OpenClaw agents run on older, costlier models.
+     He will upgrade the local ones himself, separately.)
+5. **History import.**
+   - **MSC** history → the **MSC** account.
+   - **FitFutures** (UKFI, the education side of New Body Health and
+     Fitness) → the **New Body** account. Its outreach is very much needed.
+   - **New Body** history → New Body.
+   - **Business Hero's own outreach stays LOCAL** on OpenClaw ("Byron and
+     his team"). It is **not** imported; Mike will use and upgrade it
+     separately.
+
+**Reply handling must be smarter** (Mike). The old reply sweep answered
+every reply with a booking link, which feels fake when someone has asked a
+question. Instead:
+- Aria reads the reply and answers basic questions from the business's
+  **product knowledge** (as the AI receptionist uses its knowledge base),
+  briefly and specifically, and moves gently towards a meeting **or** hands
+  over to the owner.
+- **At most one bespoke reply** before a human takes over.
+- **Default: an "Approve response" card**, optionally with the owner **CC'd**
+  into the thread so they can take over seamlessly.
+- A booking link is sent only when the person asks to meet or shows clear
+  interest.
+- Always honest that it is an AI assistant (D12).
+
+**The dashboard.** Outreach becomes a **department in the menu**, with an
+easy-to-navigate dashboard **inspired by current outreach and CRM apps, and
+on a par with them**:
+- a pipeline;
+- prospects;
+- campaigns and sequences;
+- a replies inbox;
+- results.
