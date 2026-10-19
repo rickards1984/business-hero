@@ -84,6 +84,14 @@ def db():
             email_account_id TEXT NOT NULL, to_emails TEXT NOT NULL, subject TEXT NOT NULL,
             body_preview TEXT NOT NULL, status TEXT NOT NULL, invoice_id TEXT, chase_stage INTEGER,
             provider_message_id TEXT, sent_at TEXT, error TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"""))
+        # AUTO-1 review 2: automatic chases reserve durable, unique tickets
+        # here (the same table and UNIQUE rule as production's usage_meters).
+        c.execute(text("""CREATE TABLE usage_meters (
+            id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+            business_id TEXT NOT NULL, meter TEXT NOT NULL, period TEXT NOT NULL,
+            value TEXT NOT NULL DEFAULT '0', created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"""))
+        c.execute(text("CREATE UNIQUE INDEX usage_meters_uq ON usage_meters (business_id, meter, period)"))
         for bid in (A, B):
             c.execute(text("INSERT INTO email_accounts (id, business_id, provider, email_address) "
                            "VALUES (:id, :b, 'google', :e)"), {"id": f"acct-{bid[:4]}", "b": bid,
@@ -565,3 +573,66 @@ def test_settings_writes_are_serialised():
     import inspect
     import automations_api
     assert "FOR UPDATE" in inspect.getsource(automations_api)
+
+
+
+# ------------------------------------------- Codex AUTO-1 review 2 additions ---
+
+def _rival_before_approve(db, monkeypatch, settings):
+    """Run B starts AFTER run A has proposed and checked, but BEFORE A
+    approves — the interleaving review 2 reproduced."""
+    import services.aria_actions as aa
+    real_approve = aa.approve
+    state = {"done": False}
+
+    def approve_after_a_rival(*a, **k):
+        if not state["done"]:
+            state["done"] = True
+            run(db, settings)
+        return real_approve(*a, **k)
+    monkeypatch.setattr(aa, "approve", approve_after_a_rival)
+
+
+def test_a_rival_between_check_and_send_cannot_double_chase(db, sent, monkeypatch):
+    invoice(db, days_overdue=30, email="pay@harper.example")
+    invoice(db, days_overdue=20, email="pay@harper.example")
+    _rival_before_approve(db, monkeypatch, on())
+    run(db, on())
+    assert len(sent) == 1
+
+
+def test_a_rival_between_check_and_send_cannot_exceed_the_cap(db, sent, monkeypatch):
+    invoice(db, days_overdue=30, email="one@example.com")
+    invoice(db, days_overdue=30, email="two@example.com")
+    _rival_before_approve(db, monkeypatch, on(daily_cap=1))
+    run(db, on(daily_cap=1))
+    assert len(sent) == 1
+
+
+@pytest.mark.parametrize("changed,kwargs", [
+    ({"first_after_days": 14}, {"days_overdue": 10}),
+    ({"every_days": 14}, {"days_overdue": 40, "stage": 1, "last_chased_days_ago": 8}),
+    ({"customer_gap_days": 14}, {"days_overdue": 40, "stage": 1, "last_chased_days_ago": 8}),
+])
+def test_rules_changed_mid_run_apply_to_the_send_in_hand(db, sent, changed, kwargs):
+    """Review 2 finding 3: eligibility is decided with the REFRESHED rules."""
+    invoice(db, **kwargs)
+    with Session(db) as s:
+        automations().run_invoice_autopilot(s, business(), on(), owner_name="Mike",
+                                            refresh=lambda: (on(**changed), business()))
+    assert sent == []
+
+
+def test_the_scheduler_refresh_rereads_the_business_from_the_database():
+    """Review 2 finding 4: an identity-mapped ORM instance is not a re-read."""
+    import inspect
+    source = inspect.getsource(automations().run_all_due)
+    assert "expire_all" in source or "populate_existing" in source
+
+
+def test_the_generic_settings_save_locks_the_row_too():
+    """Review 2 finding 2: an unlocked generic save could write back a stale
+    'enabled'. It must take the same row lock as the automations endpoint."""
+    import inspect
+    import main
+    assert "with_for_update" in inspect.getsource(main.update_business_settings)

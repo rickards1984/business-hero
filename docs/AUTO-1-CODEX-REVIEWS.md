@@ -49,3 +49,33 @@ Every finding taken. Tests first: 12 new tests. Mutation-checked: removing the c
 | 6 · Owner-approved cards reported as autonomous (P2) | Stage-4 cards carry `raised_by`, not `automation`. `recent_automated` lists only automatic sends with no human approver. Tested |
 
 Harness: two existing fixtures gained the columns the new checks read: the invoice balance columns, and `approved_by` on actions.
+
+## Review 2 (repair cycle 1 of 3)
+
+| | |
+|---|---|
+| Reviewed commit | `27e0b95` |
+| Session id | `01a1557a-df6f-7da1-91f0-bc9117d47d88` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 58,261` |
+| **Verdict** | **REQUEST-CHANGES** |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** — at `27e0b957210662375639e6a291e5fa85d1a0a79d`. Findings concern North Star P4 and correctness.
+
+1. **P1 — Claims can still permit duplicate sends and exceed the cap.** [automations.py:190](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:190), [automations.py:301](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:301). Run A passes `_won_claim`, then pauses before approval. Run B inserts a proposal with an earlier timestamp—or an equal timestamp and smaller UUID—and also passes. Both approve distinct cards. **Reproduced with timestamp ties and one-second clock skew: two sends to one customer; separately, two sends with `daily_cap=1`.** The check does not durably reserve permission to send. Existing overlap tests complete the rival before the first check, missing this interleaving.
+
+2. **P1 — Generic settings saves still restore revoked permission.** [main.py:1476](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/main.py:1476), [main.py:1487](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/main.py:1487). A generic save loads `enabled=true`; switch-off commits; the generic save then preserves its **stale** automations document and writes `true` back. **Reproduced through the actual ORM update path.** `FOR UPDATE` on the automation endpoint alone cannot protect an unlocked reader that subsequently overwrites the document. The next scheduled pass can email customers after permission was revoked.
+
+3. **P1 — Refreshed spacing rules are not applied to the current send.** [automations.py:256](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:256), [automations.py:270](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:270). Due-date and spacing checks run before `refresh()`. **Reproduced:** changing `first_after_days` from 7 to 14 still sends for an invoice 10 days overdue; changing `every_days` to 14 still sends after eight days. Increasing `customer_gap_days` likewise fails when the previous chase is recorded only on the invoice. Re-evaluate eligibility using the refreshed rules before approving.
+
+4. **P2 — The business refresh can retain stale account eligibility.** [automations.py:360](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:360), [auth.py:232](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/auth.py:232). `_load_business()` performs an ordinary ORM query without refreshing an already-loaded instance. **Reproduced:** another transaction set `is_active=false`; reloading returned the same object with `is_active=true`, and `_authority()` allowed it. Explicitly refresh or repopulate the instance. Tests supplying fresh `SimpleNamespace` objects do not exercise this path.
+
+Review-1 findings **1, 4 and 6 passed the exercised reproductions**: unresolved attempts remain blocked, bookkeeping failures retain spacing, settled invoices are refused, and owner-approved stage-4 cards are excluded from autonomous reporting. Findings **2, 3 and 5 remain incomplete** as above. Dismissing an already-approved action correctly preserved `done`.
+
+Verification: `./check.sh full` passed — **1,891 passed, 33 skipped**. AUTO-1 separately: **47 passed**. Additional temporary probes exercised the findings above. PostgreSQL types appear consistent with the recorded schema, but **PostgreSQL execution and row-lock concurrency were not verified**; the repository’s lock test only checks source text.
+
+No source edits, commits or pushes. Worktree is clean.
