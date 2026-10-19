@@ -213,3 +213,62 @@ Acceptance: all ten design areas in OUT-1 are covered; existing-code claims have
 7. **Allowances and prices:** recommend 200 completed prospects/500 accepted emails monthly per business, founder usage recorded without charges once exemption is verified, no overage initially. Inclusion/add-on/standalone structure is already decided; approve actual add-on and standalone prices only after pilot economics in the RED billing ticket.
 8. **Automation authority:** recommend shared AUTO permission records with typed audit references, no duplicate outreach permission engine; template/target changes require fresh first-batch review and permission. Keep bespoke replies outside standing permission.
 9. **Import approval:** recommend a masked dry run with verified source-to-tenant/account mapping, suppression-first processing, duplicate/collision reports and a proved no-op rerun. Authorise real data import and each initial external-send action separately under the RED runbooks.
+
+---
+
+## Mike's decisions — 19 October 2026
+
+**Decisions 1–9: "agree with all."**
+
+**Addition A: an optional prospect-data integration, with the customer's own
+account.** The owner can connect **Hunter.io** or **Apollo** using their own
+paid account and API key. That gives decision-maker discovery and verified
+email addresses: "quality over quantity — hundreds of emails a month, not
+thousands of spam emails to the wrong people."
+
+- **Recommendation (Claude):** **Hunter.io first.**
+  - It is a simple REST API with an API key.
+  - Domain Search finds the people at a company domain, with their roles.
+  - Email Finder gives a named person's address with a confidence score.
+  - Email Verifier checks deliverability before anything is sent.
+  - This fits the Companies House → company website pipeline directly:
+    Companies House gives the company and its directors; Hunter supplies a
+    verified address.
+
+  **Apollo second.** Its people search is richer, but API access depends on
+  the plan and the integration is larger.
+- **The key** is stored encrypted, the same way OAuth tokens are (Fernet),
+  and is never shown again after saving; there is a "test connection" check.
+  - Usage counts against the **customer's own** provider quota, shown in
+    Settings.
+  - Calls are logged (counts only).
+- **Data rules unchanged:**
+  - every enriched contact still needs corporate eligibility (PECR);
+  - provider data is kept only as needed for the prospect;
+  - each prospect page shows where the data came from ("via Hunter.io,
+    confidence 94%, verified 19 Oct");
+  - a verifier result of "undeliverable" or "risky" blocks sending.
+- **Without a connected provider,** the free pipeline (Companies House plus
+  permitted company pages plus licensed search previews) still works,
+  without guessed addresses.
+
+**Addition B: more than one outreach mailbox per business.**
+- **Mike's own example:** FitFutures outreach and replies use one inbox, and
+  New Body Gym outreach uses another Google inbox on the same domain
+  (newbodyhf.co.uk), "which keeps it separate and organised". Other
+  businesses may need the same.
+- **This is already supported in the data:** `email_accounts` allows several
+  accounts per business (`is_default`, `display_name`).
+- **The gap:** four sending paths choose "the latest connected account"
+  (`ORDER BY created_at DESC LIMIT 1`).
+- **Design:**
+  - each **campaign is tied to one chosen mailbox**, and its sends, replies,
+    reply watching, warm-up, daily caps and deliverability checks are all
+    **per mailbox**;
+  - a brand (e.g. FitFutures) can have a default mailbox;
+  - the replies inbox can be filtered by mailbox;
+  - connecting a second Google or Microsoft account is a supported flow in
+    Settings.
+  - **Everything else** (Aria's emails, invoice chases) uses the business's
+    **default** mailbox (`is_default`), not "the latest". That is a separate
+    small fix, tracked in AUTO-1 / a follow-up.
