@@ -112,7 +112,7 @@ def seed(cur, tenant):
     biz, user = tenant["business"], tenant["user"]
     ids, payloads = {}, {}
 
-    def add(name, **values):
+    def add(name, /, **values):  # positional-only: "name" is also a column
         payloads[name] = {"business_id": biz, **values}
         ids[name] = insert(cur, "outreach_" + name, payloads[name])
         return ids[name]
