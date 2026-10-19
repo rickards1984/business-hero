@@ -8,6 +8,7 @@ import type { Proposal } from '@/components/ApprovalCard';
 import { apiRequest } from '@/lib/queryClient';
 import TasksPanel from '@/components/TasksPanel';
 import ApprovalCard from '@/components/ApprovalCard';
+import ReplyCard, { type ChaseReply } from '@/components/ReplyCard';
 import AriaHero from '@/components/AriaHero';
 import { isBlocking } from '@/components/ReceptionistUsage';
 import { ago, useDashboardData } from '@/hooks/useDashboardData';
@@ -56,6 +57,12 @@ export default function DashboardPage() {
   // screen so it can show its result rather than vanish; an edit is not a
   // finish, so an edited draft simply follows the server (review 3).
   const [finished, setFinished] = useState<Record<string, Proposal>>({});
+  // AUTO-2: a reply the owner just decided stays on screen with its result.
+  const [settled, setSettled] = useState<Record<string, ChaseReply>>({});
+  const replyChanged = (reply: ChaseReply) => {
+    setSettled(prev => ({ ...prev, [reply.id]: reply }));
+    queryClient.invalidateQueries({ queryKey: ['home-summary'] });
+  };
   const cardChanged = (card: Proposal) => {
     if (card.status !== 'proposed') setFinished(prev => ({ ...prev, [card.id]: card }));
     queryClient.invalidateQueries({ queryKey: ['aria-actions'] });
@@ -73,6 +80,8 @@ export default function DashboardPage() {
   const usage = d.usage.data;
   const open = d.actions.data ?? [];
   const cards = [...open, ...Object.values(finished).filter(c => !open.some(o => o.id === c.id))];
+  const openReplies = d.summary.data?.replies ?? [];
+  const replies = [...openReplies, ...Object.values(settled).filter(r => !openReplies.some(o => o.id === r.id))];
   const inv = d.summary.data?.invoices;
   const em = d.summary.data?.emails;
   const synced = d.summary.data?.synced;
@@ -95,11 +104,16 @@ export default function DashboardPage() {
           <h2>Needs you</h2>
           <span>Aria drafts. You approve. She acts once, signed as your AI assistant.</span>
         </div>
+        {replies.length > 0 && (
+          <div className="home-cards" style={{ marginBottom: 16 }}>
+            {replies.map(r => <ReplyCard key={r.id} reply={r} onChanged={() => replyChanged(r)} />)}
+          </div>
+        )}
         {d.actions.isLoading && cards.length === 0 ? (
           <div className="home-empty"><span className="skeleton" style={{ height: 16, width: '40%' }} /></div>
         ) : d.actions.isError && cards.length === 0 ? (
           <div className="home-empty">Your drafts couldn't be loaded just now.</div>
-        ) : cards.length === 0 ? (
+        ) : cards.length === 0 && replies.length > 0 ? null : cards.length === 0 ? (
           <div className="home-empty">
             Nothing is waiting for your approval. Ask Aria to draft an email, chase an invoice,
             book something or add a task, and it will appear here for a tap.

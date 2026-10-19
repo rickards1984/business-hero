@@ -113,7 +113,8 @@ def database():
             amount_due NUMERIC, amount_paid NUMERIC DEFAULT 0, paid_amount NUMERIC, external_id TEXT)"""))
         s.execute(text("""CREATE TABLE email_accounts (
             id TEXT PRIMARY KEY, business_id TEXT NOT NULL, provider TEXT,
-            email_address TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"""))
+            email_address TEXT, is_default BOOLEAN DEFAULT 0,  -- AUTO-2: the chase mailbox
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)"""))
         s.execute(text("""CREATE TABLE email_outbox (
             id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
             business_id TEXT NOT NULL, email_account_id TEXT NOT NULL,

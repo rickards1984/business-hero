@@ -3,6 +3,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
 import type { Usage } from '@/components/ReceptionistUsage';
 import type { Proposal } from '@/components/ApprovalCard';
+import type { ChaseReply } from '@/components/ReplyCard';
 
 /**
  * NS-B7 — the Aria home's figures, shared by the hero (briefing) and the page
@@ -17,6 +18,7 @@ export interface HomeSummary {
   emails: { action_required: number; window_days: number };
   synced: { email: string | null; accounting: string | null };
   automated?: Array<{ kind: string; invoice_number?: string; customer_name?: string; stage?: number; sent_at?: string }>;
+  replies?: ChaseReply[];  // AUTO-2: replies to chases awaiting the owner
 }
 
 export interface HomeTask {
@@ -139,6 +141,15 @@ export function briefingLines(d: Dashboard): string[] {
   const auto = d.summary.data?.automated ?? [];
   if (auto.length > 0) {
     lines.push(`In the last week I chased ${plural(auto.length, 'invoice', 'invoices')} for you on autopilot.`);
+  }
+  const replies = d.summary.data?.replies ?? [];
+  if (replies.length === 1) {
+    const r = replies[0];
+    const what = r.category === 'paid' ? 'says they have paid' : 'replied about';
+    const which = r.invoice_numbers.length ? r.invoice_numbers.join(', ') : 'an invoice';
+    lines.push(`${r.customer_email} ${what} ${which}. I've paused chasing them until you decide, below.`);
+  } else if (replies.length > 1) {
+    lines.push(`${plural(replies.length, 'customer has', 'customers have')} replied to chases. I've paused chasing them until you decide, below.`);
   }
   const em = d.summary.data?.emails;
   if (em && em.action_required > 0) {

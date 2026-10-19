@@ -76,3 +76,36 @@ def put_invoice_chasing(changes: Dict[str, Any] = Body(...),
                                             automations.KIND: merged}}
     _save(session, business_id, row_id, document)
     return merged
+
+
+# ------------------------------------------------- AUTO-2: replies to chases ---
+
+def _business_ref(auth_ctx: dict):
+    from types import SimpleNamespace
+    return SimpleNamespace(id=str(auth_ctx["business_id"]))
+
+
+@router.get("/replies")
+def list_chase_replies(auth_ctx: dict = Depends(get_user_business_context),
+                       session: Session = Depends(get_session)):
+    """Replies to chases awaiting the owner. Chasing those customers is
+    paused until the owner chooses Resume or Stop."""
+    from services import chase_replies
+    return chase_replies.open_replies(session, _business_ref(auth_ctx))
+
+
+@router.post("/replies/{reply_id}/resolve")
+def resolve_chase_reply(reply_id: str, decision: Dict[str, Any] = Body(...),
+                        auth_ctx: dict = Depends(get_user_business_context),
+                        session: Session = Depends(get_session)):
+    """{"decision": "resume" | "stop"}. Stop ends automatic chasing of the
+    invoices the reply is about; it never marks anything paid."""
+    from fastapi import HTTPException
+    from services import chase_replies
+    try:
+        return chase_replies.resolve(session, _business_ref(auth_ctx), reply_id,
+                                     auth_ctx.get("user_id"), str(decision.get("decision") or ""))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Reply not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409 if "already" in str(exc) else 422, detail=str(exc))

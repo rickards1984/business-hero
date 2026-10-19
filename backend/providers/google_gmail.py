@@ -117,7 +117,7 @@ class GoogleGmailProvider(BaseEmailProvider):
             f"[GmailSync] Fetched {len(messages)}/{len(ids)} INBOX messages "
             f"({len(ids) - len(messages)} skipped)"
         )
-        return ProviderSyncResult(messages=messages, cursor=cursor or {})
+        return ProviderSyncResult(messages=messages, cursor=cursor or {}, listed_ids=ids)
 
     def fetch_message(
         self,

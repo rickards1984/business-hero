@@ -84,8 +84,10 @@ def _sync_email_for_business(business_id: str):
                 session.commit()
                 session.refresh(sync_state)
 
+            started_at = datetime.utcnow()
             result = provider.sync_inbox_changes(account=account, cursor=sync_state.cursor or {})
             msg_count = 0
+            store_failures = 0
 
             for msg in result.messages:
                 try:
@@ -139,6 +141,7 @@ def _sync_email_for_business(business_id: str):
                     msg_count += 1
                 except Exception as e:
                     logger.debug(f"[BackgroundSync] Failed to upsert email message: {e}")
+                    store_failures += 1
                     try:
                         session.rollback()
                     except Exception:
@@ -146,7 +149,13 @@ def _sync_email_for_business(business_id: str):
 
             # Update sync state
             try:
-                sync_state.cursor = result.cursor or {}
+                # AUTO-2: say honestly whether anything can have been missed,
+                # so chasing never goes over an unseen reply.
+                from services.chase_replies import completed_cursor
+                cursor = completed_cursor(session, account, result, started_at)
+                if store_failures:
+                    cursor["complete"] = False
+                sync_state.cursor = cursor
                 sync_state.last_synced_at = datetime.utcnow()
                 sync_state.last_error = None
                 session.add(sync_state)

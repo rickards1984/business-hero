@@ -35,6 +35,9 @@ class ProviderMessage:
 class ProviderSyncResult:
     messages: List[ProviderMessage]
     cursor: Dict[str, Any]
+    # Every message id the provider listed, fetched or not (Gmail). Lets the
+    # sync tell whether anything can have been missed (AUTO-2).
+    listed_ids: Optional[List[str]] = None
 
 
 class BaseEmailProvider(ABC):

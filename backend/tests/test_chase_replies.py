@@ -43,8 +43,7 @@ class MissingReplies(AssertionError):
     """Only this precise, intentional Stage 1 absence may be xfailed."""
 
 
-pytestmark = pytest.mark.xfail(raises=MissingReplies, strict=True,
-                               reason="AUTO-2 Stage 1: tests first")
+# Stage 1's strict-xfail marker was removed once the implementation landed.
 
 A, B = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 LONDON = ZoneInfo("Europe/London")
@@ -102,7 +101,7 @@ def db():
         c.execute(text("""CREATE TABLE email_messages (id TEXT PRIMARY KEY, business_id TEXT NOT NULL,
             email_account_id TEXT NOT NULL, provider_message_id TEXT NOT NULL,
             provider_thread_id TEXT, folder TEXT, from_email TEXT, from_name TEXT, to_emails TEXT,
-            subject TEXT, snippet TEXT, body_text TEXT, received_at TEXT)"""))
+            subject TEXT, snippet TEXT, body_text TEXT, received_at TEXT, ai_category TEXT)"""))
         c.execute(text("""CREATE TABLE email_sync_states (id TEXT PRIMARY KEY,
             email_account_id TEXT NOT NULL UNIQUE, cursor TEXT DEFAULT '{}', last_synced_at TEXT,
             sync_status TEXT, last_error TEXT)"""))
@@ -112,6 +111,9 @@ def db():
             value TEXT NOT NULL DEFAULT '0', created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"""))
         c.execute(text("CREATE UNIQUE INDEX usage_meters_uq ON usage_meters (business_id, meter, period)"))
+        # Read by the home summary (its accounts-sync line).
+        c.execute(text("CREATE TABLE xero_connections (business_id TEXT, last_sync_at TEXT)"))
+        c.execute(text("CREATE TABLE accounting_connections (business_id TEXT, last_sync_at TEXT)"))
         # Migration 036, as SQLite can hold it.
         c.execute(text("""CREATE TABLE chase_replies (id TEXT PRIMARY KEY, business_id TEXT NOT NULL,
             email_message_id TEXT NOT NULL, customer_email TEXT NOT NULL, invoice_ids TEXT NOT NULL,
@@ -634,3 +636,63 @@ def test_a_failed_sync_still_reads_replies_but_does_not_chase(monkeypatch):
     monkeypatch.setattr(m, "run_invoice_autopilot", lambda *a, **k: order.append("chase") or {})
     m.run_business(None, business(), on())
     assert order == ["scan"]
+
+
+# ---------------------------------------------------------------------------
+# Added during implementation (not in the approved Stage 1 set): the owner's
+# endpoints, and the cursor every sync now stores.
+
+def test_the_owner_lists_and_resolves_replies_through_the_api(db, sent, monkeypatch):
+    from test_auto_chase import client_for
+    iid = invoice(db)
+    chased(db, iid)
+    inbound(db)
+    scan(db, says("paid", "Says they paid"))
+    client = client_for(db, monkeypatch, business())
+    [r] = client.get("/v1/automations/replies").json()
+    assert r["category"] == "paid" and r["invoice_ids"] == [iid]
+    assert client.post(f"/v1/automations/replies/{r['id']}/resolve",
+                       json={"decision": "mark_paid"}).status_code == 422
+    done = client.post(f"/v1/automations/replies/{r['id']}/resolve", json={"decision": "stop"})
+    assert done.status_code == 200 and done.json()["status"] == "stopped"
+    assert client.post(f"/v1/automations/replies/{r['id']}/resolve",
+                       json={"decision": "resume"}).status_code == 409
+    assert client.get("/v1/automations/replies").json() == []
+
+
+def test_the_api_never_shows_or_resolves_another_business_reply(db, sent, monkeypatch):
+    from test_auto_chase import client_for
+    iid = invoice(db)
+    chased(db, iid)
+    inbound(db)
+    r = scan(db)[0]
+    client = client_for(db, monkeypatch, business(B))
+    assert client.get("/v1/automations/replies").json() == []
+    assert client.post(f"/v1/automations/replies/{r['id']}/resolve",
+                       json={"decision": "resume"}).status_code == 404
+    assert open_now(db)[0]["status"] == "open"
+
+
+def test_a_sync_records_whether_it_can_have_missed_anything(db):
+    """completed_cursor: a listed message stored BEFORE the sync began is
+    "known"; the provider's own cursor is kept, a stale flag is not."""
+    started = TUE_10.astimezone(timezone.utc)
+    with db.begin() as c:
+        c.execute(text("ALTER TABLE email_messages ADD COLUMN created_at TEXT"))
+        c.execute(text("INSERT INTO email_messages (id, business_id, email_account_id, "
+                       "provider_message_id, created_at) VALUES ('old', :b, :a, 'm-old', :at)"),
+                  {"b": A, "a": ACCT_A, "at": iso(TUE_10 - timedelta(days=1))})
+    acct = SimpleNamespace(id=ACCT_A, provider="google")
+    page = [f"m{i}" for i in range(49)] + ["m-old"]
+    msgs = [SimpleNamespace(provider_message_id=m) for m in page]
+    with Session(db) as s:
+        done = replies().completed_cursor(
+            s, acct, SimpleNamespace(messages=msgs, cursor={"complete": True, "x": 1},
+                                     listed_ids=page), started)
+        assert done == {"x": 1, "complete": True}
+        new_only = [f"n{i}" for i in range(50)]
+        stale = replies().completed_cursor(
+            s, acct, SimpleNamespace(messages=[SimpleNamespace(provider_message_id=m)
+                                               for m in new_only],
+                                     cursor={"complete": True}, listed_ids=new_only), started)
+        assert stale == {"complete": False}

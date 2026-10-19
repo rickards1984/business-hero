@@ -12,7 +12,9 @@ What 036 must guarantee:
   * one row per business per inbound message;
   * status and category are from the fixed lists;
   * a reply outlives its email message (deleting the message must not lift a
-    pause silently: the link is set to NULL, the reply stays).
+    pause silently: the reply stays, still open). The link is a plain id, not
+    a foreign key: staging's email_messages has no primary key (found by the
+    036 rehearsal, 19 Oct 2026), and production's was never captured.
 """
 
 import os
@@ -190,9 +192,8 @@ def test_deleting_the_email_keeps_the_reply(db):
     _, s = db
     with as_owner() as cur:
         cur.execute("DELETE FROM public.email_messages WHERE id = %s", (s["msg_a"],))
-        cur.execute("SELECT email_message_id, status FROM public.chase_replies WHERE id = %s",
-                    (s["reply_a"],))
-        assert cur.fetchone() == (None, "open")
+        cur.execute("SELECT status FROM public.chase_replies WHERE id = %s", (s["reply_a"],))
+        assert cur.fetchone() == ("open",)
 
 
 def test_deleting_the_business_removes_its_replies(db):
