@@ -751,7 +751,7 @@ def test_a_run_that_lost_its_ticket_stands_down(db, sent, monkeypatch):
         # the customer's in-progress ticket.
         out = real_propose(*a, **k)
         with db.begin() as c:
-            c.execute(text("UPDATE usage_meters SET updated_at = '2099-01-01T00:00:00+00:00' "
+            c.execute(text("UPDATE usage_meters SET value = 0 "  # another run's token
                            "WHERE meter LIKE 'autochase-inflight:%'"))
         return out
     monkeypatch.setattr(aa, "propose", ticket_taken_over)
@@ -776,3 +776,49 @@ def test_an_old_ticket_with_a_waiting_automatic_draft_is_not_reclaimed(db, sent)
                   {"b": A, "u": stale})
     result = run(db, on())
     assert sent == [] and result["skipped"][other] == "chase_in_progress"
+
+
+def test_a_reclaim_racing_a_finishing_run_still_sends_once(db, sent, monkeypatch):
+    """Review 5: run B (01:01, 1 Nov) decides to reclaim a crashed run's stale
+    ticket; in that instant run A (23:59:50, 31 Oct — clocks differ between
+    processes), which also found it stale, completes a chase for the same
+    customer and releases the ticket; B then takes it. Different UK days, so
+    the per-day ticket cannot help: B must re-check the customer AFTER taking
+    its tickets."""
+    allday = on(start_hour=0, end_hour=24, weekdays_only=False)
+    a_time = datetime(2026, 10, 31, 23, 59, 50, tzinfo=LONDON)
+    b_time = datetime(2026, 11, 1, 1, 1, tzinfo=LONDON)
+    stale = (a_time - timedelta(hours=3)).astimezone(timezone.utc).isoformat()
+    with db.begin() as c:
+        c.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) "
+                       "VALUES (:b, 'autochase-inflight:pay@harper.example', '2000-01', 1, :u)"),
+                  {"b": A, "u": stale})
+    invoice(db, days_overdue=30, email="pay@harper.example")
+    invoice(db, days_overdue=20, email="pay@harper.example")
+    m = automations()
+    clock = {"t": b_time}
+    monkeypatch.setattr(m, "now", lambda: clock["t"].astimezone(timezone.utc))
+    import services.aria_actions as aa
+    monkeypatch.setattr(aa, "now", lambda: clock["t"].astimezone(timezone.utc))
+    real_check = m._live_automatic_draft
+    state = {"done": False}
+
+    def a_finishes_in_between(session, business_, customer):
+        out = real_check(session, business_, customer)
+        if not state["done"]:
+            state["done"] = True
+            clock["t"] = a_time
+            run(db, allday)  # run A completes, end to end, in this instant
+            clock["t"] = b_time
+        return out
+    monkeypatch.setattr(m, "_live_automatic_draft", a_finishes_in_between)
+    run(db, allday)  # run B
+    assert len(sent) == 1
+
+
+def test_ownership_is_a_unique_token_not_a_timestamp():
+    """Review 5 backlog: two runs can write the same timestamp; ownership of an
+    in-progress ticket is proved by a random token each run writes."""
+    import inspect
+    source = inspect.getsource(automations()._still_holds)
+    assert "value" in source and "updated_at" not in source

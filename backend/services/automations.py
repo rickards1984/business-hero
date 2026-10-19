@@ -14,6 +14,7 @@ Stage 4 is never sent automatically: it is proposed as a card for a tap.
 
 import json
 import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -172,14 +173,21 @@ _INFLIGHT_PERIOD = "2000-01"          # in-progress tickets are not tied to a mo
 _INFLIGHT_STALE = timedelta(hours=1)   # a chase takes seconds; older means a crashed run
 
 
-def _take(session, bid: str, meter: str, period: str, moment: datetime) -> bool:
+def _take(session, bid: str, meter: str, period: str, moment: datetime, value: int = 1) -> bool:
     row = session.execute(text("""
         INSERT INTO usage_meters (business_id, meter, period, value, updated_at)
-        VALUES (:b, :m, :p, 1, :now)
+        VALUES (:b, :m, :p, :v, :now)
         ON CONFLICT (business_id, meter, period) DO NOTHING
         RETURNING meter
-    """), {"b": bid, "m": meter, "p": period, "now": moment}).fetchone()
+    """), {"b": bid, "m": meter, "p": period, "v": value, "now": moment}).fetchone()
     return row is not None
+
+
+def _token() -> int:
+    """A run's proof of ownership of an in-progress ticket. Two runs can write
+    the same timestamp; they do not draw the same random number (Codex AUTO-1
+    review 5). Fits usage_meters.value, numeric(14,4)."""
+    return secrets.randbelow(9_000_000_000) + 1
 
 
 def _live_automatic_draft(session, business, customer: str) -> bool:
@@ -199,15 +207,36 @@ def _live_automatic_draft(session, business, customer: str) -> bool:
     return False
 
 
-def _still_holds(session, business, customer: str, stamp: datetime) -> bool:
-    """Fencing: does THIS run still hold the customer's in-progress ticket?"""
+def _still_holds(session, business, customer: str, token: int) -> bool:
+    """Fencing: does THIS run still hold the customer's in-progress ticket?
+    Proved by the run's own random token, not a time (review 5)."""
     row = session.execute(text(
         "SELECT 1 FROM usage_meters WHERE business_id = :b AND meter = :m AND period = :p "
-        "AND updated_at = :stamp"),
+        "AND value = :token"),
         {"b": str(business.id), "m": f"autochase-inflight:{customer}",
-         "p": _INFLIGHT_PERIOD, "stamp": stamp}).fetchone()
+         "p": _INFLIGHT_PERIOD, "token": token}).fetchone()
     session.rollback()
     return row is not None
+
+
+def _chased_since(session, business, customer: str, since: datetime) -> bool:
+    """A fresh look at the database, taken AFTER this run holds the customer's
+    tickets: has anyone chased them since `since` — an automatic or approved
+    send that went or may have (done / executing), or a chase recorded on any
+    of their invoices? A run that finished while this one was deciding is
+    seen here, whatever its day (Codex AUTO-1 review 5)."""
+    for _aid, who, status, _at, _auto, _by in _attempts(session, business, since):
+        if who == customer and status in ("done", "executing"):
+            return True
+    rows = session.execute(text(
+        "SELECT customer_email, last_chased_at FROM invoices WHERE business_id = :b "
+        "AND last_chased_at IS NOT NULL AND customer_email IS NOT NULL"),
+        {"b": str(business.id)}).fetchall()
+    for email, at in rows:
+        when = _parse(at)
+        if email.strip().lower() == customer and when and when > since:
+            return True
+    return False
 
 
 def _reserve(session, business, customer: str, moment: datetime, s: dict, unresolved_now):
@@ -221,12 +250,13 @@ def _reserve(session, business, customer: str, moment: datetime, s: dict, unreso
       per day;
     * a numbered cap slot — but only if fewer slots than the CURRENT cap are
       already used today (a lowered cap counts every slot used — review 3).
-    Returns (reason or None, tickets as (meter, period) pairs)."""
+    Returns (reason or None, tickets as (meter, period) pairs, token)."""
     bid = str(business.id)
+    token = _token()
     day = moment.astimezone(LONDON).date()
     period = day.strftime("%Y-%m")
     inflight = f"autochase-inflight:{customer}"
-    if not _take(session, bid, inflight, _INFLIGHT_PERIOD, moment):
+    if not _take(session, bid, inflight, _INFLIGHT_PERIOD, moment, token):
         held = session.execute(text(
             "SELECT updated_at FROM usage_meters WHERE business_id = :b AND meter = :m AND period = :p"),
             {"b": bid, "m": inflight, "p": _INFLIGHT_PERIOD}).fetchone()
@@ -234,18 +264,18 @@ def _reserve(session, business, customer: str, moment: datetime, s: dict, unreso
         stamp = _parse(held[0]) if held else None
         if (stamp is None or moment - stamp < _INFLIGHT_STALE or customer in unresolved_now()
                 or _live_automatic_draft(session, business, customer)):
-            return "chase_in_progress", []
+            return "chase_in_progress", [], None
         session.execute(text(
             "DELETE FROM usage_meters WHERE business_id = :b AND meter = :m AND period = :p "
             "AND updated_at = :u"), {"b": bid, "m": inflight, "p": _INFLIGHT_PERIOD, "u": held[0]})
-        if not _take(session, bid, inflight, _INFLIGHT_PERIOD, moment):
+        if not _take(session, bid, inflight, _INFLIGHT_PERIOD, moment, token):
             session.rollback()
-            return "chase_in_progress", []
+            return "chase_in_progress", [], None
     held = [(inflight, _INFLIGHT_PERIOD)]
     daily = f"autochase:{customer}:{day.isoformat()}"
     if not _take(session, bid, daily, period, moment):
         session.rollback()
-        return "customer_chased_recently", []
+        return "customer_chased_recently", [], None
     held.append((daily, period))
     used = session.execute(text(
         "SELECT COUNT(*) FROM usage_meters WHERE business_id = :b AND period = :p AND meter LIKE :slots"),
@@ -255,9 +285,9 @@ def _reserve(session, business, customer: str, moment: datetime, s: dict, unreso
             slot = f"autochase-slot:{day.isoformat()}:{n}"
             if _take(session, bid, slot, period, moment):
                 session.commit()
-                return None, held + [(slot, period)]
+                return None, held + [(slot, period)], token
     session.rollback()  # gives back the in-progress and daily tickets with it
-    return "daily_cap", []
+    return "daily_cap", [], None
 
 
 def _give_back(session, business, tickets: list) -> None:
@@ -373,12 +403,20 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
                 result["skipped"][iid] = card.get("error") or "not_proposed"
             continue
 
-        lost, tickets = _reserve(session, business, customer, moment, s,
-                                 lambda: _unresolved_customers(session, business))
+        lost, tickets, token = _reserve(session, business, customer, moment, s,
+                                        lambda: _unresolved_customers(session, business))
         if lost:
             result["skipped"][iid] = lost
             if lost == "daily_cap":
                 break
+            continue
+        # The decision above used this run's snapshot. Now that no other run
+        # can start a chase for this customer, look again (review 5).
+        if _chased_since(session, business, customer,
+                         moment - timedelta(days=s["customer_gap_days"])):
+            _give_back(session, business, tickets)
+            chased_now.add(customer)
+            result["skipped"][iid] = "customer_chased_recently"
             continue
         proposed = aria_actions.propose(session, business, None, "send_invoice_chase",
                                         {"invoice_id": iid, "chase_stage": next_stage},
@@ -388,7 +426,7 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             result["skipped"][iid] = proposed.get("error") or "not_proposed"
             continue
         card = proposed["proposal"]
-        if not _still_holds(session, business, customer, moment):
+        if not _still_holds(session, business, customer, token):
             # Another run holds this customer now: send nothing, free only OUR
             # daily and cap tickets, and leave theirs alone (review 4).
             try:

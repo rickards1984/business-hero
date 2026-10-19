@@ -170,3 +170,43 @@ Three repair cycles used. One P1 remains (stale in-progress reclaim lets a pause
 | Finding | Action |
 |---|---|
 | Stale reclaim lets a paused live run be overtaken (P1) | Two changes. (1) **No reclaim while a live automatic draft exists** for that customer (`proposed` or `executing`, marked `automation`): its run may be paused, not crashed. Age alone no longer decides; only a ticket with no draft behind it (a run that crashed before proposing) is reclaimed. A run that crashed after proposing leaves its draft on the owner's home as an ordinary card. (2) **Fencing:** just before approving, the run confirms it still holds its own in-progress ticket (the exact stamp it wrote). If not, it dismisses its card, frees only its own daily and cap tickets, and sends nothing. Tests: Codex's reproduction (A proposes at 23:59:50 and pauses; B at 01:01) gives one send; a ticket taken over between proposal and send makes the run stand down; an old ticket with a waiting automatic draft is not reclaimed. Mutation-checked: removing either change fails its tests. Stable over three runs |
+
+## Review 5 (confirm-only, cycle 4)
+
+| | |
+|---|---|
+| Reviewed commit | `f6277bb` |
+| Session id | `01a155be-b6b2-7652-8804-df4c1d006d85` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 33,660` |
+| **Verdict** | **REQUEST-CHANGES** (one P1, same reclaim area) |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** — at `f6277bbd5c1d8bcfee30166dc104b44b074f3eeb`.
+
+**P1 — Reclaim races still allow two chases within the customer gap.** [automations.py:235](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:235), [automations.py:238](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:238).
+
+Reproduced with two complete autopilot runs:
+
+1. A reserves at **31 October 23:59:50**, then pauses before proposing.
+2. B starts at **1 November 01:01** and checks A’s stale reservation: no live draft exists.
+3. Before B’s conditional delete, A resumes, proposes, passes fencing, sends and releases its in-progress ticket.
+4. B’s delete affects zero rows, but B proceeds to take the now-free ticket. Its customer-history snapshot predates A’s send, so it chases another invoice for that customer.
+
+**Result: two mocked provider calls and two `done` actions**, violating seven-day spacing. The draft check and fencing both run successfully; neither closes this interleaving.
+
+Verification: AUTO-1 **61 passed**, including the original review-4 reproduction and crashed-before/after-proposal cases. The additional race probe fails the one-email assertion. No real emails; no repository edits, commits or pushes; worktree clean.
+
+Backlog:
+- Equal-stamp delete/re-take passes `_still_holds` for the old owner: timestamps do not uniquely identify reservation ownership.
+- Verify reservation concurrency and settings row locks against PostgreSQL; these probes used SQLite.
+### Response to review 5 — Claude Code (builder), 19 October 2026 (within cycle 4, Mike's "A")
+
+| Finding | Action |
+|---|---|
+| Reclaim race allows two chases within the customer gap (P1) | **Re-check after reservation.** The run's decision came from a snapshot taken before it held the customer. Now, once it holds the in-progress, daily and cap tickets (so no other run can start a chase for that customer), it reads the customer's history afresh from the database: any `send_invoice_chase` in `done` or `executing` within `customer_gap_days`, or any invoice of theirs with `last_chased_at` in the gap. If found, it frees all its tickets and skips `customer_chased_recently`. This closes the interleaving whatever the day: A's send is committed before A releases the ticket, and B can only re-take the ticket after that release. Test: Codex's reproduction (A at 31 Oct 23:59:50 finishing end to end inside B's reclaim decision at 1 Nov 01:01, two invoices for one customer) gives one send. Mutation-checked: disabling the re-check fails it |
+| Backlog: equal stamps do not prove ownership | **Fixed now.** Each run writes a random token into the in-progress ticket's `value` (fits `numeric(14,4)`), and fencing compares the token, not `updated_at`. Staleness still uses `updated_at`. Test asserts the fence reads `value`; the takeover test now changes the token |
+| Backlog: verify on PostgreSQL | Kept in the backlog (PostgreSQL concurrency verification), unchanged |
