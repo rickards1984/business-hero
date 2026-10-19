@@ -210,3 +210,37 @@ Backlog:
 | Reclaim race allows two chases within the customer gap (P1) | **Re-check after reservation.** The run's decision came from a snapshot taken before it held the customer. Now, once it holds the in-progress, daily and cap tickets (so no other run can start a chase for that customer), it reads the customer's history afresh from the database: any `send_invoice_chase` in `done` or `executing` within `customer_gap_days`, or any invoice of theirs with `last_chased_at` in the gap. If found, it frees all its tickets and skips `customer_chased_recently`. This closes the interleaving whatever the day: A's send is committed before A releases the ticket, and B can only re-take the ticket after that release. Test: Codex's reproduction (A at 31 Oct 23:59:50 finishing end to end inside B's reclaim decision at 1 Nov 01:01, two invoices for one customer) gives one send. Mutation-checked: disabling the re-check fails it |
 | Backlog: equal stamps do not prove ownership | **Fixed now.** Each run writes a random token into the in-progress ticket's `value` (fits `numeric(14,4)`), and fencing compares the token, not `updated_at`. Staleness still uses `updated_at`. Test asserts the fence reads `value`; the takeover test now changes the token |
 | Backlog: verify on PostgreSQL | Kept in the backlog (PostgreSQL concurrency verification), unchanged |
+
+## Review 6 (confirm-only, cycle 4)
+
+| | |
+|---|---|
+| Reviewed commit | `86b79d4` |
+| Session id | `01a155c4-cd96-7162-bda1-87fa4acdde5d` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 30,893` |
+| **Verdict** | **APPROVE** |
+
+Verbatim:
+
+---
+
+**APPROVE** — confirm-only review at `86b79d4`.
+
+**P1**
+- Review-5 P1 is closed: the race produces **one mocked send**. Disabling the new history check reproduces **two sends**.
+- No new P1 found involving duplicate automatic chases, missing authority, or permanent ticket leaks. The stand-down path returns its tickets.
+- Equal-timestamp takeover now rejects the old owner’s token.
+
+**Backlog**
+- PostgreSQL concurrency and settings-lock verification remains outstanding; these probes used SQLite.
+
+Verification: requested suite **63 passed**; additional race, cleanup, mutation, and token checks **3 passed**.
+
+No real emails, repository edits, commits, or pushes. Worktree clean. No UI clicks needed for this race confirmation.
+
+---
+
+### Status — 19 October 2026
+
+Approved. Remaining backlog: verify reservation concurrency and settings row locks against PostgreSQL (already on the backlog).
