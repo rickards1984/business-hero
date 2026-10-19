@@ -120,3 +120,28 @@ Archive results and Mike's explicit account-ID decisions. UUID ordering is displ
 - **For Stage B:**
   - build the new `UNIQUE(business_id,id)` keys on live tables (especially `email_messages`) with `CREATE UNIQUE INDEX CONCURRENTLY`, then `ADD CONSTRAINT … USING INDEX`, so syncing never blocks;
   - run the default-account audit query before the partial unique index, as the ticket says.
+
+### Claude's review of Stage B — 19 October 2026
+
+Codex built the following:
+- `037_outreach_core.sql`;
+- `audits/037-PROD-RUNBOOK.md`;
+- six policy renderings;
+- the reconcile step that brings the replay's `email_outbox` to the live-dump shape (repair cycle 1).
+
+**I ran it all on the local Supabase Postgres replay, outside the sandbox:**
+- **Replay:** 141 expected errors, every count exact, with 037 applied cleanly.
+- **Tests:** `test_outreach_schema_rls.py` plus `test_tenant_isolation_rls_path.py` gave **233 passed**. Every approved Stage A test passes, and the isolation suite pins **93** reviewed policies; Codex's six renderings match `pg_policies` exactly.
+- **Test fix:** one harness fix in the Stage A test file. Its seed helper `add(name, **values)` collided with tables that have a `name` column, so it is now `add(name, /, **values)`. No test's meaning changed.
+- **Re-paste:** the whole file pasted again exits 0, with "already exists, skipping" notices only.
+- **Rollback:** both STEP 9 blocks run, giving 0 outreach tables, 87 policies, the original 4-type `aria_actions_type_chk`, no `out3` keys and no outreach functions. That matches the before-state exactly.
+- **Security read:**
+  - `authenticated` gets SELECT only, on six tables, through member policies;
+  - `service_role` gets no TRUNCATE;
+  - neither trigger function is SECURITY DEFINER, and both pin `search_path`;
+  - every table revokes from anon and authenticated first.
+
+**Still open before production (in the runbook):**
+- STEP 0's key and duplicate checks. Staging's email tables have no primary keys (found by the 036 rehearsal).
+- The default-account audit gate.
+- Migration 036 (AUTO-2) runs first.

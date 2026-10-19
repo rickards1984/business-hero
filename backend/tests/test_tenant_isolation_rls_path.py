@@ -410,9 +410,8 @@ def test_every_policy_matches_its_reviewed_definition(db):
         f"\nUNAPPROVED policies present: {sorted(unexpected)}"
         f"\nAPPROVED policies missing:   {sorted(missing)}"
         f"\nDEFINITION CHANGED:          {changed}")
-    # 87 before 030b Release 2 dropped biz_update_if_owner; 87 again with 035's
-    # aria_actions_member_read (each new migration's policies raise this on purpose).
-    assert len(live) == len(approved) == 87
+    # 87 through 035; 037 adds six member-only SELECT policies.
+    assert len(live) == len(approved) == 93
 
 
 def test_no_policy_negates_membership_or_short_circuits_to_true(db):
