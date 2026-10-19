@@ -234,3 +234,21 @@ Mike’s decisions 1–9 and Additions A/B are settled and are not being reopene
 `PYTHONDONTWRITEBYTECODE=1 ./check.sh` exited 0: 4 passed, 0 failed, 1 skipped (eslint: no lint script). TypeScript, Python compilation and Ruff passed; pytest: 1,844 passed, 33 skipped, 220 subtests passed, 1,629 warnings, 25.67 seconds. Full/preflight was not run because no push is planned. Explicit source references were checked against local files; document whitespace check passed. Independent Codex review identified exact-address verification binding and import dry-run/apply identity gaps; both were corrected here. This does not substitute for Claude’s required shared-contract review. Only this document is intended to change. Pre-existing untracked `data.db` is left alone. No network, commit, push, migration, provider test or live send.
 
 `check.sh` cannot validate these unimplemented contracts, live RLS, external API semantics, legal clearance or deliverability. Mike’s review action: open this document, compare §§2–4 with the agreed permission/mailbox/provider behaviour, and review F20’s future click path. There is no new app behaviour to click today. Claude’s independent contract review remains required before implementation.
+
+## AUTO owner's agreement — Claude Code, 19 October 2026
+
+Checked against AUTO-1 as approved by Codex (review 6, commit `45b3466` on `ticket/AUTO-1-chase-autopilot`), not against this document's checkout.
+
+| Contract point | Agreement |
+|---|---|
+| Entrypoint `propose(..., automation=<kind>)` then `approve(..., user_id=None, version)` | **Agreed; this is what AUTO-1 ships.** `propose` takes `automation=` and `raised_by=` (an owner card raised by an automation). Automatic `approved_by` stays NULL. |
+| "Null user alone is never authority" | **Agreed, and not yet true inside `approve`.** Today the only automatic caller (`run_invoice_autopilot`) re-reads the settings and checks `_authority` immediately before approving; the API route always passes the signed-in user. Before any second automatic caller lands (AUTO-2 or OUT-6, whichever is first), `approve` with no user must itself require that the stored payload's `automation` kind is currently enabled in freshly read settings, and refuse otherwise. Tests first; RED. |
+| Mandatory version on automatic and outreach approvals | **Agreed.** AUTO-1 always passes the card's version; enforce in `approve` alongside the point above. |
+| Kind `outreach_sequence`; action types `send_outreach`, `reply_outreach` | **Agreed.** Action-type CHECK extended once, in OUT-3's migration, coordinated with me. |
+| Settings under `settings.automations.<kind>`, per-kind merge under row lock | **Agreed; AUTO-1 ships the lock and per-kind merge** (`automations_api.py`, and `preserve_automations` on the generic settings save). **Revision compare-and-swap is not in AUTO-1**; add a per-kind `revision` when OUT adds its kind. Invoice-chase settings tolerate the extra field. |
+| Typed authority metadata (`authority_type`, `automation_kind`, `authority_revision`, `authority_snapshot`) | **Agreed in principle**, as schema-versioned payload metadata first (no new columns) unless OUT-3's review shows a column is needed for indexing or RLS. One implementation, in `aria_actions`. |
+| Reservation atomic with the claim; no separate commits | **Agreed for outreach.** AUTO-1 reserves in `usage_meters` tickets committed before proposing, then fences on a random ownership token before approving (reviews 2–5). That is acceptable for chasing, where the tickets only limit frequency and the claim is the send authority. Outreach needs a pre-claim hook in `approve`'s claim transaction for its usage and reply-slot reservations; I will add the hook with OUT-6, not before. |
+| Invoice chase uses newest-account fallback (`assistant_tools.py`, `_send_invoice_chase`) | **Agreed; on the backlog** as the `is_default` fix for the four senders. Not a parallel rewrite. |
+| Migration queue | **Agreed.** One queue; OUT-3 takes the next number after 035 unless AUTO-2 needs one first, which I will flag. |
+
+AUTO-1 is approved by Codex and goes to Mike as a pull request. Autopilot stays off until he switches it on.
