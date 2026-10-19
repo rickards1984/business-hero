@@ -389,3 +389,177 @@ def test_a_read_only_account_cannot_switch_it_on(db, monkeypatch):
     biz.subscription_status = "unpaid"
     client = client_for(db, monkeypatch, biz)
     assert client.put("/v1/automations/invoice-chasing", json={"enabled": True}).status_code == 403
+
+
+# ------------------------------------------- Codex AUTO-1 review 1 additions ---
+
+def test_an_unconfirmed_send_blocks_that_customer_until_resolved(db, sent, monkeypatch):
+    """Finding 1: a chase that may have gone (no confirmation) must never be
+    followed by another automatic chase to that customer — not next hour,
+    not next week — until the owner resolves it."""
+    import assistant_tools
+    calls = []
+    monkeypatch.setattr(assistant_tools, "_send_email", lambda engine, bid, args:
+                        calls.append(1) or {"success": False, "error": "Send failed: timed out"})
+    iid = invoice(db, days_overdue=30)
+    first = run(db, on())
+    assert first["sent"] == [] and len(calls) == 1
+    later = TUE_10 + timedelta(days=14)
+    monkeypatch.setattr(automations(), "now", lambda: later.astimezone(timezone.utc))
+    import services.aria_actions as aa
+    monkeypatch.setattr(aa, "now", lambda: later.astimezone(timezone.utc))
+    second = run(db, on())
+    assert len(calls) == 1, "an unresolved attempt was followed by another send"
+    assert second["skipped"][iid] == "unresolved_attempt"
+
+
+def test_a_sent_chase_whose_bookkeeping_failed_still_spaces_the_customer(db, sent):
+    """Finding 1: the email went (done) but recording it on the invoice failed,
+    so last_chased_at was not updated. The customer is still spaced."""
+    with db.begin() as c:
+        c.execute(text("DROP TABLE email_outbox"))  # bookkeeping fails after the send
+    invoice(db, days_overdue=30)
+    run(db, on())
+    run(db, on())
+    assert len(sent) == 1
+
+
+def test_overlapping_runs_send_one_chase(db, sent, monkeypatch):
+    """Finding 2: a second pass runs between the first pass's checks and its
+    send (two processes). Exactly one chase goes; the later claimant stands
+    down without needing a lock."""
+    import services.aria_actions as aa
+    real_propose = aa.propose
+    nested = {"done": False}
+
+    def propose_with_a_rival(*a, **k):
+        if not nested["done"] and k.get("automation"):
+            nested["done"] = True
+            run(db, on())  # the rival pass completes in between
+        return real_propose(*a, **k)
+    monkeypatch.setattr(aa, "propose", propose_with_a_rival)
+    # Two invoices for ONE customer: the invoice's own stage check cannot
+    # stop the second; only customer spacing across runs can.
+    invoice(db, days_overdue=30, email="pay@harper.example")
+    invoice(db, days_overdue=20, email="pay@harper.example")
+    run(db, on())
+    assert len(sent) == 1
+
+
+def test_overlapping_runs_respect_the_daily_cap(db, sent, monkeypatch):
+    import services.aria_actions as aa
+    real_propose = aa.propose
+    nested = {"done": False}
+
+    def propose_with_a_rival(*a, **k):
+        if not nested["done"] and k.get("automation"):
+            nested["done"] = True
+            run(db, on(daily_cap=2))
+        return real_propose(*a, **k)
+    monkeypatch.setattr(aa, "propose", propose_with_a_rival)
+    for i in range(5):
+        invoice(db, days_overdue=30, email=f"c{i}@example.com")
+    run(db, on(daily_cap=2))
+    assert len(sent) == 2
+
+
+def test_switching_off_mid_run_stops_the_rest(db, sent):
+    """Finding 3: authority is re-read before every send."""
+    for i in range(3):
+        invoice(db, days_overdue=30, email=f"c{i}@example.com")
+    state = {"settings": on()}
+
+    def refresh():
+        out = (state["settings"], business())
+        state["settings"] = {**state["settings"], "enabled": False}  # owner switches off
+        return out
+    with Session(db) as s:
+        automations().run_invoice_autopilot(s, business(), on(), owner_name="Mike", refresh=refresh)
+    assert len(sent) == 1
+
+
+def test_pausing_a_customer_mid_run_is_honoured(db, sent):
+    invoice(db, days_overdue=30, email="first@example.com")
+    invoice(db, days_overdue=20, email="second@example.com")
+    calls = {"n": 0}
+
+    def refresh():
+        calls["n"] += 1
+        paused = ["second@example.com"] if calls["n"] > 1 else []
+        return on(paused_customers=paused), business()
+    with Session(db) as s:
+        automations().run_invoice_autopilot(s, business(), on(), owner_name="Mike", refresh=refresh)
+    assert [m["to"] for _, m in sent] == ["first@example.com"]
+
+
+def test_the_window_closing_mid_run_stops_the_rest(db, sent, monkeypatch):
+    for i in range(3):
+        invoice(db, days_overdue=30, email=f"c{i}@example.com")
+    clock = iter([datetime(2026, 10, 20, 16, 59, tzinfo=LONDON)] +
+                 [datetime(2026, 10, 20, 17, 0, tzinfo=LONDON)] * 50)
+    monkeypatch.setattr(automations(), "now", lambda: next(clock).astimezone(timezone.utc))
+    run(db, on())
+    assert len(sent) == 1
+
+
+def test_an_invoice_settled_just_before_sending_is_not_chased(db, sent, monkeypatch):
+    """Finding 4: approval re-applies the FULL receivables rule, not just a
+    literal 'paid' status."""
+    import services.aria_actions as aa
+    real_propose = aa.propose
+    iid = invoice(db, days_overdue=30, amount=500)
+
+    def pay_then_propose(*a, **k):
+        out = real_propose(*a, **k)
+        with db.begin() as c:
+            c.execute(text("UPDATE invoices SET paid_amount = 500 WHERE id = :i"), {"i": iid})
+        return out
+    monkeypatch.setattr(aa, "propose", pay_then_propose)
+    run(db, on())
+    assert sent == []
+
+
+def test_a_chase_card_for_a_settled_invoice_cannot_be_approved_by_hand_either(db, sent):
+    iid = invoice(db, days_overdue=30, amount=500)
+    import services.aria_actions as aa
+    with Session(db) as s:
+        card = aa.propose(s, business(), "owner", "send_invoice_chase", {"invoice_id": iid},
+                          owner_name="Mike")["proposal"]
+    with db.begin() as c:
+        c.execute(text("UPDATE invoices SET status = 'cancelled' WHERE id = :i"), {"i": iid})
+    with Session(db) as s, pytest.raises(aa.ActionRefused):
+        aa.approve(s, business(), card["id"], "owner", card["version"])
+    assert sent == []
+
+
+def test_a_stage_four_card_approved_by_the_owner_is_not_reported_as_autopilot(db, sent):
+    """Finding 6: the home's "on her own" list is automatic SENDS only."""
+    iid = invoice(db, days_overdue=60, stage=3, last_chased_days_ago=8)
+    run(db, on())
+    import services.aria_actions as aa
+    with db.connect() as c:
+        row = c.execute(text("SELECT id, payload FROM aria_actions")).fetchone()
+    with Session(db) as s:
+        aa.approve(s, business(), row[0], "owner", aa.version_of(json.loads(row[1])))
+    from services import home_summary
+    with db.connect() as c:
+        assert home_summary.recent_automated(c, A, TUE_10.astimezone(timezone.utc)) == []
+    assert stage_of(db, iid) == 4
+
+
+def test_the_generic_settings_endpoint_cannot_change_the_autopilot(monkeypatch):
+    """Finding 5: PUT /v1/business/settings replaces the document; it must
+    keep the stored automations, whatever the client sends."""
+    import main
+    preserved = main.preserve_automations({"tone": "warm"},
+                                          {"automations": {"invoice_chasing": {"enabled": True}}, "tone": "x"})
+    assert preserved == {"tone": "warm", "automations": {"invoice_chasing": {"enabled": True}}}
+    injected = main.preserve_automations({"automations": {"invoice_chasing": {"enabled": True}}}, {})
+    assert "automations" not in injected
+
+
+def test_settings_writes_are_serialised():
+    """Finding 5: the automations endpoint locks the settings row it rewrites."""
+    import inspect
+    import automations_api
+    assert "FOR UPDATE" in inspect.getsource(automations_api)
