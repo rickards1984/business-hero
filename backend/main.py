@@ -1453,6 +1453,18 @@ async def get_business_settings(
     )
 
 
+def preserve_automations(incoming: dict, existing: dict) -> dict:
+    """The generic settings PUT replaces the whole document. It must never
+    change Aria's standing permissions — those go through
+    /v1/automations/*, which validates and serialises them (Codex AUTO-1
+    review 1, finding 5). The stored `automations` are kept, whatever the
+    client sends."""
+    out = {k: v for k, v in (incoming or {}).items() if k != "automations"}
+    if isinstance(existing, dict) and "automations" in existing:
+        out["automations"] = existing["automations"]
+    return out
+
+
 @app.put("/v1/business/settings", response_model=BusinessSettingsResponse, tags=["Business"])
 async def update_business_settings(
     data: BusinessSettingsUpdate,
@@ -1467,12 +1479,12 @@ async def update_business_settings(
         # Create new settings
         settings = BusinessSettings(
             business_id=business.id,
-            settings=data.settings
+            settings=preserve_automations(data.settings, {})
         )
         session.add(settings)
     else:
-        # Update existing settings
-        settings.settings = data.settings
+        # Update existing settings (Aria's standing permissions are kept)
+        settings.settings = preserve_automations(data.settings, settings.settings or {})
         settings.updated_at = datetime.utcnow()
     
     session.commit()

@@ -96,16 +96,39 @@ def _loads(value):
     return value if isinstance(value, dict) else json.loads(value or "{}")
 
 
-def _sent_today(session, business, moment: datetime) -> int:
-    """Automatic chases already SENT this UK day (cards don't count)."""
-    day_start = datetime.combine(moment.astimezone(LONDON).date(), datetime.min.time(),
-                                 tzinfo=LONDON).astimezone(timezone.utc)
+_IN_FLIGHT = ("proposed", "executing", "done")
+
+
+def _attempts(session, business, since: datetime):
+    """Every chase attempt for this business since `since`, from the action
+    record itself (not only invoices.last_chased_at, which a failed
+    bookkeeping step may not have moved — Codex AUTO-1 review 1):
+    (id, customer, status, created_at, automatic_send, approved_by)."""
     rows = session.execute(text(
-        "SELECT payload, status FROM aria_actions WHERE business_id = :b "
-        "AND action_type = 'send_invoice_chase' AND created_at >= :since"),
-        {"b": str(business.id), "since": day_start}).fetchall()
-    return sum(1 for payload, status in rows
-               if _loads(payload).get("automation") == KIND and status != "proposed")
+        "SELECT id, payload, status, created_at, approved_by FROM aria_actions "
+        "WHERE business_id = :b AND action_type = 'send_invoice_chase' AND created_at >= :since"),
+        {"b": str(business.id), "since": since}).fetchall()
+    out = []
+    for aid, payload, status, created_at, approved_by in rows:
+        p = _loads(payload)
+        out.append((str(aid), str(p.get("to") or "").strip().lower(), status,
+                    _parse(created_at), p.get("automation") == KIND, approved_by))
+    return out
+
+
+def _unresolved_customers(session, business) -> set:
+    """Customers with a chase whose outcome is unknown (left `executing`):
+    never chased automatically again until the owner has looked."""
+    rows = session.execute(text(
+        "SELECT payload FROM aria_actions WHERE business_id = :b "
+        "AND action_type = 'send_invoice_chase' AND status = 'executing'"),
+        {"b": str(business.id)}).fetchall()
+    return {str(_loads(p).get("to") or "").strip().lower() for (p,) in rows}
+
+
+def _day_start(moment: datetime) -> datetime:
+    return datetime.combine(moment.astimezone(LONDON).date(), datetime.min.time(),
+                            tzinfo=LONDON).astimezone(timezone.utc)
 
 
 def _open_cards(session, business) -> set:
@@ -145,27 +168,74 @@ def _candidates(session, business):
     """), {"b": str(business.id)}).fetchall()
 
 
-def run_invoice_autopilot(session, business, settings: Optional[dict], *,
-                          owner_name: Optional[str] = None) -> dict:
-    """One pass of the autopilot for one business. Returns what it did."""
-    result: dict = {"sent": [], "cards": [], "skipped": {}}
-    s = chase_settings(settings)
+def _won_claim(session, business, mine: str, customer: str, moment: datetime,
+               s: dict) -> Optional[str]:
+    """Insert-then-check (Codex AUTO-1 review 1, finding 2): our proposal is
+    already stored, so a rival run — another process — can see it, and we
+    can see theirs. Of two in-flight claims, the earlier (created_at, id)
+    wins and the other stands down; anything already sent or unresolved wins
+    outright. Returns None if we may send, else the reason we may not."""
+    key = None
+    rows = _attempts(session, business, min(moment - timedelta(days=s["customer_gap_days"]),
+                                            _day_start(moment)))
+    for aid, _, _, created_at, _, _ in rows:
+        if aid == mine:
+            key = (created_at, aid)
+    gap_start = moment - timedelta(days=s["customer_gap_days"])
+    for aid, who, status, created_at, automatic, approved_by in rows:
+        if aid == mine or who != customer or created_at < gap_start:
+            continue
+        if status in ("executing", "done"):
+            return "customer_chased_recently"
+        if status == "proposed" and automatic and key and (created_at, aid) < key:
+            return "customer_chased_recently"
+    today = _day_start(moment)
+    used = sum(1 for aid, _, status, created_at, automatic, _ in rows
+               if aid != mine and automatic and created_at >= today and (
+                   status in ("executing", "done", "failed")
+                   or (status == "proposed" and key and (created_at, aid) < key)))
+    if used >= s["daily_cap"]:
+        return "daily_cap"
+    return None
+
+
+def _authority(business, s: dict, moment: datetime) -> Optional[str]:
+    """Why the autopilot may NOT act right now, or None."""
     if not s["enabled"]:
-        return result
-    moment = now()
+        return "switched_off"
     if not _in_window(moment, s):
-        return result
+        return "outside_hours"
     from auth import ACCESS_FULL, resolve_access_level
     if resolve_access_level(business) != ACCESS_FULL:
-        return result  # read-only or suspended: never chase on their behalf
+        return "account_not_active"
     if aria_actions._feature_problem(business, "send_invoice_chase"):
-        return result  # the plan lacks invoicing or email
+        return "plan"
+    return None
+
+
+def run_invoice_autopilot(session, business, settings: Optional[dict], *,
+                          owner_name: Optional[str] = None, refresh=None) -> dict:
+    """One pass of the autopilot for one business. Returns what it did.
+
+    `refresh()` returns the CURRENT (settings, business). It is called before
+    every send, so switching off, pausing a customer, a suspension or the end
+    of the window take effect mid-run (Codex AUTO-1 review 1, finding 3)."""
+    result: dict = {"sent": [], "cards": [], "skipped": {}}
+    refresh = refresh or (lambda: (settings, business))
+    s = chase_settings(settings)
+    moment = now()
+    if _authority(business, s, moment):
+        return result
 
     today = uk_today(moment)
-    remaining = s["daily_cap"] - _sent_today(session, business, moment)
     waiting = _open_cards(session, business)
+    unresolved = _unresolved_customers(session, business)
     last_by_customer = _last_chase_by_customer(session, business)
-    gap = timedelta(days=s["customer_gap_days"])
+    for _, who, status, created_at, _, _ in _attempts(
+            session, business, moment - timedelta(days=s["customer_gap_days"])):
+        if status in ("executing", "done") and who and created_at and (
+                who not in last_by_customer or created_at > last_by_customer[who]):
+            last_by_customer[who] = created_at
     chased_now: set = set()
 
     for invoice_id, email, stage, last_chased, due in _candidates(session, business):
@@ -174,8 +244,8 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
         if not customer:
             result["skipped"][iid] = "no_customer_email"
             continue
-        if customer in s["paused_customers"]:
-            result["skipped"][iid] = "customer_paused"
+        if customer in unresolved:
+            result["skipped"][iid] = "unresolved_attempt"
             continue
         if iid in waiting:
             result["skipped"][iid] = "card_waiting"
@@ -192,8 +262,20 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             result["skipped"][iid] = "not_due"
             continue
         recent = last_by_customer.get(customer)
-        if customer in chased_now or (recent and moment - recent < gap):
+        if customer in chased_now or (recent and moment - recent < timedelta(days=s["customer_gap_days"])):
             result["skipped"][iid] = "customer_chased_recently"
+            continue
+
+        # Re-read authority before acting on THIS invoice.
+        current_settings, business = refresh()
+        s = chase_settings(current_settings)
+        moment = now()
+        stop = _authority(business, s, moment)
+        if stop:
+            result["skipped"][iid] = stop
+            break
+        if customer in s["paused_customers"]:
+            result["skipped"][iid] = "customer_paused"
             continue
         next_stage = min(stage + 1, 4)
 
@@ -201,7 +283,7 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             # A later stage is the owner's call: a card, never a send.
             card = aria_actions.propose(session, business, None, "send_invoice_chase",
                                         {"invoice_id": iid, "chase_stage": next_stage},
-                                        owner_name=owner_name, automation=KIND)
+                                        owner_name=owner_name, raised_by=KIND)
             if "proposal" in card:
                 result["cards"].append(iid)
                 waiting.add(iid)
@@ -209,9 +291,6 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
                 result["skipped"][iid] = card.get("error") or "not_proposed"
             continue
 
-        if remaining <= 0:
-            result["skipped"][iid] = "daily_cap"
-            continue
         proposed = aria_actions.propose(session, business, None, "send_invoice_chase",
                                         {"invoice_id": iid, "chase_stage": next_stage},
                                         owner_name=owner_name, automation=KIND)
@@ -219,19 +298,29 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             result["skipped"][iid] = proposed.get("error") or "not_proposed"
             continue
         card = proposed["proposal"]
+        lost = _won_claim(session, business, card["id"], customer, moment, s)
+        if lost:
+            try:
+                aria_actions.dismiss(session, business, card["id"])
+            except aria_actions.ActionRefused:
+                pass
+            result["skipped"][iid] = lost
+            if lost == "daily_cap":
+                break
+            continue
         try:
             outcome = aria_actions.approve(session, business, card["id"], None, card["version"])
         except aria_actions.ActionRefused as exc:
             result["skipped"][iid] = exc.detail
             continue
-        # Sent, failed or unconfirmed: either way this customer is done for
-        # today, and an attempt counts against the cap.
+        # Sent, failed or unconfirmed: this customer is done for this run.
         chased_now.add(customer)
-        remaining -= 1
         if outcome.get("status") == "done":
             result["sent"].append(iid)
         else:
             result["skipped"][iid] = f"send_{outcome.get('status')}"
+            if outcome.get("status") == "executing":
+                unresolved.add(customer)
     if result["sent"] or result["cards"]:
         logger.info("[Autopilot] %s: chased %s, carded %s", business.id,
                     len(result["sent"]), len(result["cards"]))
@@ -263,9 +352,17 @@ def run_all_due(session) -> int:
         business = aria_actions.load_business(session, str(business_id))
         if business is None:
             continue
+        def refresh(bid=str(business_id)):
+            row = session.execute(text(
+                "SELECT settings FROM business_settings WHERE business_id = :b"),
+                {"b": bid}).fetchone()
+            fresh = (_loads(row[0]).get("automations") or {}).get(KIND) if row else None
+            return fresh, aria_actions.load_business(session, bid)
+
         try:
             done = run_invoice_autopilot(session, business, settings,
-                                         owner_name=owner_first_name(session, business_id))
+                                         owner_name=owner_first_name(session, business_id),
+                                         refresh=refresh)
             total += len(done["sent"])
         except Exception as exc:  # one business never stops the others
             session.rollback()

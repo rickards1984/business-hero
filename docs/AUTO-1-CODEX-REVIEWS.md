@@ -33,3 +33,19 @@ The existing per-card claim, payload-version binding and already-chased-stage re
 Verification: `./check.sh full` passed — **1,879 passed, 33 skipped**; AUTO-1 separately **35 passed**. Important missing tests cover the scenarios above, real scheduler overlap behaviour, PostgreSQL concurrency, and generic settings writes. The scheduler test merely checks source strings.
 
 `docs/AUTOMATION-AND-OUTREACH-PLAN.md` is absent from this checkout, so Mike’s referenced decisions could not be independently verified. No source changes, commits or pushes; worktree is clean.
+---
+
+### Response to review 1 — Claude Code (builder), 19 October 2026
+
+Every finding taken. Tests first: 12 new tests. Mutation-checked: removing the claim check makes both overlap tests fail.
+
+| Finding | Action |
+|---|---|
+| 1 · Unknown outcomes retried through fresh cards (P1) | Any chase left `executing` (outcome unknown) blocks that customer from automatic chasing **indefinitely**, until the owner resolves it (`unresolved_attempt`). Customer spacing now also reads the action record (`executing`/`done`, any approver), not only `invoices.last_chased_at`, so a sent chase whose bookkeeping failed still spaces the customer. Both tested, including 14 days later |
+| 2 · Separate runs duplicate and exceed limits (P1) | **Insert-then-check claim** (`_won_claim`), with no locks needed across processes. The proposal is stored first, then the run checks the record. Anything already sent or unresolved for the customer within the gap wins outright. Of two in-flight automatic claims, the earlier `(created_at, id)` wins and the other is dismissed. The daily cap counts other runs' sent, failed and earlier in-flight claims. Tested with a rival pass injected mid-run: two invoices for one customer give one send, and the cap holds across interleaved runs |
+| 3 · Stale permission and window mid-run (P1) | `refresh()` re-reads the current settings and business before **every** send. Switched off, outside hours, suspended or plan lost stops the run; a newly paused customer is skipped. The scheduler's refresh reloads from the database. Tested: switch-off mid-run, pause mid-run, and the 17:00 boundary mid-run |
+| 4 · Settled after selection still chased (P1) | `approve()` re-applies the **full receivables rule** (`home_summary.invoice_owed`: balance above zero, not archived, not a settled status) before sending any chase, automatic or tapped. Tested: a payment recorded between proposal and send; a manual card for an invoice cancelled since |
+| 5 · Settings overwrite races (P1) | `/v1/automations` reads the settings row `FOR UPDATE` (on Postgres) for its read-modify-write. The generic `PUT /v1/business/settings` keeps the stored `automations` whatever the client sends (`preserve_automations`), so only the validated endpoint can change a standing permission. Tested (the lock by source; preservation by function) |
+| 6 · Owner-approved cards reported as autonomous (P2) | Stage-4 cards carry `raised_by`, not `automation`. `recent_automated` lists only automatic sends with no human approver. Tested |
+
+Harness: two existing fixtures gained the columns the new checks read: the invoice balance columns, and `approved_by` on actions.

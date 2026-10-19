@@ -40,6 +40,20 @@ _BALANCE = f"""
 """
 
 
+def invoice_owed(conn, business_id: str, invoice_id: str) -> bool:
+    """The receivables rule for ONE invoice: still owed (a balance above zero,
+    not archived, not a settled/never-issued status). Used again immediately
+    before a chase is sent (Codex AUTO-1 review 1, finding 4)."""
+    not_owed = ", ".join(f"'{s}'" for s in _NOT_OWED)
+    row = conn.execute(text(f"""
+        SELECT {_BALANCE} FROM invoices
+        WHERE id = :invoice_id AND business_id = :business_id
+          AND (archived IS NULL OR archived = false)
+          AND LOWER(status) NOT IN ({not_owed})
+    """), {"invoice_id": str(invoice_id), "business_id": str(business_id)}).fetchone()
+    return row is not None and row[0] is not None and float(row[0]) > 0
+
+
 def uk_today(now: Optional[datetime] = None) -> date:
     """The UK calendar day — the one invoices are dated in. Used by the home
     AND Aria's invoice summary, so "overdue" means the same in both."""
@@ -126,7 +140,7 @@ def recent_automated(conn, business_id: str, now: Optional[datetime] = None,
     rows = conn.execute(text("""
         SELECT payload, executed_at FROM aria_actions
         WHERE business_id = :business_id AND action_type = 'send_invoice_chase'
-          AND status = 'done' AND executed_at >= :since
+          AND status = 'done' AND approved_by IS NULL AND executed_at >= :since
         ORDER BY executed_at DESC
     """), {"business_id": str(business_id), "since": now - timedelta(days=days)}).fetchall()
     out = []

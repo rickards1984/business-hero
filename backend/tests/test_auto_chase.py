@@ -495,7 +495,9 @@ def test_pausing_a_customer_mid_run_is_honoured(db, sent):
 def test_the_window_closing_mid_run_stops_the_rest(db, sent, monkeypatch):
     for i in range(3):
         invoice(db, days_overdue=30, email=f"c{i}@example.com")
-    clock = iter([datetime(2026, 10, 20, 16, 59, tzinfo=LONDON)] +
+    # The run starts at 16:59 and its first send is checked at 16:59; from
+    # then on it is 17:00, so nothing else may go.
+    clock = iter([datetime(2026, 10, 20, 16, 59, tzinfo=LONDON)] * 2 +
                  [datetime(2026, 10, 20, 17, 0, tzinfo=LONDON)] * 50)
     monkeypatch.setattr(automations(), "now", lambda: next(clock).astimezone(timezone.utc))
     run(db, on())
