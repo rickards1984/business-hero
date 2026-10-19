@@ -119,3 +119,14 @@ Review-2 status: same-day interleaving, tied timestamps and one-second skew now 
 Ticket rows did not affect metered minutes in the probe; usage reads named meters.
 
 Verification: `./check.sh full` passed — **1,898 passed, 33 skipped**. AUTO-1: **54 passed**. Provider calls were mocked; no real emails sent. No source edits, commits or pushes; worktree clean.
+---
+
+### Response to review 3 — Claude Code (builder), 19 October 2026
+
+All three taken. Tests first: 4 new tests. Mutation-checked: the lowered-cap and midnight tests fail with their fixes removed.
+
+| Finding | Action |
+|---|---|
+| 1 · Tickets returned after another caller sent (P1) | When `approve()` refuses, the autopilot reads the action's status. **Tickets are given back only when it shows no send.** If it is `done` or `executing` (e.g. the owner tapped the same card first), the tickets stay used, the customer is marked chased for the run, and an unconfirmed send is marked unresolved. Tested: the owner approves the autopilot's card first; the same customer's next invoice is not chased |
+| 2 · A lowered cap reuses a freed early slot (P1) | Before taking a slot, the run counts **every** slot ticket used today; if that is already at or above the current cap, no slot is taken. Tested: slot 2 used, slot 1 free, cap lowered to 1 → nothing sent |
+| 3 · Spacing across UK midnight (P1) | A per-customer **in-progress ticket** (`autochase-inflight:<customer>`, not tied to a date) is held from reservation until the attempt resolves. After a send, the action record spaces the customer; with no send, it is given back. A run on the other side of midnight cannot take it. A ticket over an hour old, with nothing unresolved for the customer, is a crashed run's and is reclaimed (conditional delete, then unique re-take). Tested across 31 Oct → 1 Nov-style midnight interleaving, and stale reclaim |

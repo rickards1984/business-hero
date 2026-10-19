@@ -168,36 +168,89 @@ def _candidates(session, business):
     """), {"b": str(business.id)}).fetchall()
 
 
-def _reserve(session, business, customer: str, moment: datetime, s: dict):
-    """Durable, unique tickets for one automatic chase (Codex AUTO-1 review
-    2): one per customer per UK day, and one of the day's numbered cap slots.
-    They are rows in usage_meters, whose UNIQUE (business_id, meter, period)
-    lets exactly one run hold each — so two runs, in any interleaving and
-    whatever their clocks, cannot both chase a customer or both use the last
-    slot. Returns (reason or None, tickets held, period)."""
-    from services.metering import _claim
+_INFLIGHT_PERIOD = "2000-01"          # in-progress tickets are not tied to a month
+_INFLIGHT_STALE = timedelta(hours=1)   # a chase takes seconds; older means a crashed run
+
+
+def _take(session, bid: str, meter: str, period: str, moment: datetime) -> bool:
+    row = session.execute(text("""
+        INSERT INTO usage_meters (business_id, meter, period, value, updated_at)
+        VALUES (:b, :m, :p, 1, :now)
+        ON CONFLICT (business_id, meter, period) DO NOTHING
+        RETURNING meter
+    """), {"b": bid, "m": meter, "p": period, "now": moment}).fetchone()
+    return row is not None
+
+
+def _reserve(session, business, customer: str, moment: datetime, s: dict, unresolved_now):
+    """Durable, unique tickets for one automatic chase. usage_meters'
+    UNIQUE (business_id, meter, period) lets exactly one run hold each:
+    * `autochase-inflight:<customer>` — held only while a chase is under way,
+      not tied to a date, so a run either side of midnight still excludes the
+      customer (Codex AUTO-1 review 3); one over an hour old with nothing
+      sent or unresolved is a crashed run's and is reclaimed;
+    * `autochase:<customer>:<UK date>` — one automatic chase per customer
+      per day;
+    * a numbered cap slot — but only if fewer slots than the CURRENT cap are
+      already used today (a lowered cap counts every slot used — review 3).
+    Returns (reason or None, tickets as (meter, period) pairs)."""
+    bid = str(business.id)
     day = moment.astimezone(LONDON).date()
     period = day.strftime("%Y-%m")
-    bid = str(business.id)
-    customer_ticket = f"autochase:{customer}:{day.isoformat()}"
-    if not _claim(session, bid, customer_ticket, period):
+    inflight = f"autochase-inflight:{customer}"
+    if not _take(session, bid, inflight, _INFLIGHT_PERIOD, moment):
+        held = session.execute(text(
+            "SELECT updated_at FROM usage_meters WHERE business_id = :b AND meter = :m AND period = :p"),
+            {"b": bid, "m": inflight, "p": _INFLIGHT_PERIOD}).fetchone()
         session.rollback()
-        return "customer_chased_recently", [], period
-    for n in range(1, s["daily_cap"] + 1):
-        slot = f"autochase-slot:{day.isoformat()}:{n}"
-        if _claim(session, bid, slot, period):
-            session.commit()
-            return None, [customer_ticket, slot], period
-    session.rollback()  # releases the customer ticket with the transaction
-    return "daily_cap", [], period
+        stamp = _parse(held[0]) if held else None
+        if stamp is None or moment - stamp < _INFLIGHT_STALE or customer in unresolved_now():
+            return "chase_in_progress", []
+        session.execute(text(
+            "DELETE FROM usage_meters WHERE business_id = :b AND meter = :m AND period = :p "
+            "AND updated_at = :u"), {"b": bid, "m": inflight, "p": _INFLIGHT_PERIOD, "u": held[0]})
+        if not _take(session, bid, inflight, _INFLIGHT_PERIOD, moment):
+            session.rollback()
+            return "chase_in_progress", []
+    held = [(inflight, _INFLIGHT_PERIOD)]
+    daily = f"autochase:{customer}:{day.isoformat()}"
+    if not _take(session, bid, daily, period, moment):
+        session.rollback()
+        return "customer_chased_recently", []
+    held.append((daily, period))
+    used = session.execute(text(
+        "SELECT COUNT(*) FROM usage_meters WHERE business_id = :b AND period = :p AND meter LIKE :slots"),
+        {"b": bid, "p": period, "slots": f"autochase-slot:{day.isoformat()}:%"}).scalar() or 0
+    if used < s["daily_cap"]:
+        for n in range(1, s["daily_cap"] + 1):
+            slot = f"autochase-slot:{day.isoformat()}:{n}"
+            if _take(session, bid, slot, period, moment):
+                session.commit()
+                return None, held + [(slot, period)]
+    session.rollback()  # gives back the in-progress and daily tickets with it
+    return "daily_cap", []
 
 
-def _give_back(session, business, tickets: list, period: str) -> None:
-    """Nothing was sent: free the tickets for a later run."""
-    from services.metering import _release
-    for ticket in tickets:
-        _release(session, str(business.id), ticket, period)
+def _give_back(session, business, tickets: list) -> None:
+    """Nothing was sent: free every ticket for a later run."""
+    for meter, period in tickets:
+        session.execute(text(
+            "DELETE FROM usage_meters WHERE business_id = :b AND meter = :m AND period = :p"),
+            {"b": str(business.id), "m": meter, "p": period})
     session.commit()
+
+
+def _finished(session, business, tickets: list) -> None:
+    """A chase went (or may have): keep the daily and cap tickets; end the
+    in-progress one — the action record now spaces the customer."""
+    _give_back(session, business, [t for t in tickets if t[0].startswith("autochase-inflight:")])
+
+
+def _attempt_status(session, business, action_id: str) -> Optional[str]:
+    row = session.execute(text(
+        "SELECT status FROM aria_actions WHERE id = :id AND business_id = :b"),
+        {"id": action_id, "b": str(business.id)}).fetchone()
+    return row[0] if row else None
 
 
 def _authority(business, s: dict, moment: datetime) -> Optional[str]:
@@ -291,7 +344,8 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
                 result["skipped"][iid] = card.get("error") or "not_proposed"
             continue
 
-        lost, tickets, period = _reserve(session, business, customer, moment, s)
+        lost, tickets = _reserve(session, business, customer, moment, s,
+                                 lambda: _unresolved_customers(session, business))
         if lost:
             result["skipped"][iid] = lost
             if lost == "daily_cap":
@@ -301,16 +355,27 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
                                         {"invoice_id": iid, "chase_stage": next_stage},
                                         owner_name=owner_name, automation=KIND)
         if "proposal" not in proposed:
-            _give_back(session, business, tickets, period)
+            _give_back(session, business, tickets)
             result["skipped"][iid] = proposed.get("error") or "not_proposed"
             continue
         card = proposed["proposal"]
         try:
             outcome = aria_actions.approve(session, business, card["id"], None, card["version"])
         except aria_actions.ActionRefused as exc:
-            _give_back(session, business, tickets, period)  # refused before any send
+            # A refusal does NOT prove nothing went: someone (the owner) may
+            # have approved this very card first (Codex AUTO-1 review 3). Give
+            # the tickets back only if the action shows no send.
+            status = _attempt_status(session, business, card["id"])
+            if status in ("done", "executing"):
+                _finished(session, business, tickets)
+                chased_now.add(customer)
+                if status == "executing":
+                    unresolved.add(customer)
+            else:
+                _give_back(session, business, tickets)
             result["skipped"][iid] = exc.detail
             continue
+        _finished(session, business, tickets)
         # Sent, failed or unconfirmed: this customer is done for this run, and
         # the tickets stay used.
         chased_now.add(customer)
