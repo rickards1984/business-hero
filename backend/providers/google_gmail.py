@@ -141,7 +141,9 @@ class GoogleGmailProvider(BaseEmailProvider):
         with httpx.Client(timeout=20) as client:
             token = None
             for _ in range(GMAIL_SEARCH_MAX_PAGES):
-                params = {"q": query, "maxResults": 100}
+                # Spam and Trash too: a reply filed as spam is still a reply
+                # (Codex AUTO-2 review 2).
+                params = {"q": query, "maxResults": 100, "includeSpamTrash": "true"}
                 if token:
                     params["pageToken"] = token
                 response = client.get(url, headers=headers, params=params)

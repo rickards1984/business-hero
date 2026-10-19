@@ -304,9 +304,9 @@ def propose(session, business, user_id, action_type: str, args: dict, *,
 
 
 def _paused_by_reply(session, business, payload) -> bool:
-    from services.chase_replies import blocked
+    from services.chase_replies import _address, blocked
     replied, stopped = blocked(session, business)
-    to = str(payload.get("to") or "").strip().lower()
+    to = _address(payload.get("to"))  # "Name <address>" and "address" alike (review 2)
     return to in replied or str(payload.get("invoice_id")) in stopped
 
 

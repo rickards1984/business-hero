@@ -133,3 +133,34 @@ def test_a_mailbox_that_cannot_search_says_so():
     from providers.smtp import SMTPProvider
     with pytest.raises(NotImplementedError):
         SMTPProvider.__new__(SMTPProvider).search_from(account=ACCOUNT, senders=["pay@harper.example"], since=SINCE)
+
+
+def test_gmail_search_includes_spam_and_trash(monkeypatch):
+    """Codex AUTO-2 review 2, P1 1: a reply filed as spam is still a reply."""
+    from providers import google_gmail as g
+    seen = []
+
+    def handler(request):
+        seen.append(parse_qs(urlparse(str(request.url)).query))
+        return httpx.Response(200, json={"messages": []})
+    client_with(monkeypatch, g, handler)
+    g.GoogleGmailProvider().search_from(account=ACCOUNT, senders=["pay@harper.example"], since=SINCE)
+    assert seen[0].get("includeSpamTrash") == ["true"]
+
+
+def test_graph_fails_closed_on_a_matching_message_it_cannot_use(monkeypatch):
+    """Review 2, P2: a message from the customer without a usable date or id is
+    not silently skipped."""
+    from providers import microsoft_graph as mg
+    broken = graph_message("m1", "pay@harper.example")
+    del broken["receivedDateTime"]
+    client_with(monkeypatch, mg, lambda request: httpx.Response(200, json={"value": [broken]}))
+    with pytest.raises(RuntimeError):
+        mg.MicrosoftGraphProvider().search_from(account=ACCOUNT, senders=["pay@harper.example"],
+                                                since=SINCE)
+    no_id = graph_message("m2", "pay@harper.example")
+    del no_id["id"]
+    client_with(monkeypatch, mg, lambda request: httpx.Response(200, json={"value": [no_id]}))
+    with pytest.raises(RuntimeError):
+        mg.MicrosoftGraphProvider().search_from(account=ACCOUNT, senders=["pay@harper.example"],
+                                                since=SINCE)

@@ -790,3 +790,70 @@ def test_the_api_never_shows_or_resolves_another_business_reply(db, sent, monkey
     assert client.post(f"/v1/automations/replies/{r['id']}/resolve",
                        json={"decision": "resume"}).status_code == 404
     assert open_now(db)[0]["status"] == "open"
+
+
+# ---------------------------------------------------------------------------
+# Codex AUTO-2 review 2 (repair cycle 2): regression tests for its P1s.
+
+DISPLAY = "Harper Builds <Pay@Harper.example>"
+
+
+def test_a_display_name_invoice_address_is_still_paused_by_a_reply(db, sent, mail):
+    """P1 3: the invoice holds "Name <address>"; the pause holds the address."""
+    iid = invoice(db, stage=1, last_chased_days_ago=10, email=DISPLAY)
+    chased(db, iid, days_ago=10, account=ACCT_A, email=DISPLAY)
+    mail.add(ACCT_A, frm=CUSTOMER, hours_ago=5)
+    result = autopilot(db)
+    assert sent == [] and result["skipped"].get(iid) == "customer_replied"
+
+
+def test_approval_matches_a_display_name_address_to_its_pause(db, sent, mail, monkeypatch):
+    """P1 3, the approval layer: a pause recorded during drafting stops the
+    send even when the invoice's address carries a display name."""
+    import services.aria_actions as aa
+    iid = invoice(db, stage=1, last_chased_days_ago=10, email=DISPLAY)
+    chased(db, iid, days_ago=10, account=ACCT_A, email=DISPLAY)
+    real_propose = aa.propose
+
+    def pause_lands(*a, **k):
+        out = real_propose(*a, **k)
+        mid = inbound(db, hours_ago=1)
+        with db.begin() as c:
+            c.execute(text("INSERT INTO chase_replies (id, business_id, email_message_id, customer_email, "
+                           "invoice_ids, category, status, created_at, updated_at) VALUES ('r-late2', :b, "
+                           ":m, :c, '[]', 'other', 'open', :t, :t)"),
+                      {"b": A, "m": mid, "c": CUSTOMER, "t": iso(TUE_10)})
+        return out
+    monkeypatch.setattr(aa, "propose", pause_lands)
+    autopilot(db)
+    assert sent == []
+
+
+def test_spacing_treats_a_display_name_and_a_bare_address_as_one_customer(db, sent, mail):
+    """The same canonical address everywhere, or the one-per-week rule can be
+    bypassed by how an invoice spells the address."""
+    first = invoice(db, stage=1, last_chased_days_ago=2, email=DISPLAY)
+    chased(db, first, days_ago=2, account=ACCT_A, email=DISPLAY)
+    other = invoice(db, days_overdue=30, email=CUSTOMER)
+    result = autopilot(db)
+    assert sent == [] and result["skipped"].get(other) == "customer_chased_recently"
+
+
+def test_a_mailbox_that_chased_them_but_is_now_disconnected_stops_chasing(db, sent, mail):
+    """P1 2: an older chase recorded no mailbox, a newer one went from a
+    mailbox since disconnected. Its coverage is unavailable, so no chase —
+    never silently replaced by the mailboxes still connected."""
+    iid = invoice(db, stage=1, last_chased_days_ago=10)
+    chased(db, iid, days_ago=20)                       # before AUTO-2: no mailbox recorded
+    chased(db, iid, days_ago=10, account="acct-gone")  # a mailbox no longer connected
+    result = autopilot(db)
+    assert sent == [] and result["skipped"].get(iid) == "reply_check_failed"
+
+
+def test_a_mailbox_of_another_business_is_never_searched(db, sent, mail):
+    """lookup is only ever asked about this business's own mailboxes."""
+    iid = invoice(db, stage=1, last_chased_days_ago=10)
+    chased(db, iid, days_ago=10, account=ACCT_B)       # B's mailbox id in A's history
+    result = autopilot(db)
+    assert result["skipped"].get(iid) == "reply_check_failed"
+    assert ACCT_B not in {call[0] for call in mail.calls}

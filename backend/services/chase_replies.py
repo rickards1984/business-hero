@@ -156,26 +156,43 @@ def find_replies(session, business, *, lookup: Callable, classify: Callable,
             continue
         mine = [c for c in chases if c[0] == who]
         since = min((c[3] for c in mine), default=window)
-        boxes = set(accounts.get(who, set()))
-        if None in boxes:
-            boxes = set(everything)
-        boxes.discard(None)
+        # Every mailbox their chases went from, KNOWN OR NOT — a mailbox since
+        # disconnected stays in the plan and fails it below (Codex AUTO-2
+        # review 2) — plus every connected mailbox when a chase recorded none,
+        # plus the default the next chase goes from.
+        history = set(accounts.get(who, set()))
+        boxes = {b for b in history if b}
+        if None in history:
+            boxes |= set(everything)
         if default:
             boxes.add(default)
         for acct in boxes:
             entry = plan.setdefault(acct, {"senders": [], "since": since})
             entry["senders"].append(who)
             entry["since"] = min(entry["since"], since)
+    failures = []
+    connected = set(everything)
     for acct, entry in sorted(plan.items()):
+        if acct not in connected:
+            # Not this business's connected mailbox (disconnected, or never
+            # its own): its coverage is unavailable, and it is never searched.
+            failures.append(f"mailbox {acct} is not connected")
+            continue
         senders = sorted(set(entry["senders"]))
         for i in range(0, len(senders), SENDERS_PER_SEARCH):
             try:
                 found = lookup(session, acct, senders[i:i + SENDERS_PER_SEARCH], entry["since"])
             except Exception as exc:
                 session.rollback()
-                raise ReplyCheckFailed(f"mailbox {acct} could not be searched: {exc}") from exc
+                failures.append(f"mailbox {acct} could not be searched: {exc}")
+                break
             _store(session, business, acct, found or [])
-    return scan(session, business, classify=classify)
+    # Replies that WERE found are recorded before any failure is reported, so
+    # they pause chasing and reach the owner either way.
+    new = scan(session, business, classify=classify)
+    if failures:
+        raise ReplyCheckFailed("; ".join(failures))
+    return new
 
 
 def _chase_accounts(session, business, since: datetime) -> dict:

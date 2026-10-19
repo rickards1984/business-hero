@@ -178,12 +178,17 @@ class MicrosoftGraphProvider(BaseEmailProvider):
                     raise RuntimeError(f"Microsoft Graph search failed: {response.status_code}")
                 data = response.json()
                 for raw in data.get("value", []) or []:
+                    raw_sender = str(((raw.get("from") or {}).get("emailAddress") or {})
+                                     .get("address") or "").strip().lower()
                     mapped = _map_graph_message(raw, read_scope)
+                    if raw_sender in addresses and (mapped is None or mapped.received_at is None):
+                        # From the customer but unusable: fail closed rather
+                        # than skip it (Codex AUTO-2 review 2).
+                        raise RuntimeError("a matching Microsoft message could not be read")
                     if mapped is None:
                         continue
                     sender = (mapped.from_email or "").strip().lower()
-                    when = mapped.received_at
-                    if sender in addresses and (when is None or when >= since):
+                    if sender in addresses and mapped.received_at >= since:
                         found.append(mapped)
                 url, params = data.get("@odata.nextLink"), None
                 if not url:

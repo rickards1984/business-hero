@@ -86,3 +86,74 @@ The behaviour they protected, "never chase over a reply Aria might not have seen
 - the Postgres smoke run of the search-store-scan path: one stored message and one reply after two searches.
 
 Microsoft Graph search is **unverified live**, as noted in the ticket. Its failure mode is "doesn't chase".
+
+## Review 2 (repair cycle 1, confirm)
+
+| | |
+|---|---|
+| Reviewed commit | `3917d04` |
+| Session id | `01a1565e-eb70-76e3-ad1d-f28b5ff13888` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 65,919` |
+| **Verdict** | **REQUEST-CHANGES** (three P1) |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES — three P1 blockers at `3917d04`.** These affect North Star P4/P8: automatic chasing can continue despite a reply or unavailable reply coverage.
+
+**P1 — blocks**
+
+1. **Gmail’s “whole mailbox” search excludes Spam and Trash.** [google_gmail.py:144](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/providers/google_gmail.py:144)  
+   A customer’s reply lands in Spam. The request omits `includeSpamTrash=true`; searching completes successfully without that reply, allowing another chase. The mocked probe confirms the omitted parameter and successful empty result. Include those folders and test this explicitly. No live provider verification was performed.
+
+2. **Legacy history can erase a known historical mailbox from the search plan.** [chase_replies.py:160](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/chase_replies.py:160)  
+   A customer has an older chase without `account_id` and a newer chase from mailbox A. A is subsequently disconnected and B becomes default. Because `None` appears in the history, the code **replaces** the known mailbox set with currently connected mailboxes. A disappears instead of causing an unavailable-coverage refusal. My probe reproduced an automatic send without attempting A. Union connected mailboxes with known historical IDs; unavailable historical coverage must stop the chase.
+
+3. **Display-name addresses bypass both pause checks.** [aria_actions.py:309](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/aria_actions.py:309), [automations.py:367](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:367)  
+   The invoice contains `Harper <pay@harper.example>`. Search and scanning canonicalise it to `pay@harper.example`, but automation and approval compare the unparsed display address against that canonical pause. My probe recorded an open reply **and then sent the chase**. Use the same address canonicalisation throughout. The Gmail send path accepts the display-address form.
+
+**Backlog — does not block**
+
+- **P2: Graph can return success with unusable matching messages.** [microsoft_graph.py:181](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/providers/microsoft_graph.py:181)  
+  Unmappable entries are skipped; matching entries without a usable timestamp are accepted. The latter are stored but excluded from reply scanning. A mocked response without `receivedDateTime` reproduced another chase with no pause. Fail closed when a potentially matching result lacks required fields. I classify this as P2 because the reproduction requires a malformed provider response; I have no evidence that normal Graph responses omit this field.
+
+**Disposition of review 1**
+
+| Previous finding | Assessment |
+|---|---|
+| P1 1: Gmail falsely recovers sync completeness | Original mechanism removed; closed. New Gmail coverage blocker above. |
+| P1 2: delta cursor advances past an unstored reply | Closed for chasing: delta state no longer authorises sends. General-sync behaviour remains unchanged. |
+| P1 3: swallowed background-sync failure permits chasing | Closed: chasing searches directly and search exceptions prevent sending. |
+| P1 4: reply arrives after initial scan / pause during drafting | Original tested interleavings addressed. Pause protection remains incomplete because of blocker 3. |
+| P1 5: default-mailbox switch abandons previous mailbox | Ordinary switch addressed; not fully closed because mixed history produces blocker 2. |
+| P2: freshness checked once per run | Closed: each automatic send performs its own search. |
+| P2: replies counted as customers | Closed by distinct-address counting at [useDashboardData.ts:147](/Users/michaelrickards/dev/bh2-AUTO-1-review/frontend/client/src/hooks/useDashboardData.ts:147). |
+
+Gmail and Graph pagination, page limits, HTTP failures and Gmail fetch failures fail closed in the tested paths. I found no address-query injection: validation excludes query syntax, and Graph escapes apostrophes.
+
+I found **no reachable cross-tenant path** in the inspected callers. Although `lookup_with_provider` loads by account ID alone, current IDs originate from scoped mailbox queries or server-built chase payloads. `_store` binds the supplied business explicitly and does not update another business’s messages. Neither helper independently validates account ownership; the conclusion depends on those caller invariants.
+
+Replacing sync-mechanism tests is reasonable, but **the protected behaviour is not yet fully preserved**. The replacement tests pass while the three P1 scenarios remain possible. They need regression coverage before approval.
+
+Verification:
+
+- Requested focused suite: **217 passed**.
+- `./check.sh`: **1965 passed, 50 skipped, two expected schema-conformance failures**. Both concern missing `chase_replies` dump coverage. TypeScript, compilation and Ruff passed.
+- Four additional isolated probes reproduced the behaviours above; [probe file](/private/tmp/auto2_review_probes.py).
+- Worktree clean. No tracked edits, commits, pushes, real email or network calls; `~/.openclaw` was not opened.
+
+After repair, Mike’s behavioural check should confirm that a reply pauses chasing for an invoice using a display-name address, and that disconnecting a previously used mailbox cannot silently restore chasing.
+---
+
+### Response to review 2 — Claude Code (builder), 20 October 2026 (repair cycle 2 of 3)
+
+Tests first: 7 regression tests were written and all failed before the fix.
+
+| Finding | Action |
+|---|---|
+| P1 1: Gmail excludes Spam and Trash | `includeSpamTrash=true` on every search page. Test: `test_gmail_search_includes_spam_and_trash`. |
+| P1 2: legacy history erases a known mailbox | **Union, never replace.** The plan is every mailbox any chase went from, plus every connected mailbox when a chase recorded none, plus the default. A planned mailbox that isn't one of *this business's connected* mailboxes is never searched. It fails the plan, so there is no chase (`reply_check_failed`). Mailboxes that *can* be searched still are, and their replies are recorded before the failure is reported. Tests: `test_a_mailbox_that_chased_them_but_is_now_disconnected_stops_chasing`, `test_a_mailbox_of_another_business_is_never_searched`. This also closes the caller-invariant point: `lookup` is only ever called with this business's connected mailbox ids. **Consequence for Mike:** a customer chased from a mailbox that is later disconnected isn't chased automatically again within the 60-day window. Chasing by hand still works. |
+| P1 3: display-name addresses bypass the pause checks | **One canonical address everywhere.** `automations.py` uses `chase_replies._address` (parseaddr, then lower) for the customer key, attempts, unresolved, spacing, live drafts, the review-5 re-check and the paused list. `approve()`'s pause check uses it too. Tests: `test_a_display_name_invoice_address_is_still_paused_by_a_reply`, `test_approval_matches_a_display_name_address_to_its_pause`, `test_spacing_treats_a_display_name_and_a_bare_address_as_one_customer`. The last closes the same gap in AUTO-1's one-chase-per-week rule. |
+| P2: Graph returns success with unusable matching messages | **Fixed (fail closed).** A result whose raw sender is a searched customer but which can't be mapped, or has no date, raises. Test: `test_graph_fails_closed_on_a_matching_message_it_cannot_use`. |

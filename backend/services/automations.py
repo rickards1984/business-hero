@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 
 from services import aria_actions, chase_replies
+from services.chase_replies import _address as _who  # one canonical address everywhere (AUTO-2 review 2)
 from services.home_summary import _BALANCE, _NOT_OWED, uk_today
 
 logger = logging.getLogger(__name__)
@@ -73,8 +74,8 @@ def chase_settings(raw: Optional[dict]) -> dict:
     if merged["end_hour"] <= merged["start_hour"]:
         merged["start_hour"], merged["end_hour"] = CHASE_DEFAULTS["start_hour"], CHASE_DEFAULTS["end_hour"]
     paused = merged.get("paused_customers") or []
-    merged["paused_customers"] = sorted({str(p).strip().lower() for p in paused
-                                         if isinstance(p, str) and p.strip()})
+    merged["paused_customers"] = sorted({_who(p) for p in paused
+                                         if isinstance(p, str) and p.strip()} - {""})
     return merged
 
 
@@ -112,7 +113,7 @@ def _attempts(session, business, since: datetime):
     out = []
     for aid, payload, status, created_at, approved_by in rows:
         p = _loads(payload)
-        out.append((str(aid), str(p.get("to") or "").strip().lower(), status,
+        out.append((str(aid), _who(p.get("to")), status,
                     _parse(created_at), p.get("automation") == KIND, approved_by))
     return out
 
@@ -124,7 +125,7 @@ def _unresolved_customers(session, business) -> set:
         "SELECT payload FROM aria_actions WHERE business_id = :b "
         "AND action_type = 'send_invoice_chase' AND status = 'executing'"),
         {"b": str(business.id)}).fetchall()
-    return {str(_loads(p).get("to") or "").strip().lower() for (p,) in rows}
+    return {_who(_loads(p).get("to")) for (p,) in rows}
 
 
 def _day_start(moment: datetime) -> datetime:
@@ -149,7 +150,7 @@ def _last_chase_by_customer(session, business) -> dict:
         {"b": str(business.id)}).fetchall()
     latest: dict = {}
     for email, at in rows:
-        key, when = email.strip().lower(), _parse(at)
+        key, when = _who(email), _parse(at)
         if key and when and (key not in latest or when > latest[key]):
             latest[key] = when
     return latest
@@ -202,7 +203,7 @@ def _live_automatic_draft(session, business, customer: str) -> bool:
         {"b": str(business.id)}).fetchall()
     for (payload,) in rows:
         p = _loads(payload)
-        if p.get("automation") == KIND and str(p.get("to") or "").strip().lower() == customer:
+        if p.get("automation") == KIND and _who(p.get("to")) == customer:
             return True
     return False
 
@@ -234,7 +235,7 @@ def _chased_since(session, business, customer: str, since: datetime) -> bool:
         {"b": str(business.id)}).fetchall()
     for email, at in rows:
         when = _parse(at)
-        if email.strip().lower() == customer and when and when > since:
+        if _who(email) == customer and when and when > since:
             return True
     return False
 
@@ -364,7 +365,7 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
 
     for invoice_id, email, stage, last_chased, due in _candidates(session, business):
         iid = str(invoice_id)
-        customer = (email or "").strip().lower()
+        customer = _who(email)
         if not customer:
             result["skipped"][iid] = "no_customer_email"
             continue
