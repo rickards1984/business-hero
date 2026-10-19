@@ -8,11 +8,16 @@
 # on accounting_providers, plan_definitions, automation_rule_templates — no
 # business_id column), 2 support_articles published-only reads, 3 profiles
 # self-scoped (id = auth.uid()).
+# Added 19 Oct 2026 (OUT-3 Stage A, Claude): aria_actions_member_read from
+# 035, a member read of the same shape as usage_meters. 035 is live; its policy
+# is recorded in audits/035-STAGING-REHEARSAL.md and audits/035-PROD-RUNBOOK.md,
+# and this line is the definition pg_policies renders on the replay.
 # The RLS suite asserts every live policy matches EXACTLY one of these
 # two files; change a policy and this file must change with it, on purpose.
 tablename,policyname,cmd,roles,qual,with_check
 accounting_providers,accounting_providers_admin_write,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
 accounting_providers,accounting_providers_public_read,SELECT,"{anon,authenticated}",true,null
+aria_actions,aria_actions_member_read,SELECT,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))",null
 automation_executions,automation_executions_member_access,ALL,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))","(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))"
 automation_rule_templates,automation_rule_templates_admin_write,ALL,{authenticated},is_platform_admin(auth.uid()),is_platform_admin(auth.uid())
 automation_rule_templates,automation_rule_templates_member_read,SELECT,{authenticated},true,null
