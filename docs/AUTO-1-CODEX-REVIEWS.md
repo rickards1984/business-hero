@@ -130,3 +130,35 @@ All three taken. Tests first: 4 new tests. Mutation-checked: the lowered-cap and
 | 1 · Tickets returned after another caller sent (P1) | When `approve()` refuses, the autopilot reads the action's status. **Tickets are given back only when it shows no send.** If it is `done` or `executing` (e.g. the owner tapped the same card first), the tickets stay used, the customer is marked chased for the run, and an unconfirmed send is marked unresolved. Tested: the owner approves the autopilot's card first; the same customer's next invoice is not chased |
 | 2 · A lowered cap reuses a freed early slot (P1) | Before taking a slot, the run counts **every** slot ticket used today; if that is already at or above the current cap, no slot is taken. Tested: slot 2 used, slot 1 free, cap lowered to 1 → nothing sent |
 | 3 · Spacing across UK midnight (P1) | A per-customer **in-progress ticket** (`autochase-inflight:<customer>`, not tied to a date) is held from reservation until the attempt resolves. After a send, the action record spaces the customer; with no send, it is given back. A run on the other side of midnight cannot take it. A ticket over an hour old, with nothing unresolved for the customer, is a crashed run's and is reclaimed (conditional delete, then unique re-take). Tested across 31 Oct → 1 Nov-style midnight interleaving, and stale reclaim |
+
+## Review 4 (confirm-only, repair cycle 3 of 3)
+
+| | |
+|---|---|
+| Reviewed commit | `5ff39b6` |
+| Session id | `01a15585-ce4d-79d2-a858-506649de0920` |
+| Model | `gpt-6-astra` |
+| Usage, as reported | `tokens used 37,777` |
+| **Verdict** | **REQUEST-CHANGES** (one P1) |
+
+Verbatim:
+
+---
+
+**REQUEST-CHANGES** — at `5ff39b6`.
+
+Review-3 findings **1 and 2 pass**: owner-first approval produces one email; lowering the cap after an actual paid-invoice refusal frees slot 1 permits no additional send. Finding **3 passes the original short midnight interleaving**, but stale reclaim reopens it.
+
+**P1 — Stale reclaim lets a live run lose its reservation and still send.** [automations.py:207](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:207), [automations.py:363](/Users/michaelrickards/dev/bh2-AUTO-1-review/backend/services/automations.py:363).
+
+Reproduced with the supported all-day window: A reserves and proposes at **31 October 23:59:50**, then pauses. B starts **1 November 01:01**, reclaims A’s reservation because its card is merely `proposed`, and sends for another invoice belonging to the same customer. A resumes and approves without checking reservation ownership. **Two provider calls; both actions `done`**, violating seven-day customer spacing. Age alone does not prove the original run crashed.
+
+Verification: AUTO-1 **58 passed**; targeted probes confirmed the results above. Providers mocked; no real emails. No repository edits, commits or pushes; worktree clean. This unresolved P1 goes to Mike after the final repair cycle.
+
+Backlog:
+- Exercise reservation concurrency and settings row locks against PostgreSQL; SQLite does not verify those guarantees.
+---
+
+### Status — 19 October 2026
+
+Three repair cycles used. One P1 remains (stale in-progress reclaim lets a paused live run be overtaken). Escalated to Mike with a recommendation; not fixed without his decision.
