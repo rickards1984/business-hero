@@ -790,23 +790,32 @@ END;
 $grants$;
 COMMIT;
 
--- SECTION 3 — READ-ONLY DEFAULT-ACCOUNT AUDIT. Archive ALL problem businesses.
+-- SECTION 3 — READ-ONLY DEFAULT-ACCOUNT AUDIT. Archive the whole result.
 -- No recency selection, no automated cleanup, no newest-account fallback.
+-- gate = 'BLOCKS': two or more defaults. The Section 4 index would fail;
+--   Mike chooses which account stays default, as a separate approved step.
+-- gate = 'info': connected mailboxes but none marked default. Not a blocker
+--   (the index allows at most one); AUTO-2 already stands down for such a
+--   business ("no_default_mailbox") until the owner picks one.
+-- Businesses with no mailbox at all are not listed: nothing to decide.
+-- (Gate narrowed by Claude's review, 20 Oct 2026: the index enforces AT MOST
+-- one default, so only two-or-more can make it fail.)
 SELECT b.id AS business_id,
        count(e.id) AS account_count,
        count(e.id) FILTER (WHERE e.is_default IS TRUE) AS default_count,
        coalesce(array_agg(e.id ORDER BY e.id)
-                FILTER (WHERE e.is_default IS TRUE), '{}'::uuid[]) AS default_account_ids
+                FILTER (WHERE e.is_default IS TRUE), '{}'::uuid[]) AS default_account_ids,
+       CASE WHEN count(e.id) FILTER (WHERE e.is_default IS TRUE) > 1 THEN 'BLOCKS'
+            ELSE 'info' END AS gate
 FROM public.businesses AS b
-LEFT JOIN public.email_accounts AS e ON e.business_id = b.id
+JOIN public.email_accounts AS e ON e.business_id = b.id
 GROUP BY b.id
 HAVING count(e.id) FILTER (WHERE e.is_default IS TRUE) <> 1
-ORDER BY b.id;
+ORDER BY gate, b.id;
 
 -- SECTION 4 — DEFAULT INDEX: SEPARATE APPROVAL/GATE, OUTSIDE TRANSACTION.
--- Run ONLY after SECTION 3 returns ZERO rows, per Mike's Stage B instruction.
--- An intentionally disconnected zero-default business still blocks this step;
--- Mike must explicitly resolve the gate, never invent/select an account.
+-- Run ONLY when SECTION 3 returns no row with gate = 'BLOCKS'.
+-- Never invent or select a default account to clear the gate.
 -- The index enforces AT MOST one, not exactly one. Later zero defaults fail closed.
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS email_accounts_one_default_idx
   ON public.email_accounts (business_id) WHERE is_default IS TRUE;

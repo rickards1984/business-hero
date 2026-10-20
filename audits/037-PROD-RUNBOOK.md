@@ -1,3 +1,258 @@
+# 037 — PRODUCTION RUNBOOK: outreach core (Mike's steps)
+
+**For:** Mike. **Ticket:** OUT-3. **Migration:** `backend/migrations/037_outreach_core.sql`.
+
+**Rehearsed:** `audits/037-STAGING-REHEARSAL.md` (20 Oct 2026). On staging it was applied, verified, re-pasted, rolled back to the exact before-state, and re-applied. Existing invoice-chase records came through unchanged.
+
+**What it does:**
+- creates the 17 outreach tables, all empty;
+- adds six extra lookup keys to existing email and action tables;
+- allows two new action types, for outreach;
+- nothing is switched on or sent.
+
+**Risk:** RED, as all production SQL is. Moderate in practice: it is bigger than 036, but it only adds things.
+
+Takes about 20 minutes.
+
+**Run each step ONE AT A TIME in the Supabase SQL editor.** Check the EXPECT before moving on. If anything matches STOP IF, stop and send me the output.
+
+**Before you start:** confirm the project selector reads **business-hero (`oxblcmwhuwtobdhsfgyi`)**. 036 is already live (20 Oct).
+
+---
+
+## STEP 0 — Read-only checks
+
+```sql
+SELECT current_database(),
+       (SELECT count(*) FROM pg_tables
+         WHERE schemaname = 'public' AND tablename LIKE 'outreach\_%')       AS outreach_tables,
+       to_regprocedure('public.is_business_member(uuid,uuid)') IS NOT NULL AS membership_helper,
+       (SELECT count(*) FROM (SELECT id FROM public.email_accounts GROUP BY id HAVING count(*) > 1) d) AS dup_accounts,
+       (SELECT count(*) FROM (SELECT id FROM public.email_messages GROUP BY id HAVING count(*) > 1) d) AS dup_messages,
+       (SELECT count(*) FROM (SELECT id FROM public.email_outbox  GROUP BY id HAVING count(*) > 1) d) AS dup_outbox,
+       (SELECT count(*) FROM (SELECT id FROM public.aria_actions  GROUP BY id HAVING count(*) > 1) d) AS dup_actions,
+       (SELECT count(*) FROM pg_policies WHERE schemaname = 'public')          AS policies;
+```
+
+**EXPECT:**
+- `postgres`;
+- `outreach_tables` **0**;
+- `membership_helper` **true**;
+- all four `dup_` values **0**;
+- `policies` noted. It should rise by **6** after STEP 3.
+
+**STOP IF:** `outreach_tables` isn't 0, `membership_helper` is false, or any `dup_` value isn't 0.
+
+You already sent the key check (036 STEP 0, 20 Oct): all four tables have their primary keys.
+
+---
+
+## STEP 1 — The default-mailbox check (READ-ONLY)
+
+```sql
+SELECT b.id AS business_id,
+       count(e.id) AS account_count,
+       count(e.id) FILTER (WHERE e.is_default IS TRUE) AS default_count,
+       coalesce(array_agg(e.id ORDER BY e.id)
+                FILTER (WHERE e.is_default IS TRUE), '{}'::uuid[]) AS default_account_ids,
+       CASE WHEN count(e.id) FILTER (WHERE e.is_default IS TRUE) > 1 THEN 'BLOCKS'
+            ELSE 'info' END AS gate
+FROM public.businesses AS b
+JOIN public.email_accounts AS e ON e.business_id = b.id
+GROUP BY b.id
+HAVING count(e.id) FILTER (WHERE e.is_default IS TRUE) <> 1
+ORDER BY gate, b.id;
+```
+
+**EXPECT:** **no rows**, or only rows with `gate` = `info`. An `info` row is a business with mailboxes but none marked default. It's fine for this step, and Aria won't chase for that business until a default is chosen.
+
+**STOP IF:** any row says **`BLOCKS`**: a business with two or more default mailboxes. Send me the rows. You'll choose which mailbox stays default, as a separate step. Carry on with STEPs 2–4 either way, but skip STEP 5 until it's resolved.
+
+---
+
+## STEP 2 — Six extra keys on existing tables (six separate runs)
+
+Run each statement **on its own**: paste it, run it, wait for success, then do the next. These build without locking the tables, which is why they can't run together. Each should say *Success. No rows returned*.
+
+**Run 1:**
+
+```sql
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS email_accounts_out3_business_id_key
+  ON public.email_accounts (business_id, id);
+```
+
+**Run 2:**
+
+```sql
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS aria_actions_out3_business_id_key
+  ON public.aria_actions (business_id, id);
+```
+
+**Run 3:**
+
+```sql
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS email_outbox_out3_business_id_key
+  ON public.email_outbox (business_id, id);
+```
+
+**Run 4:**
+
+```sql
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS email_messages_out3_business_id_key
+  ON public.email_messages (business_id, id);
+```
+
+**Run 5:**
+
+```sql
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS email_outbox_out3_mailbox_id_key
+  ON public.email_outbox (business_id, email_account_id, id);
+```
+
+**Run 6:**
+
+```sql
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS email_messages_out3_mailbox_id_key
+  ON public.email_messages (business_id, email_account_id, id);
+```
+
+**STOP IF:** any of them errors. Don't retry it. Send me the error, because a failed build can leave a half-made index that I need to look at.
+
+---
+
+## STEP 3 — The outreach tables (one transaction)
+
+Open **`audits/037-STEP-3-section2.sql`**, then select all and copy it. It's long, about 760 lines. Paste it into the SQL editor and run it **once**.
+
+**EXPECT:** *Success. No rows returned.*
+
+**STOP IF:** any error. Because it's one transaction, nothing will have changed. Send me the error.
+
+---
+
+## STEP 4 — VERIFY (READ-ONLY)
+
+```sql
+SELECT
+  (SELECT count(*) FROM pg_tables
+    WHERE schemaname = 'public' AND tablename LIKE 'outreach\_%')                       AS tables,
+  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relname LIKE 'outreach\_%' AND c.relkind = 'r'
+      AND c.relrowsecurity)                                                              AS rls_on,
+  (SELECT count(*) FROM information_schema.role_table_grants
+    WHERE table_schema = 'public' AND table_name LIKE 'outreach\_%' AND grantee = 'anon') AS anon_privileges,
+  (SELECT count(DISTINCT table_name) FROM information_schema.role_table_grants
+    WHERE table_schema = 'public' AND table_name LIKE 'outreach\_%'
+      AND grantee = 'authenticated')                                                     AS readable_tables,
+  (SELECT string_agg(DISTINCT privilege_type, ',') FROM information_schema.role_table_grants
+    WHERE table_schema = 'public' AND table_name LIKE 'outreach\_%'
+      AND grantee = 'authenticated')                                                     AS signed_in_privileges,
+  (SELECT pg_get_constraintdef(oid) LIKE '%send_outreach%' FROM pg_constraint
+    WHERE conname = 'aria_actions_type_chk')                                             AS outreach_actions_allowed,
+  (SELECT count(*) FROM pg_policies WHERE schemaname = 'public')                         AS policies;
+```
+
+**EXPECT:**
+- `tables` **17**;
+- `rls_on` **17**;
+- `anon_privileges` **0**;
+- `readable_tables` **6**;
+- `signed_in_privileges` **SELECT**;
+- `outreach_actions_allowed` **true**;
+- `policies` = STEP 0's number **+ 6**.
+
+**STOP IF:** anything differs, and above all if `anon_privileges` isn't 0 or `signed_in_privileges` is anything other than `SELECT`. In that case run ROLLBACK below and send me both outputs.
+
+---
+
+## STEP 5 — One default mailbox per business (only if STEP 1 had no `BLOCKS` row)
+
+Run this on its own:
+
+```sql
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS email_accounts_one_default_idx
+  ON public.email_accounts (business_id) WHERE is_default IS TRUE;
+```
+
+**EXPECT:** *Success. No rows returned.*
+
+---
+
+## STEP 6 — Regenerate the schema dump (READ-ONLY)
+
+As for 036: row limit **No limit**, run `scripts/dump-live-schema.sql`, **Download → CSV**, and drag it into the repo folder. Expect about **1,105 rows**: the previous 844 plus the 261 new outreach columns.
+
+---
+
+## ROLLBACK — only if STEP 4 failed
+
+This is tested on staging. It refuses to run if any outreach table has rows. Paste it as one run:
+
+```sql
+BEGIN;
+SET LOCAL lock_timeout='5s';
+DO $rollback$
+DECLARE t text; populated boolean;
+BEGIN
+  LOCK TABLE public.aria_actions IN ACCESS EXCLUSIVE MODE;
+  IF EXISTS (SELECT 1 FROM public.aria_actions
+             WHERE action_type IN ('send_outreach','reply_outreach')) THEN
+    RAISE EXCEPTION 'Outreach action history exists; rollback forbidden';
+  END IF;
+  FOR t IN SELECT unnest(ARRAY[
+    'outreach_brands','outreach_settings','outreach_mailboxes','outreach_prospects',
+    'outreach_evidence','outreach_compliance','outreach_campaigns',
+    'outreach_batch_reviews','outreach_sequence_steps','outreach_enrolments',
+    'outreach_messages','outreach_replies','outreach_suppressions',
+    'outreach_unsubscribe_tokens','outreach_dispatch_jobs','outreach_daily_usage',
+    'outreach_usage_events']) LOOP
+    EXECUTE format('LOCK TABLE public.%I IN ACCESS EXCLUSIVE MODE',t);
+    EXECUTE format('SELECT EXISTS (SELECT 1 FROM public.%I)',t) INTO populated;
+    IF populated THEN RAISE EXCEPTION 'Table % has history; rollback forbidden',t; END IF;
+  END LOOP;
+END;
+$rollback$;
+ALTER TABLE public.outreach_campaigns DROP CONSTRAINT IF EXISTS outreach_campaigns_first_review_fk;
+DROP TABLE IF EXISTS public.outreach_usage_events;
+DROP TABLE IF EXISTS public.outreach_daily_usage;
+DROP TABLE IF EXISTS public.outreach_dispatch_jobs;
+DROP TABLE IF EXISTS public.outreach_replies;
+DROP TABLE IF EXISTS public.outreach_messages;
+DROP TABLE IF EXISTS public.outreach_enrolments;
+DROP TABLE IF EXISTS public.outreach_sequence_steps;
+DROP TABLE IF EXISTS public.outreach_batch_reviews;
+DROP TABLE IF EXISTS public.outreach_campaigns;
+DROP TABLE IF EXISTS public.outreach_evidence;
+DROP TABLE IF EXISTS public.outreach_prospects;
+DROP TABLE IF EXISTS public.outreach_compliance;
+DROP TABLE IF EXISTS public.outreach_brands;
+DROP TABLE IF EXISTS public.outreach_mailboxes;
+DROP TABLE IF EXISTS public.outreach_settings;
+DROP TABLE IF EXISTS public.outreach_suppressions;
+DROP TABLE IF EXISTS public.outreach_unsubscribe_tokens;
+DROP FUNCTION IF EXISTS public.outreach_bind_message_version();
+DROP FUNCTION IF EXISTS public.outreach_freeze_approved_step();
+ALTER TABLE public.aria_actions DROP CONSTRAINT IF EXISTS aria_actions_type_chk;
+ALTER TABLE public.aria_actions ADD CONSTRAINT aria_actions_type_chk
+  CHECK (action_type IN ('send_email','send_invoice_chase','create_calendar_event','create_task'));
+COMMIT;
+```
+
+The six keys from STEP 2 can safely stay. Send me STEP 0's and STEP 4's output either way.
+
+---
+
+## Afterwards
+
+Send me STEP 0's row and STEP 4's row, and drag in the CSV. I'll then regenerate the schema record, record the run here, and open the OUT-3 pull request.
+
+---
+---
+
+# Technical reference (Codex, OUT-3 Stage B)
+
+Codex's full runbook follows, unchanged except for the fixture fix noted in the rehearsal record. Mike's steps above are what to run. The extra captures Codex specified (full JSON row archives of `aria_actions`, `email_outbox`, `business_settings` and `usage_meters` in production) are replaced by the staging rehearsal's synthetic legacy rows, which were compared byte for byte through apply, rollback and re-apply. This is Claude's review decision: 037 doesn't modify existing rows, the comparison is exact on staging, and archiving production's live payloads would copy customer data out of the database for no added safety.
+
 # 037 — PRODUCTION RUNBOOK: outreach core
 
 **For:** Mike. **Ticket:** OUT-3 Stage B. **Migration:** `backend/migrations/037_outreach_core.sql`.
@@ -193,10 +448,11 @@ VALUES ('00000000-0000-4000-8000-000000037004',
         '00000000-0000-4000-8000-000000037002',
         '00000000-0000-4000-8000-000000037001','google',
         'out3-sender@example.invalid',true);
-INSERT INTO public.business_settings (id,business_id,settings)
+INSERT INTO public.business_settings (id,business_id,settings,created_at,updated_at)
 VALUES ('00000000-0000-4000-8000-000000037005',
         '00000000-0000-4000-8000-000000037002',
-        '{"automations":{"invoice_chase":{"enabled":false,"revision":7}},"out3_preservation":"sentinel"}');
+        '{"automations":{"invoice_chase":{"enabled":false,"revision":7}},"out3_preservation":"sentinel"}',
+        '2026-10-19 10:00:00', '2026-10-19 10:00:00');
 INSERT INTO public.aria_actions
   (id,business_id,action_type,payload,status,approved_by,approved_at,expires_at)
 SELECT ('00000000-0000-4000-8000-00000003701' || n)::uuid,
