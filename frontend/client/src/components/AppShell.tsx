@@ -60,6 +60,7 @@ export default function AppShell() {
         activeSection={activeSection}
         businessName={me?.name || ''}
         brandColor={me?.brand_color}
+        businessLogo={me?.logo_url}
         isMobile={isMobile}
         showQuotes={showQuotes}
         onSignOut={signOut}

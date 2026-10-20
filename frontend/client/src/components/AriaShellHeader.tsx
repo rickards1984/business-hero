@@ -4,12 +4,14 @@ import { Divider, IconButton, Menu, MenuItem, Tooltip } from '@mui/material';
 import { HelpOutline, SettingsOutlined } from '@mui/icons-material';
 import ThemeToggle from './ThemeToggle';
 import AriaHero from './AriaHero';
+import { resolveLogoSrc } from '@/lib/supabase';
 import './AriaShellHeader.css';
 
 interface Props {
   activeSection: string;
   businessName: string;
   brandColor?: string | null;
+  businessLogo?: string | null;
   isMobile: boolean;
   showQuotes: boolean;
   onHelp: () => void;
@@ -34,9 +36,11 @@ function luminance(hex: string) {
   return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
 }
 
-export default function AriaShellHeader({ activeSection, businessName, brandColor, isMobile, showQuotes, onHelp, onSignOut }: Props) {
+export default function AriaShellHeader({ activeSection, businessName, brandColor, businessLogo, isMobile, showQuotes, onHelp, onSignOut }: Props) {
   const { pathname } = useLocation();
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const logoSrc = resolveLogoSrc(businessLogo);
+  const [logoFailed, setLogoFailed] = useState(false);
   const primary = brandColor && /^#[0-9a-f]{6}$/i.test(brandColor) ? brandColor : '#8E7CFF';
   const light = luminance(primary);
   // Keep the underline visibly distinct from the band and pale/white labels.
@@ -56,6 +60,13 @@ export default function AriaShellHeader({ activeSection, businessName, brandColo
           <Link to="/app/dashboard" className="aria-shell-brand" aria-label="Business Hero home">
             <span className="aria-shell-mark">B</span>
             {!isMobile && <span className="aria-shell-wordmark">Business Hero</span>}
+            {logoSrc && !logoFailed && (
+              // The owner's own logo (Settings → Branding), on a light tile so a
+              // dark logo still shows on the dark band.
+              <span className="aria-shell-logo">
+                <img src={logoSrc} alt="" onError={() => setLogoFailed(true)} />
+              </span>
+            )}
             <span className="aria-shell-business" title={businessName}>{businessName || 'Business Hero'}</span>
           </Link>
           <div className="aria-shell-actions">
