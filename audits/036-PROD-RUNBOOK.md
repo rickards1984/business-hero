@@ -199,3 +199,11 @@ Send me STEP 0's row and STEP 2's row, and drag in the CSV. I will then:
 1. regenerate `audits/live-schema-public.txt`;
 2. record the run here;
 3. push AUTO-2 and open its pull request.
+
+---
+
+## RESULT — run by Mike in production, 20 October 2026
+
+- **STEPs 0–2:** Mike reported every step passed. The STEP 0 and STEP 2 rows weren't pasted into the conversation, so they aren't recorded here. In particular, STEP 0's `email_keys` (the production primary keys on the email tables) is still wanted for 037's review.
+- **STEP 3:** the schema dump was downloaded with no row limit: **844 rows**. Compared with the after-035 dump (832), exactly the **12 `chase_replies` columns** were added, with nothing removed or changed. Every type, nullability and default matches the migration. `audits/live-schema-public.txt` was regenerated from it, and `test_schema_conformance.py` now passes: `./check.sh full` is green, with 1,975 passed.
+- **Rollback:** not needed.
