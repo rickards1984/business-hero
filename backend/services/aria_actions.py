@@ -259,8 +259,11 @@ _COLUMNS = "id, action_type, payload, status, expires_at, error, result, created
 # ------------------------------------------------------------- the API ---
 
 def propose(session, business, user_id, action_type: str, args: dict, *,
-            owner_name: Optional[str] = None, timezone: Optional[str] = None) -> dict:
-    """Store a card. Acts on nothing. Returns {"proposal": ...} or {"error": ...}."""
+            owner_name: Optional[str] = None, timezone: Optional[str] = None,
+            automation: Optional[str] = None, raised_by: Optional[str] = None) -> dict:
+    """Store a card. Acts on nothing. Returns {"proposal": ...} or {"error": ...}.
+    `automation` marks a card raised by a standing permission (AUTO-1), so the
+    audit trail can tell it from one Aria proposed in conversation."""
     if action_type not in ACTION_TYPES:
         return {"error": f"{action_type} cannot be proposed."}
     problem = _feature_problem(business, action_type)
@@ -272,6 +275,10 @@ def propose(session, business, user_id, action_type: str, args: dict, *,
         payload = _build(session, business, action_type, args, owner_name, tz_name)
     except ActionRefused as exc:
         return {"error": exc.detail}
+    if automation:
+        payload["automation"] = automation  # to be SENT by a standing permission
+    if raised_by:
+        payload["raised_by"] = raised_by    # a card an automation raised for a tap
     moment = now()
     aid = str(uuid.uuid4())
     session.execute(text(
@@ -287,6 +294,11 @@ def propose(session, business, user_id, action_type: str, args: dict, *,
                          "preview": payload, "version": version_of(payload),
                          "expires_at": (moment + EXPIRY).isoformat(),
                          "error": None, "result": None, "created_at": moment.isoformat()}}
+
+
+def _still_owed(session, business_id, invoice_id) -> bool:
+    from services.home_summary import invoice_owed
+    return invoice_owed(session, str(business_id), str(invoice_id))
 
 
 def _scoped(session, business, action_id: str):
@@ -398,6 +410,11 @@ def approve(session, business, action_id: str, user_id, version: Optional[str] =
             reason = "The invoice no longer exists; nothing was sent."
         elif (invoice[5] or "").lower() == "paid":
             reason = "Invoice already paid; nothing was sent."
+        elif not _still_owed(session, business.id, payload["invoice_id"]):
+            # The FULL receivables rule, not only a literal "paid" status: a
+            # recorded payment, a synced zero balance or a cancellation since
+            # the card was drafted all stop it (Codex AUTO-1 review 1).
+            reason = "This invoice is no longer owed; nothing was sent."
         elif (invoice[6] or 0) >= int(payload["chase_stage"]):
             # Codex review 1, finding 6: never resend an earlier stage or
             # move the invoice's stage backwards.

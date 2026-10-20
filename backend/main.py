@@ -457,6 +457,8 @@ from usage_api import router as usage_router
 app.include_router(usage_router)
 from home_api import router as home_router
 app.include_router(home_router)
+from automations_api import router as automations_router
+app.include_router(automations_router)
 from aria_actions_api import router as aria_actions_router
 app.include_router(aria_actions_router)
 
@@ -1451,6 +1453,18 @@ async def get_business_settings(
     )
 
 
+def preserve_automations(incoming: dict, existing: dict) -> dict:
+    """The generic settings PUT replaces the whole document. It must never
+    change Aria's standing permissions — those go through
+    /v1/automations/*, which validates and serialises them (Codex AUTO-1
+    review 1, finding 5). The stored `automations` are kept, whatever the
+    client sends."""
+    out = {k: v for k, v in (incoming or {}).items() if k != "automations"}
+    if isinstance(existing, dict) and "automations" in existing:
+        out["automations"] = existing["automations"]
+    return out
+
+
 @app.put("/v1/business/settings", response_model=BusinessSettingsResponse, tags=["Business"])
 async def update_business_settings(
     data: BusinessSettingsUpdate,
@@ -1458,19 +1472,22 @@ async def update_business_settings(
     session: Session = Depends(get_session)
 ):
     """Update business settings. Creates settings if they don't exist."""
-    statement = select(BusinessSettings).where(BusinessSettings.business_id == business.id)
+    # Row-locked, like /v1/automations, so this save cannot read a stale
+    # `automations` and write it back over a switch-off (Codex AUTO-1 review 2).
+    statement = select(BusinessSettings).where(
+        BusinessSettings.business_id == business.id).with_for_update()
     settings = session.exec(statement).first()
     
     if not settings:
         # Create new settings
         settings = BusinessSettings(
             business_id=business.id,
-            settings=data.settings
+            settings=preserve_automations(data.settings, {})
         )
         session.add(settings)
     else:
-        # Update existing settings
-        settings.settings = data.settings
+        # Update existing settings (Aria's standing permissions are kept)
+        settings.settings = preserve_automations(data.settings, settings.settings or {})
         settings.updated_at = datetime.utcnow()
     
     session.commit()

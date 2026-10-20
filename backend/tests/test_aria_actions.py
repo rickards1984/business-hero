@@ -108,7 +108,9 @@ def database():
             id TEXT PRIMARY KEY, business_id TEXT NOT NULL, invoice_number TEXT,
             customer_name TEXT, customer_email TEXT, amount NUMERIC, status TEXT,
             chase_stage INTEGER, due_date TEXT, archived BOOLEAN DEFAULT 0,
-            last_chased_at TEXT, updated_at TEXT)"""))
+            last_chased_at TEXT, updated_at TEXT,
+            -- AUTO-1: approval re-applies the receivables rule (harness)
+            amount_due NUMERIC, amount_paid NUMERIC DEFAULT 0, paid_amount NUMERIC, external_id TEXT)"""))
         s.execute(text("""CREATE TABLE email_accounts (
             id TEXT PRIMARY KEY, business_id TEXT NOT NULL, provider TEXT,
             email_address TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"""))

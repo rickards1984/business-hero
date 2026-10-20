@@ -15,6 +15,7 @@ import EmailOutbox from '@/pages/EmailOutbox';
 import Inbox from '@/pages/Inbox';
 import Briefings from '@/pages/Briefings';
 import AwazSettings from '@/pages/AwazSettings';
+import AriaAutomationsSettings from '@/pages/AriaAutomationsSettings';
 import AssistantChat from '@/pages/AssistantChat';
 import HelpSupport from '@/pages/HelpSupport';
 import AdminSupport from '@/pages/AdminSupport';
@@ -554,6 +555,7 @@ function App() {
                   <Route path="settings/billing" element={<BillingSettings />} />
                   <Route path="settings/email" element={<EmailSettings />} />
                   <Route path="settings/awaz" element={<AwazSettings />} />
+                  <Route path="settings/aria" element={<AriaAutomationsSettings />} />
                   <Route path="assistant/chat" element={<AssistantChat />} />
                   <Route path="help" element={<HelpSupport />} />
                   <Route path="inbox" element={<Inbox />} />
