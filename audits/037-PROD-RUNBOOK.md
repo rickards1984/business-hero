@@ -799,3 +799,18 @@ builder could not execute PostgreSQL replay or verify the reconciled catalogue.
 Claude must rerun STEP 8 and compare the outbox columns/types/nullability/defaults
 to dump lines 342–354 before accepting this repair. No network, commit, push or
 production action. Mike: no app behaviour changed and nothing new to click.
+
+---
+
+## RESULT — run by Mike in production, 20 October 2026
+
+- **STEP 0:** `postgres`; `outreach_tables` **0**; `membership_helper` **true**; every `dup_` value **0**; `policies` **88**.
+- **STEPs 1–3, 5:** Mike reported all steps passed.
+- **STEP 4:**
+  - `tables` **17**, `rls_on` **17**;
+  - `anon_privileges` **0**;
+  - `readable_tables` **6**, `signed_in_privileges` **SELECT**;
+  - `outreach_actions_allowed` **true**;
+  - `policies` **94** (88 + 6, as expected).
+- **STEP 6:** the schema dump has **1,105 rows**. Against the after-035 record it adds exactly 12 `chase_replies` columns (036) and **261 columns across the 17 outreach tables** (037); nothing removed or changed. `audits/live-schema-public.txt` was regenerated from it.
+- **Rollback:** not needed.
