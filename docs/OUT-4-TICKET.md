@@ -125,3 +125,10 @@ Tests override authenticated context and Business loading only, plus SQLite/cloc
 - **Claude:** review the exact surface/allowlists, deferred catalogue and knowledge placeholder against the binding OUT-2 split; confirm the proposed registration seam and lack of AUTO collisions. Confirm read-time retention minimization and the canonical gate at both boundaries, including platform-admin behaviour. The unavailable AUTO test file is a checkout fact, not a reason to import unreviewed work.
 - **Mike:** approve Stage B's bounded read scope after Claude's review. Retained outreach history after cancellation needs an explicit OUT-12 decision against DECISION 3; add-on/standalone inclusion is already settled, and prices stay OUT-12 after economics.
 - **Click check now:** open this packet and the test file. There is no new app behaviour to click in Stage A. After implementation/UI integration, switch business A/B, inspect prospect/campaign history and empty knowledge, then compare Aria's counts to visible records. `check.sh` cannot prove those future screens, live migration state or external behaviour; Stage A green with xfails is a test scaffold, not a working feature.
+
+### Mike's decisions — 20 October 2026
+
+1. **The Stage A tests are approved.** Stage B is authorised as written in this packet.
+2. **No retained history after cancellation.** A business that loses outreach can't read its outreach records (`retained_history=False`), as the tests encode. The data is kept, not deleted, so access returns if the business re-subscribes. This can be revisited with OUT-12, the add-on and standalone product.
+
+A Business-tier entitlement or an admin per-business feature flag grants access today. Selling outreach as an add-on or a standalone product remains OUT-12 (RED).
