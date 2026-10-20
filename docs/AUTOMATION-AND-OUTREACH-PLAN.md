@@ -319,3 +319,21 @@ on a par with them**:
 3. **Mike uses Business Hero himself, as a customer, for a month.**
 4. **A few businesses Mike already knows** join, likely with a free first month, to help refine it.
 5. Only then come paid subscriptions for others.
+
+## Upcoming: from a "Daily Pulse" to Aria's briefings — Mike, 20 October 2026
+
+Today the WhatsApp "Daily Pulse" goes out every day. Its stats are mostly zeros, and so are the financials on the odd day they appear. It's too frequent, and too empty to be worth reading. Replace it with:
+
+- **A weekly briefing from Aria.** It's written as Aria, not as a "Daily Pulse", and it's useful. It covers:
+  - what she did on her own, such as invoices chased on autopilot;
+  - replies waiting for the owner;
+  - what's owed and overdue;
+  - what needs a decision.
+- **A monthly business-performance snapshot.**
+- **No daily messages.**
+
+**Outreach is included in both** when the business's package includes it (entitlement-gated).
+
+**Rule:** a section with nothing to say is left out, never shown as zeros.
+
+**Order:** queued as its own ticket after the current AUTO/OUT work; it is not started.
