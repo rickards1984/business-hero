@@ -88,7 +88,17 @@ ORDER=(
   # production actually has: without it the RLS suite would keep asserting that
   # an owner CAN raise their own entitlement, which stopped being true.
   backend/migrations/030b_release2_revoke.sql
+  # Append to preserve the existing replay-index/error-manifest contract.
+  backend/migrations/034_invoice_customer_address.sql
+  backend/migrations/035_aria_actions.sql
 )
+# Migrations not yet written (036 AUTO-2 chase replies, 037 OUT-3 outreach
+# core) are replayed once they exist; absence must not skip their tests.
+for optional in backend/migrations/036_chase_replies.sql backend/migrations/037_outreach_core.sql; do
+  if [ -f "$optional" ]; then
+    ORDER+=("$optional")
+  fi
+done
 
 psql_in() { docker exec -i "$CONTAINER" psql -U postgres -v ON_ERROR_STOP=0 -q "$@"; }
 psql_c()  { docker exec "$CONTAINER" psql -U postgres -At -c "$1"; }
@@ -209,6 +219,7 @@ prune_ghost_policies() {
   local allow ghosts
   allow="$(.venv/bin/python - <<'PY'
 import csv, re
+from pathlib import Path
 names = set()
 with open("audits/live-policies-2026-07-05.csv", newline="") as f:
     for row in csv.DictReader(f):
@@ -218,7 +229,13 @@ for path in ["supabase/migrations/029_secure_rls_gaps.sql",
              "backend/migrations/030a_pre_billing_security.sql",
              "backend/migrations/031_money_engine.sql",
              "backend/migrations/032_nullable_line_tax.sql",
-             "backend/migrations/033_entitlement.sql"]:
+             "backend/migrations/033_entitlement.sql",
+             "backend/migrations/034_invoice_customer_address.sql",
+             "backend/migrations/035_aria_actions.sql",
+             "backend/migrations/036_chase_replies.sql",
+             "backend/migrations/037_outreach_core.sql"]:
+    if not Path(path).exists() and path.endswith(("036_chase_replies.sql", "037_outreach_core.sql")):
+        continue
     txt = "\n".join(l for l in open(path) if not l.lstrip().startswith("--"))
     for m in pat.finditer(txt):
         names.add(f"{m.group(3)}|{m.group(2)}")
@@ -275,7 +292,8 @@ census() {
 }
 
 test_() {
-  .venv/bin/python -m pytest backend/tests/test_tenant_isolation_rls_path.py -v -p no:warnings "$@"
+  # Every Postgres suite: the tenant isolation suite and each migration's own.
+  .venv/bin/python -m pytest backend/tests/test_*rls*.py -v -p no:warnings "$@"
 }
 
 down() { docker rm -f "$CONTAINER" >/dev/null 2>&1 && echo "removed $CONTAINER" || true; }

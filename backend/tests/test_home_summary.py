@@ -35,6 +35,10 @@ def engine():
         # AUTO-1: the summary also lists what Aria did on her own (harness).
         c.execute(text("""CREATE TABLE aria_actions (id TEXT, business_id TEXT, action_type TEXT,
             payload TEXT, status TEXT, executed_at TIMESTAMP, approved_by TEXT)"""))
+        # AUTO-2: and the replies to chases awaiting them (harness).
+        c.execute(text("""CREATE TABLE chase_replies (id TEXT, business_id TEXT,
+            email_message_id TEXT, customer_email TEXT, invoice_ids TEXT, category TEXT,
+            summary TEXT, status TEXT, resolved_at TEXT, created_at TEXT)"""))
     return eng
 
 

@@ -11,7 +11,7 @@ import httpx
 
 from .oauth_utils import get_valid_access_token
 
-from .base import BaseEmailProvider, ProviderSendResult, ProviderSyncResult, ProviderMessage
+from .base import BaseEmailProvider, ProviderSendResult, ProviderSyncResult, ProviderMessage, checked_senders
 
 
 _logger = logging.getLogger("gmail_provider")
@@ -21,6 +21,7 @@ GMAIL_FETCH_CONCURRENCY = 8            # max simultaneous Gmail GETs (per-user l
 GMAIL_FETCH_MAX_RETRIES = 3           # attempts per message on 429 / 5xx / transient network errors
 GMAIL_RETRY_AFTER_CAP_SECONDS = 5.0   # cap on any honored Retry-After / backoff sleep
 GMAIL_FETCH_DEADLINE_SECONDS = 30.0   # hard cap on total retry time per message
+GMAIL_SEARCH_MAX_PAGES = 10            # AUTO-2: a reply search longer than this is refused, not truncated
 
 
 class _GmailFetchError(Exception):
@@ -118,6 +119,50 @@ class GoogleGmailProvider(BaseEmailProvider):
             f"({len(ids) - len(messages)} skipped)"
         )
         return ProviderSyncResult(messages=messages, cursor=cursor or {})
+
+    def search_from(
+        self,
+        *,
+        account: Any,
+        senders: List[str],
+        since: datetime,
+    ) -> List[ProviderMessage]:
+        """AUTO-2: Gmail's own search over the whole mailbox (not only the
+        newest page of INBOX), paged to the end. Raises rather than return a
+        partial answer: a failed fetch or too many pages means "unknown"."""
+        addresses = checked_senders(senders)
+        if not addresses:
+            return []
+        query = "(" + " OR ".join(f"from:{a}" for a in addresses) + f") after:{int(since.timestamp())}"
+        access_token = get_valid_access_token(account)
+        headers = {"Authorization": f"Bearer {access_token}"}
+        url = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+        ids: List[str] = []
+        with httpx.Client(timeout=20) as client:
+            token = None
+            for _ in range(GMAIL_SEARCH_MAX_PAGES):
+                # Spam and Trash too: a reply filed as spam is still a reply
+                # (Codex AUTO-2 review 2).
+                params = {"q": query, "maxResults": 100, "includeSpamTrash": "true"}
+                if token:
+                    params["pageToken"] = token
+                response = client.get(url, headers=headers, params=params)
+                if response.status_code != 200:
+                    raise RuntimeError(f"Gmail search failed: {response.status_code}")
+                data = response.json()
+                ids.extend(item["id"] for item in (data.get("messages") or []) if item.get("id"))
+                token = data.get("nextPageToken")
+                if not token:
+                    break
+            else:
+                raise RuntimeError("Gmail search returned more pages than allowed")
+            found: List[ProviderMessage] = []
+            for mid in ids:
+                message = _fetch_message_metadata_safe(client, headers, mid)
+                if message is None:
+                    raise RuntimeError("a Gmail message found by the search could not be read")
+                found.append(message)
+        return found
 
     def fetch_message(
         self,

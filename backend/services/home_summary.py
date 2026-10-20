@@ -128,7 +128,16 @@ def summary(conn, business_id: str, now: Optional[datetime] = None) -> dict:
             "accounting": max(accounting) if accounting else None,
         },
         "automated": recent_automated(conn, bid, now),
+        "replies": open_chase_replies(conn, bid),
     }
+
+
+def open_chase_replies(conn, business_id: str) -> list:
+    """Replies to chases awaiting the owner (AUTO-2): chasing those customers
+    is paused until they choose Resume or Stop."""
+    from types import SimpleNamespace
+    from services import chase_replies
+    return chase_replies.open_replies(conn, SimpleNamespace(id=str(business_id)))
 
 
 def recent_automated(conn, business_id: str, now: Optional[datetime] = None,
