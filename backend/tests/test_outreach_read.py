@@ -30,11 +30,6 @@ class MissingOutreachRead(AssertionError):
     """The sole intentional Stage A failure."""
 
 
-pytestmark = pytest.mark.xfail(
-    strict=True, raises=MissingOutreachRead,
-    reason="OUT-4 Stage A: backend/outreach_read.py does not exist",
-)
-
 A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 EMPTY = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"

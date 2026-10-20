@@ -461,6 +461,8 @@ from automations_api import router as automations_router
 app.include_router(automations_router)
 from aria_actions_api import router as aria_actions_router
 app.include_router(aria_actions_router)
+from outreach_read import router as outreach_router
+app.include_router(outreach_router)
 
 
 

@@ -132,3 +132,19 @@ Tests override authenticated context and Business loading only, plus SQLite/cloc
 2. **No retained history after cancellation.** A business that loses outreach can't read its outreach records (`retained_history=False`), as the tests encode. The data is kept, not deleted, so access returns if the business re-subscribes. This can be revisited with OUT-12, the add-on and standalone product.
 
 A Business-tier entitlement or an admin per-business feature flag grants access today. Selling outreach as an add-on or a standalone product remains OUT-12 (RED).
+
+### Claude's review of Stage B — 20 October 2026
+
+Codex built `backend/outreach_read.py`, a two-line router include in `main.py`, and the tool registration in `assistant_tools.py`, and removed only the strict-xfail marker. **All 505 tests pass**, and `./check.sh full` is green.
+
+**I read every line of `outreach_read.py`:**
+- Only fixed literals (table, column and predicate names from `READS` and `SUMMARY`) are interpolated into SQL. Every value binds.
+- Every query, count and parent lookup carries `business_id` from trusted context. A parent is verified as owned before its children are counted.
+- `assert_feature_access(..., "outreach", retained_history=False)` runs inside `_read`, so the Aria tools are gated independently of the HTTP dependency, platform admins included.
+- Projections are exact allowlists, with text capped in SQL as well as in Python.
+
+**Ran on Postgres** (the local Supabase replay with 037, using OUT-3's two-tenant seed graph). All fourteen reads execute, each returns tenant A's seeded record, and the same parent asked for as tenant B is a 404. The mailbox filter works, and the summary totals match the seed.
+
+**Backlog, non-blocking:** `human_replies` counts only classified human categories, so a reply that couldn't be classified (`unknown`) isn't counted. That's deliberate under-claiming (P2). The OUT-8 screens should show unclassified replies separately.
+
+**Release order:** 037 must be live in production before this merges, because the reads need the tables. The PR is stacked on OUT-3.
