@@ -11,7 +11,7 @@ Mailbox provenance comes only from send_ledger.from_account. Its opaque alias is
 'account-' + SHA256(exact UTF-8 account value). The owner must verify these aliases
 in a separate mapping manifest. sent_via is not evidence of account ownership.
 Unknown labels retain their value prefixed with 'unmapped:'. Unresolved ledger
-associations and undocumented follow-ups remain unsupported history for review.
+associations remain quarantined; known follow-ups are per-contact summaries.
 """
 
 import argparse
@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from services.outreach_import import (  # noqa: E402
-    MAX_BYTES, MAX_ROWS, ImportValidationError, SafeArgumentParser, read_json, validate_export,
+    MAX_BYTES, MAX_ROWS, ESCALATIONS, REPLIES, ImportValidationError, SafeArgumentParser, read_json, timestamp, validate_export,
 )
 
 BUSINESSES = {"msc": "MSC", "fitfutures": "FitFutures", "newbody": "New Body", "businesshero": "Business Hero"}
@@ -73,11 +73,12 @@ def _alias(value):
     return "account-" + hashlib.sha256(value.encode("utf-8")).hexdigest() if value else None
 
 
-def _queue_row(entry, business, ledger):
+def _queue_row(entry, business, ledger, followups=()):
     status = _label(entry.get("status"), {"sent": "sent", "send_failed": "send_failed",
-                       "approved": "template_approved", "template_approved": "template_approved"}, "unmapped:missing")
-    replies = {key: key for key in ("none", "opt_out", "unsubscribe", "objection", "hard_bounce")}
-    reply = _label(entry.get("reply_status"), replies, "unmapped:missing")
+                       "approved": "template_approved", "template_approved": "template_approved",
+                       "skipped": "skipped", "opted_out": "opted_out"}, "unmapped:missing")
+    replies = dict(REPLIES, opt_out="opt_out", hard_bounce="hard_bounce")
+    reply = _label(entry.get("reply_status"), replies)
     notes = []
     if reply.startswith("unmapped:"):
         notes.append("unmapped:reply_status=" + reply.removeprefix("unmapped:"))
@@ -101,8 +102,20 @@ def _queue_row(entry, business, ledger):
     if type(count) is not int or count < 0:
         raise ExportError("Export failed")
     history = []
-    if count or entry.get("last_followup_at") or entry.get("warm_reply_sent_at"):
-        history.append({"unmapped": "followup_history_unavailable"})
+    last_followup = _text(entry.get("last_followup_at"), None)
+    if followups:
+        sent_events = [e for e in followups if e["status"] == "sent"]
+        failed_events = [e for e in followups if e["status"] == "failed"]
+        count = max(count, len(sent_events))
+        dates = [e["sent_at"] for e in sent_events if e["sent_at"]]
+        if last_followup:
+            dates.append(last_followup)
+        last_followup = max(dates, key=timestamp) if dates else None
+        history.append({"kind": "followup_summary", "sent": len(sent_events), "failed": len(failed_events)})
+        if len(sent_events) + len(failed_events) != len(followups):
+            history.append({"unmapped": "ledger_status"})
+    if entry.get("warm_reply_sent_at"):
+        history.append({"unmapped": "warm_reply_history"})
     # Only one unambiguous, recipient-matching ledger record can fill provenance.
     usable = len(ledger) == 1
     email = _text(entry.get("contact_email"))
@@ -117,8 +130,13 @@ def _queue_row(entry, business, ledger):
         if (status == "sent") != (event["status"] == "sent"):
             usable = False
     if ledger and not usable:
-        history.append({"unmapped": "ledger_association", "events": ledger})
+        history.append({"kind": "ledger_collision"})
+        if any(e["status"] not in {"sent", "failed", "claimed"} for e in ledger):
+            history.append({"unmapped": "ledger_status"})
     event = ledger[0] if usable else {}
+    accounts = {_text(e.get("from_account")) for e in [*ledger, *followups]}
+    if len(accounts) > 1:
+        history.append({"kind": "ledger_collision"})
     sent = _text(entry.get("sent_at"), None)
     message = _text(entry.get("gmail_message_id"), None)
     if event.get("status") == "sent":
@@ -129,13 +147,14 @@ def _queue_row(entry, business, ledger):
         segment=_text(entry.get("segment")), company=_text(entry.get("company") or entry.get("company_name")),
         contact_name=_text(entry.get("contact_name")), contact_email=email,
         subject=_text(entry.get("subject")), body=_text(entry.get("body")), status=status,
-        reply_status=reply, escalation_status=_label(entry.get("escalation_status"), {"none": "none"}),
+        reply_status=reply, escalation_status=_label(entry.get("escalation_status"), ESCALATIONS),
         notes="\n".join(notes), created_at=_text(entry.get("created_at")),
         approved_at=_text(entry.get("approved_at"), None), sent_at=sent,
         gmail_message_id=message, gmail_thread_id=_text(entry.get("gmail_thread_id"), None),
         reply_checked_at=_text(entry.get("reply_checked_at"), None), followup_due_at=None,
-        last_followup_at=_text(entry.get("last_followup_at"), None),
-        source_account=_alias(event.get("from_account")), last_known_message_count=int(bool(message)),
+        last_followup_at=last_followup,
+        source_account=_alias(event.get("from_account")) or (
+            _alias(followups[0]["from_account"]) if followups and len({e["from_account"] for e in followups}) == 1 else None), last_known_message_count=int(bool(message)),
         followup_count=count, followup_history=history,
     )
 
@@ -149,7 +168,7 @@ def _ledger_row(event):
     business = BUSINESSES.get(event["business_id"], "unmapped:" + _text(event["business_id"]))
     row = _queue_row(entry, business, [])
     row["source_account"] = _alias(event["from_account"])
-    row["followup_history"] = [{"unmapped": "ledger_without_queue", "event": event}]
+    row["followup_history"] = [{"kind": "orphan_send"}]
     return row
 
 
@@ -177,18 +196,54 @@ def export_history(home, output):
             ledger = [dict(record) for record in cursor.fetchmany(MAX_ROWS + 1)]
         if len(ledger) > MAX_ROWS:
             raise ExportError("Export failed")
-        groups = {}
-        for i, event in enumerate(ledger):
-            if event["queue_entry_id"] is not None:
-                key = (_text(event["business_id"]), _identifier(event["queue_entry_id"]))
-                groups.setdefault(key, []).append((i, event))
-        rows, used = [], set()
+        groups, followups, collisions = {}, {}, set()
+        ids, recipients = {}, {}
         for biz, queue in queues.items():
-            for entry in queue:
-                linked = groups.get((biz, _identifier(entry.get("id"))), [])
-                used.update(i for i, _ in linked)
-                rows.append(_queue_row(entry, BUSINESSES[biz], [event for _, event in linked]))
-        rows.extend(_ledger_row(event) for i, event in enumerate(ledger) if i not in used)
+            for index, entry in enumerate(queue):
+                key = (biz, index)
+                ids.setdefault((biz, _identifier(entry.get("id"))), []).append(key)
+                email = _text(entry.get("contact_email")).strip().casefold()
+                if email:
+                    recipients.setdefault((biz, email), []).append(key)
+        used = set()
+        collision_events = set()
+        for i, event in enumerate(ledger):
+            biz = _text(event["business_id"])
+            matches = ids.get((biz, _identifier(event["queue_entry_id"])), []) if event["queue_entry_id"] is not None else []
+            fallback = not matches
+            if fallback and biz != "businesshero":
+                matches = recipients.get((biz, _text(event["to_address"]).strip().casefold()), [])
+            if len(matches) == 1:
+                (followups if fallback else groups).setdefault(matches[0], []).append(event)
+                used.add(i)
+            elif len(matches) > 1:
+                collisions.update(matches)
+                collision_events.add(i)
+        rows = []
+        for biz, queue in queues.items():
+            for index, entry in enumerate(queue):
+                key = (biz, index)
+                linked = groups.get(key, [])
+                extra = list(followups.get(key, []))
+                # A matching original message anchors later successful sends.
+                original = [e for e in linked if e["status"] == "sent" and (
+                    (entry.get("gmail_message_id") and e["message_id"] == entry["gmail_message_id"]) or
+                    (entry.get("sent_at") and e["sent_at"] == entry["sent_at"]))]
+                if len(original) == 1 and all(e["status"] == "sent" and
+                        _text(e["to_address"]).strip().casefold() == _text(entry.get("contact_email")).strip().casefold()
+                        for e in linked):
+                    extra.extend(e for e in linked if e is not original[0])
+                    linked = original
+                row = _queue_row(entry, BUSINESSES[biz], linked, extra)
+                if key in collisions:
+                    row["followup_history"].append({"kind": "ledger_collision"})
+                rows.append(row)
+        for i, event in enumerate(ledger):
+            if i not in used:
+                row = _ledger_row(event)
+                if i in collision_events:
+                    row["followup_history"] = [{"kind": "ledger_collision"}]
+                rows.append(row)
         payload = {"schema_version": 1, "rows": rows}
         validate_export(payload)
         encoded = json.dumps(payload, ensure_ascii=True, indent=2, allow_nan=False).encode("utf-8")

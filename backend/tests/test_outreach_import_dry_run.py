@@ -254,8 +254,8 @@ def test_bad_mapping_fails_closed(importer, tmp_path):
 
 @pytest.mark.parametrize("changes, code", [
     ({"status": "unmapped:secret"}, "unknown_status"),
-    ({"reply_status": "strong_positive"}, "unknown_reply_status"),
-    ({"escalation_status": "pending_byron"}, "unknown_escalation_status"),
+    ({"reply_status": "mystery_reply_status_x"}, "unknown_reply_status"),
+    ({"escalation_status": "mystery_escalation_y"}, "unknown_escalation_status"),
     ({"notes": "Please stop, perhaps later"}, "notes_review"),
 ])
 def test_unknown_labels_and_ambiguous_notes_block(importer, tmp_path, changes, code):
@@ -321,3 +321,79 @@ def test_twelve_calendar_month_expiry_and_unanswered_only(importer, tmp_path):
     assert report["counts"]["expired_records"] == 1
     before = at_boundary.replace(hour=11)
     assert importer.dry_run(path, mapping=MAPPING, as_of=before)["counts"]["expired_records"] == 0
+
+
+@pytest.mark.parametrize("reply, category", [
+    ("strong_positive", "interested"), ("interested", "interested"),
+    ("needs_judgment", "unknown"), ("unclear", "unknown"), ("handled", "unknown"),
+    ("ooo", "out_of_office"), ("auto_ack", "out_of_office"),
+    ("bounce", "bounce"), ("unsubscribe", "unsubscribe"), ("opted_out", "unsubscribe"),
+    ("objection", "objection"), ("polite_decline", "objection"),
+])
+def test_observed_reply_categories(importer, tmp_path, reply, category):
+    report = run(importer, tmp_path, [row(reply_status=reply, notes="", escalation_status="pending_byron")])
+    assert report["counts"]["replies_by_category"][category] == 1
+    assert report["counts"]["owner_review"] == 1
+    assert report["counts"]["unsupported_history"] == 0
+
+
+@pytest.mark.parametrize("changes, reason", [
+    ({"status": "opted_out"}, "unsubscribe"),
+    ({"reply_status": "bounce"}, "hard_bounce"),
+    ({"escalation_status": "auto_resolved_bounce"}, "hard_bounce"),
+    ({"reply_status": "polite_decline"}, "objection"),
+    ({"escalation_status": "auto_resolved_unsubscribe"}, "unsubscribe"),
+])
+def test_observed_suppression_reasons(importer, tmp_path, changes, reason):
+    report = run(importer, tmp_path, [row(notes="", **changes)])
+    assert report["counts"]["suppressions_by_reason"][reason] == 1
+    assert report["counts"]["suppressions"] == 1
+
+
+def test_unconnected_mailbox_and_followup_summary(importer, tmp_path):
+    mapping = copy.deepcopy(MAPPING)
+    mapping["namespaces"]["MSC"]["mailboxes"]["source-m"] = "unconnected"
+    report = run(importer, tmp_path, [row(notes="", followup_count=2,
+        last_followup_at="2026-10-03T10:00:00Z")], mapping)
+    assert report["counts"]["mailbox_unconnected"] == 1
+    assert report["counts"]["unresolved_mailbox_thread"] == 0
+    assert report["counts"]["quarantined_rows"] == 0
+    assert report["counts"]["unsupported_history"] == 0
+    assert report["counts"]["send_actions"] == 0
+
+
+def test_mailbox_alias_cannot_cross_tenants(importer, tmp_path):
+    mapping = copy.deepcopy(MAPPING)
+    mapping["namespaces"]["New Body"]["mailboxes"]["source-m"] = "unconnected"
+    with pytest.raises(importer.ImportValidationError, match="^Invalid mapping$"):
+        run(importer, tmp_path, [row()], mapping)
+
+
+def test_unknown_fields_counted_without_values(importer, tmp_path):
+    report = run(importer, tmp_path, [row(notes="", reply_status="private_unknown",
+        escalation_status="private_other")])
+    assert report["counts"]["unsupported_history"] == 1
+    assert report["counts"]["unsupported_by_field"] == {"reply_status": 1, "escalation_status": 1}
+    assert "private_" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("status", ["sent", "approved", "template_approved", "skipped", "send_failed", "opted_out"])
+def test_observed_queue_states_remain_paused(importer, tmp_path, status):
+    report = run(importer, tmp_path, [row(status=status, notes="")])
+    assert report["counts"]["unsupported_history"] == 0
+    assert report["counts"]["send_actions"] == report["counts"]["current_allowance"] == 0
+    assert report["status"] == "paused"
+    assert report["counts"]["suppressions"] == int(status == "opted_out")
+
+
+def test_source_account_mapped_only_under_other_tenant_is_error(importer, tmp_path):
+    with pytest.raises(importer.ImportValidationError, match="^Invalid mapping$"):
+        run(importer, tmp_path, [row(source_account="source-n")])
+
+
+@pytest.mark.parametrize("escalation", ["none", "handled", "auto_resolved_bounce",
+    "auto_resolved_unsubscribe", "auto_resolved_ooo", "auto_resolved_auto_ack", "action_needed"])
+def test_observed_escalations_supported(importer, tmp_path, escalation):
+    report = run(importer, tmp_path, [row(escalation_status=escalation, notes="")])
+    assert report["counts"]["unsupported_history"] == 0
+    assert report["counts"]["owner_review"] == int(escalation == "action_needed")

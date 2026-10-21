@@ -99,14 +99,14 @@ def test_unmapped_values_quarantined(converter, source, tmp_path, status):
     home, _ = source
     path = queue_path(home)
     entry = json.loads(path.read_text())[0]
-    entry.update(status=status, reply_status="strong_positive", escalation_status="pending_byron")
+    entry.update(status=status, reply_status="mystery_reply_status_x", escalation_status="mystery_escalation_y")
     path.write_text(json.dumps({"queue": [entry]}))
     output = tmp_path / "export.json"
     converter.export_history(home, output)
     row = json.loads(output.read_text())["rows"][0]
     assert row["status"].startswith("unmapped:")
-    assert row["reply_status"] == "unmapped:strong_positive"
-    assert row["escalation_status"] == "unmapped:pending_byron"
+    assert row["reply_status"] == "unmapped:mystery_reply_status_x"
+    assert row["escalation_status"] == "unmapped:mystery_escalation_y"
     from services.outreach_import import dry_run
     report = dry_run(output, mapping=MAPPING, as_of=NOW)
     assert report["counts"]["quarantined_rows"] >= 1
@@ -207,13 +207,13 @@ def test_opt_out_preserves_unknown_reply_evidence(converter, source, tmp_path):
     home, _ = source
     path = queue_path(home)
     entry = json.loads(path.read_text())[0]
-    entry.update(opted_out=True, reply_status="strong_positive")
+    entry.update(opted_out=True, reply_status="mystery_reply_status_x")
     path.write_text(json.dumps([entry]))
     output = tmp_path / "export.json"
     converter.export_history(home, output)
     row = json.loads(output.read_text())["rows"][0]
     assert row["reply_status"] == "opt_out"
-    assert "unmapped:reply_status=strong_positive" in row["notes"]
+    assert "unmapped:reply_status=mystery_reply_status_x" in row["notes"]
     from services.outreach_import import dry_run
     report = dry_run(output, mapping=MAPPING, as_of=NOW)
     assert report["counts"]["suppressions"] == 1
@@ -281,3 +281,55 @@ def test_profile_output_argument_rejected_before_read(converter, tmp_path, capsy
     assert converter.main(["--profile", "--output", str(tmp_path / "out")]) == 2
     assert capsys.readouterr().out == ""
     assert not (tmp_path / "out").exists()
+
+
+def test_positive_and_owner_review_mapping(converter, source, tmp_path):
+    home, _ = source
+    entry = json.loads(queue_path(home).read_text())[0]
+    entry.update(reply_status="strong_positive", escalation_status="pending_byron",
+                 followup_count=2, last_followup_at="2026-10-04T10:00:00Z")
+    queue_path(home).write_text(json.dumps([entry]))
+    output = tmp_path / "export.json"
+    converter.export_history(home, output)
+    row = json.loads(output.read_text())["rows"][0]
+    assert row["reply_status"] == "interested"
+    assert row["escalation_status"] == "owner_review"
+    assert row["followup_count"] == 2
+    assert row["last_followup_at"] == "2026-10-04T10:00:00Z"
+    assert row["followup_history"] == []
+
+
+def test_followup_ledger_links_by_normalised_recipient(converter, source, tmp_path):
+    home, database = source
+    with sqlite3.connect(database) as connection:
+        connection.execute("""INSERT INTO send_ledger SELECT 2, created_at, business_id,
+            from_account, ' PRIVATE-PERSON@example.invalid ', fingerprint, NULL, status,
+            'followup-message', claimed_at, '2026-10-05T10:00:00Z', failed_at, error
+            FROM send_ledger""")
+    output = tmp_path / "export.json"
+    converter.export_history(home, output)
+    rows = json.loads(output.read_text())["rows"]
+    assert len(rows) == 4
+    assert rows[0]["followup_count"] == 1
+    assert rows[0]["last_followup_at"] == "2026-10-05T10:00:00Z"
+    assert rows[0]["followup_history"][0]["kind"] == "followup_summary"
+
+
+@pytest.mark.parametrize("collision", [False, True])
+def test_orphan_and_ambiguous_recipient_report(converter, source, tmp_path, collision):
+    home, database = source
+    if collision:
+        entries = json.loads(queue_path(home).read_text())
+        entries.append(dict(entries[0], id="second-queue"))
+        queue_path(home).write_text(json.dumps(entries))
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE send_ledger SET queue_entry_id=NULL, to_address=?",
+            ("private-person@example.invalid" if collision else "orphan@example.invalid",))
+    output = tmp_path / "export.json"
+    converter.export_history(home, output)
+    from services.outreach_import import dry_run
+    counts = dry_run(output, mapping=MAPPING, as_of=NOW)["counts"]
+    assert counts["unsupported_history"] == 0
+    assert counts["orphan_sends"] == (0 if collision else 1)
+    assert (counts["collisions"] > 0) == collision
+    assert counts["send_actions"] == 0

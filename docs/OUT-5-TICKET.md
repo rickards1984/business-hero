@@ -103,3 +103,75 @@ The dry run:
 **Mapping template verified:** a mapping with empty `mailboxes` is accepted. Unmapped sending accounts are then counted (`unresolved_mailbox_thread`) rather than guessed, which is right for a first look.
 
 **Still open:** compatibility with Mike's real files is untested by design, because nobody but Mike reads them. His first run is that test. It changes nothing, and anything unexpected is counted as `unmapped` or quarantined.
+
+
+### Mapping rules (Claude, 21 Oct)
+
+Repair cycle 2 is narrowly authorised by Mike conveying Claude's review. It
+serves P2/P8 data correctness and P9 tenant isolation. Scope is the converter,
+dry-run service, their two test files and this ticket; no commit, push, network,
+real source inspection, persistence or sends. This section supersedes the
+initial assumed vocabulary and unsupported-summary treatment above.
+
+- Suppress by target tenant and normalised email before history processing.
+  Queue opted_out, reply unsubscribe/opted_out and escalation
+  auto_resolved_unsubscribe mean unsubscribe. Reply bounce or escalation
+  auto_resolved_bounce means hard_bounce. Reply objection/polite_decline means
+  objection. Preserve each reason, including multiple reasons per contact;
+  failure statuses alone never suppress. Existing opt_out/hard_bounce and
+  explicit do-not-contact note support remains.
+- Reply categories: strong_positive/interested → interested;
+  needs_judgment/unclear/handled → unknown human reply; ooo/auto_ack →
+  out_of_office; bounce → bounce; unsubscribe/opted_out → unsubscribe;
+  objection/polite_decline → objection; missing/none/no_reply → no reply.
+- Escalation pending_byron/action_needed → owner_review.
+  Missing/none/handled and the observed auto_resolved_bounce,
+  auto_resolved_unsubscribe, auto_resolved_ooo, auto_resolved_auto_ack have no
+  review flag. Unrecognised escalation values are never guessed.
+- Queue sent retains accepted history; approved/template_approved retain
+  historical drafts requiring fresh approval; send_failed retains failure;
+  skipped retains not-contacted history; opted_out suppresses. All stay paused.
+- followup_count and last_followup_at form a per-contact summary, not invented
+  messages. Successful linked ledger events supply a count (maximum of the
+  source count and observed sends, avoiding double counting) and latest date.
+  Failed linked events are counted separately in the summary. Exact queue IDs
+  take precedence; otherwise link only one queue candidate with the same
+  business and normalised recipient. Multiple candidates are collisions.
+  No candidate retains an orphan record. Business Hero is excluded by the
+  importer; its unlinked ledger records remain separate excluded records.
+  Unknown/malformed history remains quarantined.
+- A mailbox alias may map to literal unconnected: known tenant ownership,
+  counted as mailbox_unconnected and blocked, without treating that mailbox
+  as unresolved. Missing mapping remains unresolved_mailbox_thread. Thread
+  and message provenance checks still apply independently. Cross-tenant
+  alias ownership and mapped mailbox contradictions fail with Invalid mapping;
+  local mapping checks cannot establish live account ownership.
+- Report counts add suppressions_by_reason (distinct tenant/contact per reason),
+  replies_by_category, owner_review, orphan_sends, mailbox_unconnected and
+  unsupported_by_field. unsupported_history counts rows with genuinely unknown
+  fields/history; field counters contain only fixed field names, never values.
+  Existing masked samples, deterministic hashes, exclusion, zero send actions,
+  zero allowance and paused status remain.
+- Only the three authorised conflicting tests change their unknown-value
+  examples to mystery_reply_status_x/mystery_escalation_y, including matching
+  expected unmapped labels. Their assertions remain. New tests independently
+  verify strong_positive → interested and pending_byron → owner_review.
+
+Acceptance: all observed labels above are recognised, suppressions survive
+quarantine and remain tenant-scoped, ambiguous links never select a recipient,
+and imports cannot activate sending. Synthetic tests cover these behaviours.
+No app UI changes: review the masked JSON counts from a separately authorised
+owner-run dry run; there is no new screen to click. Real-file compatibility and
+live mailbox ownership are not verified by these offline tests.
+
+Verification: new regression tests first failed (22 failures, 79 passes), then
+the initial implementation passed all 101 targeted tests. Final expanded suite
+and required check result recorded below.
+
+Final completion evidence: `PYTHONDONTWRITEBYTECODE=1 ./check.sh` exited 0:
+4 passed, 0 failed, 1 skipped (no eslint script); pytest 2529 passed,
+234 skipped, 220 subtests passed. OUT-5 targeted suite: 117 passed.
+Converter ruff and `git diff --check` passed. The verification-created
+untracked data.db artifact was removed. Only the five authorised files remain
+changed. No commit, push, network or real source directory access occurred.
+Status: repair cycle 2 ready for Claude review; no apply/activation authority.

@@ -21,6 +21,34 @@ DATES = set("created_at approved_at sent_at reply_checked_at followup_due_at las
 SUPPRESSIONS = {"opt_out", "unsubscribe", "hard_bounce", "objection"}
 COUNTERS = "input_rows excluded_business_hero unknown_namespace quarantined_rows new_contacts merged_rows duplicate_rows duplicate_messages collisions suppressions invalid_addresses unresolved_mailbox_thread date_inconsistencies unsupported_history expired_records scheduled_held send_actions current_allowance".split()
 
+REPLIES = {
+    "none": "none", "no_reply": "none", "": "none",
+    "strong_positive": "interested", "interested": "interested",
+    "needs_judgment": "unknown", "unclear": "unknown", "handled": "unknown", "unknown": "unknown",
+    "ooo": "out_of_office", "auto_ack": "out_of_office", "out_of_office": "out_of_office",
+    "bounce": "bounce", "hard_bounce": "bounce",
+    "unsubscribe": "unsubscribe", "opted_out": "unsubscribe", "opt_out": "unsubscribe",
+    "objection": "objection", "polite_decline": "objection",
+}
+STATUSES = {"sent", "send_failed", "template_approved", "approved", "skipped", "opted_out"}
+ESCALATIONS = {key: "none" for key in (
+    "", "none", "handled", "auto_resolved_bounce", "auto_resolved_unsubscribe",
+    "auto_resolved_ooo", "auto_resolved_auto_ack")}
+ESCALATIONS.update(dict.fromkeys(("pending_byron", "action_needed", "owner_review"), "owner_review"))
+
+
+def suppression_reasons(row):
+    reasons = set()
+    category = REPLIES.get(row["reply_status"])
+    if category == "bounce" or row["escalation_status"] == "auto_resolved_bounce":
+        reasons.add("hard_bounce")
+    if (category == "unsubscribe" or row["status"] == "opted_out" or
+            row["escalation_status"] == "auto_resolved_unsubscribe"):
+        reasons.add("unsubscribe")
+    if category == "objection" or "do not contact me again" in row["notes"].casefold():
+        reasons.add("objection")
+    return reasons
+
 
 class ImportValidationError(ValueError):
     """Public errors contain only fixed messages, never input values."""
@@ -106,6 +134,8 @@ def validate_mapping(mapping):
         if not isinstance(namespaces, dict) or set(namespaces) - (set(BRANDS) | {"Business Hero"}):
             raise ValueError
         tenants = {}
+        account_tenants = {}
+        mailbox_tenants = {}
         for name, entry in namespaces.items():
             if not isinstance(entry, dict) or set(entry) != {"tenant_id", "brand", "mailboxes"}:
                 raise ValueError
@@ -120,6 +150,11 @@ def validate_mapping(mapping):
                 raise ValueError
             if name != "Business Hero":
                 tenants[name] = tenant
+                for account, mailbox in boxes.items():
+                    if account_tenants.setdefault(account, tenant) != tenant:
+                        raise ValueError
+                    if mailbox != "unconnected" and mailbox_tenants.setdefault(mailbox, tenant) != tenant:
+                        raise ValueError
         new_body = {v for k, v in tenants.items() if k != "MSC"}
         if len(new_body) > 1 or tenants.get("MSC") in new_body:
             raise ValueError
@@ -144,6 +179,13 @@ def _email(value):
 def dry_run(path, *, mapping, as_of):
     namespaces = validate_mapping(mapping)
     rows = validate_export(read_json(path))
+    owners = {account: entry["tenant_id"] for name, entry in namespaces.items()
+              if name in BRANDS for account in entry["mailboxes"]}
+    for row in rows:
+        entry = namespaces.get(row["business"]) if row["business"] in BRANDS else None
+        owner = owners.get(row["source_account"])
+        if entry and owner and owner != entry["tenant_id"]:
+            raise ImportValidationError("Invalid mapping")
     try:
         if not isinstance(as_of, datetime) or as_of.utcoffset() is None:
             raise ValueError
@@ -152,6 +194,9 @@ def dry_run(path, *, mapping, as_of):
         raise ImportValidationError("Invalid export") from None
     counts = dict.fromkeys(COUNTERS, 0)
     counts["input_rows"] = len(rows)
+    counts.update(owner_review=0, orphan_sends=0, mailbox_unconnected=0,
+                  suppressions_by_reason={}, replies_by_category={}, unsupported_by_field={})
+    reasons_by_identity = defaultdict(set)
     report = dict(schema_version=1, mapping_version=mapping["version"],
                   manifest_hash=digest({"export": {"schema_version": 1, "rows": rows}, "mapping": mapping}),
                   as_of=as_of.isoformat(), status="paused", passes=["suppression", "history"],
@@ -178,9 +223,14 @@ def dry_run(path, *, mapping, as_of):
             continue
         sources[(name, row["id"])].add(digest(row))
         id_namespaces[row["id"]].add(name)
-        if identity[1] and (row["reply_status"] in SUPPRESSIONS or
-                           "do not contact me again" in row["notes"].casefold()):
-            suppressed.add(identity)
+        if identity[1]:
+            reasons = suppression_reasons(row)
+            if reasons:
+                suppressed.add(identity)
+                reasons_by_identity[identity].update(reasons)
+    for reasons in reasons_by_identity.values():
+        for reason in reasons:
+            counts["suppressions_by_reason"][reason] = counts["suppressions_by_reason"].get(reason, 0) + 1
     changed = {k for k, values in sources.items() if len(values) > 1}
     crossed = {k for k, values in id_namespaces.items() if len(values) > 1}
     counts["collisions"] = len(changed) + len(crossed)
@@ -220,8 +270,10 @@ def dry_run(path, *, mapping, as_of):
         mailbox = entry["mailboxes"].get(row["source_account"])
         if not mailbox or not row["gmail_thread_id"] or (row["status"] == "sent" and not row["gmail_message_id"]):
             problems[i].add("unresolved_mailbox_thread")
+        if mailbox == "unconnected":
+            counts["mailbox_unconnected"] += 1
         if mailbox and row["gmail_message_id"]:
-            message = (tenant, mailbox, row["gmail_message_id"])
+            message = (tenant, (mailbox, row["source_account"]) if mailbox == "unconnected" else mailbox, row["gmail_message_id"])
             if message in messages:
                 counts["duplicate_messages"] += 1
             else:
@@ -232,14 +284,37 @@ def dry_run(path, *, mapping, as_of):
         if ordered != sorted(ordered) or (dates["last_followup_at"] is not None and
                 (dates["sent_at"] is None or dates["last_followup_at"] < dates["sent_at"])):
             problems[i].add("date_inconsistencies")
-        if row["followup_history"]:
-            problems[i].add("unsupported_history")
-        if row["status"] not in {"sent", "send_failed", "template_approved"}:
-            problems[i].add("unknown_status")
-        if row["reply_status"] not in SUPPRESSIONS | {"none"}:
+        unknown_fields = set()
+        for history in row["followup_history"]:
+            if isinstance(history, dict) and history.get("kind") == "followup_summary" and set(history) == {"kind", "sent", "failed"} and all(
+                    type(history[k]) is int and history[k] >= 0 for k in ("sent", "failed")):
+                continue
+            if history == {"kind": "orphan_send"}:
+                counts["orphan_sends"] += 1
+                continue
+            if history == {"kind": "ledger_collision"}:
+                problems[i].add("ledger_collision")
+                counts["collisions"] += 1
+                continue
+            unknown_fields.add("followup_history")
+        for field, vocabulary, code in (
+                ("status", STATUSES, "unknown_status"),
+                ("reply_status", REPLIES, "unknown_reply_status"),
+                ("escalation_status", ESCALATIONS, "unknown_escalation_status")):
+            if row[field] not in vocabulary:
+                unknown_fields.add(field)
+                problems[i].add(code)
+        if "unmapped:reply_status=" in row["notes"]:
+            unknown_fields.add("reply_status")
             problems[i].add("unknown_reply_status")
-        if row["escalation_status"] != "none":
-            problems[i].add("unknown_escalation_status")
+        if unknown_fields:
+            problems[i].add("unsupported_history")
+            for field in unknown_fields:
+                counts["unsupported_by_field"][field] = counts["unsupported_by_field"].get(field, 0) + 1
+        category = REPLIES.get(row["reply_status"])
+        if category and category != "none":
+            counts["replies_by_category"][category] = counts["replies_by_category"].get(category, 0) + 1
+        counts["owner_review"] += int(ESCALATIONS.get(row["escalation_status"]) == "owner_review")
         if row["notes"].strip() and "do not contact me again" not in row["notes"].casefold():
             # Notes have no structured consent semantics; require owner review.
             problems[i].add("notes_review")
@@ -247,12 +322,12 @@ def dry_run(path, *, mapping, as_of):
         if start.year < 9999:
             anniversary = start.replace(year=start.year + 1,
                 day=min(start.day, calendar.monthrange(start.year + 1, start.month)[1]))
-            if row["reply_status"] == "none" and anniversary <= as_of:
+            if REPLIES.get(row["reply_status"]) == "none" and anniversary <= as_of:
                 counts["expired_records"] += 1
                 problems[i].add("expired_records")
         if dates["followup_due_at"] is not None:
             counts["scheduled_held"] += 1
-        if problems[i] or identity in suppressed:
+        if problems[i] or identity in suppressed or mailbox == "unconnected" or ESCALATIONS.get(row["escalation_status"]) == "owner_review":
             target["blocked_rows"] += 1
     diagnostic_counters = {"invalid_addresses", "unresolved_mailbox_thread", "date_inconsistencies", "unsupported_history"}
     for i, codes in enumerate(problems):
