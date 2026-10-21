@@ -337,3 +337,13 @@ Today the WhatsApp "Daily Pulse" goes out every day. Its stats are mostly zeros,
 **Rule:** a section with nothing to say is left out, never shown as zeros.
 
 **Order:** queued as its own ticket after the current AUTO/OUT work; it is not started.
+
+## Upcoming: the year-end accounting pack — Mike, 21 October 2026
+
+The Finance section produces a draft **accountancy-ready pack** for year-end reporting: balance sheet, profit and loss statement, the transactions, and so on. It saves bookkeeping time and accountancy fees, so it has to be excellent.
+
+- **Accurate (RED, money).** Every figure reconciles to the ledger, tested first, before any presentation change.
+- **As good as it can be.** It's complete, it's the shape an accountant expects, and anything missing or unreconciled is clearly flagged rather than guessed.
+- **Legal tax-saving suggestions** when the pack is produced. Each is grounded in the business's own figures and labelled "to discuss with your accountant". UK rules are checked against current sources when it's built, not from memory.
+
+**Order:** queued as its own ticket after the current AUTO/OUT work; not started.
