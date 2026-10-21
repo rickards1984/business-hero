@@ -77,3 +77,7 @@ Hash canonicalisation: sorted JSON keys, compact separators, ASCII escapes and U
 Mike: confirm whether his local system can provide this versioned JSON or needs an explicit CSV/JSONL conversion contract; confirm exact source namespace spellings, source account provenance, reply/status meanings and nonempty follow-up-history shape using schema documentation or synthetic examples. No real export requested or inspected in this stage. The destination decisions (MSC/New Body, Business Hero excluded) are settled.
 
 Open this packet and the test file to review the assumptions; there is no new app screen to click. `check.sh` with expected failures validates the scaffold and existing suite, not a working importer. Claude's independent review remains pending. Neither green checks nor approving this packet authorises real personal-data import, SQL or sends.
+
+### Mike's decision — 21 October 2026
+
+The Stage A tests are **approved**. The export format is still open: Mike isn't sure what his local system can export. Claude will inspect the local system's *code* (never its prospect data) to find or propose an export that matches the contract above.
