@@ -16,9 +16,6 @@ class MissingOutreachImport(AssertionError):
     """Only this precise missing implementation is an expected failure."""
 
 
-pytestmark = pytest.mark.xfail(
-    strict=True, raises=MissingOutreachImport, reason="OUT-5 Stage A: importer absent"
-)
 NOW = datetime(2026, 10, 20, 12, tzinfo=timezone.utc)
 MSC = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 NEW_BODY = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -253,3 +250,74 @@ def test_bad_mapping_fails_closed(importer, tmp_path):
     mapping["namespaces"]["FitFutures"]["tenant_id"] = MSC
     with pytest.raises(importer.ImportValidationError, match="^Invalid mapping$"):
         run(importer, tmp_path, [row("1", "FitFutures")], mapping)
+
+
+@pytest.mark.parametrize("changes, code", [
+    ({"status": "unmapped:secret"}, "unknown_status"),
+    ({"reply_status": "strong_positive"}, "unknown_reply_status"),
+    ({"escalation_status": "pending_byron"}, "unknown_escalation_status"),
+    ({"notes": "Please stop, perhaps later"}, "notes_review"),
+])
+def test_unknown_labels_and_ambiguous_notes_block(importer, tmp_path, changes, code):
+    report = run(importer, tmp_path, [row(**changes)])
+    assert report["counts"]["quarantined_rows"] == 1
+    assert report["targets"][MSC]["blocked_rows"] == 1
+    assert code in {s["code"] for s in report["samples"]}
+    assert report["counts"]["suppressions"] == 0
+
+
+@pytest.mark.parametrize("changes", [
+    {"created_at": "2026-10-01T09:00:00"}, {"followup_count": True},
+    {"approved_at": 1}, {"extra": "secret"}, {"followup_history": {}},
+])
+def test_additional_bad_row_types_fail_closed(importer, tmp_path, changes):
+    with pytest.raises(importer.ImportValidationError, match="^Invalid export$"):
+        run(importer, tmp_path, [row(**changes)])
+
+
+def test_resource_limits_and_nonfinite_json(importer, tmp_path, monkeypatch):
+    path = tmp_path / "synthetic.json"
+    path.write_text('{"schema_version":1,"rows":[],"extra":NaN}')
+    with pytest.raises(importer.ImportValidationError, match="^Invalid export$"):
+        importer.dry_run(path, mapping=MAPPING, as_of=NOW)
+    monkeypatch.setattr(importer, "MAX_BYTES", 10)
+    with pytest.raises(importer.ImportValidationError, match="^Invalid export$"):
+        importer.dry_run(path, mapping=MAPPING, as_of=NOW)
+    monkeypatch.setattr(importer, "MAX_BYTES", 100000)
+    monkeypatch.setattr(importer, "MAX_ROWS", 1)
+    with pytest.raises(importer.ImportValidationError, match="^Invalid export$"):
+        run(importer, tmp_path, [row(), row("2")])
+
+
+def test_cli_only_masked_report_and_safe_errors(importer, tmp_path, capsys):
+    path = tmp_path / "export.json"
+    path.write_text(json.dumps({"schema_version": 1, "rows": [row()]}))
+    mapping = tmp_path / "mapping.json"
+    mapping.write_text(json.dumps(MAPPING))
+    args = ["--input", str(path), "--mapping", str(mapping), "--as-of", NOW.isoformat()]
+    assert importer.main(args) == 0
+    captured = capsys.readouterr()
+    assert not captured.err
+    assert json.loads(captured.out) == importer.dry_run(path, mapping=MAPPING, as_of=NOW)
+    for secret in ("SYNTHETIC", "person@example.invalid", "message-1", "thread-1"):
+        assert secret not in captured.out
+    path.write_text("private-invalid-payload")
+    assert importer.main(args) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == "Invalid export\n"
+    assert importer.main(["--private-secret"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == "Invalid arguments\n"
+
+
+def test_twelve_calendar_month_expiry_and_unanswered_only(importer, tmp_path):
+    rows = [row("1", notes="", created_at="2024-02-29T12:00:00Z", approved_at=None,
+                sent_at="2024-02-29T12:00:00Z"),
+            row("2", reply_status="unmapped:strong_positive", created_at="2024-01-01T00:00:00Z")]
+    path = tmp_path / "synthetic.json"
+    path.write_text(json.dumps({"schema_version": 1, "rows": rows}))
+    at_boundary = datetime(2025, 2, 28, 12, tzinfo=timezone.utc)
+    report = importer.dry_run(path, mapping=MAPPING, as_of=at_boundary)
+    assert report["counts"]["expired_records"] == 1
+    before = at_boundary.replace(hour=11)
+    assert importer.dry_run(path, mapping=MAPPING, as_of=before)["counts"]["expired_records"] == 0

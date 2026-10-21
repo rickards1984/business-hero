@@ -81,3 +81,25 @@ Open this packet and the test file to review the assumptions; there is no new ap
 ### Mike's decision — 21 October 2026
 
 The Stage A tests are **approved**. The export format is still open: Mike isn't sure what his local system can export. Claude will inspect the local system's *code* (never its prospect data) to find or propose an export that matches the contract above.
+
+### Claude's review of Stage B — 21 October 2026
+
+Codex built `backend/services/outreach_import.py` (the dry run and its CLI), `scripts/export-outreach-history.py` (the converter Mike runs on his Mac) and `backend/tests/test_outreach_export_converter.py`, and removed the strict-xfail marker. **All 73 OUT-5 tests pass**, and `./check.sh full` is green. Codex's log shows no access to `~/.openclaw` or `~/control-tower`; the source shape came from Claude's reading of the engine *code*.
+
+**I read the personal-data paths in full.**
+
+The converter:
+- opens the send log with `mode=ro` and `PRAGMA query_only`;
+- refuses an output path inside any git repository, checking twice;
+- creates the file with `O_EXCL` and mode `0600`, so it never overwrites anything and only Mike's user can read it;
+- prints only per-business counts and the output path;
+- on any error, prints only "Export failed".
+
+The dry run:
+- reads only the two files it's given;
+- prints only the canonical masked report;
+- on errors, prints only fixed safe messages.
+
+**Mapping template verified:** a mapping with empty `mailboxes` is accepted. Unmapped sending accounts are then counted (`unresolved_mailbox_thread`) rather than guessed, which is right for a first look.
+
+**Still open:** compatibility with Mike's real files is untested by design, because nobody but Mike reads them. His first run is that test. It changes nothing, and anything unexpected is counted as `unmapped` or quarantined.
