@@ -2,6 +2,7 @@
 """Owner-run, offline OUT-5 converter; source data never appears in diagnostics.
 
 Usage: python3 scripts/export-outreach-history.py --output /outside/git/export.json
+Profile only: python3 scripts/export-outreach-history.py --profile
 Optional --home is intended for synthetic fixtures or an explicit local backup.
 All four queues and the ledger must exist; malformed input aborts the export.
 The output is sensitive, created exclusively with mode 0600, and never overwritten.
@@ -17,8 +18,10 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
+from collections import Counter
 from contextlib import closing
 from pathlib import Path
 
@@ -29,6 +32,8 @@ from services.outreach_import import (  # noqa: E402
 
 BUSINESSES = {"msc": "MSC", "fitfutures": "FitFutures", "newbody": "New Body", "businesshero": "Business Hero"}
 COLUMNS = "id created_at business_id from_account to_address fingerprint queue_entry_id status message_id claimed_at sent_at failed_at error".split()
+PROFILE_ENUMS = "status reply_status escalation_status sent_via opted_out legacy_inbox organisation_type segment".split()
+PROFILE_KEYS = PROFILE_ENUMS + "followup_count last_followup_at reply_message_id gmail_thread_id gmail_message_id sent_at created_at approved_at".split()
 
 
 class ExportError(ValueError):
@@ -202,12 +207,78 @@ def export_history(home, output):
         raise ExportError("Export failed") from None
 
 
+def _non_empty(value):
+    return value is not None and value not in ("", [], {}) and not (isinstance(value, str) and not value.strip())
+
+
+def _profile_value(value, boolean=False):
+    if boolean:
+        return "true" if value is True else "false" if value is False else "missing"
+    if not _non_empty(value):
+        return "missing"
+    # Inspect the entire value before truncation; never stringify containers.
+    if type(value) not in (str, int, float, bool):
+        return "<redacted>"
+    value = str(value)
+    if "@" in value or re.search(r"\d{7,}", value):
+        return "<redacted>"
+    return value[:40]
+
+
+def profile_history(home):
+    """Owner-run aggregate report. Never emit queue identities or free-text fields.
+
+    Enum fields are the explicitly permitted source values, capped after masking.
+    Only ledger from_account is permitted to expose an email address.
+    Non-boolean values in boolean fields are counted as missing.
+    """
+    home = Path(home).expanduser()
+    try:
+        businesses = {}
+        for biz, label in BUSINESSES.items():
+            rows = read_json(home / ".openclaw" / f"workspace-{biz}" / "outreach/queue.json")
+            if isinstance(rows, dict) and set(rows) == {"queue"}:
+                rows = rows["queue"]
+            if not isinstance(rows, list) or len(rows) > MAX_ROWS or any(not isinstance(row, dict) for row in rows):
+                raise ExportError("Export failed")
+            businesses[label] = {
+                "rows": len(rows),
+                "values": {key: dict(Counter(
+                    _profile_value(row.get(key), key in {"opted_out", "legacy_inbox"})
+                    for row in rows).most_common(50)) for key in PROFILE_ENUMS},
+                "non_empty": {key: sum(_non_empty(row.get(key)) for row in rows) for key in PROFILE_KEYS},
+            }
+        database = (home / "control-tower/server/control-tower.db").resolve()
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            rows = connection.execute("SELECT business_id, status, from_account FROM send_ledger").fetchmany(MAX_ROWS + 1)
+        if len(rows) > MAX_ROWS:
+            raise ExportError("Export failed")
+        statuses, accounts = Counter(), {}
+        for business, status, account in rows:
+            # Unknown business identifiers must not become an arbitrary output channel.
+            business = business if business in BUSINESSES else "unknown"
+            statuses[_profile_value(status)] += 1
+            if account is not None and not isinstance(account, str):
+                raise ExportError("Export failed")
+            accounts.setdefault(business, Counter())[account or "missing"] += 1
+        return {"businesses": businesses, "send_ledger": {
+            "status": dict(statuses.most_common(50)), "from_account": accounts}}
+    except (OSError, sqlite3.Error, ImportValidationError, ValueError, TypeError, RecursionError):
+        raise ExportError("Export failed") from None
+
+
 def main(argv=None):
     parser = SafeArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--output", required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--output")
+    mode.add_argument("--profile", action="store_true")
     parser.add_argument("--home", type=Path, default=Path.home())
     try:
         args = parser.parse_args(argv)
+        if args.profile:
+            print(json.dumps(profile_history(args.home), ensure_ascii=True, indent=2))
+            return 0
         counts = export_history(args.home, args.output)
         for business, count in counts.items():
             print(f"{business}: {count}")

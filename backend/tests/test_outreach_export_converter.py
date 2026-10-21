@@ -69,7 +69,8 @@ def test_business_hero_passthrough_and_only_safe_stdout(converter, source, tmp_p
     assert report["counts"]["excluded_business_hero"] == 1
 
 
-def test_read_only_sqlite_and_unchanged_inputs(converter, source, tmp_path, monkeypatch):
+@pytest.mark.parametrize("profile", [False, True])
+def test_read_only_sqlite_and_unchanged_inputs(converter, source, tmp_path, monkeypatch, profile):
     home, database = source
     before = {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
     connect = sqlite3.connect
@@ -84,7 +85,10 @@ def test_read_only_sqlite_and_unchanged_inputs(converter, source, tmp_path, monk
         return connection
 
     monkeypatch.setattr(converter.sqlite3, "connect", checked_connect)
-    converter.export_history(home, tmp_path / "export.json")
+    if profile:
+        converter.profile_history(home)
+    else:
+        converter.export_history(home, tmp_path / "export.json")
     assert len(calls) == 1
     assert before == {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
     assert database.exists()
@@ -214,3 +218,66 @@ def test_opt_out_preserves_unknown_reply_evidence(converter, source, tmp_path):
     report = dry_run(output, mapping=MAPPING, as_of=NOW)
     assert report["counts"]["suppressions"] == 1
     assert "notes_review" in {s["code"] for s in report["samples"]}
+
+
+def test_profile_only_allowlisted_aggregates(converter, source, capsys):
+    home, database = source
+    entry = json.loads(queue_path(home).read_text())[0]
+    entry.update(notes="Secret prose prospect@example.invalid", reply_content="PRIVATE_REPLY",
+                 status="dead", reply_status="prospect@example.invalid", escalation_status="pending_byron",
+                 opted_out=True, legacy_inbox=False, followup_count=0,
+                 organisation_type={"name": "PRIVATE_NESTED"}, segment="1234567")
+    queue_path(home).write_text(json.dumps({"queue": [entry]}))
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO send_ledger SELECT 2, created_at, 'newbody', from_account, to_address, fingerprint, queue_entry_id, 'failed', message_id, claimed_at, sent_at, failed_at, 'PRIVATE_ERROR' FROM send_ledger")
+    before = {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
+    assert converter.main(["--profile", "--home", str(home)]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    for secret in ("PRIVATE", "prospect@example.invalid", "private-person@example.invalid", "Secret prose",
+                   "queue-msc", "1234567", "2026-10-01", '"thread"', '"message"'):
+        assert secret not in captured.out
+    report = json.loads(captured.out)
+    msc = report["businesses"]["MSC"]
+    assert msc["rows"] == 1
+    assert msc["values"]["status"] == {"dead": 1}
+    assert msc["values"]["reply_status"] == {"<redacted>": 1}
+    assert msc["values"]["opted_out"] == {"true": 1}
+    assert msc["values"]["legacy_inbox"] == {"false": 1}
+    assert msc["non_empty"]["followup_count"] == 1
+    assert msc["non_empty"]["reply_message_id"] == 0
+    assert report["businesses"]["FitFutures"]["values"]["opted_out"] == {"missing": 1}
+    assert report["send_ledger"]["status"] == {"sent": 1, "failed": 1}
+    assert report["send_ledger"]["from_account"] == {
+        "msc": {"private-sender@example.invalid": 1}, "newbody": {"private-sender@example.invalid": 1}}
+    assert before == {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
+
+
+def test_profile_caps_and_redacts_before_truncation(converter, source, capsys):
+    home, _ = source
+    entries = [dict(status=f"state_{i}") for i in range(60)]
+    entries += [dict(reply_status="x" * 41 + "@secret", segment="x" * 41 + "1234567",
+                     sent_via="z" * 60)] * 2
+    queue_path(home).write_text(json.dumps(entries))
+    assert converter.main(["--profile", "--home", str(home)]) == 0
+    values = json.loads(capsys.readouterr().out)["businesses"]["MSC"]["values"]
+    assert len(values["status"]) == 50
+    assert values["reply_status"]["<redacted>"] == 2
+    assert values["segment"]["<redacted>"] == 2
+    assert values["sent_via"]["z" * 40] == 2
+
+
+@pytest.mark.parametrize("bad", ["PRIVATE_BAD_JSON", '{"queue": ["PRIVATE_NAME"]}'])
+def test_profile_errors_are_fixed(converter, source, capsys, bad):
+    home, _ = source
+    queue_path(home).write_text(bad)
+    assert converter.main(["--profile", "--home", str(home)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "Export failed\n"
+
+
+def test_profile_output_argument_rejected_before_read(converter, tmp_path, capsys):
+    assert converter.main(["--profile", "--output", str(tmp_path / "out")]) == 2
+    assert capsys.readouterr().out == ""
+    assert not (tmp_path / "out").exists()
