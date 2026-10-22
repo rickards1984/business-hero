@@ -175,3 +175,67 @@ Converter ruff and `git diff --check` passed. The verification-created
 untracked data.db artifact was removed. Only the five authorised files remain
 changed. No commit, push, network or real source directory access occurred.
 Status: repair cycle 2 ready for Claude review; no apply/activation authority.
+
+### Repair cycle 3 — reviewer-authorised continuation, 23 October 2026
+
+Serves P2/P8 correctness and P9 tenant isolation. Stage A was read before edits:
+no assertion requires ordinary notes to quarantine. The approved Stage A file
+is unchanged. Its explicit objection suppression and ambiguous stop-note review
+assertions still pass. This supersedes cycle 2's classification of ambiguous
+ledger matches as collisions. Follow-up ID changes are unnecessary.
+
+Decisions and acceptance:
+- A ledger event matching multiple queue candidates emits ambiguous_ledger_link
+  markers on the affected queue rows and retained ledger row. The report counts
+  affected rows as ambiguous_ledger_links, includes that reason in
+  quarantined_by_reason, and does not add them to collisions. They stay blocked.
+- collisions_by_code separates source_changed, cross_namespace_id and
+  ledger_collision origins; the first two count distinct collision groups,
+  while ledger_collision counts contradictory ledger markers, as before.
+- quarantined_by_reason counts each affected row once per reason;
+  unresolved_mailbox_by_reason distinguishes missing_source_account,
+  unmapped_source_account, missing_thread_id and missing_message_id. Reasons
+  overlap; their sum is not the distinct quarantined-row total.
+- notes_present counts nonblank notes for information. Ordinary prose alone
+  does not quarantine. The converter now retains original queue notes as well
+  as the previously collected reply/error evidence. Explicit “Do not contact me
+  again” still suppresses. Ambiguous stop/opt-out/objection wording and unmapped
+  evidence still quarantine; notes_review_by_trigger uses fixed
+  possible_objection and unmapped_evidence keys, never note contents.
+- The earlier brief is not in this checkout/thread. Implemented interpretation:
+  a queue row with no linked ledger provenance may infer the sole nonblank
+  ledger account of its exact source business. Zero/multiple accounts remain
+  unresolved. Ambiguous or contradictory links never receive a default.
+  legacy_inbox=true instead uses legacy-inbox-<source business slug> (for example
+  legacy-inbox-msc); explicit linked provenance takes precedence. These aliases
+  still require a verified mapping, including an explicit unconnected value
+  where appropriate. No mapping is fabricated or changed by the converter.
+- Diagnostics remain aggregate-only, deterministic, masked, and paused. There
+  are no sends, DB writes, account lookups, commits or pushes.
+
+Synthetic regression coverage: ordinary/review/suppressing notes, ambiguity
+quarantine without collision inflation, reason breakdowns and deterministic
+reruns, single-account inference, multi-account refusal, legacy alias and
+cross-business isolation. Targeted OUT-5 suite: 125 passed.
+
+Mike's behavioural check: there is no UI to click. Run the following from this
+worktree, using the existing verified mapping.json in the current directory
+(or replace that argument with its actual path). Review the masked counts,
+particularly the four diagnostic breakdowns and notes_present. The new export
+is outside git and will not overwrite an existing file:
+
+```bash
+python3 scripts/export-outreach-history.py --output "$HOME/outreach-export-v3.json"
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=backend .venv/bin/python -m services.outreach_import --input "$HOME/outreach-export-v3.json" --mapping mapping.json --as-of 2026-10-23T12:00:00Z
+PYTHONDONTWRITEBYTECODE=1 ./check.sh
+```
+
+These tests do not establish real-file compatibility or live mailbox ownership.
+Status: awaiting Claude review; apply and activation remain outside scope.
+
+Completion evidence: `PYTHONDONTWRITEBYTECODE=1 ./check.sh` exited 0;
+4 passed, 0 failed, 1 skipped (no eslint script). Backend: 2537 passed,
+234 skipped, 220 subtests passed. Converter ruff and `git diff --check` passed.
+The test-created untracked data.db was removed; only four authorised files
+changed, with the approved Stage A test file untouched. No network or real
+source-directory access occurred. No commit or push.

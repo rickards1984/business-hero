@@ -331,5 +331,66 @@ def test_orphan_and_ambiguous_recipient_report(converter, source, tmp_path, coll
     counts = dry_run(output, mapping=MAPPING, as_of=NOW)["counts"]
     assert counts["unsupported_history"] == 0
     assert counts["orphan_sends"] == (0 if collision else 1)
-    assert (counts["collisions"] > 0) == collision
+    assert counts["collisions"] == 0
+    assert counts["ambiguous_ledger_links"] == (3 if collision else 0)
+    if collision:
+        assert counts["quarantined_rows"] >= 3
+        assert counts["quarantined_by_reason"]["ambiguous_ledger_links"] == 3
     assert counts["send_actions"] == 0
+
+
+@pytest.mark.parametrize("notes, review, suppression", [
+    ("Ordinary useful context", 0, 0),
+    ("Please stop, perhaps later", 1, 0),
+    ("Do not contact me again", 0, 1),
+    ("unmapped:opted_out", 1, 0),
+])
+def test_note_diagnostics(tmp_path, notes, review, suppression):
+    from services.outreach_import import dry_run
+    from test_outreach_import_dry_run import row
+    path = tmp_path / "notes.json"
+    path.write_text(json.dumps({"schema_version": 1, "rows": [row(notes=notes)]}))
+    counts = dry_run(path, mapping=MAPPING, as_of=NOW)["counts"]
+    assert counts["notes_present"] == 1
+    assert counts["notes_review"] == review
+    assert counts["quarantined_rows"] == review
+    assert counts["suppressions"] == suppression
+    assert sum(counts["notes_review_by_trigger"].values()) == review
+
+
+@pytest.mark.parametrize("legacy, multiple", [(False, False), (True, False), (False, True)])
+def test_default_account_inference(converter, source, tmp_path, legacy, multiple):
+    home, database = source
+    entries = json.loads(queue_path(home).read_text())
+    entries.append(dict(entries[0], id="unlinked", contact_email="other@example.invalid",
+                        legacy_inbox=legacy, gmail_message_id="other-message"))
+    queue_path(home).write_text(json.dumps(entries))
+    if multiple:
+        with sqlite3.connect(database) as connection:
+            connection.execute("INSERT INTO send_ledger SELECT 2, created_at, business_id, 'other-sender@example.invalid', 'orphan@example.invalid', fingerprint, NULL, status, message_id, claimed_at, sent_at, failed_at, error FROM send_ledger")
+    output = tmp_path / "export.json"
+    converter.export_history(home, output)
+    rows = json.loads(output.read_text())["rows"]
+    expected = "legacy-inbox-msc" if legacy else None if multiple else converter._alias("private-sender@example.invalid")
+    assert rows[1]["source_account"] == expected
+    assert rows[2]["source_account"] is None
+
+
+def test_diagnostic_breakdowns(tmp_path):
+    from services.outreach_import import dry_run
+    from test_outreach_import_dry_run import row
+    rows = [row(notes="", source_account=None, gmail_thread_id=None, gmail_message_id=None),
+            row(notes="", body="changed"), row(business="New Body", notes="")]
+    path = tmp_path / "diagnostics.json"
+    path.write_text(json.dumps({"schema_version": 1, "rows": rows}))
+    report = dry_run(path, mapping=MAPPING, as_of=NOW)
+    counts = report["counts"]
+    assert counts["collisions_by_code"] == {
+        "source_changed": 1, "cross_namespace_id": 1, "ledger_collision": 0}
+    assert counts["collisions"] == 2
+    assert counts["unresolved_mailbox_by_reason"] == {
+        "missing_source_account": 1, "missing_thread_id": 1, "missing_message_id": 1}
+    assert counts["unresolved_mailbox_thread"] == 1
+    assert counts["quarantined_by_reason"]["source_changed"] == 2
+    assert counts["quarantined_by_reason"]["cross_namespace_id"] == 3
+    assert report == dry_run(path, mapping=MAPPING, as_of=NOW)

@@ -79,7 +79,7 @@ def _queue_row(entry, business, ledger, followups=()):
                        "skipped": "skipped", "opted_out": "opted_out"}, "unmapped:missing")
     replies = dict(REPLIES, opt_out="opt_out", hard_bounce="hard_bounce")
     reply = _label(entry.get("reply_status"), replies)
-    notes = []
+    notes = [_text(entry.get("notes"))] if entry.get("notes") else []
     if reply.startswith("unmapped:"):
         notes.append("unmapped:reply_status=" + reply.removeprefix("unmapped:"))
     for value in (entry.get("status"), entry.get("reply_status"), entry.get("escalation_status"), entry.get("last_error")):
@@ -196,6 +196,11 @@ def export_history(home, output):
             ledger = [dict(record) for record in cursor.fetchmany(MAX_ROWS + 1)]
         if len(ledger) > MAX_ROWS:
             raise ExportError("Export failed")
+        accounts_by_business = {}
+        for event in ledger:
+            account = _text(event["from_account"])
+            if account.strip():
+                accounts_by_business.setdefault(event["business_id"], set()).add(account)
         groups, followups, collisions = {}, {}, set()
         ids, recipients = {}, {}
         for biz, queue in queues.items():
@@ -236,13 +241,19 @@ def export_history(home, output):
                     linked = original
                 row = _queue_row(entry, BUSINESSES[biz], linked, extra)
                 if key in collisions:
-                    row["followup_history"].append({"kind": "ledger_collision"})
+                    row["followup_history"].append({"kind": "ambiguous_ledger_link"})
+                if not row["source_account"] and not linked and not extra and key not in collisions:
+                    accounts = accounts_by_business.get(biz, set())
+                    if entry.get("legacy_inbox") is True:
+                        row["source_account"] = "legacy-inbox-" + biz
+                    elif len(accounts) == 1:
+                        row["source_account"] = _alias(next(iter(accounts)))
                 rows.append(row)
         for i, event in enumerate(ledger):
             if i not in used:
                 row = _ledger_row(event)
                 if i in collision_events:
-                    row["followup_history"] = [{"kind": "ledger_collision"}]
+                    row["followup_history"] = [{"kind": "ambiguous_ledger_link"}]
                 rows.append(row)
         payload = {"schema_version": 1, "rows": rows}
         validate_export(payload)

@@ -195,7 +195,10 @@ def dry_run(path, *, mapping, as_of):
     counts = dict.fromkeys(COUNTERS, 0)
     counts["input_rows"] = len(rows)
     counts.update(owner_review=0, orphan_sends=0, mailbox_unconnected=0,
-                  suppressions_by_reason={}, replies_by_category={}, unsupported_by_field={})
+                  suppressions_by_reason={}, replies_by_category={}, unsupported_by_field={},
+                  ambiguous_ledger_links=0, notes_present=0, notes_review=0,
+                  collisions_by_code={}, quarantined_by_reason={},
+                  unresolved_mailbox_by_reason={}, notes_review_by_trigger={})
     reasons_by_identity = defaultdict(set)
     report = dict(schema_version=1, mapping_version=mapping["version"],
                   manifest_hash=digest({"export": {"schema_version": 1, "rows": rows}, "mapping": mapping}),
@@ -234,6 +237,7 @@ def dry_run(path, *, mapping, as_of):
     changed = {k for k, values in sources.items() if len(values) > 1}
     crossed = {k for k, values in id_namespaces.items() if len(values) > 1}
     counts["collisions"] = len(changed) + len(crossed)
+    counts["collisions_by_code"] = dict(source_changed=len(changed), cross_namespace_id=len(crossed), ledger_collision=0)
     counts["suppressions"] = len(suppressed)
     contacts, messages, seen_rows, contact_sources = set(), set(), set(), set()
     for i, row in enumerate(rows):
@@ -268,7 +272,19 @@ def dry_run(path, *, mapping, as_of):
                 counts["merged_rows"] += 1
             contact_sources.add((identity, source))
         mailbox = entry["mailboxes"].get(row["source_account"])
-        if not mailbox or not row["gmail_thread_id"] or (row["status"] == "sent" and not row["gmail_message_id"]):
+        unresolved = set()
+        if not row["source_account"]:
+            unresolved.add("missing_source_account")
+        elif not mailbox:
+            unresolved.add("unmapped_source_account")
+        if not row["gmail_thread_id"]:
+            unresolved.add("missing_thread_id")
+        if row["status"] == "sent" and not row["gmail_message_id"]:
+            unresolved.add("missing_message_id")
+        for reason in unresolved:
+            bucket = counts["unresolved_mailbox_by_reason"]
+            bucket[reason] = bucket.get(reason, 0) + 1
+        if unresolved:
             problems[i].add("unresolved_mailbox_thread")
         if mailbox == "unconnected":
             counts["mailbox_unconnected"] += 1
@@ -292,9 +308,13 @@ def dry_run(path, *, mapping, as_of):
             if history == {"kind": "orphan_send"}:
                 counts["orphan_sends"] += 1
                 continue
+            if history == {"kind": "ambiguous_ledger_link"}:
+                problems[i].add("ambiguous_ledger_links")
+                continue
             if history == {"kind": "ledger_collision"}:
                 problems[i].add("ledger_collision")
                 counts["collisions"] += 1
+                counts["collisions_by_code"]["ledger_collision"] += 1
                 continue
             unknown_fields.add("followup_history")
         for field, vocabulary, code in (
@@ -315,9 +335,19 @@ def dry_run(path, *, mapping, as_of):
         if category and category != "none":
             counts["replies_by_category"][category] = counts["replies_by_category"].get(category, 0) + 1
         counts["owner_review"] += int(ESCALATIONS.get(row["escalation_status"]) == "owner_review")
-        if row["notes"].strip() and "do not contact me again" not in row["notes"].casefold():
-            # Notes have no structured consent semantics; require owner review.
+        note = row["notes"].casefold()
+        counts["notes_present"] += int(bool(note.strip()))
+        triggers = set()
+        if "unmapped:" in note:
+            triggers.add("unmapped_evidence")
+        if "do not contact me again" not in note and re.search(
+                r"\b(stop|unsubscribe|opt[ -]?out|objection|do not contact)\b", note):
+            triggers.add("possible_objection")
+        if triggers:
             problems[i].add("notes_review")
+        for trigger in triggers:
+            bucket = counts["notes_review_by_trigger"]
+            bucket[trigger] = bucket.get(trigger, 0) + 1
         start = dates["sent_at"] or dates["created_at"]
         if start.year < 9999:
             anniversary = start.replace(year=start.year + 1,
@@ -329,10 +359,12 @@ def dry_run(path, *, mapping, as_of):
             counts["scheduled_held"] += 1
         if problems[i] or identity in suppressed or mailbox == "unconnected" or ESCALATIONS.get(row["escalation_status"]) == "owner_review":
             target["blocked_rows"] += 1
-    diagnostic_counters = {"invalid_addresses", "unresolved_mailbox_thread", "date_inconsistencies", "unsupported_history"}
+    diagnostic_counters = {"invalid_addresses", "unresolved_mailbox_thread", "date_inconsistencies", "unsupported_history", "ambiguous_ledger_links", "notes_review"}
     for i, codes in enumerate(problems):
         counts["quarantined_rows"] += int(bool(codes))
         for code in sorted(codes):
+            bucket = counts["quarantined_by_reason"]
+            bucket[code] = bucket.get(code, 0) + 1
             if code in diagnostic_counters:
                 counts[code] += 1
             if len(report["samples"]) < 5:
