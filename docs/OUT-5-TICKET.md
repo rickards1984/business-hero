@@ -239,3 +239,7 @@ Completion evidence: `PYTHONDONTWRITEBYTECODE=1 ./check.sh` exited 0;
 The test-created untracked data.db was removed; only four authorised files
 changed, with the approved Stage A test file untouched. No network or real
 source-directory access occurred. No commit or push.
+
+### Mike's answer on the legacy inbox — 23 October 2026
+
+Mike can't say for certain which inbox was the "legacy inbox"; it could be one of two to four others. So the `legacy-inbox-<business>` alias stays **unmapped**. Those records are imported as history with the mailbox marked unknown. They are still subject to every suppression, and nothing is ever sent or threaded from an unknown mailbox. This can be revisited if Mike identifies the inbox later.
