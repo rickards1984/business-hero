@@ -198,7 +198,7 @@ def test_ledger_hard_bounce_stages_suppression(converter, source, tmp_path):
     converter.export_history(home, output)
     row = json.loads(output.read_text())["rows"][0]
     assert row["reply_status"] == "hard_bounce"
-    assert row["followup_history"]  # Conflicting send state stays quarantined.
+    assert row["followup_history"] == []  # Failed initial attempt is not a collision.
     from services.outreach_import import dry_run
     assert dry_run(output, mapping=MAPPING, as_of=NOW)["counts"]["suppressions"] == 1
 
@@ -394,3 +394,86 @@ def test_diagnostic_breakdowns(tmp_path):
     assert counts["quarantined_by_reason"]["source_changed"] == 2
     assert counts["quarantined_by_reason"]["cross_namespace_id"] == 3
     assert report == dry_run(path, mapping=MAPPING, as_of=NOW)
+
+
+@pytest.mark.parametrize("case, collision, sent", [
+    ("two_followups", False, 2),
+    ("same_instant", False, 0),
+    ("tolerance", False, 0),
+    ("outside_tolerance", True, 0),
+    ("message_priority", False, 0),
+    ("different_message", True, 0),
+    ("different_recipient", True, 0),
+    ("two_accounts", True, 1),
+    ("duplicate_initial_recipient", True, 1),
+    ("failed_followup", False, 0),
+])
+def test_direct_ledger_initial_and_followups(converter, source, tmp_path, case, collision, sent):
+    home, database = source
+    entry = json.loads(queue_path(home).read_text())[0]
+    if case in {"different_message", "message_priority"}:
+        entry["gmail_message_id"] = "different" if case == "different_message" else "message"
+    queue_path(home).write_text(json.dumps([entry]))
+    with sqlite3.connect(database) as connection:
+        if case in {"same_instant", "tolerance", "outside_tolerance", "message_priority"}:
+            value = {"same_instant": "2026-10-02T11:00:00.000+01:00",
+                     "tolerance": "2026-10-02T10:02:00Z",
+                     "outside_tolerance": "2026-10-02T10:02:01Z",
+                     "message_priority": "2026-10-02T10:05:00Z"}[case]
+            connection.execute("UPDATE send_ledger SET sent_at=?", (value,))
+        if case == "different_recipient":
+            connection.execute("UPDATE send_ledger SET to_address='other@example.invalid'")
+        if case in {"two_followups", "two_accounts", "duplicate_initial_recipient", "failed_followup"}:
+            connection.execute("""INSERT INTO send_ledger SELECT 0, created_at, business_id,
+                from_account, to_address, fingerprint, queue_entry_id, status,
+                'followup', claimed_at, '2026-10-03T10:00:00Z', failed_at, error
+                FROM send_ledger WHERE id=1""")
+            if case == "two_followups":
+                connection.execute("""INSERT INTO send_ledger SELECT 3, created_at, business_id,
+                    from_account, to_address, fingerprint, queue_entry_id, status,
+                    'followup-2', claimed_at, '2026-10-04T10:00:00Z', failed_at, error
+                    FROM send_ledger WHERE id=1""")
+            elif case == "two_accounts":
+                connection.execute("UPDATE send_ledger SET from_account='other@example.invalid' WHERE id=0")
+            elif case == "duplicate_initial_recipient":
+                connection.execute("UPDATE send_ledger SET message_id='message', to_address='other@example.invalid' WHERE id=0")
+            else:
+                connection.execute("UPDATE send_ledger SET status='failed', sent_at=NULL WHERE id=0")
+    output = tmp_path / "export.json"
+    converter.export_history(home, output)
+    row = json.loads(output.read_text())["rows"][0]
+    assert ({"kind": "ledger_collision"} in row["followup_history"]) is collision
+    summaries = [e for e in row["followup_history"] if e["kind"] == "followup_summary"]
+    assert sum(e["sent"] for e in summaries) == sent
+    assert sum(e["failed"] for e in summaries) == (case == "failed_followup")
+    if case == "two_followups":
+        assert row["gmail_message_id"] == "message"
+        assert row["followup_count"] == 2
+        assert row["last_followup_at"] == "2026-10-04T10:00:00Z"
+    from services.outreach_import import dry_run
+    counts = dry_run(output, mapping=MAPPING, as_of=NOW)["counts"]
+    assert counts["collisions_by_code"]["ledger_collision"] == int(collision)
+    assert counts["send_actions"] == 0
+
+
+@pytest.mark.parametrize("mode", ["claimed_at", "id", "all_failed"])
+def test_direct_ledger_ties_and_failed_initial(converter, source, tmp_path, mode):
+    home, database = source
+    entry = json.loads(queue_path(home).read_text())[0]
+    entry["gmail_message_id"] = "message"
+    queue_path(home).write_text(json.dumps([entry]))
+    with sqlite3.connect(database) as connection:
+        connection.execute("""INSERT INTO send_ledger SELECT 2, created_at, business_id,
+            from_account, to_address, fingerprint, queue_entry_id, status,
+            'second-message', claimed_at, sent_at, failed_at, error FROM send_ledger""")
+        if mode == "claimed_at":
+            connection.execute("UPDATE send_ledger SET id=0, claimed_at='2026-10-02T09:01:00Z' WHERE id=2")
+        elif mode == "all_failed":
+            connection.execute("UPDATE send_ledger SET status='failed', sent_at=NULL, message_id=NULL")
+    output = tmp_path / "export.json"
+    converter.export_history(home, output)
+    row = json.loads(output.read_text())["rows"][0]
+    assert row["followup_history"] == [{"kind": "followup_summary",
+        "sent": 0 if mode == "all_failed" else 1,
+        "failed": 1 if mode == "all_failed" else 0}]
+    assert row["source_account"] == converter._alias("private-sender@example.invalid")

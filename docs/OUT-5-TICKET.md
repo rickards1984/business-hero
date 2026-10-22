@@ -243,3 +243,53 @@ source-directory access occurred. No commit or push.
 ### Mike's answer on the legacy inbox — 23 October 2026
 
 Mike can't say for certain which inbox was the "legacy inbox"; it could be one of two to four others. So the `legacy-inbox-<business>` alias stays **unmapped**. Those records are imported as history with the mailbox marked unknown. They are still subject to every suppression, and nothing is ever sent or threaded from an unknown mailbox. This can be revisited if Mike identifies the inbox later.
+
+### Repair cycle 4 — explicitly authorised by Mike, 23 October 2026
+
+Mike authorised this fourth round beyond the normal three-cycle limit. Serves
+P2/P8 correctness. Actual starting HEAD was aad7319 (b324216 plus Mike's legacy
+inbox decision); existing untracked data.db is left untouched.
+
+Direct ledger events are ordered by parsed sent_at, parsed claimed_at, then
+ledger id (missing dates sort last). The first sent event is the initial send;
+remaining events join the same follow-up summary as recipient-linked events.
+If no sent event exists, the first failed event is the failed initial attempt;
+other failures count as failed follow-ups. Queue follow-up counts still use
+the maximum of source and observed sends, and dates retain the latest value.
+
+Initial-send matching uses equal message IDs when both exist; otherwise two
+available sent_at timestamps must be within 120 seconds, inclusive. Every
+linked recipient must match the normalised queue email. Different initial
+message IDs, timestamp mismatches outside that fallback tolerance, different
+recipients (including repeated initial IDs with different recipients), and
+multiple source accounts remain collisions. One marker per affected queue row
+avoids double-counting simultaneous conflicts. Unknown statuses retain review
+markers. Historical queue state, suppression handling and paused status remain.
+
+Approved Stage A tests are untouched. The Stage B
+`test_ledger_hard_bounce_stages_suppression` assertion was adjusted: a failed
+initial attempt alone no longer requires collision history; its suppression
+assertion remains. No other existing test assertions were weakened.
+Synthetic coverage adds initial plus two direct follow-ups, equivalent timestamp
+formats, inclusive tolerance and outside boundary, message-ID priority,
+message/recipient/account conflicts, duplicate initial IDs with differing
+recipients, and failed follow-up attempts. Initial new tests reproduced five
+failures; implementation and the full targeted suite passed (135 tests).
+
+No app screen changed. Mike's behavioural check is a fresh local export and
+masked dry-run report using his verified mapping, comparing ledger_collision
+and follow-up results. Offline synthetic checks cannot establish the corrected
+counts on real data or live account ownership. No real source data was read;
+no network, commit, push, import or send was performed.
+
+Independent read-only agent review found no blocking defects. Its suggested
+ordering-tie and all-failed coverage was added; final targeted suite: 138 passed.
+Stage B provenance of the changed hard-bounce assertion was verified against
+commit 1d9e811. The first required check passed (2547 backend tests, 234 skipped,
+220 subtests); a final run includes the three additional reviewer-suggested tests.
+
+Final completion evidence: `PYTHONDONTWRITEBYTECODE=1 ./check.sh` exited 0:
+4 passed, 0 failed, 1 skipped (no eslint script); backend 2550 passed,
+234 skipped, 220 subtests passed. Converter ruff and `git diff --check` passed.
+Only exporter, converter tests and this ticket changed. Status: ready for
+Claude review; no commit or push.

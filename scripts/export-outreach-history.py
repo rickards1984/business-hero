@@ -98,6 +98,20 @@ def _queue_row(entry, business, ledger, followups=()):
     for field in ("reply_content", "latest_reply_snippet", "warm_reply_text", "last_error"):
         if entry.get(field):
             notes.append(_text(entry[field]))
+    events = [*ledger, *followups]
+    # Timestamp order, rather than SQLite insertion order, identifies the initial send.
+    missing_date = timestamp("9999-12-31T23:59:59+00:00")
+    ledger = sorted(ledger, key=lambda e: (
+        timestamp(e["sent_at"]) if e.get("sent_at") else missing_date,
+        timestamp(e["claimed_at"]) if e.get("claimed_at") else missing_date,
+        e["id"],
+    ))
+    initial = next((e for e in ledger if e["status"] == "sent"), None)
+    if initial is None:
+        initial = next((e for e in ledger if e["status"] == "failed"), None)
+    if initial is None and ledger:
+        initial = ledger[0]
+    followups = [*followups, *(e for e in ledger if e is not initial)]
     count = entry.get("followup_count", 0)
     if type(count) is not int or count < 0:
         raise ExportError("Export failed")
@@ -116,27 +130,24 @@ def _queue_row(entry, business, ledger, followups=()):
             history.append({"unmapped": "ledger_status"})
     if entry.get("warm_reply_sent_at"):
         history.append({"unmapped": "warm_reply_history"})
-    # Only one unambiguous, recipient-matching ledger record can fill provenance.
-    usable = len(ledger) == 1
     email = _text(entry.get("contact_email"))
-    if usable:
-        event = ledger[0]
-        usable = _text(event["to_address"]).strip().casefold() == email.strip().casefold()
-        for queue_key, log_key in (("gmail_message_id", "message_id"), ("sent_at", "sent_at")):
-            if entry.get(queue_key) and event[log_key] and entry[queue_key] != event[log_key]:
-                usable = False
-        if event["status"] not in {"sent", "failed", "claimed"}:
-            usable = False
-        if (status == "sent") != (event["status"] == "sent"):
-            usable = False
-    if ledger and not usable:
+    conflict = any(_text(e["to_address"]).strip().casefold() != email.strip().casefold()
+                   for e in events)
+    accounts = {_text(e.get("from_account")) for e in events}
+    conflict = conflict or len(accounts) > 1
+    if initial and initial["status"] == "sent":
+        queue_message = entry.get("gmail_message_id")
+        ledger_message = initial.get("message_id")
+        if queue_message and ledger_message:
+            conflict = conflict or queue_message != ledger_message
+        elif entry.get("sent_at") and initial.get("sent_at"):
+            conflict = conflict or abs((timestamp(entry["sent_at"]) -
+                                       timestamp(initial["sent_at"])).total_seconds()) > 120
+    if conflict:
         history.append({"kind": "ledger_collision"})
-        if any(e["status"] not in {"sent", "failed", "claimed"} for e in ledger):
-            history.append({"unmapped": "ledger_status"})
-    event = ledger[0] if usable else {}
-    accounts = {_text(e.get("from_account")) for e in [*ledger, *followups]}
-    if len(accounts) > 1:
-        history.append({"kind": "ledger_collision"})
+    if any(e["status"] not in {"sent", "failed", "claimed"} for e in ledger):
+        history.append({"unmapped": "ledger_status"})
+    event = initial if initial and not conflict else {}
     sent = _text(entry.get("sent_at"), None)
     message = _text(entry.get("gmail_message_id"), None)
     if event.get("status") == "sent":
@@ -230,15 +241,6 @@ def export_history(home, output):
                 key = (biz, index)
                 linked = groups.get(key, [])
                 extra = list(followups.get(key, []))
-                # A matching original message anchors later successful sends.
-                original = [e for e in linked if e["status"] == "sent" and (
-                    (entry.get("gmail_message_id") and e["message_id"] == entry["gmail_message_id"]) or
-                    (entry.get("sent_at") and e["sent_at"] == entry["sent_at"]))]
-                if len(original) == 1 and all(e["status"] == "sent" and
-                        _text(e["to_address"]).strip().casefold() == _text(entry.get("contact_email")).strip().casefold()
-                        for e in linked):
-                    extra.extend(e for e in linked if e is not original[0])
-                    linked = original
                 row = _queue_row(entry, BUSINESSES[biz], linked, extra)
                 if key in collisions:
                     row["followup_history"].append({"kind": "ambiguous_ledger_link"})
