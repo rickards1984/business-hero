@@ -40,3 +40,14 @@
 ## Mike's approval — 23 October 2026
 
 The tests are approved. Build authorised.
+
+## Codex review 1 — REQUEST-CHANGES, two P1s, repair cycle 1
+
+1. **Connecting a second mailbox could move chasing.** Nothing ever marked a default, so a business's only mailbox is usually unmarked; it's AUTO-2's default only because it's alone. Connecting outreach would have marked outreach. **Fix:** the callback now reads the mailboxes *before* saving the connection. Afterwards it marks the mailbox AUTO-2 was already sending from: the only one, or the new one if there were none. When there were two or more and none was marked, it leaves the choice to the owner.
+2. **The race relied on 037's index, which main lacks.** **Fix:** every change to a default — after connecting, and on Make default — first takes a per-business transaction lock (`pg_advisory_xact_lock`). `backend/tests/test_mailboxes_rls.py` races two connections, and two Make-default presses, 15 rounds each, on the local Postgres with 037's index set aside. They pass with the lock and fail without it (both checked).
+
+Also fixed from the backlog:
+- a reconnect restores the owner's label;
+- the screen shows the new default immediately after a successful switch.
+
+Remaining backlog: the fake-async concurrency test was replaced by the real Postgres race test.

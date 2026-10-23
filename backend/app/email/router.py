@@ -7,6 +7,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 from urllib.parse import urlencode
 
@@ -56,6 +57,8 @@ from .service import (
 from providers.google_gmail import GoogleGmailProvider
 from providers.microsoft_graph import MicrosoftGraphProvider
 from providers.smtp import SMTPProvider
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -1521,6 +1524,39 @@ async def google_oauth_start(
     return RedirectResponse(url=build_google_oauth_start_url(auth_ctx, mode))
 
 
+async def _mailboxes_before_connect(business_id: str) -> Optional[list]:
+    """MAIL-1: the mailboxes as they were before this connection is saved
+    (which one AUTO-2 was sending from, and their labels). None if they
+    could not be read; the default is then left alone."""
+    from .mailboxes import mailboxes_before
+
+    def read():
+        with get_session_context() as session:
+            return mailboxes_before(session, business_id)
+    try:
+        return await run_in_threadpool(read)
+    except Exception as exc:  # the connection must still go ahead
+        logger.warning("[Mailboxes] could not read mailboxes before connecting: %s", type(exc).__name__)
+        return None
+
+
+async def _settle_default_after_connect(business_id: str, email_address: str, provider: str,
+                                        before: Optional[list]) -> None:
+    """MAIL-1: keep AUTO-2's sending mailbox as the default; never fails
+    the connection."""
+    if before is None:
+        return
+    from .mailboxes import ensure_default_after_connect
+
+    def settle():
+        with get_session_context() as session:
+            ensure_default_after_connect(session, business_id, email_address, provider, before)
+    try:
+        await run_in_threadpool(settle)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Mailboxes] could not settle the default: %s", type(exc).__name__)
+
+
 @oauth_router.get("/oauth/google/callback")
 async def google_oauth_callback(
     code: Optional[str] = None,
@@ -1570,6 +1606,7 @@ async def google_oauth_callback(
         raise HTTPException(status_code=400, detail="Google profile email missing")
 
     token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in or 0)
+    before = await _mailboxes_before_connect(payload["business_id"])  # MAIL-1
     await admin.upsert_email_accounts(
         {
             "provider": "google",
@@ -1583,8 +1620,7 @@ async def google_oauth_callback(
             "token_expires_at": token_expires_at.isoformat(),
         }
     )
-    from .mailboxes import ensure_default_after_connect  # MAIL-1: the first becomes default
-    await ensure_default_after_connect(admin, payload["business_id"], email_address, "google")
+    await _settle_default_after_connect(payload["business_id"], email_address, "google", before)
     return RedirectResponse(url=_frontend_settings_url("google"))
 
 
@@ -1646,6 +1682,7 @@ async def microsoft_oauth_callback(
         raise HTTPException(status_code=400, detail="Microsoft profile email missing")
 
     token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in or 0)
+    before = await _mailboxes_before_connect(payload["business_id"])  # MAIL-1
     await admin.upsert_email_accounts(
         {
             "provider": "microsoft",
@@ -1659,6 +1696,5 @@ async def microsoft_oauth_callback(
             "token_expires_at": token_expires_at.isoformat(),
         }
     )
-    from .mailboxes import ensure_default_after_connect  # MAIL-1: the first becomes default
-    await ensure_default_after_connect(admin, payload["business_id"], email_address, "microsoft")
+    await _settle_default_after_connect(payload["business_id"], email_address, "microsoft", before)
     return RedirectResponse(url=_frontend_settings_url("microsoft"))
