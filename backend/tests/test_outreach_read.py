@@ -520,8 +520,12 @@ def test_aria_is_told_plainly_what_outreach_is_and_is_not(harness, plan, flags):
     assert code == 403
     text_ = json.dumps(result).lower()
     assert "business plan" in text_
-    assert "add-on" in result["aria_guidance"].lower() and "do not" in result["aria_guidance"].lower()
+    guidance = result["aria_guidance"].lower()
+    assert "add-on" in guidance and "do not invent" in guidance
     assert "not available yet" in text_ or "still being built" in text_
+    # Mike, 23 Oct: an owner may send outreach by hand; Aria may offer to
+    # look for replies to THOSE emails in their inbox.
+    assert "send outreach emails themselves" in guidance and "replies" in guidance
 
 
 @pytest.mark.parametrize("plan,flags,status,active", [

@@ -236,10 +236,12 @@ def _read(session, read, arguments, business_id):
 _NOT_ON_PLAN = {"Feature 'outreach' not enabled for your plan", "Feature 'outreach' disabled"}
 NOT_ON_PLAN_ERROR = ("Outreach isn't switched on for this business. It comes with the Business "
                      "plan, and it is still being built: it is not available yet.")
-NOT_ON_PLAN_GUIDANCE = ("Tell the owner plainly that outreach isn't available on their account yet. "
-                        "Do not offer or mention an add-on, upgrade, dashboard or sequence statistics, "
-                        "and do not describe outreach features: none are available to them. "
-                        "Do not offer to search their inbox for outreach replies instead.")
+NOT_ON_PLAN_GUIDANCE = (
+    "Tell the owner plainly that Business Hero's outreach feature isn't on their account: it comes "
+    "with the Business plan, and it is still being built. Do not invent an add-on, dashboards or "
+    "sequence statistics. If they send outreach emails themselves, offer to check their inbox for "
+    "replies to those emails (for example, from a person or company they name, or over the last "
+    "week) and flag any that need a response. Do not offer unrelated checks such as calls.")
 
 
 def execute_read_tool(tool_name, arguments, business_id):
