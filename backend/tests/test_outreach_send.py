@@ -41,7 +41,7 @@ def uid(label):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, 'out6-test:' + label))
 
 
-A, B, OWNER = uid('A'), uid('B'), uid('owner')
+A, B, OWNER, STAFF = uid('A'), uid('B'), uid('owner'), uid('staff')
 BOX, DEFAULT, FOREIGN = uid('box'), uid('default'), uid('foreign')
 PROSPECT, CAMPAIGN, STEP, ENROLMENT, BRAND, LIA = map(
     uid, ('prospect', 'campaign', 'step', 'enrolment', 'brand', 'lia'))
@@ -66,6 +66,10 @@ def seed(s, foreign=True):
     one (test_outreach_send_rls.py). Never real data. `foreign` adds another
     business's half-formed rows for the SQLite isolation cases; 037's foreign
     keys would rightly refuse them."""
+    # Codex hook review 1 (P1): only an active OWNER of this business may
+    # approve outreach. Staff and platform admins may not.
+    insert(s, 'business_members', business_id=A, user_id=OWNER, role='owner', is_active=True)
+    insert(s, 'business_members', business_id=A, user_id=STAFF, role='member', is_active=True)
     for box, bid, default in ((BOX, A, False), (DEFAULT, A, True), (FOREIGN, B, True)):
         insert(s, 'email_accounts', id=box, business_id=bid, user_id=OWNER,
                provider='google', email_address=f'{box}@example.invalid', is_default=default,
@@ -146,6 +150,7 @@ def database(tmp_path):
             'CREATE TABLE email_outbox (id TEXT PRIMARY KEY, business_id TEXT, email_account_id TEXT, invoice_id TEXT, chase_stage INTEGER, to_emails TEXT, subject TEXT, body_preview TEXT, provider_message_id TEXT, status TEXT, error TEXT, sent_at TEXT, created_at TEXT)',
             'CREATE TABLE usage_meters (business_id TEXT, meter TEXT, period TEXT, value NUMERIC, updated_at TEXT, UNIQUE(business_id,meter,period))',
             'CREATE TABLE business_settings (business_id TEXT PRIMARY KEY, settings TEXT)',
+            'CREATE TABLE business_members (id TEXT, business_id TEXT, user_id TEXT, role TEXT, is_active BOOLEAN)',
             'CREATE UNIQUE INDEX operation_once ON outreach_usage_events (business_id, operation_key, kind)',
             'CREATE UNIQUE INDEX logical_once ON outreach_dispatch_jobs (business_id, logical_key)',
             'CREATE UNIQUE INDEX message_once ON outreach_messages (business_id, idempotency_key)',
@@ -942,3 +947,48 @@ def test_hook_generic_email_bookkeeping_is_never_used(h, monkeypatch):
     monkeypatch.setattr(acts, '_bookkeep_email', forbidden)
     card = real_propose(h)['proposal']
     assert acts.approve(h.s, h.b, card['id'], OWNER, version=card['version'])['status'] == 'done'
+
+
+# ------------------------------------------- only the owner approves (P1) ---
+
+def _member(h, user, bid=A, role='owner', active=True):
+    insert(h.s, 'business_members', business_id=bid, user_id=user, role=role, is_active=active)
+    h.s.commit()
+
+
+@pytest.mark.parametrize('who', ['staff', 'inactive_owner', 'platform_admin', 'other_business_owner'])
+def test_hook_only_an_active_owner_of_this_business_approves(h, who):
+    acts = real(h)
+    card = real_propose(h)['proposal']
+    user = STAFF
+    if who == 'inactive_owner':
+        user = uid('former-owner')
+        _member(h, user, active=False)
+    elif who == 'platform_admin':
+        user = uid('platform-admin')  # authenticated, but no membership of A
+    elif who == 'other_business_owner':
+        user = uid('owner-of-b')
+        _member(h, user, bid=B)
+    with pytest.raises(acts.ActionRefused) as exc:
+        acts.approve(h.s, h.b, card['id'], user, version=card['version'])
+    assert exc.value.status_code == 403
+    assert not h.p.sends and not h.p.searches, 'refused before the mailbox is searched'
+    assert h.s.execute(text('SELECT count(*) FROM outreach_usage_events')).scalar() == 0
+    assert h.s.execute(text("SELECT status FROM aria_actions")).scalar() == 'proposed'
+
+
+def test_hook_ownership_removed_during_the_search_stops_the_claim(h):
+    acts = real(h)
+    card = real_propose(h)['proposal']
+    original = h.p.search_from
+
+    def demoted(**kwargs):
+        with Session(h.engine) as other:
+            other.execute(text("UPDATE business_members SET role='member' WHERE user_id=:u"), {'u': OWNER})
+            other.commit()
+        return original(**kwargs)
+    h.p.search_from = demoted
+    with pytest.raises(acts.ActionRefused):
+        acts.approve(h.s, h.b, card['id'], OWNER, version=card['version'])
+    assert not h.p.sends
+    assert h.s.execute(text('SELECT count(*) FROM outreach_usage_events')).scalar() == 0

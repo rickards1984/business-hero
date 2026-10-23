@@ -490,9 +490,24 @@ def approve(session, business, action_id: str, user_id, version: Optional[str] =
     return _view(_scoped(session, business, action_id))
 
 
+def _is_active_owner(session, business, user_id, lock: bool = False) -> bool:
+    """An active OWNER of this business (Codex OUT-6 hook review 1, P1):
+    staff members and platform admins can see a card but never send outreach."""
+    try:
+        uuid.UUID(str(user_id))
+    except ValueError:
+        return False
+    suffix = " FOR SHARE" if lock and _is_postgres(session) else ""
+    return session.execute(text(
+        "SELECT 1 FROM business_members WHERE business_id = :b AND user_id = :u "
+        "AND role = 'owner' AND is_active = :t" + suffix),
+        {"b": str(business.id), "u": str(user_id), "t": True}).fetchone() is not None
+
+
 def _approve_outreach(session, business, action_id: str, row, user_id, version) -> dict:
-    """OUT-6 (docs/OUT-6-TICKET.md, the agreed hook). Only the owner's tap on
-    the exact version they saw; never a standing permission. Order:
+    """OUT-6 (docs/OUT-6-TICKET.md, the agreed hook). Only an active owner's
+    tap on the exact version they saw; never staff, a platform admin or a
+    standing permission. Order:
 
       1. reply search in the campaign mailbox, outside any transaction;
       2. ONE transaction: every eligibility recheck and reservation
@@ -504,9 +519,9 @@ def _approve_outreach(session, business, action_id: str, row, user_id, version) 
          bookkeeping are never used.
     """
     from services import outreach_send
-    if not user_id:
+    if not user_id or not _is_active_owner(session, business, user_id):
         session.rollback()
-        raise ActionRefused(403, "Outreach is sent only when the owner approves it.")
+        raise ActionRefused(403, "Only the business owner can approve outreach.")
     payload = _loads(row[2])
     if not version or version != version_of(payload):
         session.rollback()
@@ -523,6 +538,10 @@ def _approve_outreach(session, business, action_id: str, row, user_id, version) 
         moment = outreach_send.now()
         outreach_send.prepare_claim(session, business, action_id=str(action_id), payload=payload,
                                     user_id=str(user_id), version=version, moment=moment)
+        # Again inside the claim, holding the membership row until commit, so
+        # ownership removed during the search stops it.
+        if not _is_active_owner(session, business, user_id, lock=True):
+            raise ActionRefused(403, "Only the business owner can approve outreach.")
         seen = "CAST(:seen AS jsonb)" if _is_postgres(session) else ":seen"
         claimed = session.execute(text(
             "UPDATE aria_actions SET status = 'executing', approved_by = :user_id, "

@@ -318,3 +318,13 @@ Not covered here: DST and month-boundary settlement on Postgres, crash after acc
 2. The sending window ignores UK bank holidays.
 3. An unsubscribe landing between the claim commit and `dispatch` (milliseconds) is not rechecked. `dispatch` could take `lock_business` and recheck suppression before fencing.
 4. Unsubscribe tokens from cards that were never approved are never revoked. They still unsubscribe correctly, which is the safe direction.
+
+**Codex hook review 1: REQUEST-CHANGES, one P1 (repair cycle 1).** Any authenticated member could approve. **Fix:** `_is_active_owner`, which requires `business_members.role = 'owner'` and `is_active` for this business. It is checked before the reply search, so nothing is searched for a non-owner. It is checked again inside the claim transaction holding the membership row (`FOR SHARE`), so ownership removed during the search stops the claim. Tests cover staff, an inactive owner, a platform admin (no membership), another business's owner, demotion during the search, and staff on Postgres.
+
+Review backlog, also done:
+- the race helper now fails on any crash, hung worker or missing outcome;
+- a real second-session dismiss during the claim waits on the row lock and loses with 409.
+
+Still backlog: daily-cap (business/mailbox/campaign) races and pause/suppression races on Postgres.
+
+Review preserved verbatim: `audits/OUT-6-HOOK-CODEX-REVIEW-1.md`. Postgres: 8 pass. Codex's sandbox cannot reach the loopback harness; Claude ran it.

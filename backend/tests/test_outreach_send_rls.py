@@ -36,7 +36,7 @@ from sqlalchemy import create_engine, text  # noqa: E402
 from sqlmodel import Session  # noqa: E402
 
 import test_outreach_send as base  # noqa: E402
-from test_outreach_send import A, B, OWNER, CAMPAIGN, STEP, ENROLMENT, LIA, NOW, STAMP  # noqa: E402
+from test_outreach_send import A, B, OWNER, STAFF, CAMPAIGN, STEP, ENROLMENT, LIA, NOW, STAMP  # noqa: E402
 
 SECRET = "synthetic-key-" * 4
 TABLES = ("outreach_dispatch_jobs", "outreach_usage_events", "outreach_daily_usage",
@@ -57,7 +57,7 @@ def _teardown(engine):
                       "business_settings", "business_members"):
                 c.execute(text(f"DELETE FROM public.{t} WHERE business_id = :b"), {"b": bid})
             c.execute(text("DELETE FROM public.businesses WHERE id = :b"), {"b": bid})
-        c.execute(text("DELETE FROM auth.users WHERE id = :u"), {"u": OWNER})
+        c.execute(text("DELETE FROM auth.users WHERE id IN (:u, :s)"), {"u": OWNER, "s": STAFF})
 
 
 @pytest.fixture
@@ -69,8 +69,9 @@ def pg(monkeypatch):
             pytest.skip("037 is not replayed in the local harness")
     _teardown(engine)
     with Session(engine) as s:
-        s.execute(text("INSERT INTO auth.users (id, email, aud, role) VALUES "
-                       "(:u, 'out6-owner@example.invalid', 'authenticated', 'authenticated')"), {"u": OWNER})
+        for user, mail in ((OWNER, "out6-owner@example.invalid"), (STAFF, "out6-staff@example.invalid")):
+            s.execute(text("INSERT INTO auth.users (id, email, aud, role) VALUES "
+                           "(:u, :m, 'authenticated', 'authenticated')"), {"u": user, "m": mail})
         for bid, name in ((A, "Out6 A"), (B, "Out6 B")):
             s.execute(text("INSERT INTO public.businesses (id, name, api_key, plan_tier, subscription_status, "
                            "is_active, feature_flags) VALUES (:b, :n, :k, 'business', 'active', true, '{}'::jsonb)"),
@@ -128,11 +129,15 @@ def _together(pg, *jobs):
     pg.m.prepare_claim = gated
     results, errors = [], []
 
+    crashed = []
+
     def run(job):
         try:
             results.append(job())
         except pg.a.ActionRefused as exc:
             errors.append(exc)
+        except BaseException as exc:  # noqa: BLE001 - any other end fails the test (review 1)
+            crashed.append(exc)
     threads = [threading.Thread(target=run, args=(j,)) for j in jobs]
     try:
         for t in threads:
@@ -141,7 +146,10 @@ def _together(pg, *jobs):
             t.join(60)
     finally:
         pg.m.prepare_claim = original
+    assert not any(t.is_alive() for t in threads), "an approval never finished"
+    assert not crashed, crashed
     assert len(arrived) == len(jobs), "the approvals never reached the claim together"
+    assert len(results) + len(errors) == len(jobs)
     return results, errors
 
 
@@ -252,3 +260,42 @@ def test_unsubscribe_before_approval_stops_the_card(pg):
     with pytest.raises(pg.a.ActionRefused):
         _approve(pg, card)
     assert not pg.p.sends
+
+
+def test_a_dismiss_from_another_session_during_the_claim_waits_and_loses(pg, monkeypatch):
+    """Review 1: a real second session, not a change inside the approval's
+    own transaction. The claim holds the card's row, so the dismiss waits,
+    then finds the card already executing."""
+    import time
+    card = _propose(pg)
+    original = pg.m.prepare_claim
+    outcome = {}
+
+    def dismiss():
+        with Session(pg.engine) as other:
+            try:
+                pg.a.dismiss(other, pg.b, card["id"])
+                outcome["dismissed"] = True
+            except pg.a.ActionRefused as exc:
+                outcome["refused"] = exc.status_code
+    worker = threading.Thread(target=dismiss)
+
+    def claim_then_race(session, business, **kwargs):
+        original(session, business, **kwargs)
+        worker.start()
+        time.sleep(0.5)  # the dismiss is now waiting on the card's row lock
+        assert "dismissed" not in outcome and "refused" not in outcome, "the dismiss did not wait"
+    monkeypatch.setattr(pg.m, "prepare_claim", claim_then_race)
+    assert _approve(pg, card)["status"] == "done"
+    worker.join(30)
+    assert not worker.is_alive() and outcome == {"refused": 409}
+    assert len(pg.p.sends) == 1
+
+
+def test_staff_cannot_approve_on_postgres(pg):
+    """STAFF is an active 'member' of A in the shared seed."""
+    card = _propose(pg)
+    with Session(pg.engine) as s:
+        with pytest.raises(pg.a.ActionRefused) as exc:
+            pg.a.approve(s, pg.b, card["id"], STAFF, version=card["version"])
+    assert exc.value.status_code == 403 and not pg.p.sends and not pg.p.searches
