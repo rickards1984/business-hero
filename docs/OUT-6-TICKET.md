@@ -282,3 +282,39 @@ headers; claim checks the allowlisted unsubscribe headers and stored token
 binding. `git diff --check` passed. The only untracked files are the new
 permitted service and the pre-existing `data.db`. No integration, PostgreSQL,
 provider-wire, visual or live-send verification is claimed by this result.
+
+### Claude's aria_actions hook, and Claude's review of Stage B — 23 October 2026
+
+**Hook (`backend/services/aria_actions.py`)**, as agreed above:
+- `send_outreach` is in `ACTION_TYPES`. Chat and voice use the new `CHAT_ACTION_TYPES`, which leaves it out, and `propose_from_chat` refuses it. Only a campaign raises an outreach card, never the model.
+- `propose` refuses `automation` or `raised_by` for outreach, and rolls back on a refused build, so no unsubscribe token is left pending.
+- `edit` can change only the subject (one line, at most 998 characters) and the body (1–20,000 characters). It never rebuilds, which would mint a new unsubscribe link.
+- `approve` routes outreach to `_approve_outreach`:
+  - a signed-in owner and the exact version are required;
+  - automation markers are refused;
+  - order: `search_before_claim` (no transaction); then one transaction with `prepare_claim` and the `proposed → executing` claim; then commit; then `dispatch`;
+  - any refusal or lost claim rolls back every reservation and drops the dispatch permit;
+  - generic `_execute` and `_bookkeep_email` are never used.
+- The seven strict-xfail cases now pass through the real path. Their marks are gone, replaced by a `real_aria_actions` fixture that keeps them on the real path. Eight hook tests were added.
+
+**PostgreSQL (`backend/tests/test_outreach_send_rls.py`).** These run against the local harness with 035, 036 and 037 replayed: real types, foreign keys and triggers, and the real path. All six pass:
+- one send with native `text[]`/JSONB, the meters settled and the job completed;
+- two taps on one card at once: one send;
+- two cards for one recipient at once: one send;
+- the last monthly slot (499 + 2 at once): exactly one;
+- a lost claim rolls back events, messages, jobs, daily rows and meters;
+- unsubscribing before approval stops the card.
+
+Mutation checks, with the code restored afterwards:
+- With every lock off, the last-slot race sends two and fails.
+- With only the business-wide locks on, it passes.
+- Same-card races are held by the claim and the unique keys even without locks.
+- Pre-created daily and meter rows stop insert conflicts from masking the race.
+
+Not covered here: DST and month-boundary settlement on Postgres, crash after acceptance, provider wire fixtures. Those stay as gates for the adapter ticket.
+
+**Claude's review of Stage B — APPROVE, no P1.** Backlog (P2):
+1. `prepare_claim` loads every inbox message since the last contact into Python to look for a reply. This is correct but grows with the inbox; filter by sender in SQL.
+2. The sending window ignores UK bank holidays.
+3. An unsubscribe landing between the claim commit and `dispatch` (milliseconds) is not rechecked. `dispatch` could take `lock_business` and recheck suppression before fencing.
+4. Unsubscribe tokens from cards that were never approved are never revoked. They still unsubscribe correctly, which is the safe direction.

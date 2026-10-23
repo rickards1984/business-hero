@@ -24,8 +24,14 @@ class MissingSharedHook(AssertionError):
     """Only the absent Claude-owned registration is expected to fail."""
 
 
-HOOK = pytest.mark.xfail(strict=True, raises=MissingSharedHook,
-                         reason="awaits Claude's aria_actions hook")
+# These cases run through the REAL services.aria_actions path. They were
+# strict-xfailed until Claude's hook landed; the marks are gone and they must pass.
+HOOK = pytest.mark.usefixtures('real_aria_actions')
+
+
+@pytest.fixture
+def real_aria_actions():
+    """Marker fixture: the `h` fixture below hands these tests real aria_actions."""
 NOW = datetime(2026, 10, 23, 11, tzinfo=timezone.utc)
 LAST = NOW - timedelta(days=10)
 STAMP = NOW.isoformat()
@@ -53,6 +59,64 @@ def add(session, table, **values):
     row.update(values)
     insert(session, 'outreach_' + table, **row)
     return row['id']
+
+
+def seed(s, foreign=True):
+    """The synthetic campaign, shared by the SQLite suite and the Postgres
+    one (test_outreach_send_rls.py). Never real data. `foreign` adds another
+    business's half-formed rows for the SQLite isolation cases; 037's foreign
+    keys would rightly refuse them."""
+    for box, bid, default in ((BOX, A, False), (DEFAULT, A, True), (FOREIGN, B, True)):
+        insert(s, 'email_accounts', id=box, business_id=bid, user_id=OWNER,
+               provider='google', email_address=f'{box}@example.invalid', is_default=default,
+               capabilities='{}', token_ciphertext='fake-token', refresh_token_ciphertext='fake-refresh',
+               created_at=(NOW + timedelta(days=1) if default else LAST).isoformat())
+    add(s, 'brands', id=BRAND, name='Synthetic Ltd', default_mailbox_id=DEFAULT,
+        privacy_url='https://example.invalid/privacy', sender_identity='Synthetic Ltd', version=1)
+    add(s, 'settings', pause_all=False, timezone='Europe/London', business_daily_cap=20,
+        owner_cc_default=False, retention_policy_version=1)
+    add(s, 'mailboxes', mailbox_id=BOX, enabled=True, daily_cap=5, warmup_stage=5,
+        sending_days=0, health_status='pass', health_checked_at=STAMP,
+        health_evidence=json.dumps({'domain_control': True, 'spf': 'pass', 'dkim': 'pass',
+                                    'dmarc': 'pass', 'from_aligned': True}))
+    add(s, 'compliance', id=LIA, brand_id=BRAND, audience_hash='audience-v1', version=1,
+        purpose='Relevant synthetic offer', necessity='Synthetic', balancing_test='Synthetic',
+        safeguards='Opt out', sources='[]', decision='approved', reviewer=OWNER,
+        reviewed_at=STAMP, review_due_at=(NOW + timedelta(days=30)).isoformat())
+    add(s, 'prospects', id=PROSPECT, company='Synthetic Ltd', name='Person',
+        role='Director', domain='example.invalid', email=EMAIL, email_key=KEY,
+        subscriber_type='corporate', eligibility='eligible', lawful_basis='legitimate_interests',
+        lia_id=LIA, stage='ready', captured_at=LAST.isoformat(), evidence_checked_at=STAMP,
+        notice_due_at=(NOW + timedelta(days=10)).isoformat(),
+        retention_due_at=(NOW + timedelta(days=300)).isoformat())
+    add(s, 'evidence', prospect_id=PROSPECT, source_type='synthetic', operation='verify',
+        source_url='https://example.invalid/team', fact_type='email_verification', fact_value='valid',
+        verification_status='valid', verification_subject_email_key=KEY, flags='[]',
+        fetched_at=STAMP, verified_at=STAMP, expires_at=(NOW + timedelta(days=7)).isoformat())
+    add(s, 'campaigns', id=CAMPAIGN, brand_id=BRAND, mailbox_id=BOX, name='Synthetic',
+        target_rules='{}', target_hash='audience-v1', sequence_version=1, version=1,
+        status='ready', timezone='Europe/London', daily_cap=5)
+    add(s, 'sequence_steps', id=STEP, campaign_id=CAMPAIGN, sequence_version=1,
+        ordinal=0, delay_business_days=0, template_text=json.dumps({'schema_version': 1, 'subject': 'Synthetic offer',
+                                  'body': 'A relevant synthetic offer.'}),
+        template_hash=hashlib.sha256(json.dumps({'schema_version': 1, 'subject': 'Synthetic offer',
+                                               'body': 'A relevant synthetic offer.'}).encode()).hexdigest(),
+        allowed_variables='[]', approved_by=OWNER, approved_at=STAMP)
+    add(s, 'enrolments', id=ENROLMENT, prospect_id=PROSPECT, campaign_id=CAMPAIGN,
+        sequence_version=1, state='active', next_step=0, next_due_at=LAST.isoformat())
+    if not foreign:
+        return
+    add(s, 'campaigns', id=uid('foreign-campaign'), business_id=B, mailbox_id=FOREIGN,
+        brand_id=uid('foreign-brand'), name='FOREIGN SECRET', target_rules='{}',
+        target_hash='foreign', sequence_version=1, version=1, status='ready',
+        timezone='Europe/London', daily_cap=5)
+    add(s, 'enrolments', id=uid('foreign-enrolment'), business_id=B,
+        campaign_id=uid('foreign-campaign'), prospect_id=uid('foreign-prospect'),
+        sequence_version=1, state='active', next_step=0, next_due_at=LAST.isoformat())
+    add(s, 'sequence_steps', id=uid('foreign-step'), business_id=B,
+        campaign_id=uid('foreign-campaign'), sequence_version=1, ordinal=0,
+        delay_business_days=0, template_text='FOREIGN SECRET', template_hash='foreign',
+        allowed_variables='[]', approved_by=uid('foreign-owner'), approved_at=STAMP)
 
 
 @pytest.fixture
@@ -88,55 +152,7 @@ def database(tmp_path):
             'CREATE UNIQUE INDEX daily_once ON outreach_daily_usage (business_id, scope_type, scope_id, local_date)',
         ):
             s.execute(text(ddl))
-        for box, bid, default in ((BOX, A, False), (DEFAULT, A, True), (FOREIGN, B, True)):
-            insert(s, 'email_accounts', id=box, business_id=bid, user_id=OWNER,
-                   provider='google', email_address=f'{box}@example.invalid', is_default=default,
-                   capabilities='{}', token_ciphertext='fake-token', refresh_token_ciphertext='fake-refresh',
-                   created_at=(NOW + timedelta(days=1) if default else LAST).isoformat())
-        add(s, 'brands', id=BRAND, name='Synthetic Ltd', default_mailbox_id=DEFAULT,
-            privacy_url='https://example.invalid/privacy', sender_identity='Synthetic Ltd', version=1)
-        add(s, 'settings', pause_all=False, timezone='Europe/London', business_daily_cap=20,
-            owner_cc_default=False, retention_policy_version=1)
-        add(s, 'mailboxes', mailbox_id=BOX, enabled=True, daily_cap=5, warmup_stage=5,
-            sending_days=0, health_status='pass', health_checked_at=STAMP,
-            health_evidence=json.dumps({'domain_control': True, 'spf': 'pass', 'dkim': 'pass',
-                                        'dmarc': 'pass', 'from_aligned': True}))
-        add(s, 'compliance', id=LIA, brand_id=BRAND, audience_hash='audience-v1', version=1,
-            purpose='Relevant synthetic offer', necessity='Synthetic', balancing_test='Synthetic',
-            safeguards='Opt out', sources='[]', decision='approved', reviewer=OWNER,
-            reviewed_at=STAMP, review_due_at=(NOW + timedelta(days=30)).isoformat())
-        add(s, 'prospects', id=PROSPECT, company='Synthetic Ltd', name='Person',
-            role='Director', domain='example.invalid', email=EMAIL, email_key=KEY,
-            subscriber_type='corporate', eligibility='eligible', lawful_basis='legitimate_interests',
-            lia_id=LIA, stage='ready', captured_at=LAST.isoformat(), evidence_checked_at=STAMP,
-            notice_due_at=(NOW + timedelta(days=10)).isoformat(),
-            retention_due_at=(NOW + timedelta(days=300)).isoformat())
-        add(s, 'evidence', prospect_id=PROSPECT, source_type='synthetic', operation='verify',
-            source_url='https://example.invalid/team', fact_type='email_verification', fact_value='valid',
-            verification_status='valid', verification_subject_email_key=KEY, flags='[]',
-            fetched_at=STAMP, verified_at=STAMP, expires_at=(NOW + timedelta(days=7)).isoformat())
-        add(s, 'campaigns', id=CAMPAIGN, brand_id=BRAND, mailbox_id=BOX, name='Synthetic',
-            target_rules='{}', target_hash='audience-v1', sequence_version=1, version=1,
-            status='ready', timezone='Europe/London', daily_cap=5)
-        add(s, 'sequence_steps', id=STEP, campaign_id=CAMPAIGN, sequence_version=1,
-            ordinal=0, delay_business_days=0, template_text=json.dumps({'schema_version': 1, 'subject': 'Synthetic offer',
-                                      'body': 'A relevant synthetic offer.'}),
-            template_hash=hashlib.sha256(json.dumps({'schema_version': 1, 'subject': 'Synthetic offer',
-                                                   'body': 'A relevant synthetic offer.'}).encode()).hexdigest(),
-            allowed_variables='[]', approved_by=OWNER, approved_at=STAMP)
-        add(s, 'enrolments', id=ENROLMENT, prospect_id=PROSPECT, campaign_id=CAMPAIGN,
-            sequence_version=1, state='active', next_step=0, next_due_at=LAST.isoformat())
-        add(s, 'campaigns', id=uid('foreign-campaign'), business_id=B, mailbox_id=FOREIGN,
-            brand_id=uid('foreign-brand'), name='FOREIGN SECRET', target_rules='{}',
-            target_hash='foreign', sequence_version=1, version=1, status='ready',
-            timezone='Europe/London', daily_cap=5)
-        add(s, 'enrolments', id=uid('foreign-enrolment'), business_id=B,
-            campaign_id=uid('foreign-campaign'), prospect_id=uid('foreign-prospect'),
-            sequence_version=1, state='active', next_step=0, next_due_at=LAST.isoformat())
-        add(s, 'sequence_steps', id=uid('foreign-step'), business_id=B,
-            campaign_id=uid('foreign-campaign'), sequence_version=1, ordinal=0,
-            delay_business_days=0, template_text='FOREIGN SECRET', template_hash='foreign',
-            allowed_variables='[]', approved_by=uid('foreign-owner'), approved_at=STAMP)
+        seed(s)
         insert(s, 'businesses', id=A, plan_tier='business', feature_flags='{}', subscription_status='active', is_active=True)
         insert(s, 'business_settings', business_id=A, settings='{}')
         s.commit()
@@ -167,7 +183,7 @@ def h(database, monkeypatch, request):
     monkeypatch.setattr(module, 'get_provider_for_account', lambda account: fake)
     with Session(database) as session:
         api = LocalActions(module, actions)
-        if request.node.get_closest_marker('xfail'):
+        if 'real_aria_actions' in request.fixturenames:
             if 'send_outreach' not in actions.ACTION_TYPES:
                 raise MissingSharedHook('shared registration absent')
             api = actions
@@ -812,3 +828,117 @@ def test_edited_header_injection_refused_even_with_current_card_hash(h, part):
     change(h, 'aria_actions', payload=json.dumps(payload))
     card.update(preview=payload, version=h.a.version_of(payload))
     refused(h, card)
+
+
+# ------------------------------------------------ Claude's aria_actions hook ---
+# The real NS-B10 path (services.aria_actions), not the LocalActions seam.
+
+def real(h):
+    from services import aria_actions
+    return aria_actions
+
+
+def real_propose(h, **kwargs):
+    args = dict(campaign_id=CAMPAIGN, enrolment_id=ENROLMENT, step_id=STEP)
+    return real(h).propose(h.s, h.b, OWNER, 'send_outreach', args, owner_name='Owner', **kwargs)
+
+
+def test_hook_owner_approval_sends_once_through_the_real_path(h):
+    card = real_propose(h)['proposal']
+    done = real(h).approve(h.s, h.b, card['id'], OWNER, version=card['version'])
+    assert done['status'] == 'done' and done['result']['outcome'] == 'accepted'
+    assert len(h.p.sends) == 1 and len(h.p.searches) == 1
+    with pytest.raises(real(h).ActionRefused):
+        real(h).approve(h.s, h.b, card['id'], OWNER, version=card['version'])
+    assert len(h.p.sends) == 1
+
+
+def test_hook_chat_and_voice_cannot_raise_an_outreach_card(h):
+    acts = real(h)
+    assert 'send_outreach' in acts.ACTION_TYPES
+    assert 'send_outreach' not in acts.CHAT_ACTION_TYPES
+    out = acts.propose_from_chat(A, OWNER, 'send_outreach',
+                                 dict(campaign_id=CAMPAIGN, enrolment_id=ENROLMENT, step_id=STEP))
+    assert 'error' in out and 'proposal' not in out
+    import inspect
+    import assistant_chat
+    import realtime_voice
+    for module in (assistant_chat, realtime_voice):
+        assert 'aria_actions.ACTION_TYPES' not in inspect.getsource(module), module.__name__
+
+
+@pytest.mark.parametrize('extra', [{'automation': 'outreach_sequence'}, {'raised_by': 'outreach_sequence'}])
+def test_hook_no_standing_permission_can_raise_an_outreach_card(h, extra):
+    out = real_propose(h, **extra)
+    assert 'error' in out
+    assert h.s.execute(text("SELECT count(*) FROM aria_actions")).scalar() == 0
+
+
+def test_hook_a_refused_proposal_leaves_nothing_behind(h):
+    change(h, 'outreach_settings', owner_cc_default=True, owner_cc_address='bad\r\nBcc: x@example.invalid')
+    out = real_propose(h)
+    assert 'error' in out
+    h.s.commit()  # a later commit on the same session must not persist half a proposal
+    assert h.s.execute(text("SELECT count(*) FROM outreach_unsubscribe_tokens")).scalar() == 0
+    assert h.s.execute(text("SELECT count(*) FROM aria_actions")).scalar() == 0
+
+
+def test_hook_only_subject_and_body_are_editable(h):
+    acts = real(h)
+    card = real_propose(h)['proposal']
+    for field in ('to', 'cc', 'footer', 'headers', 'mailbox_id', 'from_email'):
+        with pytest.raises(acts.ActionRefused):
+            acts.edit(h.s, h.b, card['id'], {field: 'x@example.invalid'})
+    with pytest.raises(acts.ActionRefused):
+        acts.edit(h.s, h.b, card['id'], {'subject': 'Hi\r\nBcc: x@example.invalid'})
+    with pytest.raises(acts.ActionRefused):
+        acts.edit(h.s, h.b, card['id'], {'body': '   '})
+    edited = acts.edit(h.s, h.b, card['id'], {'subject': 'A better subject', 'body': 'Owner copy'})
+    preview = edited['preview']
+    assert preview['subject'] == 'A better subject' and preview['body'] == 'Owner copy'
+    assert {k: v for k, v in preview.items() if k not in ('subject', 'body')} == \
+        {k: v for k, v in card['preview'].items() if k not in ('subject', 'body')}
+    done = acts.approve(h.s, h.b, card['id'], OWNER, version=edited['version'])
+    assert done['status'] == 'done' and h.p.sends[0][1]['subject'] == 'A better subject'
+
+
+def test_hook_lost_claim_rolls_back_every_reservation(h, monkeypatch):
+    """The card is dismissed after the eligibility claim but before the
+    proposed -> executing update: nothing the claim reserved survives."""
+    acts = real(h)
+    card = real_propose(h)['proposal']
+    original = h.m.prepare_claim
+
+    def then_dismissed(session, business, **kwargs):
+        original(session, business, **kwargs)
+        session.execute(text("UPDATE aria_actions SET status='dismissed' WHERE id=:id"), {'id': card['id']})
+    monkeypatch.setattr(h.m, 'prepare_claim', then_dismissed)
+    with pytest.raises(acts.ActionRefused):
+        acts.approve(h.s, h.b, card['id'], OWNER, version=card['version'])
+    assert not h.p.sends
+    for table in ('outreach_usage_events', 'outreach_messages', 'outreach_dispatch_jobs'):
+        assert h.s.execute(text(f'SELECT count(*) FROM {table}')).scalar() == 0, table
+    assert (h.s.execute(text("SELECT coalesce(sum(value),0) FROM usage_meters WHERE meter LIKE 'outreach%'")).scalar() or 0) == 0
+    assert h.s.execute(text('SELECT status FROM aria_actions')).scalar() == 'proposed'
+
+
+def test_hook_an_unknown_outcome_stays_executing_and_is_never_retried(h):
+    acts = real(h)
+    h.p.outcome = TimeoutError('ambiguous')
+    card = real_propose(h)['proposal']
+    out = acts.approve(h.s, h.b, card['id'], OWNER, version=card['version'])
+    assert out['status'] == 'executing'
+    with pytest.raises(acts.ActionRefused):
+        acts.approve(h.s, h.b, card['id'], OWNER, version=card['version'])
+    assert len(h.p.sends) == 1
+
+
+def test_hook_generic_email_bookkeeping_is_never_used(h, monkeypatch):
+    acts = real(h)
+
+    def forbidden(*a, **k):
+        raise AssertionError('outreach must bypass the generic email path')
+    monkeypatch.setattr(acts, '_execute', forbidden)
+    monkeypatch.setattr(acts, '_bookkeep_email', forbidden)
+    card = real_propose(h)['proposal']
+    assert acts.approve(h.s, h.b, card['id'], OWNER, version=card['version'])['status'] == 'done'
