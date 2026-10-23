@@ -51,3 +51,11 @@ Also fixed from the backlog:
 - the screen shows the new default immediately after a successful switch.
 
 Remaining backlog: the fake-async concurrency test was replaced by the real Postgres race test.
+
+## Codex review 2 — APPROVE (d3291d7)
+
+Both P1s are closed and no new P1 was found. Both reviews are preserved word for word in `audits/MAIL-1-CODEX-REVIEW-1.md` and `-2.md`.
+
+Backlog (P2, not blocking):
+- If the read taken before connecting fails, the default is left alone. Chasing then waits for Make default rather than guessing a sender.
+- A rename made during a reconnect can be overwritten by the label restore.
