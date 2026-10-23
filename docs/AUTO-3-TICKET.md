@@ -90,3 +90,8 @@ The P2s are also fixed:
 - a chat "chase again" for a stage-4 invoice is now approvable, once.
 
 Tests: 7 new. The suites have 227 passing; `./check.sh full` is green.
+
+## Codex review 2: APPROVE, no P1 (`audits/AUTO-3-CODEX-REVIEW-2.md`)
+Backlog (P2):
+1. Two **separate** cards for overlapping invoices, approved at the same instant, can both send. Each card is claimed only once; overlapping debts are not locked together. The autopilot never makes two such cards (decision B), so this needs the owner to draft two by hand and tap both together. Fix: a per-customer lock at approval.
+2. A due-date change after drafting does not invalidate the card. Fix: add the due date to `_drifted`.
