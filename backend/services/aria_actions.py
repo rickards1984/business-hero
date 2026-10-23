@@ -191,7 +191,14 @@ def _chase_payload(session, business, args: dict, owner_name) -> dict:
     template = get_chase_email_template(
         stage, {"customer_name": customer, "invoice_number": number, "amount": amount,
                 "due_date": due_text}, getattr(business, "name", None))
-    return {"invoice_id": invoice_id, "invoice_number": number, "customer_name": customer,
+    # AUTO-2: the chase goes from the business's default mailbox, fixed here,
+    # so replies land in the inbox Aria reads. Never "the newest account".
+    from services.chase_replies import default_mailbox
+    account_id = default_mailbox(session, business.id)
+    if account_id is None:
+        raise ActionRefused(422, "Choose which mailbox chases are sent from: mark one as the "
+                                 "default in Email settings.")
+    return {"invoice_id": invoice_id, "account_id": account_id, "invoice_number": number, "customer_name": customer,
             "to": customer_email, "subject": template["subject"], "body": template["body"],
             "chase_stage": stage,
             "sign_off": args.get("sign_off") or sign_off(
@@ -294,6 +301,13 @@ def propose(session, business, user_id, action_type: str, args: dict, *,
                          "preview": payload, "version": version_of(payload),
                          "expires_at": (moment + EXPIRY).isoformat(),
                          "error": None, "result": None, "created_at": moment.isoformat()}}
+
+
+def _paused_by_reply(session, business, payload) -> bool:
+    from services.chase_replies import _address, blocked
+    replied, stopped = blocked(session, business)
+    to = _address(payload.get("to"))  # "Name <address>" and "address" alike (review 2)
+    return to in replied or str(payload.get("invoice_id")) in stopped
 
 
 def _still_owed(session, business_id, invoice_id) -> bool:
@@ -410,6 +424,11 @@ def approve(session, business, action_id: str, user_id, version: Optional[str] =
             reason = "The invoice no longer exists; nothing was sent."
         elif (invoice[5] or "").lower() == "paid":
             reason = "Invoice already paid; nothing was sent."
+        elif payload.get("automation") and _paused_by_reply(session, business, payload):
+            # AUTO-2 (Codex review 1, P1 4): an automatic chase never goes to a
+            # customer whose reply is waiting for the owner, however late the
+            # pause was recorded. A card the owner taps is their decision.
+            reason = "The customer has replied; automatic chasing is paused. Nothing was sent."
         elif not _still_owed(session, business.id, payload["invoice_id"]):
             # The FULL receivables rule, not only a literal "paid" status: a
             # recorded payment, a synced zero balance or a cancellation since
@@ -460,9 +479,10 @@ def _execute(session, business, action_type: str, payload: dict) -> dict:
     business_id = str(business.id)
     if action_type in ("send_email", "send_invoice_chase"):
         body = payload["body"] + "\n\n" + payload["sign_off"]
-        return assistant_tools._send_email(
-            engine, business_id, {"to": payload["to"], "subject": payload["subject"],
-                                  "body": body})
+        args = {"to": payload["to"], "subject": payload["subject"], "body": body}
+        if payload.get("account_id"):
+            args["account_id"] = payload["account_id"]
+        return assistant_tools._send_email(engine, business_id, args)
     if action_type == "create_calendar_event":
         return _run(assistant_tools.create_calendar_event(
             business_id, payload["title"], payload["start"], payload["end"],
@@ -488,10 +508,16 @@ def _bookkeep_email(session, business, action_type: str, payload: dict, result: 
     The email has gone: a failure here is logged, never turned into a
     'failed' card that invites a second send."""
     try:
-        account = session.execute(text(
-            "SELECT id FROM email_accounts WHERE business_id = :business_id "
-            "AND provider IN ('google', 'microsoft') ORDER BY created_at DESC LIMIT 1"),
-            {"business_id": str(business.id)}).fetchone()
+        if payload.get("account_id"):
+            # The mailbox the card was bound to is the one that sent (AUTO-2).
+            account = session.execute(text(
+                "SELECT id FROM email_accounts WHERE business_id = :business_id AND id = :id"),
+                {"business_id": str(business.id), "id": payload["account_id"]}).fetchone()
+        else:
+            account = session.execute(text(
+                "SELECT id FROM email_accounts WHERE business_id = :business_id "
+                "AND provider IN ('google', 'microsoft') ORDER BY created_at DESC LIMIT 1"),
+                {"business_id": str(business.id)}).fetchone()
         sent_at = now()
         if account is not None:
             to_sql = "ARRAY[:to_email]" if _is_postgres(session) else ":to_email"

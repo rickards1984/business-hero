@@ -79,7 +79,21 @@ def db():
             chase_stage INTEGER DEFAULT 0, due_date TEXT, archived BOOLEAN DEFAULT 0,
             last_chased_at TEXT, updated_at TEXT, external_id TEXT)"""))
         c.execute(text("""CREATE TABLE email_accounts (id TEXT PRIMARY KEY, business_id TEXT NOT NULL,
-            provider TEXT, email_address TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"""))
+            provider TEXT, email_address TEXT, is_default BOOLEAN DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)"""))
+        # AUTO-2: chasing waits for a complete, recent read of the inbox, and
+        # pauses on replies. Here every inbox was just read and has no replies.
+        c.execute(text("""CREATE TABLE email_sync_states (id TEXT PRIMARY KEY,
+            email_account_id TEXT NOT NULL UNIQUE, cursor TEXT DEFAULT '{}', last_synced_at TEXT,
+            sync_status TEXT, last_error TEXT)"""))
+        c.execute(text("""CREATE TABLE email_messages (id TEXT PRIMARY KEY, business_id TEXT NOT NULL,
+            email_account_id TEXT, provider_message_id TEXT, provider_thread_id TEXT,
+            from_email TEXT, subject TEXT, snippet TEXT, body_text TEXT, received_at TEXT)"""))
+        c.execute(text("""CREATE TABLE chase_replies (id TEXT PRIMARY KEY, business_id TEXT NOT NULL,
+            email_message_id TEXT, customer_email TEXT NOT NULL, invoice_ids TEXT NOT NULL,
+            category TEXT NOT NULL, summary TEXT, status TEXT NOT NULL DEFAULT 'open',
+            resolved_by TEXT, resolved_at TEXT, created_at TEXT, updated_at TEXT,
+            UNIQUE (business_id, email_message_id))"""))
         c.execute(text("""CREATE TABLE email_outbox (id TEXT PRIMARY KEY, business_id TEXT NOT NULL,
             email_account_id TEXT NOT NULL, to_emails TEXT NOT NULL, subject TEXT NOT NULL,
             body_preview TEXT NOT NULL, status TEXT NOT NULL, invoice_id TEXT, chase_stage INTEGER,
@@ -96,6 +110,10 @@ def db():
             c.execute(text("INSERT INTO email_accounts (id, business_id, provider, email_address) "
                            "VALUES (:id, :b, 'google', :e)"), {"id": f"acct-{bid[:4]}", "b": bid,
                                                               "e": f"owner@{bid[:4]}.example"})
+            c.execute(text("INSERT INTO email_sync_states (id, email_account_id, cursor, "
+                           "last_synced_at) VALUES (:id, :a, '{\"complete\": true}', :at)"),
+                      {"id": f"sync-{bid[:4]}", "a": f"acct-{bid[:4]}",
+                       "at": (TUE_10 - timedelta(minutes=20)).astimezone(timezone.utc).isoformat()})
     yield eng
     eng.dispose()
 
@@ -117,6 +135,15 @@ def invoice(eng, *, bid=A, days_overdue=10, stage=0, last_chased_days_ago=None,
                   {"id": iid, "b": bid, "n": f"INV-{_n['i']:04d}", "e": email, "a": amount, "p": paid,
                    "s": status, "st": stage, "d": due, "ar": archived, "l": last})
     return iid
+
+
+@pytest.fixture(autouse=True)
+def mailboxes_hold_no_replies(monkeypatch):
+    """AUTO-2 searches the mailboxes for replies before every automatic
+    chase; that is tested in test_chase_replies.py. Here the search finds
+    nothing, so AUTO-1's rules are what decide."""
+    from services import chase_replies
+    monkeypatch.setattr(chase_replies, "lookup_with_provider", lambda *a, **k: [])
 
 
 @pytest.fixture

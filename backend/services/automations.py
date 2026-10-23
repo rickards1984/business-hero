@@ -21,7 +21,8 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
-from services import aria_actions
+from services import aria_actions, chase_replies
+from services.chase_replies import _address as _who  # one canonical address everywhere (AUTO-2 review 2)
 from services.home_summary import _BALANCE, _NOT_OWED, uk_today
 
 logger = logging.getLogger(__name__)
@@ -73,8 +74,8 @@ def chase_settings(raw: Optional[dict]) -> dict:
     if merged["end_hour"] <= merged["start_hour"]:
         merged["start_hour"], merged["end_hour"] = CHASE_DEFAULTS["start_hour"], CHASE_DEFAULTS["end_hour"]
     paused = merged.get("paused_customers") or []
-    merged["paused_customers"] = sorted({str(p).strip().lower() for p in paused
-                                         if isinstance(p, str) and p.strip()})
+    merged["paused_customers"] = sorted({_who(p) for p in paused
+                                         if isinstance(p, str) and p.strip()} - {""})
     return merged
 
 
@@ -112,7 +113,7 @@ def _attempts(session, business, since: datetime):
     out = []
     for aid, payload, status, created_at, approved_by in rows:
         p = _loads(payload)
-        out.append((str(aid), str(p.get("to") or "").strip().lower(), status,
+        out.append((str(aid), _who(p.get("to")), status,
                     _parse(created_at), p.get("automation") == KIND, approved_by))
     return out
 
@@ -124,7 +125,7 @@ def _unresolved_customers(session, business) -> set:
         "SELECT payload FROM aria_actions WHERE business_id = :b "
         "AND action_type = 'send_invoice_chase' AND status = 'executing'"),
         {"b": str(business.id)}).fetchall()
-    return {str(_loads(p).get("to") or "").strip().lower() for (p,) in rows}
+    return {_who(_loads(p).get("to")) for (p,) in rows}
 
 
 def _day_start(moment: datetime) -> datetime:
@@ -149,7 +150,7 @@ def _last_chase_by_customer(session, business) -> dict:
         {"b": str(business.id)}).fetchall()
     latest: dict = {}
     for email, at in rows:
-        key, when = email.strip().lower(), _parse(at)
+        key, when = _who(email), _parse(at)
         if key and when and (key not in latest or when > latest[key]):
             latest[key] = when
     return latest
@@ -202,7 +203,7 @@ def _live_automatic_draft(session, business, customer: str) -> bool:
         {"b": str(business.id)}).fetchall()
     for (payload,) in rows:
         p = _loads(payload)
-        if p.get("automation") == KIND and str(p.get("to") or "").strip().lower() == customer:
+        if p.get("automation") == KIND and _who(p.get("to")) == customer:
             return True
     return False
 
@@ -234,7 +235,7 @@ def _chased_since(session, business, customer: str, since: datetime) -> bool:
         {"b": str(business.id)}).fetchall()
     for email, at in rows:
         when = _parse(at)
-        if email.strip().lower() == customer and when and when > since:
+        if _who(email) == customer and when and when > since:
             return True
     return False
 
@@ -327,7 +328,8 @@ def _authority(business, s: dict, moment: datetime) -> Optional[str]:
 
 
 def run_invoice_autopilot(session, business, settings: Optional[dict], *,
-                          owner_name: Optional[str] = None, refresh=None) -> dict:
+                          owner_name: Optional[str] = None, refresh=None,
+                          lookup=None, classify=None) -> dict:
     """One pass of the autopilot for one business. Returns what it did.
 
     `refresh()` returns the CURRENT (settings, business). It is called before
@@ -340,6 +342,18 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
     if _authority(business, s, moment):
         return result
 
+    # AUTO-2: chase only from the default mailbox (never "the newest"). If
+    # there isn't one, nothing at all this run, cards included.
+    mailbox = chase_replies.default_mailbox(session, business.id)
+    if mailbox is None:
+        for invoice_id, *_ in _candidates(session, business):
+            result["skipped"][str(invoice_id)] = "no_default_mailbox"
+        session.rollback()
+        return result
+    lookup = lookup or chase_replies.lookup_with_provider
+    classify = classify or chase_replies.classify_with_model
+    replied, stopped = chase_replies.blocked(session, business)
+
     waiting = _open_cards(session, business)
     unresolved = _unresolved_customers(session, business)
     last_by_customer = _last_chase_by_customer(session, business)
@@ -351,7 +365,7 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
 
     for invoice_id, email, stage, last_chased, due in _candidates(session, business):
         iid = str(invoice_id)
-        customer = (email or "").strip().lower()
+        customer = _who(email)
         if not customer:
             result["skipped"][iid] = "no_customer_email"
             continue
@@ -370,6 +384,12 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             continue
         if customer in unresolved:
             result["skipped"][iid] = "unresolved_attempt"
+            continue
+        if iid in stopped:
+            result["skipped"][iid] = "chasing_stopped"
+            continue
+        if customer in replied:
+            result["skipped"][iid] = "customer_replied"
             continue
         if iid in waiting:
             result["skipped"][iid] = "card_waiting"
@@ -418,6 +438,23 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             chased_now.add(customer)
             result["skipped"][iid] = "customer_chased_recently"
             continue
+        # AUTO-2 (Codex review 1): search this customer's mailboxes NOW, just
+        # before this send — every mailbox their chases went from, and the one
+        # this chase will go from. A failed search means no chase.
+        try:
+            chase_replies.find_replies(session, business, lookup=lookup, classify=classify,
+                                       customers=[customer])
+        except chase_replies.ReplyCheckFailed as exc:
+            logger.warning("[Autopilot] %s: %s", business.id, exc)
+            _give_back(session, business, tickets)
+            result["skipped"][iid] = "reply_check_failed"
+            continue
+        replied_now, stopped_now = chase_replies.blocked(session, business)
+        if customer in replied_now or iid in stopped_now:
+            _give_back(session, business, tickets)
+            replied.add(customer)
+            result["skipped"][iid] = "chasing_stopped" if iid in stopped_now else "customer_replied"
+            continue
         proposed = aria_actions.propose(session, business, None, "send_invoice_chase",
                                         {"invoice_id": iid, "chase_stage": next_stage},
                                         owner_name=owner_name, automation=KIND)
@@ -426,6 +463,16 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             result["skipped"][iid] = proposed.get("error") or "not_proposed"
             continue
         card = proposed["proposal"]
+        if (card.get("preview") or {}).get("account_id") != mailbox:
+            # The default mailbox changed mid-run: its inbox was not the one
+            # checked above. Send nothing this run.
+            try:
+                aria_actions.dismiss(session, business, card["id"])
+            except aria_actions.ActionRefused:
+                pass
+            _give_back(session, business, tickets)
+            result["skipped"][iid] = "no_default_mailbox"
+            continue
         if not _still_holds(session, business, customer, token):
             # Another run holds this customer now: send nothing, free only OUR
             # daily and cap tickets, and leave theirs alone (review 4).
@@ -483,10 +530,52 @@ def owner_first_name(session, business_id: str) -> Optional[str]:
     return None
 
 
+def run_business(session, business, settings: Optional[dict], *, owner_name=None,
+                 refresh=None, lookup=None, classify=None) -> dict:
+    """One business's hourly pass: look up replies to its chases (so the owner
+    is told), then chase. A failed lookup does not lift earlier pauses, and
+    every chase still does its own search right before sending."""
+    lookup = lookup or chase_replies.lookup_with_provider
+    classify = classify or chase_replies.classify_with_model
+    try:
+        chase_replies.find_replies(session, business, lookup=lookup, classify=classify)
+    except Exception as exc:
+        if session is not None:
+            session.rollback()
+        logger.warning("[Autopilot] %s: reply lookup failed: %s", business.id, exc)
+    return run_invoice_autopilot(session, business, settings, owner_name=owner_name,
+                                 refresh=refresh, lookup=lookup, classify=classify)
+
+
+def scan_replies_everywhere(session, *, exclude=()) -> int:
+    """Replies to chases are flagged whether or not the autopilot is on (Mike:
+    flag the owner on ANY reply)."""
+    since = now() - timedelta(days=chase_replies.REPLY_WINDOW_DAYS)
+    rows = session.execute(text(
+        "SELECT DISTINCT business_id FROM aria_actions WHERE action_type = 'send_invoice_chase' "
+        "AND status IN ('done', 'executing') AND created_at >= :since"), {"since": since}).fetchall()
+    found = 0
+    for (business_id,) in rows:
+        if str(business_id) in exclude:
+            continue
+        business = aria_actions.load_business(session, str(business_id))
+        if business is None:
+            continue
+        try:
+            found += len(chase_replies.find_replies(
+                session, business, lookup=chase_replies.lookup_with_provider,
+                classify=chase_replies.classify_with_model))
+        except Exception as exc:
+            session.rollback()
+            logger.error("[ChaseReplies] %s failed: %s", business_id, exc)
+    return found
+
+
 def run_all_due(session) -> int:
     """The scheduler's pass: every business that switched the autopilot on."""
     rows = session.execute(text("SELECT business_id, settings FROM business_settings")).fetchall()
     total = 0
+    done_here = set()
     for business_id, raw in rows:
         settings = (_loads(raw).get("automations") or {}).get(KIND)
         if not chase_settings(settings)["enabled"]:
@@ -504,12 +593,18 @@ def run_all_due(session) -> int:
             fresh = (_loads(row[0]).get("automations") or {}).get(KIND) if row else None
             return fresh, aria_actions.load_business(session, bid)
 
+        done_here.add(str(business_id))
         try:
-            done = run_invoice_autopilot(session, business, settings,
-                                         owner_name=owner_first_name(session, business_id),
-                                         refresh=refresh)
-            total += len(done["sent"])
+            done = run_business(session, business, settings,
+                                owner_name=owner_first_name(session, business_id),
+                                refresh=refresh)
+            total += len(done.get("sent", []))
         except Exception as exc:  # one business never stops the others
             session.rollback()
             logger.error("[Autopilot] %s failed: %s", business_id, exc)
+    try:
+        scan_replies_everywhere(session, exclude=done_here)
+    except Exception as exc:
+        session.rollback()
+        logger.error("[ChaseReplies] scan failed: %s", exc)
     return total

@@ -304,3 +304,36 @@ on a par with them**:
 - campaigns and sequences;
 - a replies inbox;
 - results.
+
+## Progress and launch sequence — Mike, 19 October 2026
+
+**Where things stand:**
+- **AUTO-1** (chasing on autopilot): Codex approved it (review 6), and it is PR #36. It is off until switched on.
+- **AUTO-2** (replies to chases): the tests are written and await Mike's approval. Its migration is 036.
+- **OUT-2** (shared contracts): agreed, and reviewed by Claude.
+- **OUT-3** (outreach core schema): the tests are written and await Mike's approval. Its migration is 037.
+
+**The launch sequence:**
+1. Finish AUTO-2 and the outreach department (the OUT tickets).
+2. **The final finish: an admin-panel review.** Mike must be able to onboard a new business easily, with every feature switchable when setting it up. That includes the outreach add-on: included in the Business tier, a paid add-on below it, and a standalone outreach-only product. It also includes the business's mailboxes.
+3. **Mike uses Business Hero himself, as a customer, for a month.**
+4. **A few businesses Mike already knows** join, likely with a free first month, to help refine it.
+5. Only then come paid subscriptions for others.
+
+## Upcoming: from a "Daily Pulse" to Aria's briefings — Mike, 20 October 2026
+
+Today the WhatsApp "Daily Pulse" goes out every day. Its stats are mostly zeros, and so are the financials on the odd day they appear. It's too frequent, and too empty to be worth reading. Replace it with:
+
+- **A weekly briefing from Aria.** It's written as Aria, not as a "Daily Pulse", and it's useful. It covers:
+  - what she did on her own, such as invoices chased on autopilot;
+  - replies waiting for the owner;
+  - what's owed and overdue;
+  - what needs a decision.
+- **A monthly business-performance snapshot.**
+- **No daily messages.**
+
+**Outreach is included in both** when the business's package includes it (entitlement-gated).
+
+**Rule:** a section with nothing to say is left out, never shown as zeros.
+
+**Order:** queued as its own ticket after the current AUTO/OUT work; it is not started.

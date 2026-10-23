@@ -10,7 +10,7 @@
 # that nothing is left unchecked. Keep UNGUARDED_BUDGET at 0 while this says
 # FULL — the test enforces that too.
 #
-# Captured 2026-10-13 (after migration 035): 832 columns across 60 tables, covering all 40 tables
+# Captured 2026-10-20 (after migration 036): 844 columns across 61 tables, covering all 41 tables
 # the backend writes. Supersedes the businesses-only bootstrap.
 #
 # The Supabase editor exports CSV, which QUOTES any field containing a comma —
@@ -265,6 +265,18 @@ col   calls.started_at timestamp with time zone null=YES def=-
 col   calls.summary text null=YES def=-
 col   calls.transcript text null=YES def=-
 col   calls.updated_at timestamp with time zone null=YES def=now()
+col   chase_replies.business_id uuid null=NO def=-
+col   chase_replies.category text null=NO def=-
+col   chase_replies.created_at timestamp with time zone null=NO def=now()
+col   chase_replies.customer_email text null=NO def=-
+col   chase_replies.email_message_id uuid null=YES def=-
+col   chase_replies.id uuid null=NO def=gen_random_uuid()
+col   chase_replies.invoice_ids jsonb null=NO def='[]'::jsonb
+col   chase_replies.resolved_at timestamp with time zone null=YES def=-
+col   chase_replies.resolved_by uuid null=YES def=-
+col   chase_replies.status text null=NO def='open'::text
+col   chase_replies.summary text null=YES def=-
+col   chase_replies.updated_at timestamp with time zone null=NO def=now()
 col   email_accounts.business_id uuid null=NO def=-
 col   email_accounts.capabilities jsonb null=NO def='{}'::jsonb
 col   email_accounts.created_at timestamp with time zone null=NO def=now()

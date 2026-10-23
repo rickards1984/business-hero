@@ -18,6 +18,8 @@
 .aria-shell-mark { width: 28px; height: 28px; flex-shrink: 0; border-radius: 8px; background: #6E56F0; color: white; display: grid; place-items: center; font-size: 14px; font-weight: 700; }
 .aria-shell-wordmark { font-size: 14px; font-weight: 600; white-space: nowrap; }
 .aria-shell-business, .aria-shell-micro { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; letter-spacing: .6px; text-transform: uppercase; color: #A3A5BD; }
+.aria-shell-logo { height: 28px; max-width: 96px; flex-shrink: 0; padding: 3px 6px; border-radius: 8px; background: #FFFFFF; display: inline-flex; align-items: center; }
+.aria-shell-logo img { max-height: 22px; max-width: 84px; width: auto; height: auto; object-fit: contain; display: block; }
 .aria-shell-business { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .aria-shell-actions { flex-shrink: 0; gap: 8px; }
 .aria-shell-actions .MuiIconButton-root { color: #C9CAD8; width: 38px; height: 38px; border: 1px solid #2A2B3A; border-radius: 10px; }

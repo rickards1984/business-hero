@@ -1503,15 +1503,24 @@ def _send_email(engine, business_id: str, args: dict) -> dict:
             "error": f"Invalid email domain in '{to_email}'. The email address must have a valid domain like 'example.com'."
         }
     
-    # Get OAuth account
+    # Get OAuth account: the one a card was bound to (AUTO-2), scoped to this
+    # business; otherwise, for older callers, the newest connected account.
     with engine.connect() as conn:
-        result = conn.execute(text("""
-            SELECT id, provider, email_address, token_ciphertext, refresh_token_ciphertext
-            FROM email_accounts
-            WHERE business_id = :business_id AND provider IN ('google', 'microsoft')
-            ORDER BY created_at DESC
-            LIMIT 1
-        """), {"business_id": business_id})
+        if args.get("account_id"):
+            result = conn.execute(text("""
+                SELECT id, provider, email_address, token_ciphertext, refresh_token_ciphertext
+                FROM email_accounts
+                WHERE business_id = :business_id AND id = :account_id
+                  AND provider IN ('google', 'microsoft')
+            """), {"business_id": business_id, "account_id": str(args["account_id"])})
+        else:
+            result = conn.execute(text("""
+                SELECT id, provider, email_address, token_ciphertext, refresh_token_ciphertext
+                FROM email_accounts
+                WHERE business_id = :business_id AND provider IN ('google', 'microsoft')
+                ORDER BY created_at DESC
+                LIMIT 1
+            """), {"business_id": business_id})
         row = result.fetchone()
     
     if not row:
@@ -1539,7 +1548,8 @@ def _send_email(engine, business_id: str, args: dict) -> dict:
                     "from": from_email,
                     "to": to_email,
                     "subject": subject,
-                    "gmail_message_id": api_result.get("id")
+                    "gmail_message_id": api_result.get("id"),
+                    "gmail_thread_id": api_result.get("threadId"),
                 }
             else:
                 return {"success": False, "error": "Gmail API did not confirm send"}
