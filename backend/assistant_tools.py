@@ -461,7 +461,8 @@ TOOL_DEFINITIONS = [
                 "type": "object",
                 "properties": {
                     "invoice_id": {"type": "string", "description": "The invoice's id from list_invoices or get_overdue_invoices"},
-                    "chase_stage": {"type": "integer", "description": "Optional stage 1-4; defaults to the next stage"}
+                    "chase_stage": {"type": "integer", "description": "Optional stage 1-4; defaults to the next stage"},
+                    "chase_again": {"type": "boolean", "description": "Only when the owner has said yes to chasing again an invoice chased in the last 7 days"}
                 },
                 "required": ["invoice_id"]
             }

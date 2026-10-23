@@ -26,8 +26,7 @@ class MissingCombined(AssertionError):
     """Only the intentional Stage 1 absence may be xfailed."""
 
 
-pytestmark = pytest.mark.xfail(strict=True, raises=MissingCombined,
-                               reason="AUTO-3 not built yet: tests first")
+# Stage 1's strict-xfail marker was removed once the implementation landed.
 
 
 def combined():
@@ -375,3 +374,16 @@ def test_aria_can_say_chase_again(db):
     props = tool["function"]["parameters"]["properties"]
     assert props["chase_again"]["type"] == "boolean"
     assert "chase_again" not in tool["function"]["parameters"].get("required", [])
+
+
+def test_the_home_shows_every_invoice_in_a_combined_chase(db, sent):
+    from datetime import timezone
+    from services import home_summary
+    combined()
+    a = invoice(db, days_overdue=30)
+    b = invoice(db, days_overdue=20)
+    run(db, on())
+    with db.connect() as c:
+        (entry,) = home_summary.recent_automated(c, A, TUE_10.astimezone(timezone.utc))
+    assert entry["invoice_count"] == 2
+    assert number(db, a) in entry["invoice_number"] and number(db, b) in entry["invoice_number"]

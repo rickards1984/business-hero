@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 CHAT_ACTION_TYPES = ("send_email", "send_invoice_chase", "create_calendar_event", "create_task")
 ACTION_TYPES = CHAT_ACTION_TYPES + ("send_outreach",)
 EXPIRY = timedelta(hours=72)
+RECENT_CHASE = timedelta(days=7)   # Mike: "the usual rule" for asking before re-chasing
 DEFAULT_ASSISTANT_NAME = "Aria"
 
 # Every action needs Aria; each then needs the feature it touches
@@ -166,6 +167,20 @@ def _email_payload(args: dict, owner_name, business) -> dict:
                 DEFAULT_ASSISTANT_NAME, owner_name, getattr(business, "name", None))}
 
 
+def _owed_amount(session, business_id: str, invoice_id: str):
+    """What the customer still owes on this invoice (AUTO-3 decision C):
+    a part-paid invoice is chased for the balance, never its full amount."""
+    from services.home_summary import _BALANCE
+    row = session.execute(text(
+        f"SELECT {_BALANCE} FROM invoices WHERE id = :invoice_id AND business_id = :business_id"),
+        {"invoice_id": str(invoice_id), "business_id": str(business_id)}).fetchone()
+    return None if row is None or row[0] is None else row[0]
+
+
+def _money(value) -> str:
+    return f"{float(value):.2f}"
+
+
 def _invoice(session, business_id: str, invoice_id: str):
     return session.execute(text(
         "SELECT id, invoice_number, customer_name, customer_email, amount, status, "
@@ -177,6 +192,12 @@ def _invoice(session, business_id: str, invoice_id: str):
 
 def _chase_payload(session, business, args: dict, owner_name) -> dict:
     from email_templates import get_chase_email_template
+    if args.get("invoice_ids") is not None:
+        ids = args.get("invoice_ids")
+        if isinstance(ids, list) and len(ids) == 1:
+            args = {**{k: v for k, v in args.items() if k != "invoice_ids"}, "invoice_id": ids[0]}
+        else:
+            return _combined_chase_payload(session, business, args, owner_name)
     invoice_id = str(args.get("invoice_id") or "").strip()
     if not invoice_id:
         raise ActionRefused(422, "invoice_id is required. Use list_invoices to find it.")
@@ -195,8 +216,10 @@ def _chase_payload(session, business, args: dict, owner_name) -> dict:
     requested = args.get("chase_stage")
     stage = min(max(int(requested), 1), 4) if requested else min((current_stage or 0) + 1, 4)
     due_text = due.isoformat() if hasattr(due, "isoformat") else (str(due) if due else "N/A")
+    owed = _owed_amount(session, business.id, invoice_id)
     template = get_chase_email_template(
-        stage, {"customer_name": customer, "invoice_number": number, "amount": amount,
+        stage, {"customer_name": customer, "invoice_number": number,
+                "amount": owed if owed is not None else amount,
                 "due_date": due_text}, getattr(business, "name", None))
     # AUTO-2: the chase goes from the business's default mailbox, fixed here,
     # so replies land in the inbox Aria reads. Never "the newest account".
@@ -210,6 +233,87 @@ def _chase_payload(session, business, args: dict, owner_name) -> dict:
             "chase_stage": stage,
             "sign_off": args.get("sign_off") or sign_off(
                 DEFAULT_ASSISTANT_NAME, owner_name, getattr(business, "name", None))}
+
+
+def _combined_chase_payload(session, business, args: dict, owner_name) -> dict:
+    """AUTO-3: one chase listing several of ONE customer's invoices, at one
+    stage. Each invoice records the stage it was at and the stage it moves to,
+    so approval can refuse a card that is out of date."""
+    from email_templates import get_combined_chase_email_template
+    from services.chase_replies import _address, default_mailbox
+    ids = args.get("invoice_ids")
+    if not isinstance(ids, list) or len(ids) < 2 or len(set(map(str, ids))) != len(ids):
+        raise ActionRefused(422, "A combined chase needs two or more different invoices.")
+    rows = []
+    for iid in ids:
+        try:
+            uuid.UUID(str(iid))
+        except ValueError:
+            raise ActionRefused(422, f"Invoice {iid} not found.")
+        row = _invoice(session, business.id, str(iid))
+        if row is None:
+            raise ActionRefused(422, f"Invoice {iid} not found.")
+        if (row[5] or "").lower() == "paid" or not _still_owed(session, business.id, str(iid)):
+            raise ActionRefused(422, f"Invoice {row[1]} is no longer owed.")
+        rows.append(row)
+    customers = {_address(r[3]) for r in rows}
+    if len(customers) != 1 or not next(iter(customers)):
+        raise ActionRefused(422, "A combined chase is for one customer's invoices only.")
+
+    def due_key(r):
+        return (str(r[7]) if r[7] is not None else "9999", str(r[0]))
+    rows.sort(key=due_key)
+    invoices = []
+    for r in rows:
+        was = int(r[6] or 0)
+        due = r[7].isoformat() if hasattr(r[7], "isoformat") else (str(r[7]) if r[7] else "N/A")
+        invoices.append({"invoice_id": str(r[0]), "invoice_number": r[1],
+                         "amount": _money(_owed_amount(session, business.id, str(r[0])) or 0),
+                         "due_date": due, "stage_was": was, "stage": min(was + 1, 4)})
+    requested = args.get("chase_stage")
+    stage = min(max(int(requested), 1), 4) if requested else invoices[0]["stage"]
+    lead = rows[0]
+    template = get_combined_chase_email_template(stage, lead[2], invoices, getattr(business, "name", None))
+    account_id = default_mailbox(session, business.id)
+    if account_id is None:
+        raise ActionRefused(422, "Choose which mailbox chases are sent from: mark one as the "
+                                 "default in Email settings.")
+    return {"invoice_id": str(lead[0]), "invoice_ids": [i["invoice_id"] for i in invoices],
+            "invoices": invoices, "total": _money(sum(float(i["amount"]) for i in invoices)),
+            "account_id": account_id, "invoice_number": lead[1], "customer_name": lead[2],
+            "to": lead[3], "subject": template["subject"], "body": template["body"],
+            "chase_stage": stage,
+            "sign_off": args.get("sign_off") or sign_off(
+                DEFAULT_ASSISTANT_NAME, owner_name, getattr(business, "name", None))}
+
+
+def _recently_chased(session, business, args: dict) -> Optional[str]:
+    """Mike, 23 Oct 2026: the owner asks in chat to chase an invoice that was
+    already chased in the last 7 days; Aria says so and asks first."""
+    ids = args.get("invoice_ids") if args.get("invoice_ids") is not None else [args.get("invoice_id")]
+    for iid in ids or []:
+        try:
+            uuid.UUID(str(iid))
+        except ValueError:
+            continue
+        row = session.execute(text(
+            "SELECT invoice_number, last_chased_at, chase_stage FROM invoices "
+            "WHERE id = :id AND business_id = :b"), {"id": str(iid), "b": str(business.id)}).fetchone()
+        if row is None or not row[1]:
+            continue
+        when = row[1]
+        if isinstance(when, str):
+            when = datetime.fromisoformat(when.replace(" ", "T").replace("Z", "+00:00"))
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if now() - when < RECENT_CHASE:
+            from zoneinfo import ZoneInfo
+            local = when.astimezone(ZoneInfo("Europe/London"))
+            return (f"Invoice {row[0]} was already chased on {local.day} {local:%B} "
+                    f"(stage {row[2] or 0}). Tell the owner and ask whether to chase it again. "
+                    "Only if they say yes, call send_invoice_chase again with chase_again set "
+                    "to true. Nothing has been drafted or sent.")
+    return None
 
 
 def _event_payload(args: dict, tz_name: str) -> dict:
@@ -292,6 +396,13 @@ def propose(session, business, user_id, action_type: str, args: dict, *,
         return {"error": f"This can't be done on your current plan: {problem}"}
     tz_name = timezone or getattr(business, "timezone", None) or "Europe/London"
     args = {k: v for k, v in dict(args or {}).items() if k != "sign_off"}
+    chase_again = bool(args.pop("chase_again", False))
+    if (action_type == "send_invoice_chase" and not automation and not raised_by
+            and not chase_again):
+        recent = _recently_chased(session, business, args)
+        if recent:
+            session.rollback()
+            return {"error": recent}
     try:
         payload = _build(session, business, action_type, args, owner_name, tz_name)
     except ActionRefused as exc:
@@ -322,7 +433,8 @@ def _paused_by_reply(session, business, payload) -> bool:
     from services.chase_replies import _address, blocked
     replied, stopped = blocked(session, business)
     to = _address(payload.get("to"))  # "Name <address>" and "address" alike (review 2)
-    return to in replied or str(payload.get("invoice_id")) in stopped
+    listed = {str(i) for i in (payload.get("invoice_ids") or [payload.get("invoice_id")])}
+    return to in replied or bool(listed & stopped)
 
 
 def _still_owed(session, business_id, invoice_id) -> bool:
@@ -434,7 +546,13 @@ def approve(session, business, action_id: str, user_id, version: Optional[str] =
     session.commit()
     payload = _loads(claimed[0])
 
-    if action_type == "send_invoice_chase":
+    if action_type == "send_invoice_chase" and payload.get("invoices"):
+        reason = _combined_out_of_date(session, business, payload)
+        if reason:
+            _set(session, business, action_id, status="failed", error=reason, executed_at=now())
+            session.commit()
+            raise ActionRefused(409, reason)
+    elif action_type == "send_invoice_chase":
         invoice = _invoice(session, business.id, payload["invoice_id"])
         reason = None
         if invoice is None:
@@ -561,6 +679,24 @@ def _approve_outreach(session, business, action_id: str, row, user_id, version) 
     return _view(_scoped(session, business, action_id))
 
 
+def _combined_out_of_date(session, business, payload) -> Optional[str]:
+    """AUTO-3: the email must be exactly what was drafted. If ANY listed
+    invoice is gone, settled or chased since, nothing is sent; the next run
+    drafts a fresh one."""
+    if payload.get("automation") and _paused_by_reply(session, business, payload):
+        return "The customer has replied; automatic chasing is paused. Nothing was sent."
+    for item in payload["invoices"]:
+        invoice = _invoice(session, business.id, item["invoice_id"])
+        if invoice is None:
+            return f"Invoice {item['invoice_number']} no longer exists; nothing was sent."
+        if (invoice[5] or "").lower() == "paid" or not _still_owed(session, business.id, item["invoice_id"]):
+            return f"Invoice {item['invoice_number']} is no longer owed; nothing was sent."
+        if int(invoice[6] or 0) > int(item["stage_was"]):
+            return (f"Invoice {item['invoice_number']} has been chased since this was drafted. "
+                    "Nothing was sent; ask Aria for a fresh one.")
+    return None
+
+
 def _execute(session, business, action_type: str, payload: dict) -> dict:
     import assistant_tools
     engine = session.get_bind()
@@ -621,7 +757,17 @@ def _bookkeep_email(session, business, action_type: str, payload: dict, result: 
                  "invoice_id": payload.get("invoice_id"),
                  "chase_stage": payload.get("chase_stage"),
                  "provider_id": result.get("gmail_message_id"), "sent_at": sent_at})
-        if action_type == "send_invoice_chase":
+        if action_type == "send_invoice_chase" and payload.get("invoices"):
+            # AUTO-3: every listed invoice moves to its own next stage, never
+            # backwards, and is marked chased now.
+            for item in payload["invoices"]:
+                session.execute(text(
+                    "UPDATE invoices SET chase_stage = CASE WHEN COALESCE(chase_stage, 0) < :stage "
+                    "THEN :stage ELSE chase_stage END, last_chased_at = :now, "
+                    "updated_at = :now WHERE id = :invoice_id AND business_id = :business_id"),
+                    {"stage": item["stage"], "now": sent_at,
+                     "invoice_id": item["invoice_id"], "business_id": str(business.id)})
+        elif action_type == "send_invoice_chase":
             # Never backwards (review 1, finding 6).
             session.execute(text(
                 "UPDATE invoices SET chase_stage = CASE WHEN COALESCE(chase_stage, 0) < :stage "

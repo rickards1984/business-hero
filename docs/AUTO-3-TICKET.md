@@ -65,3 +65,16 @@ No migration.
 - **Addition to D (Mike):** when the owner asks Aria in chat to chase an invoice that was already chased in the last 7 days, Aria says when it was chased and asks whether to chase it again. Only if the owner says yes does she draft the card (`chase_again: true`). The owner's tap still sends it.
   - Tests: `test_a_chat_chase_of_an_invoice_chased_this_week_asks_first`, `test_after_the_owner_says_yes_the_card_is_drafted`, `test_an_invoice_not_chased_this_week_needs_no_question`, `test_aria_can_say_chase_again`.
   - The autopilot is unaffected: its own spacing rules already apply.
+
+## Build — 23 October 2026
+- `email_templates.get_combined_chase_email_template`: the same tone as the existing stage templates, with a list of invoices and a total.
+- `aria_actions`:
+  - `_combined_chase_payload`: one customer and one business only, two or more different invoices, all still owed; each invoice records `stage_was` and `stage`;
+  - single chases now quote the amount **still owed** (decision C);
+  - `_combined_out_of_date`: approval refuses if any listed invoice is gone, settled or chased since drafting, or if the customer replied (automatic chases);
+  - bookkeeping advances every listed invoice, never backwards;
+  - the chat rule: `_recently_chased` plus `chase_again`. Automatic proposals never ask.
+- `automations.run_invoice_autopilot`: the customer's listed invoices are every past-due, owed, not-stopped invoice, oldest first. An open card for any of them holds the customer (decision B). The stage is the most overdue invoice's next stage, and stage 4 means a card. `sent`/`cards` list every invoice; invoices already covered this run are skipped silently.
+- Home: `recent_automated` gives every invoice number and `invoice_count`, and the home line counts invoices, not emails.
+- **A second meaning change in AUTO-1's suite:** `test_an_old_ticket_with_a_waiting_automatic_draft_is_not_reclaimed`. Decision B now holds the customer *before* the ticket check, so the reason may be `card_waiting` instead of `chase_in_progress`. The protected property (nothing sent, stale ticket untouched) is now asserted directly.
+- Verification: `test_combined_chase.py` (31) and `test_auto_chase.py` (93 passed in total across both); `./check.sh full` is green.
