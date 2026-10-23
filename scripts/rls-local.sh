@@ -93,8 +93,8 @@ ORDER=(
   backend/migrations/035_aria_actions.sql
 )
 # Migrations not yet written (036 AUTO-2 chase replies, 037 OUT-3 outreach
-# core) are replayed once they exist; absence must not skip their tests.
-for optional in backend/migrations/036_chase_replies.sql backend/migrations/037_outreach_core.sql; do
+# core, 038 OUT-7 reply drafts) are replayed once they exist; absence must not skip their tests.
+for optional in backend/migrations/036_chase_replies.sql backend/migrations/037_outreach_core.sql backend/migrations/038_outreach_replies.sql; do
   if [ -f "$optional" ]; then
     ORDER+=("$optional")
   fi
@@ -241,8 +241,9 @@ for path in ["supabase/migrations/029_secure_rls_gaps.sql",
              "backend/migrations/034_invoice_customer_address.sql",
              "backend/migrations/035_aria_actions.sql",
              "backend/migrations/036_chase_replies.sql",
-             "backend/migrations/037_outreach_core.sql"]:
-    if not Path(path).exists() and path.endswith(("036_chase_replies.sql", "037_outreach_core.sql")):
+             "backend/migrations/037_outreach_core.sql",
+             "backend/migrations/038_outreach_replies.sql"]:
+    if not Path(path).exists() and path.endswith(("036_chase_replies.sql", "037_outreach_core.sql", "038_outreach_replies.sql")):
         continue
     txt = "\n".join(l for l in open(path) if not l.lstrip().startswith("--"))
     for m in pat.finditer(txt):
