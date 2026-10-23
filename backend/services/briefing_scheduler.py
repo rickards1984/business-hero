@@ -70,7 +70,11 @@ async def _reconcile_stripe_if_due():
         try:
             with get_session_context() as session:
                 stripe_reconciliation.run(session)
-        except Exception:
+        except Exception as exc:
+            # Say WHY, so the next failure can be fixed from the logs: the error
+            # class and a short message only (Stripe masks keys in its messages).
+            logger.error("[Scheduler] Stripe reconciliation failed: %s: %s",
+                         type(exc).__name__, str(exc)[:200])
             stripe_reconciliation.record_failure()
 
     # Retain the task and skip overlapping runs without holding up other jobs.
