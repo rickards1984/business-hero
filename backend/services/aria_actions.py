@@ -181,6 +181,44 @@ def _money(value) -> str:
     return f"{float(value):.2f}"
 
 
+def _chase_marks(session, business_id: str, invoice_id: str):
+    """(customer address, stage, last chased) as they are NOW, normalised so a
+    card can record them and approval can see any change since (Codex AUTO-3
+    review 1)."""
+    from services.chase_replies import _address
+    row = session.execute(text(
+        "SELECT customer_email, chase_stage, last_chased_at FROM invoices "
+        "WHERE id = :id AND business_id = :b"), {"id": str(invoice_id), "b": str(business_id)}).fetchone()
+    if row is None:
+        return None
+    when = row[2]
+    if isinstance(when, str) and when:
+        when = datetime.fromisoformat(when.replace(" ", "T").replace("Z", "+00:00"))
+    if isinstance(when, datetime) and when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return _address(row[0]), int(row[1] or 0), (when.astimezone(timezone.utc).isoformat() if when else None)
+
+
+def _drifted(session, business_id: str, invoice_id: str, *, to: str, amount: str,
+             stage_was: int, last_chased_was) -> Optional[str]:
+    """Why a drafted chase no longer matches this invoice, or None.
+    Codex AUTO-3 review 1: the amount still owed, the customer and the chase
+    marks must all be exactly as drafted."""
+    from services.chase_replies import _address
+    marks = _chase_marks(session, business_id, invoice_id)
+    if marks is None:
+        return "no longer exists"
+    customer, stage, last = marks
+    if customer != _address(to):
+        return "now belongs to a different customer"
+    owed = _owed_amount(session, business_id, invoice_id)
+    if owed is None or _money(owed) != amount:
+        return "has a different amount owed now"
+    if stage != int(stage_was) or last != last_chased_was:
+        return "has been chased since this was drafted"
+    return None
+
+
 def _invoice(session, business_id: str, invoice_id: str):
     return session.execute(text(
         "SELECT id, invoice_number, customer_name, customer_email, amount, status, "
@@ -217,6 +255,7 @@ def _chase_payload(session, business, args: dict, owner_name) -> dict:
     stage = min(max(int(requested), 1), 4) if requested else min((current_stage or 0) + 1, 4)
     due_text = due.isoformat() if hasattr(due, "isoformat") else (str(due) if due else "N/A")
     owed = _owed_amount(session, business.id, invoice_id)
+    marks = _chase_marks(session, business.id, invoice_id)
     template = get_chase_email_template(
         stage, {"customer_name": customer, "invoice_number": number,
                 "amount": owed if owed is not None else amount,
@@ -231,6 +270,9 @@ def _chase_payload(session, business, args: dict, owner_name) -> dict:
     return {"invoice_id": invoice_id, "account_id": account_id, "invoice_number": number, "customer_name": customer,
             "to": customer_email, "subject": template["subject"], "body": template["body"],
             "chase_stage": stage,
+            # What approval checks again (Codex AUTO-3 review 1).
+            "amount_owed": _money(owed if owed is not None else amount),
+            "stage_was": marks[1], "last_chased_was": marks[2],
             "sign_off": args.get("sign_off") or sign_off(
                 DEFAULT_ASSISTANT_NAME, owner_name, getattr(business, "name", None))}
 
@@ -269,7 +311,8 @@ def _combined_chase_payload(session, business, args: dict, owner_name) -> dict:
         due = r[7].isoformat() if hasattr(r[7], "isoformat") else (str(r[7]) if r[7] else "N/A")
         invoices.append({"invoice_id": str(r[0]), "invoice_number": r[1],
                          "amount": _money(_owed_amount(session, business.id, str(r[0])) or 0),
-                         "due_date": due, "stage_was": was, "stage": min(was + 1, 4)})
+                         "due_date": due, "stage_was": was, "stage": min(was + 1, 4),
+                         "last_chased_was": _chase_marks(session, business.id, str(r[0]))[2]})
     requested = args.get("chase_stage")
     stage = min(max(int(requested), 1), 4) if requested else invoices[0]["stage"]
     lead = rows[0]
@@ -569,7 +612,19 @@ def approve(session, business, action_id: str, user_id, version: Optional[str] =
             # recorded payment, a synced zero balance or a cancellation since
             # the card was drafted all stop it (Codex AUTO-1 review 1).
             reason = "This invoice is no longer owed; nothing was sent."
-        elif (invoice[6] or 0) >= int(payload["chase_stage"]):
+        elif "stage_was" in payload and _drifted(
+                session, business.id, payload["invoice_id"], to=payload["to"],
+                amount=payload["amount_owed"], stage_was=payload["stage_was"],
+                last_chased_was=payload.get("last_chased_was")):
+            reason = (f"This chase is out of date: invoice {invoice[1]} " + _drifted(
+                session, business.id, payload["invoice_id"], to=payload["to"],
+                amount=payload["amount_owed"], stage_was=payload["stage_was"],
+                last_chased_was=payload.get("last_chased_was"))
+                + ". Nothing was sent; ask Aria for a fresh one.")
+        elif (invoice[6] or 0) >= int(payload["chase_stage"]) and not (
+                int(payload["chase_stage"]) == 4 and payload.get("stage_was") == 4):
+            # A final demand may be sent again (the owner said yes in chat);
+            # the unchanged marks above prove this card is not a stale copy.
             # Codex review 1, finding 6: never resend an earlier stage or
             # move the invoice's stage backwards.
             reason = (f"This chase is out of date: the invoice has already had stage "
@@ -691,8 +746,11 @@ def _combined_out_of_date(session, business, payload) -> Optional[str]:
             return f"Invoice {item['invoice_number']} no longer exists; nothing was sent."
         if (invoice[5] or "").lower() == "paid" or not _still_owed(session, business.id, item["invoice_id"]):
             return f"Invoice {item['invoice_number']} is no longer owed; nothing was sent."
-        if int(invoice[6] or 0) > int(item["stage_was"]):
-            return (f"Invoice {item['invoice_number']} has been chased since this was drafted. "
+        drift = _drifted(session, business.id, item["invoice_id"], to=payload["to"],
+                         amount=item["amount"], stage_was=item["stage_was"],
+                         last_chased_was=item.get("last_chased_was"))
+        if drift:
+            return (f"This chase is out of date: invoice {item['invoice_number']} {drift}. "
                     "Nothing was sent; ask Aria for a fresh one.")
     return None
 

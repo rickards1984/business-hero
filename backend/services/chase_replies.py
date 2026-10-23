@@ -226,8 +226,16 @@ def _chases(session, business, since: datetime) -> list:
     for payload, result, created, approved, executed, number in rows:
         p, r = _loads(payload), _loads(result)
         sent_at = _parse(executed) or _parse(approved) or _parse(created)
-        out.append((_address(p.get("to")), str(p.get("invoice_id") or ""), number, sent_at,
-                    r.get("gmail_thread_id")))
+        listed = p.get("invoices") or []
+        if listed:
+            # AUTO-3 (Codex review 1): a combined chase covers EVERY invoice it
+            # listed, so a reply or a Stop reaches them all.
+            for item in listed:
+                out.append((_address(p.get("to")), str(item.get("invoice_id") or ""),
+                            item.get("invoice_number"), sent_at, r.get("gmail_thread_id")))
+        else:
+            out.append((_address(p.get("to")), str(p.get("invoice_id") or ""), number, sent_at,
+                        r.get("gmail_thread_id")))
     return out
 
 

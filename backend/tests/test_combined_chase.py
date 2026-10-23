@@ -387,3 +387,94 @@ def test_the_home_shows_every_invoice_in_a_combined_chase(db, sent):
         (entry,) = home_summary.recent_automated(c, A, TUE_10.astimezone(timezone.utc))
     assert entry["invoice_count"] == 2
     assert number(db, a) in entry["invoice_number"] and number(db, b) in entry["invoice_number"]
+
+
+# ------------------------------------------- Codex AUTO-3 review 1 (P1s, P2s) ---
+
+def _card(db, payload_args, who="owner"):
+    import services.aria_actions as aa
+    with Session(db) as s:
+        out = aa.propose(s, business(), who, "send_invoice_chase", payload_args, owner_name="Mike")
+    assert "proposal" in out, out
+    return out["proposal"]
+
+
+def _approve(db, card):
+    import services.aria_actions as aa
+    with Session(db) as s:
+        return aa.approve(s, business(), card["id"], "owner", card["version"])
+
+
+@pytest.mark.parametrize("combined_card", [True, False])
+def test_a_part_payment_after_drafting_stops_the_send(db, sent, combined_card):
+    """P1 1: the email must never quote an amount no longer owed."""
+    import services.aria_actions as aa
+    combined()
+    a = invoice(db, days_overdue=30, amount=500)
+    b = invoice(db, days_overdue=20, amount=100)
+    card = _card(db, {"invoice_ids": [a, b]} if combined_card else {"invoice_id": a})
+    with db.begin() as c:
+        c.execute(text("UPDATE invoices SET paid_amount = 400 WHERE id = :i"), {"i": a})
+    with pytest.raises(aa.ActionRefused):
+        _approve(db, card)
+    assert sent == [] and stage_of(db, a) == 0
+
+
+@pytest.mark.parametrize("combined_card", [True, False])
+def test_an_invoice_moved_to_another_customer_after_drafting_stops_the_send(db, sent, combined_card):
+    """P1 3: never email one customer's invoice details to another."""
+    import services.aria_actions as aa
+    combined()
+    a = invoice(db, days_overdue=30)
+    b = invoice(db, days_overdue=20)
+    card = _card(db, {"invoice_ids": [a, b]} if combined_card else {"invoice_id": b})
+    with db.begin() as c:
+        c.execute(text("UPDATE invoices SET customer_email = 'someone.else@example.com' WHERE id = :i"),
+                  {"i": b})
+    with pytest.raises(aa.ActionRefused):
+        _approve(db, card)
+    assert sent == []
+
+
+def test_a_reply_to_a_combined_chase_covers_every_listed_invoice(db, sent):
+    """P1 2: "I paid both" must reach every invoice the email listed, so
+    Stop stops them all."""
+    from datetime import timedelta, timezone
+    from services import chase_replies
+    combined()
+    a = invoice(db, days_overdue=30)
+    b = invoice(db, days_overdue=20)
+    run(db, on())
+    with Session(db) as s:
+        chases = chase_replies._chases(s, business(), (TUE_10 - timedelta(days=1)).astimezone(timezone.utc))
+    assert {iid for who, iid, *_ in chases if who == "pay@harper.example"} == {a, b}
+    assert set(chase_replies._which_invoices(chases, None, "I paid both")) == {a, b}
+    named = chase_replies._which_invoices(chases, None, f"about {number(db, b)} only")
+    assert named == [b], "naming one invoice still picks only that one"
+
+
+def test_two_final_stage_cards_cannot_both_send(db, sent):
+    """Review P2: invoices already at stage 4 stay at 4 after a send, so the
+    stage alone cannot spot a second, stale card."""
+    import services.aria_actions as aa
+    combined()
+    a = invoice(db, days_overdue=90, stage=4, last_chased_days_ago=10)
+    b = invoice(db, days_overdue=80, stage=4, last_chased_days_ago=10)
+    first, second = _card(db, {"invoice_ids": [a, b]}), _card(db, {"invoice_ids": [a, b]})
+    assert _approve(db, first)["status"] == "done"
+    with pytest.raises(aa.ActionRefused):
+        _approve(db, second)
+    assert len(sent) == 1
+
+
+def test_chasing_a_final_stage_invoice_again_from_chat_can_be_approved(db, sent):
+    """Review P2: the owner said yes to chasing again an invoice already at
+    stage 4; the card it makes must be approvable, once."""
+    import services.aria_actions as aa
+    combined()
+    iid = invoice(db, days_overdue=90, stage=4, last_chased_days_ago=3)
+    card = _card(db, {"invoice_id": iid, "chase_again": True})
+    assert _approve(db, card)["status"] == "done" and len(sent) == 1
+    assert stage_of(db, iid) == 4
+    with pytest.raises(aa.ActionRefused):
+        _approve(db, card)

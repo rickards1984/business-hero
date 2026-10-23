@@ -78,3 +78,15 @@ No migration.
 - Home: `recent_automated` gives every invoice number and `invoice_count`, and the home line counts invoices, not emails.
 - **A second meaning change in AUTO-1's suite:** `test_an_old_ticket_with_a_waiting_automatic_draft_is_not_reclaimed`. Decision B now holds the customer *before* the ticket check, so the reason may be `card_waiting` instead of `chase_in_progress`. The protected property (nothing sent, stale ticket untouched) is now asserted directly.
 - Verification: `test_combined_chase.py` (31) and `test_auto_chase.py` (93 passed in total across both); `./check.sh full` is green.
+
+## Codex review 1: REQUEST-CHANGES, three P1s (repair cycle 1)
+Preserved verbatim in `audits/AUTO-3-CODEX-REVIEW-1.md`.
+1. **A part-payment after drafting still sent the old amounts.** Every invoice on a card (single or combined) now records the amount owed, the customer, the stage and the last-chased time. Approval refuses ("out of date") if any of these has changed (`_drifted`).
+2. **A reply to a combined chase reached only the lead invoice.** `chase_replies._chases` now expands a combined chase into every listed invoice, so "I paid both" and Stop reach them all. Naming one invoice still picks just that one.
+3. **An invoice moved to another customer was still emailed to the first.** This is covered by the same check: the invoice's current customer must be the card's recipient.
+
+The P2s are also fixed:
+- two stale final-stage cards can no longer both send, because the last-chased time must be unchanged;
+- a chat "chase again" for a stage-4 invoice is now approvable, once.
+
+Tests: 7 new. The suites have 227 passing; `./check.sh full` is green.
