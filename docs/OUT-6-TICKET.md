@@ -328,3 +328,10 @@ Review backlog, also done:
 Still backlog: daily-cap (business/mailbox/campaign) races and pause/suppression races on Postgres.
 
 Review preserved verbatim: `audits/OUT-6-HOOK-CODEX-REVIEW-1.md`. Postgres: 8 pass. Codex's sandbox cannot reach the loopback harness; Claude ran it.
+
+**Codex hook review 2: APPROVE, no P1** (`audits/OUT-6-HOOK-CODEX-REVIEW-2.md`). The dismiss-race test now waits until Postgres shows the dismiss blocked by the approval's backend (`pg_blocking_pids`), rather than sleeping.
+
+Backlog carried to the adapter/pilot ticket:
+- membership-writer lock order: approval takes membership after the action; no current writer takes them in the opposite order;
+- an API-chain test for a platform admin selecting another business;
+- daily-cap and pause/suppression races on Postgres.

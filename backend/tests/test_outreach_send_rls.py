@@ -283,8 +283,20 @@ def test_a_dismiss_from_another_session_during_the_claim_waits_and_loses(pg, mon
     def claim_then_race(session, business, **kwargs):
         original(session, business, **kwargs)
         worker.start()
-        time.sleep(0.5)  # the dismiss is now waiting on the card's row lock
-        assert "dismissed" not in outcome and "refused" not in outcome, "the dismiss did not wait"
+        # Proof, not a pause (review 2): wait until Postgres shows the dismiss
+        # blocked on a lock held by this approval's own backend.
+        mine = session.execute(text("SELECT pg_backend_pid()")).scalar()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with pg.engine.connect() as c:
+                blocked = c.execute(text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE :me = ANY(pg_blocking_pids(pid))"),
+                    {"me": mine}).scalar()
+            if blocked:
+                break
+            time.sleep(0.05)
+        assert blocked, "the dismiss never waited on the claim"
+        assert "dismissed" not in outcome and "refused" not in outcome
     monkeypatch.setattr(pg.m, "prepare_claim", claim_then_race)
     assert _approve(pg, card)["status"] == "done"
     worker.join(30)
