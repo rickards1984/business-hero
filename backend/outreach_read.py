@@ -231,6 +231,17 @@ def _read(session, read, arguments, business_id):
     return result
 
 
+# Told only "not enabled for your plan", Aria invented an "Outreach add-on"
+# with dashboards (Mike, 23 Oct 2026). State the facts and forbid the rest.
+_NOT_ON_PLAN = {"Feature 'outreach' not enabled for your plan", "Feature 'outreach' disabled"}
+NOT_ON_PLAN_ERROR = ("Outreach isn't switched on for this business. It comes with the Business "
+                     "plan, and it is still being built: it is not available yet.")
+NOT_ON_PLAN_GUIDANCE = ("Tell the owner plainly that outreach isn't available on their account yet. "
+                        "Do not offer or mention an add-on, upgrade, dashboard or sequence statistics, "
+                        "and do not describe outreach features: none are available to them. "
+                        "Do not offer to search their inbox for outreach replies instead.")
+
+
 def execute_read_tool(tool_name, arguments, business_id):
     """Dispatcher boundary: business_id comes only from trusted tool context."""
     try:
@@ -239,6 +250,8 @@ def execute_read_tool(tool_name, arguments, business_id):
         with Session(engine) as session:
             return _read(session, read, validated, business_id)
     except HTTPException as exc:
+        if exc.status_code == 403 and str(exc.detail) in _NOT_ON_PLAN:
+            return {"status_code": 403, "error": NOT_ON_PLAN_ERROR, "aria_guidance": NOT_ON_PLAN_GUIDANCE}
         return {"status_code": exc.status_code, "error": exc.detail}
     except SQLAlchemyError:
         return {"status_code": 500, "error": "Outreach records unavailable"}
