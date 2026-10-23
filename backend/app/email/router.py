@@ -218,7 +218,8 @@ def build_google_oauth_start_url(auth_ctx: dict, mode: Optional[str]) -> str:
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "access_type": "offline",
-        "prompt": "consent",
+        # MAIL-1: ask which Google account, so a second mailbox can be connected.
+        "prompt": "consent select_account",
         "scope": _google_scopes(mode),
         "state": state,
     }
@@ -319,17 +320,22 @@ async def set_default_email_account(
     account_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
     admin: SupabaseAdminClient = Depends(get_supabase_admin_client),
+    session: Session = Depends(get_session),
 ) -> EmailAccountPublic:
+    """MAIL-1: ownership is checked first, and clearing and setting the
+    default are one transaction — a business is never left with none."""
+    from .mailboxes import set_default
     business_id = auth_ctx["business_id"]
-    await admin._update("email_accounts", {"is_default": False}, filters={"business_id": business_id})
-    updated = await admin._update(
-        "email_accounts",
-        {"is_default": True},
-        filters={"id": account_id, "business_id": business_id},
-    )
-    if not updated:
+    try:
+        await run_in_threadpool(set_default, session, business_id, account_id)
+    except LookupError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Email account not found")
-    row = updated[0]
+    row = await admin.fetch_email_account(
+        business_id=business_id, account_id=account_id,
+        fields="id,business_id,user_id,provider,email_address,display_name,capabilities,is_default,"
+               "created_at,updated_at")
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Email account not found")
     return EmailAccountPublic(
         id=row["id"],
         business_id=row["business_id"],
@@ -342,6 +348,27 @@ async def set_default_email_account(
         created_at=row["created_at"],
         updated_at=row.get("updated_at"),
     )
+
+
+class MailboxLabel(BaseModel):
+    label: str = Field(..., max_length=200)
+
+
+@router.patch("/accounts/{account_id}")
+async def label_email_account(
+    account_id: str,
+    data: MailboxLabel,
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """MAIL-1: label a mailbox, e.g. "FitFutures outreach"."""
+    from .mailboxes import rename
+    try:
+        return await run_in_threadpool(rename, session, auth_ctx["business_id"], account_id, data.label)
+    except LookupError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Email account not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
 
 @router.post("/accounts/smtp", response_model=EmailAccountPublic)
@@ -395,6 +422,7 @@ async def delete_email_account(
     account_id: str,
     auth_ctx: dict = Depends(get_user_business_context),
     admin: SupabaseAdminClient = Depends(get_supabase_admin_client),
+    session: Session = Depends(get_session),
 ):
     """Disconnect/delete an email account."""
     business_id = auth_ctx["business_id"]
@@ -415,9 +443,14 @@ async def delete_email_account(
     if not deleted:
         raise HTTPException(status_code=404, detail="Email account not found or already deleted")
     
+    # MAIL-1: with two or more left and none the default, ask the owner to
+    # choose (invoice chasing waits until they do).
+    from .mailboxes import needs_default
+    choose = await run_in_threadpool(needs_default, session, business_id)
     return {
         "success": True,
-        "message": f"Disconnected {account['provider']} account {account['email_address']}"
+        "message": f"Disconnected {account['provider']} account {account['email_address']}",
+        "needs_default": choose,
     }
 
 
@@ -1550,6 +1583,8 @@ async def google_oauth_callback(
             "token_expires_at": token_expires_at.isoformat(),
         }
     )
+    from .mailboxes import ensure_default_after_connect  # MAIL-1: the first becomes default
+    await ensure_default_after_connect(admin, payload["business_id"], email_address, "google")
     return RedirectResponse(url=_frontend_settings_url("google"))
 
 
@@ -1624,4 +1659,6 @@ async def microsoft_oauth_callback(
             "token_expires_at": token_expires_at.isoformat(),
         }
     )
+    from .mailboxes import ensure_default_after_connect  # MAIL-1: the first becomes default
+    await ensure_default_after_connect(admin, payload["business_id"], email_address, "microsoft")
     return RedirectResponse(url=_frontend_settings_url("microsoft"))

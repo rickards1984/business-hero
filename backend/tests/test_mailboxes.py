@@ -37,8 +37,7 @@ class MissingMailboxes(AssertionError):
     """Only this precise, intentional Stage 1 absence may be xfailed."""
 
 
-pytestmark = pytest.mark.xfail(raises=MissingMailboxes, strict=True,
-                               reason="MAIL-1 Stage 1: tests first")
+# Stage 1's strict-xfail marker was removed once the implementation landed.
 
 A, B = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 
@@ -223,6 +222,7 @@ def test_the_google_sign_in_asks_which_account(monkeypatch):
     mailboxes()
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client")
     monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_URI", "https://example.invalid/cb")
+    monkeypatch.setenv("EMAIL_OAUTH_STATE_SECRET", "test-only-secret")
     router = importlib.import_module("app.email.router")
     url = router.build_google_oauth_start_url({"user_id": "u", "business_id": A}, None)
     prompt = parse_qs(urlparse(url).query)["prompt"][0].split()
