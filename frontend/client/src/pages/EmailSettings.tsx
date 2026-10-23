@@ -65,6 +65,7 @@ interface OAuthAccount {
   provider: string;
   email_address: string;
   display_name?: string;
+  is_default?: boolean;
   created_at: string;
 }
 
@@ -314,6 +315,47 @@ export default function EmailSettings() {
     }
   };
 
+  // MAIL-1: several mailboxes, one default (invoice chases and general email
+  // go from it), and a label each, e.g. "FitFutures outreach".
+  const [labelEdit, setLabelEdit] = useState<{ id: string; text: string } | null>(null);
+  const [mailboxBusy, setMailboxBusy] = useState<string | null>(null);
+
+  const makeDefault = async (account: OAuthAccount) => {
+    setMailboxBusy(account.id);
+    setError('');
+    try {
+      const response = await apiRequest('POST', `/v1/email/accounts/${account.id}/set-default`);
+      if (!response.ok) throw new Error('That mailbox could not be made the default.');
+      setSuccessMessage(`${account.email_address} is now the default mailbox.`);
+      // The switch succeeded: show it now, even if the refresh below fails.
+      setOauthAccounts((prev) => prev.map((a) => ({ ...a, is_default: a.id === account.id })));
+      fetchOAuthAccounts();
+    } catch (err: any) {
+      setError(err.message || 'That mailbox could not be made the default.');
+    } finally {
+      setMailboxBusy(null);
+    }
+  };
+
+  const saveLabel = async () => {
+    if (!labelEdit) return;
+    setMailboxBusy(labelEdit.id);
+    setError('');
+    try {
+      const response = await apiRequest('PATCH', `/v1/email/accounts/${labelEdit.id}`, { label: labelEdit.text });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || 'That label could not be saved.');
+      }
+      setLabelEdit(null);
+      fetchOAuthAccounts();
+    } catch (err: any) {
+      setError(err.message || 'That label could not be saved.');
+    } finally {
+      setMailboxBusy(null);
+    }
+  };
+
   const handleDisconnectClick = (account: OAuthAccount) => {
     setAccountToDisconnect(account);
     setDisconnectOpen(true);
@@ -329,7 +371,10 @@ export default function EmailSettings() {
         const errorData = await response.json();
         throw new Error(errorData.detail || 'Failed to disconnect account');
       }
-      setSuccessMessage('Email account disconnected');
+      const result = await response.json().catch(() => ({}));
+      setSuccessMessage(result.needs_default
+        ? 'Email account disconnected. Choose which mailbox is the default: Aria won\'t chase invoices until you do.'
+        : 'Email account disconnected');
       setDisconnectOpen(false);
       setAccountToDisconnect(null);
       // Refresh the accounts list
@@ -396,9 +441,8 @@ export default function EmailSettings() {
     }
   };
 
-  // Check if provider is already connected
-  const hasGoogle = oauthAccounts.some(a => a.provider === 'google');
-  const hasMicrosoft = oauthAccounts.some(a => a.provider === 'microsoft');
+  // MAIL-1: any number of mailboxes; warn when none is the default.
+  const needsDefault = oauthAccounts.length >= 2 && !oauthAccounts.some(a => a.is_default);
 
   if (loading || authLoading) {
     return (
@@ -441,6 +485,12 @@ export default function EmailSettings() {
       {/* Section 1: Connected Accounts */}
       <Paper sx={{ p: 3, mb: 3 }}>
         <Typography variant="h6" gutterBottom>Connected Accounts</Typography>
+        {needsDefault && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            Choose which mailbox is the default. Aria sends invoice chases and general email from it,
+            and won't chase invoices until one is chosen.
+          </Alert>
+        )}
         
         {oauthAccounts.length === 0 ? (
           <Box sx={{ py: 2 }}>
@@ -471,10 +521,27 @@ export default function EmailSettings() {
                     <EmailIcon sx={{ color: '#0078D4', fontSize: 32 }} />
                   )}
                   <Box>
-                    <Typography variant="body1" fontWeight="medium">
-                      {account.email_address}
-                    </Typography>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    {labelEdit?.id === account.id ? (
+                      <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', mb: 0.5 }}>
+                        <TextField size="small" label="Label" value={labelEdit.text}
+                          inputProps={{ maxLength: 60 }}
+                          onChange={e => setLabelEdit({ id: account.id, text: e.target.value })} />
+                        <Button size="small" variant="contained" disabled={mailboxBusy === account.id}
+                          onClick={saveLabel}>Save</Button>
+                        <Button size="small" onClick={() => setLabelEdit(null)}>Cancel</Button>
+                      </Box>
+                    ) : (
+                      <Typography variant="body1" fontWeight="medium">
+                        {account.display_name || account.email_address}
+                      </Typography>
+                    )}
+                    {account.display_name && (
+                      <Typography variant="body2" color="text.secondary">{account.email_address}</Typography>
+                    )}
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                      {account.is_default && (
+                        <Chip size="small" label="Default" color="primary" />
+                      )}
                       <Chip 
                         size="small" 
                         label={account.provider === 'google' ? 'Google' : 'Microsoft'}
@@ -491,14 +558,26 @@ export default function EmailSettings() {
                     </Box>
                   </Box>
                 </Box>
-                <Button 
-                  size="small" 
-                  color="error" 
-                  variant="outlined"
-                  onClick={() => handleDisconnectClick(account)}
-                >
-                  Disconnect
-                </Button>
+                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                  {!account.is_default && (
+                    <Button size="small" variant="outlined" disabled={mailboxBusy === account.id}
+                      onClick={() => makeDefault(account)}>
+                      Make default
+                    </Button>
+                  )}
+                  <Button size="small" variant="text"
+                    onClick={() => setLabelEdit({ id: account.id, text: account.display_name || '' })}>
+                    {account.display_name ? 'Rename' : 'Add label'}
+                  </Button>
+                  <Button 
+                    size="small" 
+                    color="error" 
+                    variant="outlined"
+                    onClick={() => handleDisconnectClick(account)}
+                  >
+                    Disconnect
+                  </Button>
+                </Box>
               </Box>
             ))}
           </Box>
@@ -506,15 +585,14 @@ export default function EmailSettings() {
       </Paper>
 
       {/* Section 2: Connect New Account */}
-      {(!hasGoogle || !hasMicrosoft) && (
         <Paper sx={{ p: 3, mb: 3 }}>
           <Typography variant="h6" gutterBottom>Connect New Account</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-            Connect your email account to enable inbox sync, email briefings, and draft replies.
+            Connect as many mailboxes as you need, for example a separate inbox for each brand's outreach.
+            The first one you connect becomes the default.
           </Typography>
 
           <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-            {!hasGoogle && (
               <Button 
                 variant="outlined" 
                 startIcon={<GoogleIcon />}
@@ -527,8 +605,6 @@ export default function EmailSettings() {
               >
                 Connect Google
               </Button>
-            )}
-            {!hasMicrosoft && (
               <Button 
                 variant="outlined" 
                 startIcon={<EmailIcon />}
@@ -541,10 +617,8 @@ export default function EmailSettings() {
               >
                 Connect Microsoft
               </Button>
-            )}
           </Box>
         </Paper>
-      )}
 
       {/* Section 3: Awaz Integration */}
       <Paper sx={{ p: 3, mb: 3 }}>
