@@ -293,3 +293,26 @@ Final completion evidence: `PYTHONDONTWRITEBYTECODE=1 ./check.sh` exited 0:
 234 skipped, 220 subtests passed. Converter ruff and `git diff --check` passed.
 Only exporter, converter tests and this ticket changed. Status: ready for
 Claude review; no commit or push.
+
+### Real-data dry run — result, 23 October 2026 (export v4, Mike's Mac)
+
+The masked report (counts only), after four repair rounds; Mike authorised the fourth:
+- **input:** 4,037 rows (MSC 1,033; FitFutures 842; New Body 566), plus 1,596 Business Hero rows **excluded**;
+- **contacts:** MSC 1,025, New Body 1,277; **messages:** MSC 1,026, New Body 1,143;
+- **suppressions:** **106** (hard bounce 86, unsubscribe 11, objection 9), MSC 56 and New Body 50;
+- **collisions:** **0**;
+- **quarantined:** **355**:
+  - unresolved mailbox 319 (missing source account 89, missing thread id 231);
+  - ambiguous ledger links 139;
+  - possible objection in notes 17;
+  - date inconsistencies 10;
+  - invalid addresses 4;
+  - unsupported follow-up history 9;
+- **status:** `paused`, with **0** send actions and **0** allowance used.
+
+**The trend across runs:** unsupported records went 3,946 → 9, held-back records 4,286 → 355, collisions 1,471 → 0, and suppressions 6 → 106.
+
+**The dry run's purpose is met.** The real import remains gated on:
+1. the import tables, a RED migration with a runbook;
+2. OUT-13 (retention and subject rights);
+3. Mike approving the exact mapping and reviewing the quarantined records.
