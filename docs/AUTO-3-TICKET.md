@@ -59,3 +59,9 @@ No migration.
 
 ## Tests
 `backend/tests/test_combined_chase.py`, strictly xfailed until the code exists.
+
+## Mike's approval — 23 October 2026
+- The tests and decisions A–D are approved as recommended. The meaning change to `test_one_chase_per_customer_per_week` is approved.
+- **Addition to D (Mike):** when the owner asks Aria in chat to chase an invoice that was already chased in the last 7 days, Aria says when it was chased and asks whether to chase it again. Only if the owner says yes does she draft the card (`chase_again: true`). The owner's tap still sends it.
+  - Tests: `test_a_chat_chase_of_an_invoice_chased_this_week_asks_first`, `test_after_the_owner_says_yes_the_card_is_drafted`, `test_an_invoice_not_chased_this_week_needs_no_question`, `test_aria_can_say_chase_again`.
+  - The autopilot is unaffected: its own spacing rules already apply.

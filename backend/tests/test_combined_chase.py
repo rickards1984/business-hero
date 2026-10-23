@@ -323,3 +323,55 @@ def test_the_combined_wording_lists_every_invoice_and_the_total(stage):
                   "Harper Builds"):
         assert piece in out["body"], piece
     assert "\n" not in out["subject"] and "\r" not in out["subject"]
+
+
+# ------------------------------------------- Aria's chat chase (Mike, 23 Oct) ---
+# "If she's already chased that invoice in the last seven days, she advises
+# it's already been chased: do you want to chase it again?"
+
+def test_a_chat_chase_of_an_invoice_chased_this_week_asks_first(db, sent):
+    import services.aria_actions as aa
+    combined()
+    iid = invoice(db, days_overdue=30, stage=1, last_chased_days_ago=3)
+    with Session(db) as s:
+        out = aa.propose(s, business(), "owner", "send_invoice_chase", {"invoice_id": iid},
+                         owner_name="Mike")
+    assert "proposal" not in out
+    message = out["error"]
+    assert "already" in message and number(db, iid) in message
+    assert "17 October" in message, "says when"
+    assert "chase_again" in message, "tells Aria how to go ahead if the owner says yes"
+    assert cards(db) == []
+
+
+def test_after_the_owner_says_yes_the_card_is_drafted(db, sent):
+    import services.aria_actions as aa
+    combined()
+    iid = invoice(db, days_overdue=30, stage=1, last_chased_days_ago=3)
+    with Session(db) as s:
+        out = aa.propose(s, business(), "owner", "send_invoice_chase",
+                         {"invoice_id": iid, "chase_again": True}, owner_name="Mike")
+    assert "proposal" in out
+    assert "chase_again" not in out["proposal"]["preview"]
+    assert sent == [], "still only a card: the owner's tap sends it"
+
+
+@pytest.mark.parametrize("ago", [None, 7, 30])
+def test_an_invoice_not_chased_this_week_needs_no_question(db, sent, ago):
+    import services.aria_actions as aa
+    combined()
+    iid = invoice(db, days_overdue=40, stage=1 if ago else 0, last_chased_days_ago=ago)
+    with Session(db) as s:
+        out = aa.propose(s, business(), "owner", "send_invoice_chase", {"invoice_id": iid},
+                         owner_name="Mike")
+    assert "proposal" in out
+
+
+def test_aria_can_say_chase_again(db):
+    combined()
+    import assistant_tools
+    (tool,) = [t for t in assistant_tools.TOOL_DEFINITIONS
+               if t["function"]["name"] == "send_invoice_chase"]
+    props = tool["function"]["parameters"]["properties"]
+    assert props["chase_again"]["type"] == "boolean"
+    assert "chase_again" not in tool["function"]["parameters"].get("required", [])
