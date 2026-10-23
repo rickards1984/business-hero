@@ -110,3 +110,7 @@ No new product decision is needed to finish Stage A; the defaults are already ag
 **Ownership:** Claude implements the hook in `aria_actions` (registration, mandatory version for outreach, refusing a NULL-owner outreach approval), plus its common-service regression and Postgres concurrency tests. Codex reviews them. Codex implements `outreach_send`.
 
 **Test impact:** any Stage A test that expects the search inside `prepare_claim` is re-expressed in Stage B as "search before, then re-check under the lock". The assertions (fail closed, reply blocks the send) stay.
+
+### Mike's approval — 23 October 2026
+
+The Stage A tests are approved, including the change that moves the search outside the locked transaction. Stage B is authorised: Codex builds `outreach_send`; Claude builds the shared hook.
