@@ -327,6 +327,8 @@ export default function EmailSettings() {
       const response = await apiRequest('POST', `/v1/email/accounts/${account.id}/set-default`);
       if (!response.ok) throw new Error('That mailbox could not be made the default.');
       setSuccessMessage(`${account.email_address} is now the default mailbox.`);
+      // The switch succeeded: show it now, even if the refresh below fails.
+      setOauthAccounts((prev) => prev.map((a) => ({ ...a, is_default: a.id === account.id })));
       fetchOAuthAccounts();
     } catch (err: any) {
       setError(err.message || 'That mailbox could not be made the default.');
