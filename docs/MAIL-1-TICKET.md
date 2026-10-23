@@ -36,3 +36,7 @@
 3. Repeat with `partners-ukfi@newbodyhf.co.uk`, labelled "FitFutures outreach".
 4. Invoice chasing still goes from `m.rickards@`. The home page shows no warning.
 5. In MSC's business, connect `ops@msccompany.co.uk`.
+
+## Mike's approval — 23 October 2026
+
+The tests are approved. Build authorised.
