@@ -508,3 +508,26 @@ def test_settings_never_invents_standing_permission(harness, via):
         "status": "not_available",
         "message": "None available: outreach permission projection awaits OUT-6/OUT-11.",
     }
+
+
+@pytest.mark.parametrize("plan,flags", [("starter", {}), ("pro", {}), ("business", {"outreach": False})])
+def test_aria_is_told_plainly_what_outreach_is_and_is_not(harness, plan, flags):
+    """Mike, 23 Oct 2026: told only "not enabled for your plan", Aria invented
+    an "Outreach add-on" with "dashboards and sequence performance". The tool
+    result must state the facts and forbid inventing an offer."""
+    harness.biz.plan_tier, harness.biz.feature_flags = plan, flags
+    code, result = invoke(harness, SURFACES[0], "tool")
+    assert code == 403
+    text_ = json.dumps(result).lower()
+    assert "business plan" in text_
+    assert "add-on" in result["aria_guidance"].lower() and "do not" in result["aria_guidance"].lower()
+    assert "not available yet" in text_ or "still being built" in text_
+
+
+@pytest.mark.parametrize("plan,flags,status,active", [
+    ("business", {}, "unpaid", True), ("business", {}, "active", False)])
+def test_read_only_or_suspended_is_not_described_as_a_plan_problem(harness, plan, flags, status, active):
+    harness.biz.plan_tier, harness.biz.feature_flags = plan, flags
+    harness.biz.subscription_status, harness.biz.is_active = status, active
+    code, result = invoke(harness, SURFACES[0], "tool")
+    assert code == 403 and "aria_guidance" not in result
