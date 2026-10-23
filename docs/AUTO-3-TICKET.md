@@ -1,0 +1,61 @@
+# AUTO-3 — One chase email per customer, listing all their overdue invoices
+
+**Tier:** RED: automatic customer contact about money. **Builder:** Claude. **Reviewer:** Codex. **Tests first, approved by Mike before any code.**
+**Decision:** Mike, 23 Oct 2026, after his own test invoices on 22 Oct. The autopilot chased an old £1.05 invoice at stage 3, and the one-chase-a-week rule then held back his newer invoice to the same customer.
+
+## Why
+Today the autopilot chases one invoice per email, oldest first, and sends at most one email per customer per week. So a customer who owes three invoices hears about only one each week, and a small old invoice can use up the week's chase.
+
+## Behaviour
+1. **One email per customer, covering every overdue invoice they owe.**
+   - A customer is chased when at least one of their invoices is due for a chase under today's rules (stage 1 at 7 days overdue, then every 7 days).
+   - The email lists **every** invoice of theirs that is past its due date and still owed: its number, the amount **still owed**, and its due date, with a total.
+2. **The email's stage is the next stage of the customer's most overdue invoice.** Each listed invoice then moves up one stage (never backwards, never above 4). Its "last chased" date becomes today.
+3. **At most one email per customer per week, as now.** Every other rule stays:
+   - weekdays 09:00–17:00 UK;
+   - the daily cap, which counts emails, not invoices;
+   - paused customers;
+   - replies pause the customer (AUTO-2);
+   - the default mailbox only;
+   - an unconfirmed send blocks that customer.
+4. **Stage 4 is still always a card, never an automatic send.** If the email's stage would be 4, the owner gets a card listing all the invoices.
+5. **An invoice the owner stopped chasing** (from a customer's reply) is left out of the email. The customer's other invoices are still chased.
+6. **Settled before sending:** if any listed invoice is paid, cancelled, archived or already chased by the time of sending, **nothing is sent**. The next hourly run drafts a fresh email. A card the owner taps follows the same rule.
+7. **A single overdue invoice** gives the same email as today, except that it shows the amount still owed (see decision C).
+
+## Decisions for Mike (each with a recommendation)
+- **A. Which invoices are listed?** *Recommended: every overdue invoice of that customer, even one only a day overdue.* This matches "all overdue invoices". The alternative lists only invoices 7+ days overdue.
+- **B. An open card for one of the customer's invoices** (a stage-4 card, or one Aria drafted in chat). *Recommended: the customer is skipped until that card is approved, dismissed or expires.* This avoids two emails about the same debt. The alternative leaves that invoice out and emails the rest.
+- **C. Amount shown.** *Recommended: the amount still owed*, for single-invoice chases too. Today a part-paid invoice is chased for its full amount, which is wrong.
+- **D. Aria's chat chases** ("chase invoice 123"). *Recommended: unchanged, one invoice per card, for now.* Only the autopilot combines.
+
+## Contract
+- `email_templates.get_combined_chase_email_template(stage, customer_name, invoices, business_name) -> {"subject", "body"}`. `invoices` is a list of `{"invoice_number", "amount", "due_date"}`, where `amount` is the amount still owed. The body lists each invoice and the total.
+- `aria_actions.propose(..., "send_invoice_chase", {"invoice_ids": [...], "chase_stage": S})` builds a combined card. Its payload is today's single-invoice payload plus:
+  - `invoice_ids`: every listed invoice, ordered by due date;
+  - `invoices`: a list of `{invoice_id, invoice_number, amount, due_date, stage}`, where `stage` is that invoice's stage after this send;
+  - `total`.
+  - `invoice_id` is the most overdue invoice; `chase_stage` is S.
+- `{"invoice_id": ...}` alone builds exactly today's single payload, except for the owed amount (decision C).
+- `run_invoice_autopilot(...)`: `sent` and `cards` list **every** invoice in a sent email or card. `skipped` is unchanged.
+- Recording a sent chase: one `email_outbox` row (invoice_id = the most overdue, chase_stage = S). Then each listed invoice's stage goes up, never backwards, and its `last_chased_at` is set to now.
+
+## Files
+- `backend/services/automations.py`
+- `backend/services/aria_actions.py`
+- `backend/email_templates.py`
+- `backend/tests/test_combined_chase.py` (new)
+- `backend/tests/test_auto_chase.py`: one test changes meaning (below)
+
+No migration.
+
+## A test that changes meaning (needs Mike's approval)
+`test_one_chase_per_customer_per_week` asserted that two overdue invoices for one customer give **one email about one invoice**, with the other skipped. Under AUTO-3 the answer is **one email covering both**. The test is replaced by `test_two_overdue_invoices_one_customer_one_email` in the new file. The one-email-a-week rule itself is still tested, by `test_a_customer_chased_by_hand_this_week_waits` and `test_running_twice_sends_once`.
+
+## Not in this ticket
+- Combining Aria's chat chases (decision D).
+- Statements or attachments.
+- Any change to reply handling (AUTO-2 already matches replies per customer).
+
+## Tests
+`backend/tests/test_combined_chase.py`, strictly xfailed until the code exists.
