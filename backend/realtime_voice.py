@@ -972,7 +972,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
 
         async def _answer_tool(name: str, arguments: dict) -> str:
             from services import aria_actions
-            if name in aria_actions.ACTION_TYPES:
+            if name in aria_actions.CHAT_ACTION_TYPES:
                 # D18: a spoken action becomes the NS-B10 card on screen. It
                 # is approved by a tap, never by a spoken yes.
                 proposed = await asyncio.to_thread(

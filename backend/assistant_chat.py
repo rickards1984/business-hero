@@ -24,7 +24,7 @@ async def _execute_tool_async(tool_name: str, arguments: dict, business_id: str,
     # never executed here. Only a caller that says who is asking may
     # propose; anything else falls through to the NS-A1 refusal.
     from services import aria_actions
-    if tool_name in aria_actions.ACTION_TYPES and user_id:
+    if tool_name in aria_actions.CHAT_ACTION_TYPES and user_id:
         return await asyncio.to_thread(
             aria_actions.propose_from_chat, str(business_id), user_id, tool_name,
             dict(arguments or {}), owner_name=user_name, timezone=timezone)

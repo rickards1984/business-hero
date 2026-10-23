@@ -10,8 +10,8 @@
 # that nothing is left unchecked. Keep UNGUARDED_BUDGET at 0 while this says
 # FULL — the test enforces that too.
 #
-# Captured 2026-10-20 (after migration 036): 844 columns across 61 tables, covering all 41 tables
-# the backend writes. Supersedes the businesses-only bootstrap.
+# Captured 2026-10-20 (after migrations 036 and 037): 1105 columns across 78 tables, covering
+# every table the backend writes. Supersedes the businesses-only bootstrap.
 #
 # The Supabase editor exports CSV, which QUOTES any field containing a comma —
 # every numeric(p,s) and character varying(n) line. Those quotes are stripped
@@ -580,6 +580,267 @@ col   onboarding_sessions.status text null=NO def='in_progress'::text
 col   onboarding_sessions.steps_completed jsonb null=NO def='{"email_setup": false, "owner_account": false, "plan_features": false, "calendar_setup": false, "review_activate": false, "accounting_setup": false, "business_details": false, "receptionist_setup": false}'::jsonb
 col   onboarding_sessions.updated_at timestamp with time zone null=NO def=now()
 col   onboarding_sessions.wizard_data jsonb null=NO def='{}'::jsonb
+col   outreach_batch_reviews.business_id uuid null=NO def=-
+col   outreach_batch_reviews.campaign_id uuid null=NO def=-
+col   outreach_batch_reviews.campaign_version integer(32,0) null=NO def=-
+col   outreach_batch_reviews.created_at timestamp with time zone null=NO def=now()
+col   outreach_batch_reviews.eligible_count integer(32,0) null=NO def=-
+col   outreach_batch_reviews.id uuid null=NO def=gen_random_uuid()
+col   outreach_batch_reviews.mailbox_id uuid null=NO def=-
+col   outreach_batch_reviews.reviewed_at timestamp with time zone null=YES def=-
+col   outreach_batch_reviews.reviewed_by uuid null=YES def=-
+col   outreach_batch_reviews.reviewed_count integer(32,0) null=NO def=0
+col   outreach_batch_reviews.target_hash text null=NO def=-
+col   outreach_batch_reviews.template_set_hash text null=NO def=-
+col   outreach_batch_reviews.updated_at timestamp with time zone null=NO def=now()
+col   outreach_brands.business_id uuid null=NO def=-
+col   outreach_brands.created_at timestamp with time zone null=NO def=now()
+col   outreach_brands.default_mailbox_id uuid null=YES def=-
+col   outreach_brands.id uuid null=NO def=gen_random_uuid()
+col   outreach_brands.name text null=NO def=-
+col   outreach_brands.privacy_url text null=NO def=-
+col   outreach_brands.sender_identity text null=NO def=-
+col   outreach_brands.updated_at timestamp with time zone null=NO def=now()
+col   outreach_brands.version integer(32,0) null=NO def=-
+col   outreach_campaigns.brand_id uuid null=NO def=-
+col   outreach_campaigns.business_id uuid null=NO def=-
+col   outreach_campaigns.created_at timestamp with time zone null=NO def=now()
+col   outreach_campaigns.daily_cap integer(32,0) null=NO def=-
+col   outreach_campaigns.first_batch_review_id uuid null=YES def=-
+col   outreach_campaigns.id uuid null=NO def=gen_random_uuid()
+col   outreach_campaigns.mailbox_id uuid null=NO def=-
+col   outreach_campaigns.name text null=NO def=-
+col   outreach_campaigns.sequence_version integer(32,0) null=NO def=-
+col   outreach_campaigns.status text null=NO def='draft'::text
+col   outreach_campaigns.target_hash text null=NO def=-
+col   outreach_campaigns.target_rules jsonb null=NO def=-
+col   outreach_campaigns.timezone text null=NO def=-
+col   outreach_campaigns.updated_at timestamp with time zone null=NO def=now()
+col   outreach_campaigns.version integer(32,0) null=NO def=-
+col   outreach_compliance.audience_hash text null=NO def=-
+col   outreach_compliance.balancing_test text null=NO def=-
+col   outreach_compliance.brand_id uuid null=NO def=-
+col   outreach_compliance.business_id uuid null=NO def=-
+col   outreach_compliance.created_at timestamp with time zone null=NO def=now()
+col   outreach_compliance.decision text null=NO def='draft'::text
+col   outreach_compliance.id uuid null=NO def=gen_random_uuid()
+col   outreach_compliance.necessity text null=NO def=-
+col   outreach_compliance.purpose text null=NO def=-
+col   outreach_compliance.review_due_at timestamp with time zone null=NO def=-
+col   outreach_compliance.reviewed_at timestamp with time zone null=YES def=-
+col   outreach_compliance.reviewer uuid null=YES def=-
+col   outreach_compliance.safeguards text null=NO def=-
+col   outreach_compliance.sources jsonb null=NO def=-
+col   outreach_compliance.updated_at timestamp with time zone null=NO def=now()
+col   outreach_compliance.version integer(32,0) null=NO def=-
+col   outreach_daily_usage.accepted integer(32,0) null=NO def=0
+col   outreach_daily_usage.business_id uuid null=NO def=-
+col   outreach_daily_usage.created_at timestamp with time zone null=NO def=now()
+col   outreach_daily_usage.id uuid null=NO def=gen_random_uuid()
+col   outreach_daily_usage.local_date date null=NO def=-
+col   outreach_daily_usage.reserved integer(32,0) null=NO def=0
+col   outreach_daily_usage.scope_id uuid null=NO def=-
+col   outreach_daily_usage.scope_mailbox_id uuid null=YES def=-
+col   outreach_daily_usage.scope_type text null=NO def=-
+col   outreach_daily_usage.unknown integer(32,0) null=NO def=0
+col   outreach_daily_usage.updated_at timestamp with time zone null=NO def=now()
+col   outreach_dispatch_jobs.action_id uuid null=YES def=-
+col   outreach_dispatch_jobs.business_id uuid null=NO def=-
+col   outreach_dispatch_jobs.created_at timestamp with time zone null=NO def=now()
+col   outreach_dispatch_jobs.dispatch_started_at timestamp with time zone null=YES def=-
+col   outreach_dispatch_jobs.due_at timestamp with time zone null=NO def=-
+col   outreach_dispatch_jobs.enrolment_id uuid null=YES def=-
+col   outreach_dispatch_jobs.id uuid null=NO def=gen_random_uuid()
+col   outreach_dispatch_jobs.lease_owner text null=YES def=-
+col   outreach_dispatch_jobs.lease_until timestamp with time zone null=YES def=-
+col   outreach_dispatch_jobs.logical_key text null=NO def=-
+col   outreach_dispatch_jobs.message_id uuid null=NO def=-
+col   outreach_dispatch_jobs.status text null=NO def='pending'::text
+col   outreach_dispatch_jobs.step_id uuid null=YES def=-
+col   outreach_dispatch_jobs.updated_at timestamp with time zone null=NO def=now()
+col   outreach_enrolments.business_id uuid null=NO def=-
+col   outreach_enrolments.campaign_id uuid null=NO def=-
+col   outreach_enrolments.created_at timestamp with time zone null=NO def=now()
+col   outreach_enrolments.id uuid null=NO def=gen_random_uuid()
+col   outreach_enrolments.next_due_at timestamp with time zone null=YES def=-
+col   outreach_enrolments.next_step integer(32,0) null=YES def=-
+col   outreach_enrolments.prospect_id uuid null=NO def=-
+col   outreach_enrolments.sequence_version integer(32,0) null=NO def=-
+col   outreach_enrolments.state text null=NO def='pending'::text
+col   outreach_enrolments.stop_reason text null=YES def=-
+col   outreach_enrolments.takeover_at timestamp with time zone null=YES def=-
+col   outreach_enrolments.updated_at timestamp with time zone null=NO def=now()
+col   outreach_evidence.adapter_version text null=YES def=-
+col   outreach_evidence.business_id uuid null=NO def=-
+col   outreach_evidence.confidence numeric null=YES def=-
+col   outreach_evidence.created_at timestamp with time zone null=NO def=now()
+col   outreach_evidence.excerpt text null=YES def=-
+col   outreach_evidence.expires_at timestamp with time zone null=NO def=-
+col   outreach_evidence.fact_type text null=NO def=-
+col   outreach_evidence.fact_value text null=NO def=-
+col   outreach_evidence.fetched_at timestamp with time zone null=NO def=-
+col   outreach_evidence.flags jsonb null=YES def=-
+col   outreach_evidence.id uuid null=NO def=gen_random_uuid()
+col   outreach_evidence.model_config_version text null=YES def=-
+col   outreach_evidence.operation text null=NO def=-
+col   outreach_evidence.prospect_id uuid null=NO def=-
+col   outreach_evidence.provider_record_id text null=YES def=-
+col   outreach_evidence.raw_verdict text null=YES def=-
+col   outreach_evidence.scale text null=YES def=-
+col   outreach_evidence.source_type text null=NO def=-
+col   outreach_evidence.source_url text null=YES def=-
+col   outreach_evidence.updated_at timestamp with time zone null=NO def=now()
+col   outreach_evidence.verification_status text null=YES def=-
+col   outreach_evidence.verification_subject_email_key text null=YES def=-
+col   outreach_evidence.verified_at timestamp with time zone null=YES def=-
+col   outreach_mailboxes.business_id uuid null=NO def=-
+col   outreach_mailboxes.created_at timestamp with time zone null=NO def=now()
+col   outreach_mailboxes.daily_cap integer(32,0) null=NO def=-
+col   outreach_mailboxes.enabled boolean null=NO def=false
+col   outreach_mailboxes.health_checked_at timestamp with time zone null=YES def=-
+col   outreach_mailboxes.health_evidence jsonb null=NO def=-
+col   outreach_mailboxes.health_reviewed_at timestamp with time zone null=YES def=-
+col   outreach_mailboxes.health_reviewed_by uuid null=YES def=-
+col   outreach_mailboxes.health_status text null=NO def='unknown'::text
+col   outreach_mailboxes.id uuid null=NO def=gen_random_uuid()
+col   outreach_mailboxes.mailbox_id uuid null=NO def=-
+col   outreach_mailboxes.pause_reason text null=YES def=-
+col   outreach_mailboxes.sending_days integer(32,0) null=NO def=0
+col   outreach_mailboxes.updated_at timestamp with time zone null=NO def=now()
+col   outreach_mailboxes.warmup_stage integer(32,0) null=NO def=-
+col   outreach_messages.accepted_at timestamp with time zone null=YES def=-
+col   outreach_messages.action_id uuid null=YES def=-
+col   outreach_messages.authority_snapshot jsonb null=NO def=-
+col   outreach_messages.batch_review_id uuid null=YES def=-
+col   outreach_messages.body text null=NO def=-
+col   outreach_messages.business_id uuid null=NO def=-
+col   outreach_messages.campaign_id uuid null=YES def=-
+col   outreach_messages.cc_emails ARRAY null=NO def=-
+col   outreach_messages.created_at timestamp with time zone null=NO def=now()
+col   outreach_messages.direction text null=NO def=-
+col   outreach_messages.enrolment_id uuid null=YES def=-
+col   outreach_messages.id uuid null=NO def=gen_random_uuid()
+col   outreach_messages.idempotency_key text null=NO def=-
+col   outreach_messages.kind text null=NO def=-
+col   outreach_messages.mailbox_id uuid null=YES def=-
+col   outreach_messages.origin text null=NO def=-
+col   outreach_messages.outbox_id uuid null=YES def=-
+col   outreach_messages.payload_hash text null=NO def=-
+col   outreach_messages.payload_version integer(32,0) null=NO def=-
+col   outreach_messages.prospect_id uuid null=NO def=-
+col   outreach_messages.provider text null=YES def=-
+col   outreach_messages.provider_message_id text null=YES def=-
+col   outreach_messages.provider_thread_id text null=YES def=-
+col   outreach_messages.reply_target_id uuid null=YES def=-
+col   outreach_messages.retry_of uuid null=YES def=-
+col   outreach_messages.rfc_message_id text null=YES def=-
+col   outreach_messages.sequence_version integer(32,0) null=YES def=-
+col   outreach_messages.state text null=NO def='draft'::text
+col   outreach_messages.step_id uuid null=YES def=-
+col   outreach_messages.subject text null=NO def=-
+col   outreach_messages.to_emails ARRAY null=NO def=-
+col   outreach_messages.updated_at timestamp with time zone null=NO def=now()
+col   outreach_prospects.business_id uuid null=NO def=-
+col   outreach_prospects.captured_at timestamp with time zone null=NO def=-
+col   outreach_prospects.company text null=YES def=-
+col   outreach_prospects.confidence numeric null=YES def=-
+col   outreach_prospects.created_at timestamp with time zone null=NO def=now()
+col   outreach_prospects.domain text null=YES def=-
+col   outreach_prospects.eligibility text null=NO def='blocked'::text
+col   outreach_prospects.email text null=YES def=-
+col   outreach_prospects.email_key text null=YES def=-
+col   outreach_prospects.evidence_checked_at timestamp with time zone null=YES def=-
+col   outreach_prospects.first_contact_at timestamp with time zone null=YES def=-
+col   outreach_prospects.fit_score numeric null=YES def=-
+col   outreach_prospects.id uuid null=NO def=gen_random_uuid()
+col   outreach_prospects.last_contact_at timestamp with time zone null=YES def=-
+col   outreach_prospects.lawful_basis text null=YES def=-
+col   outreach_prospects.lia_id uuid null=YES def=-
+col   outreach_prospects.name text null=YES def=-
+col   outreach_prospects.notice_due_at timestamp with time zone null=YES def=-
+col   outreach_prospects.notice_provided_at timestamp with time zone null=YES def=-
+col   outreach_prospects.number text null=YES def=-
+col   outreach_prospects.owner_user_id uuid null=YES def=-
+col   outreach_prospects.retention_due_at timestamp with time zone null=NO def=-
+col   outreach_prospects.role text null=YES def=-
+col   outreach_prospects.stage text null=NO def='new'::text
+col   outreach_prospects.subscriber_type text null=NO def='unknown'::text
+col   outreach_prospects.updated_at timestamp with time zone null=NO def=now()
+col   outreach_prospects.why_now text null=YES def=-
+col   outreach_replies.business_id uuid null=NO def=-
+col   outreach_replies.category text null=YES def=-
+col   outreach_replies.classification_version integer(32,0) null=YES def=-
+col   outreach_replies.confidence numeric null=YES def=-
+col   outreach_replies.created_at timestamp with time zone null=NO def=now()
+col   outreach_replies.id uuid null=NO def=gen_random_uuid()
+col   outreach_replies.inbound_email_id uuid null=NO def=-
+col   outreach_replies.knowledge_refs jsonb null=NO def=-
+col   outreach_replies.mailbox_id uuid null=NO def=-
+col   outreach_replies.matched_message_id uuid null=YES def=-
+col   outreach_replies.owner_id uuid null=YES def=-
+col   outreach_replies.prospect_id uuid null=NO def=-
+col   outreach_replies.received_at timestamp with time zone null=NO def=-
+col   outreach_replies.resolution text null=NO def='pending'::text
+col   outreach_replies.suggested_body text null=YES def=-
+col   outreach_replies.updated_at timestamp with time zone null=NO def=now()
+col   outreach_sequence_steps.allowed_variables jsonb null=NO def=-
+col   outreach_sequence_steps.approved_at timestamp with time zone null=YES def=-
+col   outreach_sequence_steps.approved_by uuid null=YES def=-
+col   outreach_sequence_steps.business_id uuid null=NO def=-
+col   outreach_sequence_steps.campaign_id uuid null=NO def=-
+col   outreach_sequence_steps.created_at timestamp with time zone null=NO def=now()
+col   outreach_sequence_steps.delay_business_days integer(32,0) null=NO def=-
+col   outreach_sequence_steps.id uuid null=NO def=gen_random_uuid()
+col   outreach_sequence_steps.ordinal integer(32,0) null=NO def=-
+col   outreach_sequence_steps.sequence_version integer(32,0) null=NO def=-
+col   outreach_sequence_steps.template_hash text null=NO def=-
+col   outreach_sequence_steps.template_text text null=NO def=-
+col   outreach_sequence_steps.updated_at timestamp with time zone null=NO def=now()
+col   outreach_settings.business_daily_cap integer(32,0) null=NO def=20
+col   outreach_settings.business_id uuid null=NO def=-
+col   outreach_settings.created_at timestamp with time zone null=NO def=now()
+col   outreach_settings.id uuid null=NO def=gen_random_uuid()
+col   outreach_settings.owner_cc_address text null=YES def=-
+col   outreach_settings.owner_cc_default boolean null=NO def=false
+col   outreach_settings.pause_all boolean null=NO def=true
+col   outreach_settings.retention_policy_version integer(32,0) null=NO def=-
+col   outreach_settings.timezone text null=NO def='Europe/London'::text
+col   outreach_settings.updated_at timestamp with time zone null=NO def=now()
+col   outreach_suppressions.business_id uuid null=NO def=-
+col   outreach_suppressions.created_at timestamp with time zone null=NO def=now()
+col   outreach_suppressions.digest_version integer(32,0) null=NO def=-
+col   outreach_suppressions.id uuid null=NO def=gen_random_uuid()
+col   outreach_suppressions.key_digest text null=NO def=-
+col   outreach_suppressions.key_type text null=NO def=-
+col   outreach_suppressions.reason text null=NO def=-
+col   outreach_suppressions.review_at timestamp with time zone null=YES def=-
+col   outreach_suppressions.source_ref text null=YES def=-
+col   outreach_suppressions.suppressed_at timestamp with time zone null=NO def=-
+col   outreach_suppressions.updated_at timestamp with time zone null=NO def=now()
+col   outreach_unsubscribe_tokens.business_id uuid null=NO def=-
+col   outreach_unsubscribe_tokens.created_at timestamp with time zone null=NO def=now()
+col   outreach_unsubscribe_tokens.digest_version integer(32,0) null=NO def=-
+col   outreach_unsubscribe_tokens.id uuid null=NO def=gen_random_uuid()
+col   outreach_unsubscribe_tokens.issued_at timestamp with time zone null=NO def=-
+col   outreach_unsubscribe_tokens.prospect_key_digest text null=NO def=-
+col   outreach_unsubscribe_tokens.revoked_at timestamp with time zone null=YES def=-
+col   outreach_unsubscribe_tokens.token_digest text null=NO def=-
+col   outreach_unsubscribe_tokens.updated_at timestamp with time zone null=NO def=now()
+col   outreach_usage_events.business_id uuid null=NO def=-
+col   outreach_usage_events.cost numeric(18,6) null=YES def=-
+col   outreach_usage_events.created_at timestamp with time zone null=NO def=now()
+col   outreach_usage_events.currency text null=YES def=-
+col   outreach_usage_events.id uuid null=NO def=gen_random_uuid()
+col   outreach_usage_events.kind text null=NO def=-
+col   outreach_usage_events.local_send_date date null=YES def=-
+col   outreach_usage_events.mailbox_id uuid null=YES def=-
+col   outreach_usage_events.message_id uuid null=YES def=-
+col   outreach_usage_events.operation_key text null=NO def=-
+col   outreach_usage_events.period_end timestamp with time zone null=NO def=-
+col   outreach_usage_events.period_start timestamp with time zone null=NO def=-
+col   outreach_usage_events.quantity integer(32,0) null=NO def=-
+col   outreach_usage_events.state text null=NO def=-
+col   outreach_usage_events.updated_at timestamp with time zone null=NO def=now()
 col   plan_definitions.created_at timestamp with time zone null=NO def=now()
 col   plan_definitions.description text null=YES def=-
 col   plan_definitions.features jsonb null=NO def='{}'::jsonb

@@ -137,6 +137,14 @@ replay() {
   local i=0
   for f in "${ORDER[@]}"; do
     [ -f "$f" ] || { echo "missing: $f" >&2; exit 1; }
+    if [ "$f" = backend/migrations/034_invoice_customer_address.sql ]; then
+      # After historical replay, before 034–037: reconcile 006's old outbox
+      # to audits/live-schema-public.txt lines 342–354. Keep migration indices
+      # unchanged so the exact expected-errors manifest retains its meaning.
+      # No tolerated errors here: stop before later migrations on any failure.
+      docker exec -i "$CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 \
+        < scripts/rls-local-reconcile.sql || return 1
+    fi
     i=$((i+1))
     out="$(psql_in < "$f" 2>&1 || true)"
     if printf '%s' "$out" | grep -qiE 'could not connect|connection refused|server closed the connection|psql: error'; then

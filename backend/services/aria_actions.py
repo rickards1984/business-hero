@@ -31,7 +31,10 @@ from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
-ACTION_TYPES = ("send_email", "send_invoice_chase", "create_calendar_event", "create_task")
+# What Aria may raise in chat or voice. Outreach is deliberately absent: an
+# outreach card is raised only by its campaign (OUT-6), never by the model.
+CHAT_ACTION_TYPES = ("send_email", "send_invoice_chase", "create_calendar_event", "create_task")
+ACTION_TYPES = CHAT_ACTION_TYPES + ("send_outreach",)
 EXPIRY = timedelta(hours=72)
 DEFAULT_ASSISTANT_NAME = "Aria"
 
@@ -42,6 +45,7 @@ _FEATURES = {
     "send_invoice_chase": ("aria_chat", "invoicing", "email"),
     "create_calendar_event": ("aria_chat", "calendar_sync"),
     "create_task": ("aria_chat",),
+    "send_outreach": ("outreach",),  # rechecked from the database at the claim
 }
 
 # What the owner may change on a card before approving it. The sign-off is
@@ -52,6 +56,9 @@ _EDITABLE = {
     "create_calendar_event": {"title", "date", "start_time", "duration_minutes",
                               "description", "calendar_id"},
     "create_task": {"title", "description", "due_at"},
+    # Recipient, mailbox, footer, unsubscribe headers and threading are bound
+    # to the campaign and rechecked at the claim (OUT-6).
+    "send_outreach": {"subject", "body"},
 }
 
 SENT_MESSAGE = ("Shown to the owner as an approval card. Nothing has been sent or "
@@ -249,6 +256,9 @@ def _build(session, business, action_type: str, args: dict, owner_name, tz_name)
         return _chase_payload(session, business, args, owner_name)
     if action_type == "create_calendar_event":
         return _event_payload(args, tz_name)
+    if action_type == "send_outreach":
+        from services import outreach_send
+        return outreach_send.build_payload(session, business, args, owner_name=owner_name)
     return _task_payload(args)
 
 
@@ -273,6 +283,10 @@ def propose(session, business, user_id, action_type: str, args: dict, *,
     audit trail can tell it from one Aria proposed in conversation."""
     if action_type not in ACTION_TYPES:
         return {"error": f"{action_type} cannot be proposed."}
+    if action_type == "send_outreach" and (automation or raised_by):
+        # OUT-6: every outreach email is a card the owner taps. No standing
+        # permission sends one, and none raises one.
+        return {"error": "Outreach is sent only when the owner approves each email."}
     problem = _feature_problem(business, action_type)
     if problem:
         return {"error": f"This can't be done on your current plan: {problem}"}
@@ -281,6 +295,7 @@ def propose(session, business, user_id, action_type: str, args: dict, *,
     try:
         payload = _build(session, business, action_type, args, owner_name, tz_name)
     except ActionRefused as exc:
+        session.rollback()  # never leave half a proposal (an outreach token) pending
         return {"error": exc.detail}
     if automation:
         payload["automation"] = automation  # to be SENT by a standing permission
@@ -395,6 +410,8 @@ def approve(session, business, action_id: str, user_id, version: Optional[str] =
     if problem:
         session.rollback()
         raise ActionRefused(403, problem)
+    if action_type == "send_outreach":
+        return _approve_outreach(session, business, action_id, row, user_id, version)
     stored = row[2] if isinstance(row[2], str) else json.dumps(row[2])
     if version is not None and version != version_of(_loads(row[2])):
         session.rollback()
@@ -470,6 +487,77 @@ def approve(session, business, action_id: str, user_id, version: Optional[str] =
         _bookkeep_email(session, business, action_type, payload, result)
     _set(session, business, action_id, status="done", executed_at=now(), result=result)
     session.commit()
+    return _view(_scoped(session, business, action_id))
+
+
+def _is_active_owner(session, business, user_id, lock: bool = False) -> bool:
+    """An active OWNER of this business (Codex OUT-6 hook review 1, P1):
+    staff members and platform admins can see a card but never send outreach."""
+    try:
+        uuid.UUID(str(user_id))
+    except ValueError:
+        return False
+    suffix = " FOR SHARE" if lock and _is_postgres(session) else ""
+    return session.execute(text(
+        "SELECT 1 FROM business_members WHERE business_id = :b AND user_id = :u "
+        "AND role = 'owner' AND is_active = :t" + suffix),
+        {"b": str(business.id), "u": str(user_id), "t": True}).fetchone() is not None
+
+
+def _approve_outreach(session, business, action_id: str, row, user_id, version) -> dict:
+    """OUT-6 (docs/OUT-6-TICKET.md, the agreed hook). Only an active owner's
+    tap on the exact version they saw; never staff, a platform admin or a
+    standing permission. Order:
+
+      1. reply search in the campaign mailbox, outside any transaction;
+      2. ONE transaction: every eligibility recheck and reservation
+         (prepare_claim, which locks the action row last), then the
+         proposed -> executing claim; any refusal or a lost claim rolls the
+         whole of it back;
+      3. commit, then the outreach dispatcher, which settles usage, the
+         message and this card itself. Generic email sending and its
+         bookkeeping are never used.
+    """
+    from services import outreach_send
+    if not user_id or not _is_active_owner(session, business, user_id):
+        session.rollback()
+        raise ActionRefused(403, "Only the business owner can approve outreach.")
+    payload = _loads(row[2])
+    if not version or version != version_of(payload):
+        session.rollback()
+        raise ActionRefused(409, CHANGED)
+    if payload.get("automation") or payload.get("authority_snapshot") or payload.get("raised_by"):
+        session.rollback()
+        raise ActionRefused(403, "Outreach is sent only when the owner approves it.")
+    if row[3] != "proposed" or _is_expired(row[4]):
+        _refuse_unclaimable(session, business, row)
+    stored = row[2] if isinstance(row[2], str) else json.dumps(row[2])
+    session.rollback()  # no transaction or pending write may span the search
+    outreach_send.search_before_claim(session, business, action_id=str(action_id), payload=payload)
+    try:
+        moment = outreach_send.now()
+        outreach_send.prepare_claim(session, business, action_id=str(action_id), payload=payload,
+                                    user_id=str(user_id), version=version, moment=moment)
+        # Again inside the claim, holding the membership row until commit, so
+        # ownership removed during the search stops it.
+        if not _is_active_owner(session, business, user_id, lock=True):
+            raise ActionRefused(403, "Only the business owner can approve outreach.")
+        seen = "CAST(:seen AS jsonb)" if _is_postgres(session) else ":seen"
+        claimed = session.execute(text(
+            "UPDATE aria_actions SET status = 'executing', approved_by = :user_id, "
+            "approved_at = :now, updated_at = :now "
+            "WHERE id = :id AND business_id = :business_id AND status = 'proposed' "
+            f"AND expires_at > :now AND payload = {seen} RETURNING id"),
+            {"id": str(action_id), "business_id": str(business.id), "user_id": str(user_id),
+             "now": moment, "seen": stored}).fetchone()
+        if claimed is None:
+            raise ActionRefused(409, CHANGED)
+        session.commit()  # claim + reservations durable before anything is sent
+    except Exception:
+        session.rollback()
+        session.info.get("outreach_dispatch", {}).pop(str(action_id), None)
+        raise
+    outreach_send.dispatch(session, business, action_id=str(action_id), payload=payload)
     return _view(_scoped(session, business, action_id))
 
 
@@ -568,6 +656,16 @@ def edit(session, business, action_id: str, changes: dict) -> dict:
         if not subject or not body:
             raise ActionRefused(422, "A chase needs a subject and a body.")
         new_payload = {**payload, "subject": subject, "body": body}
+    elif action_type == "send_outreach":
+        # Never rebuilt: a rebuild would mint a new unsubscribe link and
+        # rebind the recipient. Only the words change; the claim rechecks.
+        subject = str(merged.get("subject") or "").strip()
+        body = str(merged.get("body") or "").strip()
+        if not subject or "\r" in subject or "\n" in subject or len(subject) > 998:
+            raise ActionRefused(422, "An outreach email needs a one-line subject.")
+        if not body or len(body) > 20000:
+            raise ActionRefused(422, "An outreach email needs a body (at most 20,000 characters).")
+        new_payload = {**payload, "subject": subject, "body": body}
     else:
         new_payload = _build(session, business, action_type, merged, None, tz_name)
         if "sign_off" in payload:
@@ -613,6 +711,8 @@ def propose_from_chat(business_id: str, user_id, action_type: str, args: dict, *
                       owner_name: Optional[str] = None,
                       timezone: Optional[str] = None) -> dict:
     """The chat boundary: what the model's tool call becomes."""
+    if action_type not in CHAT_ACTION_TYPES:
+        return {"error": f"{action_type} cannot be proposed from chat."}
     from db import get_session_context
     with get_session_context() as session:
         business = load_business(session, business_id)

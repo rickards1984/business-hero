@@ -49,3 +49,12 @@ support_articles,support_articles_admin_write,ALL,{authenticated},is_platform_ad
 support_articles,support_articles_member_read,SELECT,{authenticated},((is_published = true) OR is_platform_admin(auth.uid())),null
 support_articles,support_articles_public_read,SELECT,{anon},(is_published = true),null
 usage_meters,usage_meters_member_read,SELECT,{authenticated},"(is_business_member(auth.uid(), business_id) OR is_platform_admin(auth.uid()))",null
+# OUT-3 / 037, 19 Oct 2026: six member-only SELECT policies, derived offline
+# from 037_outreach_core.sql; NOT a live capture. Claude must verify exact
+# pg_policies renderings on replay before independent approval. No admin bypass.
+outreach_brands,outreach_brands_member_read,SELECT,{authenticated},"is_business_member(auth.uid(), business_id)",null
+outreach_campaigns,outreach_campaigns_member_read,SELECT,{authenticated},"is_business_member(auth.uid(), business_id)",null
+outreach_prospects,outreach_prospects_member_read,SELECT,{authenticated},"is_business_member(auth.uid(), business_id)",null
+outreach_evidence,outreach_evidence_member_read,SELECT,{authenticated},"is_business_member(auth.uid(), business_id)",null
+outreach_compliance,outreach_compliance_member_read,SELECT,{authenticated},"is_business_member(auth.uid(), business_id)",null
+outreach_replies,outreach_replies_member_read,SELECT,{authenticated},"is_business_member(auth.uid(), business_id)",null
