@@ -114,3 +114,171 @@ No new product decision is needed to finish Stage A; the defaults are already ag
 ### Mike's approval — 23 October 2026
 
 The Stage A tests are approved, including the change that moves the search outside the locked transaction. Stage B is authorised: Codex builds `outreach_send`; Claude builds the shared hook.
+
+### Stage B builder handoff — 23 October 2026
+
+**Status:** implemented locally for Claude's review; shared-hook integration,
+PostgreSQL verification and production adapters remain gates. Mike's approval
+above authorises this implementation. No commit, push, network, real send or
+production SQL. Only the four permitted files changed; existing `data.db` is
+untouched. Serves P4, P8, P9 and P2/correctness.
+
+**Implemented:** `backend/services/outreach_send.py` supplies `build_payload`,
+`search_before_claim`, `prepare_claim`, `dispatch`, and `unsubscribe`.
+`backend/services/metering.py` adds outreach-only reservation/settlement helpers.
+No change to `aria_actions.py`, provider files, schema, API routes or read tools.
+
+**Exact integration contract for Claude:**
+
+```python
+payload = outreach_send.build_payload(session, business, args, owner_name=owner_name)
+# Persist the payload and card together, then commit, as for other proposals.
+# On approval, first validate authenticated owner, scoped proposed card, exact
+# version and expiry. Do not regenerate payload or permit automation.
+search_at = outreach_send.search_before_claim(
+    session, business, action_id=action_id, payload=payload)
+# Same Session, new transaction; search_at is audit information, not authority.
+outreach_send.prepare_claim(
+    session, business, action_id=action_id, payload=payload,
+    user_id=user_id, version=version, moment=outreach_send.now())
+# Conditional proposed -> executing claim, including tenant/payload/expiry.
+# On ANY exception or lost CAS: rollback all reservations. Otherwise commit.
+result = outreach_send.dispatch(
+    session, business, action_id=action_id, payload=payload)
+```
+
+`search_before_claim` ends its preliminary read transaction before provider
+I/O. It must not be called with pending application writes. It invokes AUTO-2
+`search_from`, requires a complete list, then AUTO-2 `_store` commits the inbox
+observations outside the claim transaction. Search errors fail closed. A
+same-session receipt binds action ID, exact payload hash, search start and
+lower time bound; it expires after two minutes. Claim consumes it and rechecks
+stored inbox messages and outreach replies, including those inserted after
+search. `prepare_claim` never calls providers, commits, rolls back or opens
+another session. It returns None. Dispatch must immediately follow the claim
+commit on the same Session **without starting another transaction first**.
+It consumes a one-use in-memory permit and durably fences the job before I/O.
+A restarted process cannot obtain that permit: unresolved durable claims hold
+capacity and are conservatively unknown, never retry candidates.
+
+`dispatch` owns its settlement transaction and returns `status` (done, failed,
+executing), `outcome`, `search_at`, and `dispatch_at`. Claude must bypass generic
+email dispatch/bookkeeping and generic success/failure finalisation for this
+result. Unknown is executing, even after a transport exception or projection
+failure. The dispatcher stores action result, message/provider references,
+mailbox-attributed outbox and metering together. No provider ID still counts
+as acceptance, but cannot support a threaded follow-up. Meter settlement is
+idempotent and allows unknown -> terminal reconciliation, in the original UK
+month/day; reconciliation must also update message/job/action projections in
+its transaction, not call the dispatcher again.
+
+**Lock order:** shared `business_settings` then `outreach_settings`; current
+business entitlement row; shared monthly metering advisory/row locks; business
+then mailbox daily rows; account/mailbox state; prospect/enrolment;
+campaign/step/brand; compliance/evidence; action last. All reads carry tenant
+predicates. Settlement takes the shared settings lock before meter/daily and
+mailbox state; unsubscribe takes the same settings lock before token/contact
+and pending actions. Claude must coordinate pause/settings/suppression writers
+on this order. The business-wide lock serialises operation uniqueness and
+shared capacity, including absent daily rows; database unique constraints
+remain the backstop. No lease expiry releases capacity or authorises replay.
+
+**Meter decisions:** `usage_meters.outreach_emails_sent` is accepted usage;
+`outreach_emails_reserved` holds reserved + unknown usage. Their sum may not
+exceed 500; no overage or separate monthly aggregate. Events freeze their UK
+period and local date, identify one logical operation, and settle exactly
+once. Business and mailbox daily aggregates include accepted/reserved/unknown;
+campaign cap checks events joined to its messages. Five accepted sending days
+promote stage 5 to 10; another five and explicit owner health review are needed
+for 20. Unknown never advances warm-up. Lower configured caps continue to win.
+Health evidence may include a lower `provider_daily_cap`; otherwise the pilot
+ceiling is 20, not a claim about a provider's externally verified quota.
+
+**Configuration/representation:** approved templates use the packet's exact
+version-1 JSON text envelope; stored-byte SHA-256 is rechecked. No rendering or
+model call is added. Template/UI ownership must use this same representation.
+`OUTREACH_SUPPRESSION_SECRET` must be at least 32 characters and shared with
+address verification/import writers: v1 HMAC-SHA256 over
+`v1:{business_id}:{kind}:{normalised_value}`. Current prospect email_key must
+match the exact address; old verification cannot follow an edited address.
+Key rotation/multi-version migration is not activated by this change.
+`OUTREACH_UNSUBSCRIBE_BASE_URL` must be HTTPS and point to the future public
+handler. Neither setting has a production default. Tokens have 256 random
+bits; only SHA-256 and recipient binding enter the token table. GET confirms
+without mutation; POST derives tenant from the token, checks revocation under
+lock, suppresses once and cancels pending cards/jobs for the recipient. Cards use the existing `dismissed`
+status (with an unsubscribe reason); pending jobs use `cancelled`. The local
+fixture now enforces 035's action status CHECK as well.
+
+Existing Gmail/Graph providers **do not implement `send_outreach`**. Search
+preflight refuses adapters without that method before any reservation. The
+service uses the packet's adapter envelope; it does not silently call
+`send_email`. Production wire adapters, public endpoint wiring, OUT-4 usage
+projections, retention activation and live delivery remain outside these four
+allowed files. This is not an end-to-end send feature or activation approval.
+
+**Test changes, with assertions preserved:** the former module-absence xfail
+is removed. A thin local transaction seam persists a real payload, calls
+search, then the real claim, conditional action update/commit and dispatcher;
+it never replaces eligibility, reservation, settlement or transport logic.
+All existing assertions remain. Search-order cases now exercised through that
+seam are:
+
+- `test_reply_search_at_approval_blocks_even_unclassified_reply`
+- `test_complete_search_failure_is_not_an_empty_inbox`
+- `test_disconnected_campaign_mailbox_never_falls_back`
+- `test_followup_searches_since_actual_predecessor_and_preserves_thread`
+- `test_claim_hook_reservations_roll_back_if_hook_fails`
+
+The entitlement-revocation case now changes the database record rather than
+only mutating the caller's object, proving the fresh database gate. Fixture
+recipient digest now uses the real v1 synthetic HMAC, and the fixture includes
+business entitlement and AUTO-2 inbox tables. No assertion was weakened.
+Added direct tests cover the database-only claim/no commit/no rollback,
+reply arriving after search, missing search receipt, all-reservation rollback,
+duplicate logical cards, crash/restart refusal, original-month reconciliation
+twice, projection failure after acceptance, changed-address verification,
+self-mail exclusion, revoked tokens, missing adapters, window crossing, both
+follow-up delays, warm-up progression and unclaimed-card cancellation.
+
+**Still strict-xfailed, reason exactly `awaits Claude's aria_actions hook`:**
+
+- `test_version_is_mandatory` (None, empty, wrong-version: 3 cases)
+- `test_edited_card_invalidates_old_approval`
+- `test_expired_card`
+- `test_no_null_owner_even_with_forged_standing_permission`
+- `test_double_approval_during_transport_and_after_completion`
+
+These seven cases keep the real `aria_actions` path. Only absent outreach
+registration raises `MissingSharedHook`; once registered, implementation or
+assertion failures are real failures and passing cases become strict XPASS
+until Claude removes the marks. Other cases explicitly test the service seam,
+not the absent shared hook.
+
+**Claude's PostgreSQL verification:** run genuine two-session last-slot races
+for monthly/business/mailbox/campaign caps; duplicate-card/operation races;
+lost action CAS and hook-exception rollback of messages/jobs/events/meters;
+concurrent pause/suppression/token revocation versus claim; lock order and
+missing-row insertion; native UUID/text-array/JSONB/timestamptz binding and
+037 composite FKs/version triggers. Verify midnight/month/DST reservation and
+unknown settlement, accepted-day promotion across restarts and multiple
+messages on one day, crash after claim/before transport/after acceptance, and
+projection/settlement failure without replay. SQLite does not establish these
+properties on PostgreSQL. Shared owner/API authorisation and unchanged AUTO
+behaviour need Claude's hook regression tests. Provider wire fixtures must
+still establish Gmail MIME/threadId and Graph reply/draft/header behaviour.
+
+**Mike's behaviour check:** no new screen or live-send test is available in
+this worktree. After hook, adapters and pilot approval, use the previously
+specified campaign-card From/To/copy -> approve once -> history/usage path,
+and opt out before approving another card. No real email has been sent here.
+
+**Stage B completion evidence:** final `PYTHONDONTWRITEBYTECODE=1 ./check.sh`
+exited 0: **4 passed, 0 failed, 1 skipped** (no eslint script). TypeScript,
+Python compilation and Ruff passed. Backend: **2,692 passed, 251 skipped,
+7 xfailed, 220 subtests passed**. Targeted OUT-6: **75 passed, 7 xfailed**.
+The added current-card-hash tests also reject subject CRLF and arbitrary
+headers; claim checks the allowlisted unsubscribe headers and stored token
+binding. `git diff --check` passed. The only untracked files are the new
+permitted service and the pre-existing `data.db`. No integration, PostgreSQL,
+provider-wire, visual or live-send verification is claimed by this result.

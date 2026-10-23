@@ -1,11 +1,12 @@
-"""OUT-6 Stage A: proposed service seams; real aria_actions entrypoints.
+"""OUT-6 service contract through a local transaction seam.
 
-Only absence of services.outreach_send is expected to fail. SQLite mirrors
-037 column names, not PostgreSQL locks/RLS/triggers. All identities synthetic.
+Only Claude-owned integration cases await the real aria_actions hook. SQLite
+mirrors 037 columns and the action status CHECK, not PostgreSQL locks/RLS/FKs.
+All identities and providers are synthetic; sockets are forbidden.
 """
 import hashlib
+import hmac
 import importlib
-import importlib.util
 import json
 import re
 import socket
@@ -19,14 +20,12 @@ from sqlalchemy import create_engine, text
 from sqlmodel import Session
 
 
-class MissingOutreachSend(AssertionError):
-    """The sole permitted Stage A expected failure."""
+class MissingSharedHook(AssertionError):
+    """Only the absent Claude-owned registration is expected to fail."""
 
 
-pytestmark = pytest.mark.xfail(
-    raises=MissingOutreachSend, strict=True,
-    reason="Stage A: services.outreach_send does not exist",
-)
+HOOK = pytest.mark.xfail(strict=True, raises=MissingSharedHook,
+                         reason="awaits Claude's aria_actions hook")
 NOW = datetime(2026, 10, 23, 11, tzinfo=timezone.utc)
 LAST = NOW - timedelta(days=10)
 STAMP = NOW.isoformat()
@@ -41,7 +40,7 @@ BOX, DEFAULT, FOREIGN = uid('box'), uid('default'), uid('foreign')
 PROSPECT, CAMPAIGN, STEP, ENROLMENT, BRAND, LIA = map(
     uid, ('prospect', 'campaign', 'step', 'enrolment', 'brand', 'lia'))
 EMAIL = 'person@example.invalid'
-KEY = 'synthetic-tenant-email-digest'
+KEY = hmac.new(('synthetic-key-' * 4).encode(), f'v1:{A}:email:{EMAIL}'.encode(), hashlib.sha256).hexdigest()
 
 
 def insert(session, table, **values):
@@ -76,8 +75,10 @@ def database(tmp_path):
                     cols.append(f'{col} {affinity}' + (' PRIMARY KEY' if col == 'id' else ''))
             s.execute(text(f"CREATE TABLE {name} ({','.join(cols)})"))
         for ddl in (
-            'CREATE TABLE aria_actions (id TEXT PRIMARY KEY, business_id TEXT, proposed_by TEXT, action_type TEXT, payload TEXT, status TEXT, expires_at TIMESTAMP, error TEXT, result TEXT, created_at TIMESTAMP, updated_at TIMESTAMP, approved_by TEXT, approved_at TIMESTAMP, executed_at TIMESTAMP)',
+            'CREATE TABLE businesses (id TEXT PRIMARY KEY, plan_tier TEXT, feature_flags TEXT, subscription_status TEXT, is_active BOOLEAN, trial_ends_at TIMESTAMP)',
+            'CREATE TABLE aria_actions (id TEXT PRIMARY KEY, business_id TEXT, proposed_by TEXT, action_type TEXT, payload TEXT, status TEXT CHECK (status IN ("proposed","executing","done","failed","dismissed","expired")), expires_at TIMESTAMP, error TEXT, result TEXT, created_at TIMESTAMP, updated_at TIMESTAMP, approved_by TEXT, approved_at TIMESTAMP, executed_at TIMESTAMP)',
             'CREATE TABLE email_accounts (id TEXT PRIMARY KEY, business_id TEXT, user_id TEXT, provider TEXT, email_address TEXT, display_name TEXT, capabilities TEXT, is_default BOOLEAN, token_ciphertext TEXT, refresh_token_ciphertext TEXT, token_expires_at TEXT, smtp_config TEXT, created_at TEXT, updated_at TEXT)',
+            'CREATE TABLE email_messages (id TEXT PRIMARY KEY, business_id TEXT, email_account_id TEXT, provider_message_id TEXT, provider_thread_id TEXT, folder TEXT, from_email TEXT, from_name TEXT, subject TEXT, snippet TEXT, body_text TEXT, received_at TIMESTAMP, created_at TIMESTAMP, updated_at TIMESTAMP)',
             'CREATE TABLE email_outbox (id TEXT PRIMARY KEY, business_id TEXT, email_account_id TEXT, invoice_id TEXT, chase_stage INTEGER, to_emails TEXT, subject TEXT, body_preview TEXT, provider_message_id TEXT, status TEXT, error TEXT, sent_at TEXT, created_at TEXT)',
             'CREATE TABLE usage_meters (business_id TEXT, meter TEXT, period TEXT, value NUMERIC, updated_at TEXT, UNIQUE(business_id,meter,period))',
             'CREATE TABLE business_settings (business_id TEXT PRIMARY KEY, settings TEXT)',
@@ -136,6 +137,7 @@ def database(tmp_path):
             campaign_id=uid('foreign-campaign'), sequence_version=1, ordinal=0,
             delay_business_days=0, template_text='FOREIGN SECRET', template_hash='foreign',
             allowed_variables='[]', approved_by=uid('foreign-owner'), approved_at=STAMP)
+        insert(s, 'businesses', id=A, plan_tier='business', feature_flags='{}', subscription_status='active', is_active=True)
         insert(s, 'business_settings', business_id=A, settings='{}')
         s.commit()
     yield engine
@@ -143,14 +145,14 @@ def database(tmp_path):
 
 
 @pytest.fixture
-def h(database, monkeypatch):
+def h(database, monkeypatch, request):
     def forbidden(*args, **kwargs):
         raise AssertionError('OUT-6 tests must never use network or generic email sender')
 
     monkeypatch.setattr(socket.socket, 'connect', forbidden)
     monkeypatch.setattr(socket, 'create_connection', forbidden)
-    if importlib.util.find_spec('services.outreach_send') is None:
-        raise MissingOutreachSend('backend/services/outreach_send.py is absent')
+    monkeypatch.setenv('OUTREACH_SUPPRESSION_SECRET', 'synthetic-key-' * 4)
+    monkeypatch.setenv('OUTREACH_UNSUBSCRIBE_BASE_URL', 'https://example.invalid/unsubscribe')
     module = importlib.import_module('services.outreach_send')
     from services import aria_actions as actions
     import assistant_tools
@@ -164,7 +166,55 @@ def h(database, monkeypatch):
     # Proposed seam, no replacement of builder/claim/metering/eligibility code.
     monkeypatch.setattr(module, 'get_provider_for_account', lambda account: fake)
     with Session(database) as session:
-        yield SimpleNamespace(s=session, engine=database, m=module, a=actions, b=business, p=fake)
+        api = LocalActions(module, actions)
+        if request.node.get_closest_marker('xfail'):
+            if 'send_outreach' not in actions.ACTION_TYPES:
+                raise MissingSharedHook('shared registration absent')
+            api = actions
+        yield SimpleNamespace(s=session, engine=database, m=module, a=api, b=business, p=fake)
+
+
+class LocalActions:
+    """Test-only transaction seam; never installed in production aria_actions.
+
+    Exercises real builder/search/claim/dispatcher. Shared-hook-specific tests
+    below still use real aria_actions and strictly await Claude's registration.
+    """
+    def __init__(self, module, actions):
+        self.module, self.actions = module, actions
+        self.ActionRefused = actions.ActionRefused
+        self.version_of = actions.version_of
+        self.now = actions.now
+
+    def propose(self, session, business, user_id, action_type, args, **kwargs):
+        try:
+            payload = self.module.build_payload(session, business, args, kwargs.get('owner_name'))
+        except self.ActionRefused as exc:
+            session.rollback()
+            return {'error': exc.detail}
+        aid = str(uuid.uuid4())
+        insert(session, 'aria_actions', id=aid, business_id=str(business.id),
+               proposed_by=user_id, action_type=action_type, payload=json.dumps(payload),
+               status='proposed', expires_at=payload['expires_at'], created_at=self.module.now())
+        session.commit()
+        return {'proposal': {'id': aid, 'preview': payload, 'version': self.version_of(payload)}}
+
+    def approve(self, session, business, action_id, user_id, version=None):
+        try:
+            row = self.module.one(session, 'aria_actions', business.id, action_id)
+            payload = json.loads(row['payload'])
+            self.module.require(row['status'] == 'proposed' and user_id and version == self.version_of(payload))
+            self.module.search_before_claim(session, business, action_id=action_id, payload=payload)
+            self.module.prepare_claim(session, business, action_id=action_id, payload=payload,
+                                      user_id=user_id, version=version, moment=self.module.now())
+            changed = session.execute(text("UPDATE aria_actions SET status='executing' WHERE id=:id AND business_id=:b AND status='proposed' AND payload=:p"),
+                                      {'id': action_id, 'b': str(business.id), 'p': row['payload']})
+            self.module.require(changed.rowcount == 1)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        return self.module.dispatch(session, business, action_id=action_id, payload=payload)
 
 
 class FakeProvider:
@@ -326,10 +376,12 @@ def test_complete_search_failure_is_not_an_empty_inbox(h):
 
 
 @pytest.mark.parametrize('version', [None, '', 'wrong-version'])
+@HOOK
 def test_version_is_mandatory(h, version):
     refused(h, propose(h), version=version)
 
 
+@HOOK
 def test_edited_card_invalidates_old_approval(h):
     card = propose(h)
     updated = h.a.edit(h.s, h.b, card['id'], {'body': 'Owner edited copy'})
@@ -337,12 +389,14 @@ def test_edited_card_invalidates_old_approval(h):
     refused(h, card)
 
 
+@HOOK
 def test_expired_card(h):
     card = propose(h)
     change(h, 'aria_actions', expires_at=LAST)
     refused(h, card)
 
 
+@HOOK
 def test_no_null_owner_even_with_forged_standing_permission(h):
     card = propose(h)
     payload = dict(card['preview'], automation='outreach_sequence', authority_snapshot={'enabled': True})
@@ -353,7 +407,8 @@ def test_no_null_owner_even_with_forged_standing_permission(h):
 
 def test_entitlement_revoked_after_proposal(h):
     card = propose(h)
-    h.b.feature_flags = {'outreach': False}
+    h.s.execute(text('UPDATE businesses SET feature_flags=:flags WHERE id=:b'), {'flags': json.dumps({'outreach': False}), 'b': A})
+    h.s.commit()
     refused(h, card)
 
 
@@ -394,6 +449,7 @@ def test_uk_weekday_window_and_dst(h, monkeypatch, moment, allowed):
         refused(h, card)
 
 
+@HOOK
 def test_double_approval_during_transport_and_after_completion(h):
     card = propose(h)
     def second_tap():
@@ -564,4 +620,195 @@ def test_warmup_twenty_requires_owner_health_review(h):
     card = propose(h)
     change(h, 'outreach_mailboxes', warmup_stage=20, daily_cap=20, sending_days=10,
            health_reviewed_by=None, health_reviewed_at=None)
+    refused(h, card)
+
+
+def presearch(h, card):
+    return h.m.search_before_claim(h.s, h.b, action_id=card['id'], payload=card['preview'])
+
+
+def claim(h, card):
+    h.m.prepare_claim(h.s, h.b, action_id=card['id'], payload=card['preview'],
+                      user_id=OWNER, version=card['version'], moment=h.m.now())
+
+
+def test_reply_stored_after_search_is_rechecked_under_claim_locks(h):
+    card = propose(h)
+    presearch(h, card)
+    insert(h.s, 'email_messages', id=uid('late-reply'), business_id=A, email_account_id=BOX,
+           from_email=EMAIL, received_at=NOW, provider_message_id='late-reply')
+    h.s.commit()
+    with pytest.raises(h.a.ActionRefused, match='replied'):
+        claim(h, card)
+    h.s.rollback()
+    assert len(h.p.searches) == 1 and not h.p.sends
+    assert h.s.execute(text('SELECT count(*) FROM outreach_usage_events')).scalar() == 0
+
+
+def test_claim_is_database_only_and_caller_rollback_removes_every_hold(h, monkeypatch):
+    card = propose(h)
+    presearch(h, card)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('claim must not commit, rollback or access provider')
+    with monkeypatch.context() as patch:
+        patch.setattr(h.m, 'get_provider_for_account', forbidden)
+        patch.setattr(h.s, 'commit', forbidden)
+        patch.setattr(h.s, 'rollback', forbidden)
+        claim(h, card)
+        assert h.s.execute(text("SELECT value FROM usage_meters WHERE meter='outreach_emails_reserved'")).scalar() == 1
+    h.s.rollback()
+    for table in ('outreach_messages', 'outreach_usage_events', 'outreach_dispatch_jobs', 'outreach_daily_usage', 'usage_meters'):
+        assert h.s.execute(text(f'SELECT count(*) FROM {table}')).scalar() == 0
+    assert not h.p.sends
+
+
+def test_claim_without_fresh_search_receipt_fails_closed(h):
+    card = propose(h)
+    with pytest.raises(h.a.ActionRefused, match='search required'):
+        claim(h, card)
+    assert not h.p.sends and not h.p.searches
+
+
+def test_duplicate_logical_cards_cannot_reserve_twice(h):
+    first, second = propose(h), propose(h)
+    assert first['preview']['idempotency_key'] == second['preview']['idempotency_key']
+    assert approve(h, first)['status'] == 'done'
+    with pytest.raises(h.a.ActionRefused):
+        approve(h, second)
+    assert len(h.p.sends) == 1
+    assert h.s.execute(text('SELECT count(*) FROM outreach_usage_events')).scalar() == 1
+
+
+def test_crashed_claim_cannot_be_dispatched_by_restarted_session(h):
+    card = propose(h)
+    presearch(h, card)
+    claim(h, card)
+    change(h, 'aria_actions', status='executing')
+    with Session(h.engine) as fresh:
+        with pytest.raises(h.a.ActionRefused, match='dispatch authority'):
+            h.m.dispatch(fresh, h.b, action_id=card['id'], payload=card['preview'])
+    assert not h.p.sends
+    assert h.s.execute(text("SELECT value FROM usage_meters WHERE meter='outreach_emails_reserved'")).scalar() == 1
+
+
+def test_unknown_reconciliation_twice_uses_original_month_and_day(h, monkeypatch):
+    from services import metering
+    card = propose(h)
+    h.p.outcome = 'unknown'
+    approve(h, card)
+    future = datetime(2026, 11, 2, 11, tzinfo=timezone.utc)
+    monkeypatch.setattr(h.m, 'now', lambda: future)
+    for _ in range(2):
+        metering.settle_outreach_usage(h.s, h.b, operation_key=card['preview']['idempotency_key'],
+                                      outcome='accepted', evidence={'accepted_at': STAMP})
+        h.s.commit()
+    assert h.s.execute(text("SELECT period,value FROM usage_meters WHERE meter='outreach_emails_sent'")).all() == [('2026-10', 1)]
+    assert h.s.execute(text("SELECT value FROM usage_meters WHERE meter='outreach_emails_reserved'")).scalar() == 0
+    assert h.s.execute(text("SELECT local_date,accepted,unknown FROM outreach_daily_usage WHERE scope_type='business'")).all() == [('2026-10-23', 1, 0)]
+    assert h.s.execute(text('SELECT sending_days FROM outreach_mailboxes')).scalar() == 1
+    assert len(h.p.sends) == 1
+
+
+def test_acceptance_projection_failure_holds_unknown_without_retry(h, monkeypatch):
+    card = propose(h)
+    original = h.s.execute
+    def fail_projection(statement, *args, **kwargs):
+        if str(statement).startswith('INSERT INTO email_outbox'):
+            raise RuntimeError('synthetic projection failure')
+        return original(statement, *args, **kwargs)
+    monkeypatch.setattr(h.s, 'execute', fail_projection)
+    assert approve(h, card)['status'] == 'executing'
+    assert h.s.execute(text('SELECT state FROM outreach_usage_events')).scalar() == 'unknown'
+    assert h.s.execute(text("SELECT value FROM usage_meters WHERE meter='outreach_emails_sent'")).scalar() == 0
+    assert h.s.execute(text("SELECT value FROM usage_meters WHERE meter='outreach_emails_reserved'")).scalar() == 1
+    with pytest.raises(h.a.ActionRefused):
+        approve(h, card)
+    assert len(h.p.sends) == 1
+
+
+def test_exact_address_digest_cannot_be_replaced_by_old_verification(h):
+    card = propose(h)
+    change(h, 'outreach_prospects', email='replacement@example.invalid')
+    # Even a fresh proposal cannot turn evidence about the old email into valid evidence.
+    replacement = propose(h)
+    assert replacement['version'] != card['version']
+    refused(h, replacement)
+
+
+def test_self_mail_does_not_block_but_is_stored_by_auto2(h):
+    card = propose(h)
+    h.p.replies = [SimpleNamespace(provider_message_id='self', provider_thread_id=None,
+                                  from_email=f'{BOX}@example.invalid', received_at=NOW, body_text=None)]
+    assert approve(h, card)['status'] == 'done'
+    assert h.s.execute(text('SELECT count(*) FROM email_messages')).scalar() == 1
+
+
+def test_revoked_unsubscribe_token_cannot_mutate(h):
+    card = propose(h)
+    token = card['preview']['headers']['List-Unsubscribe'].strip('<>').rsplit('/', 1)[-1]
+    change(h, 'outreach_unsubscribe_tokens', revoked_at=STAMP)
+    with pytest.raises(h.a.ActionRefused):
+        h.m.unsubscribe(h.s, token=token, method='POST')
+    assert h.s.execute(text('SELECT count(*) FROM outreach_suppressions')).scalar() == 0
+
+
+def test_missing_outreach_adapter_refuses_before_reserving(h, monkeypatch):
+    card = propose(h)
+    monkeypatch.setattr(h.m, 'get_provider_for_account', lambda account: SimpleNamespace(search_from=h.p.search_from))
+    refused(h, card)
+    assert not h.p.searches
+
+
+def test_search_crossing_sending_window_refuses(h, monkeypatch):
+    card = propose(h)
+    def search(**kwargs):
+        monkeypatch.setattr(h.m, 'now', lambda: datetime(2026, 10, 23, 16, tzinfo=timezone.utc))
+        return []
+    monkeypatch.setattr(h.p, 'search_from', search)
+    refused(h, card)
+
+
+@pytest.mark.parametrize('ordinal,delay,age,allowed', [(1, 5, 7, True), (2, 7, 7, False), (2, 7, 11, True)])
+def test_both_followup_business_day_delays(h, ordinal, delay, age, allowed):
+    predecessor(h, accepted_at=NOW - timedelta(days=age))
+    change(h, 'outreach_sequence_steps', ordinal=ordinal, delay_business_days=delay)
+    change(h, 'outreach_enrolments', next_step=ordinal)
+    card = propose(h)
+    if allowed:
+        assert approve(h, card)['status'] == 'done'
+    else:
+        refused(h, card)
+
+
+def test_fifth_accepted_day_promotes_ten_but_unknown_does_not(h):
+    change(h, 'outreach_mailboxes', sending_days=4)
+    h.p.outcome = 'unknown'
+    card = propose(h)
+    approve(h, card)
+    assert h.s.execute(text('SELECT sending_days,warmup_stage FROM outreach_mailboxes')).one() == (4, 5)
+    from services import metering
+    metering.settle_outreach_usage(h.s, h.b, operation_key=card['preview']['idempotency_key'],
+                                  outcome='accepted', evidence={})
+    h.s.commit()
+    assert h.s.execute(text('SELECT sending_days,warmup_stage FROM outreach_mailboxes')).one() == (5, 10)
+
+
+def test_unsubscribe_cancels_all_unclaimed_cards_for_same_tenant_prospect(h):
+    cards = [propose(h), propose(h)]
+    token = cards[0]['preview']['headers']['List-Unsubscribe'].strip('<>').rsplit('/', 1)[-1]
+    h.m.unsubscribe(h.s, token=token, method='POST')
+    assert h.s.execute(text('SELECT status FROM aria_actions WHERE business_id=:b'), {'b': A}).scalars().all() == ['dismissed', 'dismissed']
+    assert not h.p.sends
+
+
+@pytest.mark.parametrize('part', ['subject', 'headers'])
+def test_edited_header_injection_refused_even_with_current_card_hash(h, part):
+    card = propose(h)
+    payload = dict(card['preview'])
+    if part == 'subject':
+        payload['subject'] = 'Offer\r\nBcc: injected@example.invalid'
+    else:
+        payload['headers'] = dict(payload['headers'], Bcc='injected@example.invalid')
+    change(h, 'aria_actions', payload=json.dumps(payload))
+    card.update(preview=payload, version=h.a.version_of(payload))
     refused(h, card)

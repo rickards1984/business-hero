@@ -560,3 +560,132 @@ def reconcile_open_voice_sessions(session, lookup=None, stale_after_seconds: int
         session.commit()
         billed += 1
     return billed
+
+
+# OUT-6: monthly accepted and held counts both live in usage_meters. Events
+# identify operations and their frozen period; they are not a second allowance.
+OUTREACH_SENT = 'outreach_emails_sent'
+OUTREACH_HELD = 'outreach_emails_reserved'
+
+
+def lock_outreach_usage(session, business, *, moment, mailbox_id=None):
+    """Called after the shared business/settings lock, before contact locks."""
+    bid, period = str(business.id), period_for(moment)
+    _lock(session, bid, period)
+    for meter in (OUTREACH_SENT, OUTREACH_HELD):
+        session.execute(text(
+            'INSERT INTO usage_meters (business_id,meter,period,value,updated_at) '
+            'VALUES (:b,:m,:p,0,CURRENT_TIMESTAMP) ON CONFLICT (business_id,meter,period) DO NOTHING'),
+            {'b': bid, 'm': meter, 'p': period})
+        suffix = ' FOR UPDATE' if session.get_bind().dialect.name == 'postgresql' else ''
+        session.execute(text('SELECT value FROM usage_meters WHERE business_id=:b AND meter=:m AND period=:p' + suffix),
+                        {'b': bid, 'm': meter, 'p': period}).fetchone()
+
+    if mailbox_id is not None:
+        from services.outreach_send import rows, insert
+        for scope, ident in (('business', bid), ('mailbox', str(mailbox_id))):
+            params = {'s': scope, 'i': ident, 'd': moment.astimezone(LONDON).date().isoformat()}
+            found = rows(session, 'outreach_daily_usage', bid,
+                         'AND scope_type=:s AND scope_id=:i AND local_date=:d', params, True)
+            if not found:
+                insert(session, 'outreach_daily_usage', bid, scope_type=scope, scope_id=ident,
+                       local_date=params['d'], reserved=0, accepted=0, unknown=0)
+
+
+def _outreach_delta(session, bid, meter, period, amount):
+    session.execute(text('UPDATE usage_meters SET value=value+:n,updated_at=CURRENT_TIMESTAMP '
+                         'WHERE business_id=:b AND meter=:m AND period=:p'),
+                    {'b': bid, 'm': meter, 'p': period, 'n': amount})
+
+
+def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, prospect_id, message_id, moment):
+    """Reserve once; caller owns transaction, rollback and action claim."""
+    from services.outreach_send import rows, one, require, insert, loads, _parse
+    bid = str(business.id)
+    lock_outreach_usage(session, business, moment=moment)
+    period = period_for(moment)
+    require(not rows(session, 'outreach_usage_events', bid, 'AND operation_key=:k', {'k': operation_key}))
+    require(_read(session, bid, OUTREACH_SENT, period) + _read(session, bid, OUTREACH_HELD, period) < 500,
+            'Monthly outreach allowance exhausted')
+    settings = one(session, 'outreach_settings', bid, lock=True)
+    mailboxes = rows(session, 'outreach_mailboxes', bid, 'AND mailbox_id=:m', {'m': mailbox_id}, True)
+    require(len(mailboxes) == 1)
+    box = mailboxes[0]
+    local = moment.astimezone(LONDON)
+    health = loads(box['health_evidence']) or {}
+    require(box['enabled'] and not box['pause_reason'] and box['health_status'] == 'pass' and
+            _parse(box['health_checked_at']) and _parse(box['health_checked_at']) <= moment and
+            _parse(box['health_checked_at']).astimezone(LONDON).date() == local.date())
+    require(health.get('domain_control') is True and health.get('from_aligned') is True and
+            all(health.get(k) == 'pass' for k in ('spf', 'dkim', 'dmarc')))
+    days = box['sending_days'] or 0
+    stage = 5 if days < 5 else 10
+    if box['warmup_stage'] == 20:
+        require(days >= 10 and box['health_reviewed_by'] and box['health_reviewed_at'])
+        stage = 20
+    require(box['warmup_stage'] <= stage)
+    cap = min(stage, box['warmup_stage'], box['daily_cap'], int(health.get('provider_daily_cap', 20)))
+    message = one(session, 'outreach_messages', bid, message_id)
+    campaign = one(session, 'outreach_campaigns', bid, message['campaign_id'])
+    # Campaign cap also includes every held/accepted message for this UK day.
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    count = session.execute(text(
+        "SELECT count(*) FROM outreach_usage_events u JOIN outreach_messages m ON m.business_id=u.business_id AND m.id=u.message_id "
+        "WHERE u.business_id=:b AND m.campaign_id=:c AND u.local_send_date=:d AND u.state IN ('reserved','committed','unknown')"),
+        {'b': bid, 'c': campaign['id'], 'd': local.date().isoformat()}).scalar()
+    require(count < campaign['daily_cap'], 'Campaign daily capacity exhausted')
+    for scope, scope_id, limit in (('business', bid, min(20, settings['business_daily_cap'])), ('mailbox', mailbox_id, cap)):
+        usage = rows(session, 'outreach_daily_usage', bid, 'AND scope_type=:s AND scope_id=:i AND local_date=:d',
+                     {'s': scope, 'i': scope_id, 'd': local.date().isoformat()}, True)
+        if not usage:
+            ident = insert(session, 'outreach_daily_usage', bid, scope_type=scope, scope_id=scope_id,
+                           local_date=local.date().isoformat(), reserved=0, accepted=0, unknown=0)
+            usage = [one(session, 'outreach_daily_usage', bid, ident)]
+        u = usage[0]
+        require(sum(u[k] or 0 for k in ('reserved', 'accepted', 'unknown')) < limit, 'Daily outreach capacity exhausted')
+        session.execute(text('UPDATE outreach_daily_usage SET reserved=reserved+1 WHERE business_id=:b AND id=:id'), {'b': bid, 'id': u['id']})
+    month_start = start.replace(day=1)
+    month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    insert(session, 'outreach_usage_events', bid, operation_key=operation_key, kind=OUTREACH_SENT,
+           quantity=1, state='reserved', period_start=month_start.astimezone(ZoneInfo('UTC')),
+           period_end=month_end.astimezone(ZoneInfo('UTC')), mailbox_id=mailbox_id,
+           local_send_date=local.date().isoformat(), message_id=message_id)
+    _outreach_delta(session, bid, OUTREACH_HELD, period, 1)
+
+
+def settle_outreach_usage(session, business, *, operation_key, outcome, evidence):
+    """Idempotently settle in the reservation's original UK period. No commit.
+
+    Unknown remains held. Authoritative reconciliation may later resolve an
+    unknown once, but terminal events never change state or charge twice.
+    """
+    from services.outreach_send import rows, require, lock_business, _parse
+    bid = str(business.id)
+    lock_business(session, bid)
+    events = rows(session, 'outreach_usage_events', bid, 'AND operation_key=:k AND kind=:kind',
+                  {'k': operation_key, 'kind': OUTREACH_SENT})
+    require(len(events) == 1)
+    event = events[0]
+    lock_outreach_usage(session, business, moment=_parse(event['period_start']))
+    if event['state'] in ('committed', 'released'):
+        return False
+    target = {'accepted': 'committed', 'definitely_not_accepted': 'released', 'unknown': 'unknown'}[outcome]
+    if event['state'] == target:
+        return False
+    period = period_for(_parse(event['period_start']))
+    old_column = 'reserved' if event['state'] == 'reserved' else 'unknown'
+    for scope, ident in (('business', bid), ('mailbox', str(event['mailbox_id']))):
+        usage = rows(session, 'outreach_daily_usage', bid, 'AND scope_type=:s AND scope_id=:i AND local_date=:d',
+                     {'s': scope, 'i': ident, 'd': event['local_send_date']}, True)
+        require(len(usage) == 1 and usage[0][old_column] >= 1)
+        u = usage[0]
+        extra = ',accepted=accepted+1' if target == 'committed' else ',unknown=unknown+1' if target == 'unknown' else ''
+        session.execute(text(f'UPDATE outreach_daily_usage SET {old_column}={old_column}-1{extra} WHERE business_id=:b AND id=:id'), {'b': bid, 'id': u['id']})
+        if scope == 'mailbox' and target == 'committed' and u['accepted'] == 0:
+            session.execute(text('UPDATE outreach_mailboxes SET warmup_stage=CASE WHEN warmup_stage=5 AND sending_days+1>=5 THEN 10 ELSE warmup_stage END,sending_days=sending_days+1 WHERE business_id=:b AND mailbox_id=:m'), {'b': bid, 'm': ident})
+    if target != 'unknown':
+        _outreach_delta(session, bid, OUTREACH_HELD, period, -1)
+    if target == 'committed':
+        _outreach_delta(session, bid, OUTREACH_SENT, period, 1)
+    session.execute(text('UPDATE outreach_usage_events SET state=:s,updated_at=CURRENT_TIMESTAMP WHERE business_id=:b AND id=:id'), {'s': target, 'b': bid, 'id': event['id']})
+    return True
