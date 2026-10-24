@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session
@@ -15,6 +15,7 @@ import auth
 from auth import get_user_business_context
 from db import get_session
 from services import outreach_setup as setup
+from rate_limiting import limiter
 from services.aria_actions import ActionRefused
 
 router = APIRouter(prefix="/v1/outreach/setup", tags=["Outreach setup"])
@@ -161,7 +162,8 @@ def copy(campaign_id: UUID, body: Copy, context=Depends(get_user_business_contex
 
 
 @public_router.get("/p/outreach-privacy/{brand_id}", response_class=HTMLResponse)
-def public_notice(brand_id: str, session: Session = Depends(get_session)):
+@limiter.limit("60/minute")   # public and unauthenticated (Codex OUT-15 review 1)
+def public_notice(request: Request, brand_id: str, session: Session = Depends(get_session)):
     body = setup.public_privacy_notice(session, brand_id)
     if not body:
         raise HTTPException(404, "Not found")

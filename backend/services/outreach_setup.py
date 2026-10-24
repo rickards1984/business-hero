@@ -45,6 +45,7 @@ PROVIDERS = {
 }
 # Settings-document keys this ticket owns; the generic settings save keeps them.
 PRIVACY_KEY, AUDIENCE_KEY = "outreach_privacy", "outreach_audiences"
+DNS_PAUSE = "Daily check failed:"   # the only pause a DNS pass may lift
 
 
 def now() -> datetime:
@@ -194,6 +195,31 @@ def dns_txt(name: str) -> list:
     return [b"".join(r.strings).decode("utf-8", "replace") for r in answer]
 
 
+def _tags(record: str) -> dict:
+    out = {}
+    for part in record.split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k.strip().lower()] = "".join(v.split())
+    return out
+
+
+def _usable_dkim(record: str) -> bool:
+    """A published, non-revoked public key: p= is real base64 of a usable
+    length (an empty p= means the key was revoked)."""
+    import re as _re
+    tags = _tags(record)
+    if tags.get("v", "dkim1").lower() != "dkim1":
+        return False
+    key = tags.get("p", "")
+    return len(key) >= 64 and bool(_re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", key))
+
+
+def _usable_dmarc(record: str) -> bool:
+    tags = _tags(record)
+    return record.strip().lower().startswith("v=dmarc1") and tags.get("p", "").lower() in ("none", "quarantine", "reject")
+
+
 def _evaluate(account: dict, resolve: Callable) -> dict:
     """Plain DNS checks for one sending mailbox. Never raises."""
     address = _address(account["email_address"])
@@ -216,18 +242,21 @@ def _evaluate(account: dict, resolve: Callable) -> dict:
         except Exception:  # a resolver failure is a missing record, never a pass
             return []
     advice = []
-    if any(t.lower().startswith("v=spf1") and f"include:{provider['spf']}" in t.lower() for t in txt(domain)):
+    spf = [t for t in txt(domain) if t.strip().lower().split(" ")[0] == "v=spf1"]
+    # Exactly one SPF record (two is a permanent error), naming the provider
+    # as a whole mechanism — never a substring (Codex OUT-15 review 1).
+    if len(spf) == 1 and f"include:{provider['spf']}" in [m.lower() for m in spf[0].split()]:
         evidence["spf"] = "pass"
     else:
         advice.append(f"SPF: your domain's SPF record must include {provider['name']}. Add or edit the TXT "
                       f"record on {domain} to read: v=spf1 include:{provider['spf']} ~all")
     for selector in provider["selectors"]:
-        if any("v=dkim1" in t.lower() or "p=" in t.lower() for t in txt(f"{selector}._domainkey.{domain}")):
+        if any(_usable_dkim(t) for t in txt(f"{selector}._domainkey.{domain}")):
             evidence["dkim"] = "pass"
             evidence["selectors"].append(selector)
     if evidence["dkim"] != "pass":
         advice.append("DKIM: " + provider["dkim_help"])
-    if any(t.lower().startswith("v=dmarc1") for t in txt(f"_dmarc.{domain}")):
+    if any(_usable_dmarc(t) for t in txt(f"_dmarc.{domain}")):
         evidence["dmarc"] = "pass"
     else:
         advice.append(f"DMARC: add a TXT record named _dmarc.{domain} with the value "
@@ -239,16 +268,19 @@ def _evaluate(account: dict, resolve: Callable) -> dict:
 
 
 def _apply_health(session, bid: str, row: dict, result: dict, moment: datetime, *, daily: bool) -> None:
-    retired = str(row.get("pause_reason") or "").startswith("Retired")
+    # Only a pause this check itself caused may be lifted by a pass; a
+    # retirement, complaint or bounce hold stays (Codex OUT-15 review 1).
+    reason = str(row.get("pause_reason") or "")
+    held = bool(reason) and not reason.startswith(DNS_PAUSE)
     passed = result["status"] == "pass"
     fields = dict(health_status=result["status"], health_checked_at=moment,
                   health_evidence=json.dumps(result["evidence"]), updated_at=moment)
-    if passed and not retired:
+    if passed and not held:
         fields.update(enabled=True, pause_reason=None)
     elif not passed:
         fields["enabled"] = False
         if daily:
-            fields["pause_reason"] = "Daily check failed: " + " ".join(result["advice"])[:900]
+            fields["pause_reason"] = (DNS_PAUSE + " " + " ".join(result["advice"]))[:900] if not held else reason
     expr = "CAST(:health_evidence AS jsonb)" if send.pg(session) else ":health_evidence"
     session.execute(text(
         "UPDATE outreach_mailboxes SET " + ", ".join(
@@ -259,11 +291,15 @@ def _apply_health(session, bid: str, row: dict, result: dict, moment: datetime, 
 def check_mailbox_health(session, business, user, mailbox_id, *, resolve: Callable = dns_txt) -> dict:
     _authority(session, business, user)
     bid = str(business.id)
-    account = send.one(session, "email_accounts", bid, mailbox_id, True)
+    account = send.one(session, "email_accounts", bid, mailbox_id)
+    send.require(send.rows(session, "outreach_mailboxes", bid, "AND mailbox_id = :m", {"m": str(account["id"])}),
+                 "Add this mailbox to outreach first", 409)
+    session.rollback()   # DNS lookups happen with no lock held
+    result = _evaluate(account, resolve)
+    _authority(session, business, user)
     found = send.rows(session, "outreach_mailboxes", bid, "AND mailbox_id = :m", {"m": str(account["id"])}, True)
     send.require(found, "Add this mailbox to outreach first", 409)
-    result = _evaluate(account, resolve)
-    _apply_health(session, bid, found[0], result, now(), daily=False)
+    _apply_health(session, bid, found[0], result, now(), daily=False)   # the CURRENT row, under lock
     session.commit()
     return result
 
@@ -298,8 +334,19 @@ def recheck_health(session, *, resolve: Callable = dns_txt, moment: Optional[dat
         bid = str(row["business_id"])
         try:
             account = send.one(session, "email_accounts", bid, row["mailbox_id"])
+            session.rollback()   # lookups with no lock held
             result = _evaluate(account, resolve)
-            _apply_health(session, bid, dict(row), result, moment, daily=True)
+            # Re-read under the business lock: an owner's change during the
+            # lookups (retire, pause) wins (Codex OUT-15 review 1).
+            if not send.pg(session):
+                session.execute(text("UPDATE business_settings SET business_id = business_id WHERE business_id = :b"),
+                                {"b": bid})
+            send.lock_business(session, bid)
+            current = send.rows(session, "outreach_mailboxes", bid, "AND id = :id", {"id": str(row["id"])}, True)
+            if not current or not current[0]["enabled"]:
+                session.rollback()
+                continue
+            _apply_health(session, bid, current[0], result, moment, daily=True)
             session.commit()
         except Exception:  # one business's failure never stops the rest
             session.rollback()
@@ -495,9 +542,12 @@ REQUIRED = ("brand", "mailboxes", "audience", "privacy", "limits", "campaign")
 
 def status(session, business) -> dict:
     bid = str(business.id)
-    if not send.rows(session, "outreach_settings", bid):
+    settings_rows = send.rows(session, "outreach_settings", bid)
+    if not settings_rows:
         session.rollback()
-        return {"steps": {s: "todo" for s in REQUIRED + ("knowledge",)}, "next": "brand", "complete": False}
+        return {"steps": {s: "todo" for s in REQUIRED + ("knowledge",)}, "next": "brand", "complete": False,
+                "started": False}
+    started = not settings_rows[0]["pause_all"]
     brands = send.rows(session, "outreach_brands", bid)
     notices = _settings_doc(session, bid).get(PRIVACY_KEY) or {}
     healthy = session.execute(text(
@@ -526,7 +576,7 @@ def status(session, business) -> dict:
         "campaign": "done" if ready_campaign else ("blocked" if not (healthy and approved_lia) else "todo"),
     }
     todo = [s for s in REQUIRED if steps[s] != "done"]
-    return {"steps": steps, "next": todo[0] if todo else None, "complete": not todo}
+    return {"steps": steps, "next": todo[0] if todo else None, "complete": not todo, "started": started}
 
 
 def finish(session, business, user) -> dict:

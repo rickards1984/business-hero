@@ -120,7 +120,7 @@ def dns(records):
 
 
 GOOD_GOOGLE = {"newbody.example": ["v=spf1 include:_spf.google.com ~all"],
-               "google._domainkey.newbody.example": ["v=DKIM1; k=rsa; p=MIIB"],
+               "google._domainkey.newbody.example": ["v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqIDAQAB"],
                "_dmarc.newbody.example": ["v=DMARC1; p=quarantine"]}
 
 
@@ -427,7 +427,7 @@ def second_mailbox(db, healthy=True):
                        "'hello@newbody-studio.example', 0, '{}', 'fake', :t)"),
                   {"id": NEW_BOX, "b": A, "u": OWNER, "t": NOW.isoformat()})
     records = {"newbody-studio.example": ["v=spf1 include:_spf.google.com ~all"],
-               "google._domainkey.newbody-studio.example": ["v=DKIM1; p=MIIB"]}
+               "google._domainkey.newbody-studio.example": ["v=DKIM1; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqIDAQAB"]}
     if healthy:
         records["_dmarc.newbody-studio.example"] = ["v=DMARC1; p=none"]
     return records
@@ -566,3 +566,95 @@ def test_the_hourly_autopilot_pass_runs_the_daily_check():
     import inspect
     from services import automations
     assert "daily_health" in inspect.getsource(automations.run_all_due)
+
+
+# ------------------------------------------- Codex OUT-15 review 1 (P1s) ---
+
+@pytest.mark.parametrize("records,word", [
+    ({**GOOD_GOOGLE, "google._domainkey.newbody.example": ["v=DKIM1; k=rsa; p="]}, "DKIM"),      # revoked key
+    ({**GOOD_GOOGLE, "google._domainkey.newbody.example": ["v=DKIM1; p=!!notbase64!!"]}, "DKIM"),
+    ({**GOOD_GOOGLE, "newbody.example": ["v=spf1 include:_spf.google.com ~all",
+                                         "v=spf1 include:other.example ~all"]}, "SPF"),      # two SPF = permerror
+    ({**GOOD_GOOGLE, "newbody.example": ["v=spf1 include:_spf.google.com.evil.example ~all"]}, "SPF"),
+    ({**GOOD_GOOGLE, "_dmarc.newbody.example": ["v=DMARC1"]}, "DMARC"),                       # no policy
+    ({**GOOD_GOOGLE, "_dmarc.newbody.example": ["v=DMARC1; p=bogus"]}, "DMARC"),
+])
+def test_only_genuinely_usable_records_pass(db, records, word):
+    """P1 4: loose string matching passed unusable records."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    with Session(db) as s:
+        m.begin(s, biz, OWNER)
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": WORKSPACE, "daily_cap": 5})
+        out = m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(records))
+    assert out["status"] == "fail" and word in " ".join(out["advice"])
+    with db.connect() as c:
+        assert not bool(c.execute(text("SELECT enabled FROM outreach_mailboxes")).scalar())
+
+
+@pytest.mark.parametrize("hold", ["Complaint received: paused", "Hard bounces: 3 of the last 50", "Retired by owner: x"])
+def test_a_dns_pass_never_lifts_a_safety_hold(db, hold):
+    """P1 3: only a DNS-caused pause may be lifted by a DNS pass."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    ready(m, db, biz)
+    with db.begin() as c:
+        c.execute(text("UPDATE outreach_mailboxes SET enabled = 0, pause_reason = :r WHERE mailbox_id = :m"),
+                  {"r": hold, "m": WORKSPACE})
+    with Session(db) as s:
+        m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(GOOD_GOOGLE))
+        m.recheck_health(s, resolve=dns(GOOD_GOOGLE), moment=NOW + timedelta(days=1))
+    with db.connect() as c:
+        enabled, reason = c.execute(text("SELECT enabled, pause_reason FROM outreach_mailboxes WHERE mailbox_id = :m"),
+                                    {"m": WORKSPACE}).one()
+    assert not bool(enabled) and reason == hold
+
+
+def test_a_dns_caused_pause_is_lifted_by_a_later_pass(db):
+    m = setup_module_or_missing()
+    biz = grant(db)
+    ready(m, db, biz)
+    broken = {k: v for k, v in GOOD_GOOGLE.items() if not k.startswith("_dmarc")}
+    with Session(db) as s:
+        m.recheck_health(s, resolve=dns(broken), moment=NOW + timedelta(days=1))
+        m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(GOOD_GOOGLE))
+    with db.connect() as c:
+        assert bool(c.execute(text("SELECT enabled FROM outreach_mailboxes WHERE mailbox_id = :m"),
+                              {"m": WORKSPACE}).scalar())
+
+
+def test_the_daily_check_never_overwrites_a_retirement_made_during_its_lookups(db):
+    """P1 2: the owner retires the mailbox while DNS is being looked up."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    ready(m, db, biz)
+    calls = {"n": 0}
+
+    def slow(name):
+        calls["n"] += 1
+        if calls["n"] == 1:   # mid-lookup, from another session
+            with db.begin() as c:
+                c.execute(text("UPDATE outreach_mailboxes SET enabled = 0, pause_reason = 'Retired by owner: rebrand' "
+                               "WHERE mailbox_id = :m"), {"m": WORKSPACE})
+        return GOOD_GOOGLE.get(name, [])
+    with Session(db) as s:
+        m.recheck_health(s, resolve=slow, moment=NOW + timedelta(days=1))
+    with db.connect() as c:
+        enabled, reason = c.execute(text("SELECT enabled, pause_reason FROM outreach_mailboxes WHERE mailbox_id = :m"),
+                                    {"m": WORKSPACE}).one()
+    assert not bool(enabled) and reason.startswith("Retired")
+
+
+def test_setup_stays_on_screen_until_outreach_is_started(db):
+    """P1 1: the wizard must not vanish at `complete` before Start outreach."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    brand, lia, campaign = ready(m, db, biz)
+    with Session(db) as s:
+        from services import outreach_manage
+        c = s.execute(text("SELECT version, sequence_version FROM outreach_campaigns")).one()
+        outreach_manage.approve_templates(s, biz, OWNER, campaign["id"], {"version": int(c[0]), "sequence_version": int(c[1])})
+        state = m.status(s, biz)
+        assert state["complete"] is True and state["started"] is False
+        m.finish(s, biz, OWNER)
+        assert m.status(s, biz)["started"] is True

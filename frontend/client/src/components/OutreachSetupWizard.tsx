@@ -2,7 +2,7 @@
 // mailbox. Every step saves on the server, so the owner can leave and come
 // back. Aria's drafts are suggestions: nothing takes effect until the owner
 // approves it, and nothing here sends an email.
-import { useState } from 'react';
+import { createContext, useContext, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -13,7 +13,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { outreachError } from '@/hooks/useOutreachData';
 
 type StepState = 'done' | 'todo' | 'blocked';
-export interface SetupStatus { steps: Record<string, StepState>; next: string | null; complete: boolean }
+export interface SetupStatus { steps: Record<string, StepState>; next: string | null; complete: boolean; started: boolean }
 interface Account { id: string; email_address: string; display_name?: string | null; provider: string }
 interface Health { status: 'pass' | 'fail'; advice: string[]; evidence: Record<string, unknown> }
 
@@ -28,6 +28,11 @@ const STEPS: { key: string; label: string; optional?: boolean }[] = [
 ];
 
 const setupPath = (path: string) => `/v1/outreach/setup/${path}`;
+
+// Every cached list is keyed by business, so switching business never shows
+// another business's choices (Codex OUT-15 review 1).
+const BusinessKey = createContext('');
+const useBusinessKey = () => useContext(BusinessKey);
 
 export function useSetupStatus(businessId: string) {
   return useQuery<SetupStatus>({
@@ -84,6 +89,7 @@ export default function OutreachSetupWizard({ businessId }: { businessId: string
   if (status.isError) return <Alert severity="warning">{outreachError(status.error)}</Alert>;
 
   return (
+    <BusinessKey.Provider value={businessId}>
     <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 } }}>
       <Stack spacing={2}>
         <Typography variant="h5">Set up outreach</Typography>
@@ -134,6 +140,7 @@ export default function OutreachSetupWizard({ businessId }: { businessId: string
         </Box>
       </Stack>
     </Paper>
+    </BusinessKey.Provider>
   );
 }
 
@@ -202,8 +209,9 @@ function MailboxStep({ api, accounts }: { api: Api; accounts: Account[] }) {
 }
 
 function BrandPicker({ brandId, setBrandId }: { brandId: string; setBrandId: (id: string) => void }) {
+  const businessId = useBusinessKey();
   const brands = useQuery<{ items?: { id: string; name: string }[] }>({
-    queryKey: ['outreach-brands-setup'], queryFn: async () => (await apiRequest('GET', '/v1/outreach/brands')).json(), retry: false,
+    queryKey: ['outreach', businessId, 'setup-brands'], queryFn: async () => (await apiRequest('GET', '/v1/outreach/brands')).json(), retry: false,
   });
   return (
     <TextField select label="Brand" value={brandId} onChange={e => setBrandId(e.target.value)}>
@@ -302,7 +310,7 @@ function CampaignStep({ api, accounts, brandId, setBrandId, complianceId, setCom
   const [mailbox, setMailbox] = useState('');
   const [created, setCreated] = useState('');
   const compliance = useQuery<{ items?: { id: string; brand_id: string; version: number; decision: string; reviewed_at?: string }[] }>({
-    queryKey: ['outreach-compliance-setup'], queryFn: async () => (await apiRequest('GET', '/v1/outreach/compliance?limit=50')).json(), retry: false,
+    queryKey: ['outreach', useBusinessKey(), 'setup-compliance'], queryFn: async () => (await apiRequest('GET', '/v1/outreach/compliance?limit=50')).json(), retry: false,
   });
   const audiences = (compliance.data?.items || []).filter(a => a.decision === 'approved')
     .map(a => ({ ...a, summary: `Approved audience v${a.version}${a.reviewed_at ? `, ${a.reviewed_at.slice(0, 10)}` : ''}` }));
@@ -323,12 +331,7 @@ function CampaignStep({ api, accounts, brandId, setBrandId, complianceId, setCom
         const out = await api.call<{ id: string }>('POST', 'campaign', { name, brand_id: brandId, mailbox_id: mailbox, compliance_id: complianceId, daily_cap: 5 });
         if (out) setCreated(out.id);
       }}>Ask Aria to draft the three emails</Button>
-      {created && (
-        <Alert severity="success">
-          Drafted. Open the campaign to read and edit the three emails, then tap "Approve these templates".{' '}
-          <Button component={Link} to="/app/outreach/campaigns">Open campaigns</Button>
-        </Alert>
-      )}
+      {created && <CampaignTemplates campaignId={created} />}
     </Stack>
   );
 }
@@ -374,5 +377,64 @@ export function ChangeSendingMailbox({ businessId }: { businessId: string }) {
         )}
       </Stack>
     </Paper>
+  );
+}
+
+
+// The three emails, read, edited and approved without leaving the wizard
+// (Codex OUT-15 review 1: setup could not be finished in the app).
+function CampaignTemplates({ campaignId }: { campaignId: string }) {
+  const businessId = useBusinessKey();
+  const client = useQueryClient();
+  const campaign = useQuery<{ item?: { version: number; sequence_version: number } }>({
+    queryKey: ['outreach', businessId, `campaigns/${campaignId}`],
+    queryFn: async () => (await apiRequest('GET', `/v1/outreach/campaigns/${campaignId}`)).json(), retry: false,
+  });
+  const sequence = useQuery<{ items?: { ordinal: number; delay_business_days: number; subject: string; body: string; approved_at?: string | null }[] }>({
+    queryKey: ['outreach', businessId, `campaigns/${campaignId}/sequence`],
+    queryFn: async () => (await apiRequest('GET', `/v1/outreach/campaigns/${campaignId}/sequence`)).json(), retry: false,
+  });
+  const [edits, setEdits] = useState<Record<number, { subject: string; body: string }>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const steps = [...(sequence.data?.items || [])].sort((a, b) => a.ordinal - b.ordinal);
+  const approved = steps.length === 3 && steps.every(s => s.approved_at);
+  const changed = Object.keys(edits).length > 0;
+  const refresh = () => { client.invalidateQueries({ queryKey: ['outreach', businessId] }); client.invalidateQueries({ queryKey: ['outreach-setup', businessId] }); };
+  async function send(method: string, path: string, body: unknown) {
+    setBusy(true); setError('');
+    try { await (await apiRequest(method, path, body)).json(); refresh(); return true; }
+    catch (e) { setError(outreachError(e)); return false; } finally { setBusy(false); }
+  }
+  if (!campaign.data?.item || steps.length !== 3) return <Typography>Loading the drafted emails…</Typography>;
+  const labels = ['First email', 'Follow-up after 5 working days', 'Final email after 7 more'];
+  return (
+    <Stack spacing={1.5}>
+      <Alert severity={approved ? 'success' : 'info'}>
+        {approved ? 'Approved. These three emails are ready.' : "Aria's drafts. Edit anything, save, then approve. Approving sends nothing."}
+      </Alert>
+      {steps.map(step => {
+        const value = edits[step.ordinal] || { subject: step.subject, body: step.body };
+        return (
+          <Paper key={step.ordinal} variant="outlined" sx={{ p: 1.5 }}>
+            <Stack spacing={1}>
+              <Typography variant="subtitle2">{labels[step.ordinal]}</Typography>
+              <TextField label="Subject" value={value.subject} onChange={e => setEdits({ ...edits, [step.ordinal]: { ...value, subject: e.target.value } })} />
+              <TextField label="Email" multiline minRows={4} value={value.body} onChange={e => setEdits({ ...edits, [step.ordinal]: { ...value, body: e.target.value } })} />
+            </Stack>
+          </Paper>
+        );
+      })}
+      {error && <Alert severity="error">{error}</Alert>}
+      <Stack direction="row" spacing={1} flexWrap="wrap">
+        <Button variant="outlined" disabled={busy || !changed} onClick={async () => {
+          const body = { version: campaign.data!.item!.version, steps: steps.map(s => ({ ordinal: s.ordinal, delay_business_days: s.delay_business_days, ...(edits[s.ordinal] || { subject: s.subject, body: s.body }) })) };
+          if (await send('PUT', `/v1/outreach/campaigns/${campaignId}/sequence`, body)) setEdits({});
+        }}>Save wording</Button>
+        <Button variant="contained" disabled={busy || changed || approved} onClick={() =>
+          send('POST', `/v1/outreach/campaigns/${campaignId}/approve-templates`, { version: campaign.data!.item!.version, sequence_version: campaign.data!.item!.sequence_version })
+        }>Approve these templates</Button>
+      </Stack>
+    </Stack>
   );
 }

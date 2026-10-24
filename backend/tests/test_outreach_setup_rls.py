@@ -21,7 +21,7 @@ BOX_ONE, BOX_TWO = str(uuid.uuid4()), str(uuid.uuid4())
 RECORDS = {}
 for domain in ("setup-one.example", "setup-two.example"):
     RECORDS[domain] = ["v=spf1 include:_spf.google.com ~all"]
-    RECORDS[f"google._domainkey.{domain}"] = ["v=DKIM1; p=MIIB"]
+    RECORDS[f"google._domainkey.{domain}"] = ["v=DKIM1; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqIDAQAB"]
     RECORDS[f"_dmarc.{domain}"] = ["v=DMARC1; p=none"]
 
 

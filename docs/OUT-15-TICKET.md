@@ -88,3 +88,17 @@ No migration: the notice lives in `business_settings`.
   - `./check.sh full` is green, with tsc;
   - the Postgres `test_outreach_setup_rls.py` runs the whole wizard plus a mailbox change, and passes alongside the OUT-6/8 races and the isolation suite.
 - **Production settings needed before use:** `PUBLIC_BASE_URL` (the backend's public HTTPS address, for privacy links) and `OPENAI_API_KEY` (already set). `ARIA_DRAFT_MODEL` is optional and defaults to gpt-4o.
+
+## Codex review 1: REQUEST-CHANGES, four P1s (repair cycle 1)
+Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-1.md`. Tests first for each:
+1. **Setup couldn't be finished in the app.** The wizard now stays until outreach is **started** (`status.started`), not merely complete. The campaign step shows the three drafted emails to edit, save and "Approve these templates" in place.
+2. **The daily check could overwrite a retirement made during its lookups.** DNS now runs with no lock held. Each result is applied only to the mailbox row re-read under the business lock, and only if it's still enabled.
+3. **A DNS pass lifted complaint, bounce and retirement holds.** A pass now lifts only a pause the DNS check itself caused (`Daily check failed:`). Every other hold stays.
+4. **Unusable records passed.** DKIM needs a real base64 `p=` of usable length (an empty `p=`, meaning a revoked key, fails). SPF needs exactly one record, naming the provider as a whole mechanism. DMARC needs a `p=` of none, quarantine or reject.
+
+From the backlog, also done:
+- the wizard's cached lists are keyed by business;
+- the public privacy page is limited to 60 requests a minute;
+- interactive checks run DNS outside locks and re-read before writing.
+
+Tests: setup **46 passed**; `./check.sh full` is green; the Postgres wizard passes.
