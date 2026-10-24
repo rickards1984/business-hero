@@ -54,6 +54,7 @@ def _insert(s, table, **values):
 def db(tmp_path, monkeypatch):
     monkeypatch.setenv("OUTREACH_SUPPRESSION_SECRET", "synthetic-key-" * 4)
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://app.example.invalid")
+    monkeypatch.setenv("OUTREACH_UNSUBSCRIBE_BASE_URL", "https://app.example.invalid/unsubscribe")
     engine = create_engine("sqlite:///" + str(tmp_path / "out15.sqlite"))
     migrations = Path(__file__).parents[1] / "migrations"
     with Session(engine) as s:
@@ -76,8 +77,11 @@ def db(tmp_path, monkeypatch):
             "CREATE TABLE email_accounts (id TEXT PRIMARY KEY, business_id TEXT, user_id TEXT, provider TEXT, "
             "email_address TEXT, display_name TEXT, capabilities TEXT, is_default BOOLEAN, token_ciphertext TEXT, "
             "refresh_token_ciphertext TEXT, token_expires_at TEXT, smtp_config TEXT, created_at TEXT, updated_at TEXT)",
-            "CREATE TABLE aria_actions (id TEXT PRIMARY KEY, business_id TEXT, action_type TEXT, payload TEXT, status TEXT, "
-            "error TEXT, updated_at TEXT)",
+            "CREATE TABLE aria_actions (id TEXT PRIMARY KEY, business_id TEXT, proposed_by TEXT, action_type TEXT, "
+            "payload TEXT, status TEXT, expires_at TEXT, error TEXT, result TEXT, created_at TEXT, updated_at TEXT, "
+            "approved_by TEXT, approved_at TEXT, executed_at TEXT)",
+            "CREATE TABLE usage_meters (business_id TEXT, meter TEXT, period TEXT, value NUMERIC, updated_at TEXT, "
+            "UNIQUE (business_id, meter, period))",
             "CREATE UNIQUE INDEX settings_once ON outreach_settings (business_id)",
             "CREATE UNIQUE INDEX brand_name_once ON outreach_brands (business_id, name)",
             "CREATE UNIQUE INDEX mailbox_once ON outreach_mailboxes (business_id, mailbox_id)",

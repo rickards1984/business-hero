@@ -613,6 +613,13 @@ def run_all_due(session) -> int:
     except Exception as exc:  # never stops invoice chasing
         session.rollback()
         logger.error("[Autopilot] outreach mailbox check failed: %s", type(exc).__name__)
+    try:
+        # OUT-10: weekday research from 06:00 UK, once per business per day.
+        from services import outreach_research
+        outreach_research.run_due(session)
+    except Exception as exc:  # never stops invoice chasing
+        session.rollback()
+        logger.error("[Autopilot] outreach research failed: %s", type(exc).__name__)
     rows = session.execute(text("SELECT business_id, settings FROM business_settings")).fetchall()
     total = 0
     done_here = set()

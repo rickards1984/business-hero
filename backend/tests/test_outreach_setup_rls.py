@@ -95,3 +95,47 @@ def test_the_whole_wizard_and_a_mailbox_change_on_postgres(pg, biz):
         assert brand["id"] in doc["outreach_privacy"]
         assert c.execute(text("SELECT count(*) FROM outreach_sequence_steps WHERE campaign_id = :c"),
                          {"c": copy["id"]}).scalar() == 3
+
+
+def test_research_writes_verified_prospects_and_enrols_on_postgres(pg, biz, monkeypatch):
+    """OUT-10 on real 037 constraints: prospects, evidence (JSONB flags,
+    verification binding), the spend meter and enrolment."""
+    from datetime import datetime, timezone
+    from services import outreach_manage, outreach_research, outreach_setup as m
+    from test_outreach_research import World, person
+    monkeypatch.setenv("OUTREACH_SUPPRESSION_SECRET", "synthetic-key-" * 4)
+    with Session(pg.engine) as s:
+        m.begin(s, biz, OWNER)
+        brand = m.save_brand(s, biz, OWNER, {"name": "Research Brand", "sender_identity": "Research Brand Ltd"})
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": BOX_ONE, "daily_cap": 5})
+        m.check_mailbox_health(s, biz, OWNER, BOX_ONE, resolve=resolve)
+        lia = m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Independent gyms",
+                                              "segments": ["gym"], "regions": ["Essex"]},
+                               draft=lambda ctx: {k: f"{k} text" for k in
+                                                  ("purpose", "necessity", "balancing_test", "safeguards")})
+        m.approve_audience(s, biz, OWNER, lia["id"], {})
+        m.approve_privacy_notice(s, biz, OWNER, brand["id"], {"text": "Notice."})
+        campaign = m.create_first_campaign(
+            s, biz, OWNER, {"name": "R", "brand_id": brand["id"], "mailbox_id": BOX_ONE,
+                            "compliance_id": lia["id"], "daily_cap": 5},
+            draft=lambda ctx: [{"subject": f"S{i}", "body": f"B{i}"} for i in range(3)])
+        row = s.execute(text("SELECT version, sequence_version FROM outreach_campaigns WHERE id = :c"),
+                        {"c": campaign["id"]}).one()
+        outreach_manage.approve_templates(s, biz, OWNER, campaign["id"], {"version": row[0], "sequence_version": row[1]})
+        m.finish(s, biz, OWNER)
+        outreach_research.configure(s, biz, OWNER, {"enabled": True})
+        world = World([[person(i) for i in range(12)] + [person(99, company="Sole Trader Gym")]], cost=25)
+        world.not_companies.add("Sole Trader Gym")
+        kw = world.kwargs()
+        kw["moment"] = datetime.now(timezone.utc)
+        out = outreach_research.run(s, biz, lia["id"], **kw)
+    assert len(out["accepted"]) == 12 and out["decision_makers"] == 12
+    assert out["attempts"] == 3, "12 is short of 20, so it retried wider twice"
+    with pg.engine.connect() as c:
+        assert c.execute(text("SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'eligible'"),
+                         {"b": B}).scalar() == 12
+        assert c.execute(text("SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'"),
+                         {"b": B}).scalar() == 1
+        assert c.execute(text("SELECT count(*) FROM outreach_enrolments WHERE business_id = :b"), {"b": B}).scalar() == 5
+        assert c.execute(text("SELECT value FROM usage_meters WHERE business_id = :b AND meter = 'outreach_research_pence'"),
+                         {"b": B}).scalar() == 75, "each of the three searches is charged"
