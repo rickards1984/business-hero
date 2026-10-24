@@ -668,6 +668,42 @@ def create_first_campaign(session, business, user, data: dict, *, draft: Callabl
 
 REQUIRED = ("brand", "mailboxes", "audience", "privacy", "limits", "campaign")
 
+def _truthy(value) -> bool:
+    return value in (True, 1, "1", "true", "t")
+
+
+def _brand_status(brand, notices, rules, boxes, accounts, healthy_ids, lias, campaigns, approved_steps) -> dict:
+    """One brand's setup (OUT-18): its mailbox, its audiences each with its own
+    email sequence, its privacy notice. Ready = an approved audience whose
+    campaign is approved and sends from this brand's healthy mailbox."""
+    bid_ = str(brand["id"])
+    mine = [c for c in campaigns if str(c["brand_id"]) == bid_]
+    chosen = str(brand["default_mailbox_id"]) if brand["default_mailbox_id"] else None
+    mailbox = chosen or (str(mine[0]["mailbox_id"]) if mine else None)   # pre-OUT-18 brands chose none
+    latest = {}
+    for lia in lias:
+        if str(lia["brand_id"]) == bid_:
+            if lia["audience_hash"] not in latest or int(lia["version"]) >= int(latest[lia["audience_hash"]]["version"]):
+                latest[lia["audience_hash"]] = lia
+    audiences = []
+    for lia in latest.values():
+        found = [c for c in mine if c["target_hash"] == lia["audience_hash"]]
+        best = next((c for c in found if approved_steps.get(str(c["id"]))), found[-1] if found else None)
+        audiences.append({
+            "id": str(lia["id"]), "description": ((rules.get(str(lia["id"])) or {}).get("description") or ""),
+            "approved": lia["decision"] == "approved",
+            "campaign": None if not best else {
+                "id": str(best["id"]), "name": best["name"], "mailbox_id": str(best["mailbox_id"]),
+                "ready": bool(approved_steps.get(str(best["id"])) and str(best["mailbox_id"]) in healthy_ids
+                              and (not chosen or str(best["mailbox_id"]) == chosen))}})
+    privacy = bid_ in notices
+    mailbox_ok = bool(mailbox and mailbox in healthy_ids)
+    ready = privacy and mailbox_ok and any(a["approved"] and a["campaign"] and a["campaign"]["ready"] for a in audiences)
+    return {"id": bid_, "name": brand["name"], "sender_identity": brand["sender_identity"],
+            "mailbox_id": mailbox, "mailbox_address": accounts.get(mailbox) if mailbox else None,
+            "mailbox_ok": mailbox_ok, "privacy": privacy, "audiences": audiences, "ready": ready}
+
+
 
 def status(session, business) -> dict:
     bid = str(business.id)
@@ -679,35 +715,48 @@ def status(session, business) -> dict:
     # Setup finished is its own durable fact; pausing outreach never undoes it
     # (Codex OUT-15 review 2).
     started = bool((_settings_doc(session, bid).get(SETUP_KEY) or {}).get("finished_at"))
-    brands = send.rows(session, "outreach_brands", bid)
-    notices = _settings_doc(session, bid).get(PRIVACY_KEY) or {}
-    healthy = session.execute(text(
-        "SELECT count(*) FROM outreach_mailboxes WHERE business_id = :b AND enabled = :t AND health_status = 'pass'"),
-        {"b": bid, "t": True}).scalar()
-    approved_lia = session.execute(text(
-        "SELECT count(*) FROM outreach_compliance WHERE business_id = :b AND decision = 'approved'"),
-        {"b": bid}).scalar()
-    ready_campaign = False
-    for c in send.rows(session, "outreach_campaigns", bid):
-        steps = send.rows(session, "outreach_sequence_steps", bid, "AND campaign_id = :c AND sequence_version = :v",
-                          {"c": str(c["id"]), "v": c["sequence_version"]})
-        if len(steps) == 3 and all(s["approved_at"] for s in steps):
-            ready_campaign = True
+    brands = send.rows(session, "outreach_brands", bid, "ORDER BY created_at, id")
+    doc = _settings_doc(session, bid)
+    notices = doc.get(PRIVACY_KEY) or {}
+    rules = doc.get(AUDIENCE_KEY) or {}
+    boxes = {str(r["mailbox_id"]): r for r in send.rows(session, "outreach_mailboxes", bid)}
+    accounts = {str(a["id"]): a["email_address"] for a in send.rows(session, "email_accounts", bid)}
+    healthy_ids = {k for k, r in boxes.items() if _truthy(r["enabled"]) and r["health_status"] == "pass"}
+    lias = send.rows(session, "outreach_compliance", bid, "ORDER BY created_at, id")
+    campaigns = send.rows(session, "outreach_campaigns", bid, "ORDER BY created_at, id")
+    approved_steps = {}
+    for c in campaigns:
+        steps_ = send.rows(session, "outreach_sequence_steps", bid, "AND campaign_id = :c AND sequence_version = :v",
+                           {"c": str(c["id"]), "v": c["sequence_version"]})
+        approved_steps[str(c["id"])] = len(steps_) == 3 and all(x["approved_at"] for x in steps_)
     knowledge = session.execute(text(
         "SELECT count(*) FROM outreach_knowledge WHERE business_id = :b AND status = 'approved'"),
         {"b": bid}).scalar()
     session.rollback()
+    per_brand = [_brand_status(b, notices, rules, boxes, accounts, healthy_ids, lias, campaigns, approved_steps)
+                 for b in brands]
+    ready_brands = [b for b in per_brand if b["ready"]]
+    focus = ready_brands[0] if ready_brands else (per_brand[-1] if per_brand else None)
+    # OUT-18: setup is finished when ONE brand is ready; the steps describe the
+    # ready brand, or else the brand being set up (the newest).
+    has_audience = bool(focus and any(a["approved"] for a in focus["audiences"]))
+    # The brand's own mailbox once chosen; before that, any checked mailbox.
+    mailboxes_done = focus["mailbox_ok"] if focus and focus["mailbox_id"] else bool(healthy_ids)
     steps = {
         "brand": "done" if brands else "todo",
-        "mailboxes": "done" if healthy else "todo",
-        "audience": "done" if approved_lia else ("blocked" if not brands else "todo"),
-        "privacy": "done" if brands and all(str(b["id"]) in notices for b in brands) else "todo",
+        "mailboxes": "done" if mailboxes_done else "todo",
+        "audience": "done" if has_audience else ("blocked" if not brands else "todo"),
+        "privacy": "done" if focus and focus["privacy"] else "todo",
         "knowledge": "done" if knowledge else "todo",
         "limits": "done",
-        "campaign": "done" if ready_campaign else ("blocked" if not (healthy and approved_lia) else "todo"),
+        "campaign": "done" if focus and any(a["campaign"] and a["campaign"]["ready"] for a in focus["audiences"])
+                    else ("blocked" if not (healthy_ids and has_audience) else "todo"),
     }
+    if ready_brands:
+        steps.update({k: "done" for k in REQUIRED})
     todo = [s for s in REQUIRED if steps[s] != "done"]
-    return {"steps": steps, "next": todo[0] if todo else None, "complete": not todo, "started": started}
+    return {"steps": steps, "next": todo[0] if todo else None, "complete": bool(ready_brands), "started": started,
+            "brands": per_brand}
 
 
 def finish(session, business, user) -> dict:
