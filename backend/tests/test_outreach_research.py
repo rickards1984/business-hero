@@ -678,3 +678,62 @@ def test_aria_can_read_the_research_status_and_lessons():
     import assistant_tools
     names = [t["function"]["name"] for t in assistant_tools.TOOL_DEFINITIONS]
     assert "get_outreach_research" in names
+
+
+# ------------------------------------------------ Codex OUT-10 review 3 (P1s) ---
+
+@pytest.mark.parametrize("page", [
+    # an unrelated company's number in the credits of a sole trader's site
+    "<html><p>Sam Taylor is a sole trader. Email sam@studio1.example.</p>"
+    "<footer>Website built by Studio 1 Ltd (company number {n})</footer></html>",
+    # the number only inside markup, not visible text
+    "<html><p>Email sam@studio1.example</p><img src=\"/img/{n}.png\" alt=\"logo\"></html>",
+    # name and number, but no registration statement binding them
+    "<html><p>Studio 1 Ltd. Email sam@studio1.example. Ref {n}</p></html>",
+    # a proper disclosure, but the page says the business trades as a sole trader
+    "<html><p>Sam trading as Studio 1. Email sam@studio1.example.</p>"
+    "<footer>Studio 1 Ltd is registered in England and Wales, company number {n}.</footer></html>",
+])
+def test_only_a_proper_legal_disclosure_binds_the_company(db, page):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    n = World.number_for("Studio 1 Ltd")
+    world.pages["https://studio1.example/team"] = page.format(n=n)
+    world.pages["https://studio1.example/"] = page.format(n=n)
+    assert run(db, biz, lia, world)["accepted"] == []
+
+
+def test_a_proper_disclosure_is_accepted(db):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    n = World.number_for("Studio 1 Ltd")
+    world.pages["https://studio1.example/team"] = (
+        "<html><p>Email sam@studio1.example</p><footer>Studio 1 Limited. Registered in England and Wales. "
+        f"Company registration number: {n}. Registered office: 1 High St.</footer></html>")
+    assert len(run(db, biz, lia, world)["accepted"]) == 1
+
+
+def test_a_quoted_local_part_is_never_proof(db):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    n = World.number_for("Studio 1 Ltd")
+    world.pages["https://studio1.example/team"] = (
+        f'<html>"sam@studio1.example"@other.example Studio 1 Ltd is registered in England, company number {n}.</html>')
+    assert run(db, biz, lia, world)["accepted"] == []
+
+
+def test_the_reserve_covers_the_models_hard_maximum():
+    """P1 3: the reservation is computed from limits the provider enforces:
+    the model's whole context window, the output cap and the tool-call cap."""
+    r = research()
+    worst = (r.MODEL_CONTEXT_TOKENS * r.PRICE_IN_PER_M + r.MAX_OUTPUT_TOKENS * r.PRICE_OUT_PER_M) / 1_000_000 \
+        + r.MAX_TOOL_CALLS * r.PRICE_PER_SEARCH
+    assert r.MAX_SEARCH_PENCE >= worst
+
+
+def test_a_compound_surname_is_not_a_match(db):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1, name="Sam Jones", role="Director")]])
+    world.officers["Studio 1 Ltd"] = ["SMITH-JONES, Sam"]
+    run(db, biz, lia, world)
+    assert count(db, "SELECT fact_value FROM outreach_evidence WHERE business_id = :b AND fact_type = 'role_verified'") == "false"

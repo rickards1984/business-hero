@@ -129,3 +129,13 @@ Backlog, also done:
 - the Aria tool `get_outreach_research` (status, spend, summary, lessons; outreach access checked; this business only).
 
 Tests: research **82 passed**, setup **86 passed**; `./check.sh full` is green; Postgres passes. The installed OpenAI SDK (3.9.0) supports `max_tool_calls` and `search_context_size`.
+
+## Codex review 3: REQUEST-CHANGES, three P1s (repair cycle 3 of 3, the last before escalating to Mike)
+Preserved verbatim in `audits/OUT-10-CODEX-REVIEW-3.md`. Fixes, tests first:
+1. **A proper legal disclosure binds the entity.** In the page's **visible text** (scripts, styles and markup removed, so image names don't count), the registered number must sit within a registration statement ("registered in England…", "company number…", "registered office"…), together with the **registered name**. A page describing a sole trader, "trading as", "t/a", self-employment or a partnership is always review.
+2. **Quoted local parts:** a quote or backslash before the address disqualifies it (`"x@y"@z`).
+3. **The reserve is a true maximum,** computed from limits the provider enforces: the model's whole context window (1,047,576 tokens) × the input price, plus the output cap × the output price, plus the tool-call cap × the search price. That's **189p** per search. Only the real cost is kept once a search settles.
+
+Backlog, also done: surnames compare as a whole, so "Sam Jones" no longer matches "SMITH-JONES, Sam".
+
+Tests: research **90 passed**, setup **86 passed**; `./check.sh full` is green; Postgres passes.

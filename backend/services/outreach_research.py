@@ -44,8 +44,17 @@ DEFAULT_CAP_PENCE = 2000                 # decision C: £20 a month, editable
 # Every search reserves its maximum possible cost before it is sent (Codex
 # OUT-10 review 1): the provider call is bounded (output tokens, tool calls)
 # so this is a real ceiling, and a search that fails keeps its reservation.
-MAX_SEARCH_PENCE = int(os.environ.get("ARIA_RESEARCH_MAX_SEARCH_PENCE", "100"))
 MAX_OUTPUT_TOKENS, MAX_TOOL_CALLS = 8000, 8
+# Conservative pence prices (GBP), overridable without a deploy.
+PRICE_IN_PER_M = float(os.environ.get("ARIA_RESEARCH_PRICE_IN_PENCE_PER_M", "160"))
+PRICE_OUT_PER_M = float(os.environ.get("ARIA_RESEARCH_PRICE_OUT_PENCE_PER_M", "640"))
+PRICE_PER_SEARCH = float(os.environ.get("ARIA_RESEARCH_PRICE_PER_SEARCH_PENCE", "2"))
+# The model's whole context window: the provider cannot bill more input than
+# this in one call, so the reserve below is a TRUE maximum (Codex OUT-10
+# review 3: "low" search context is guidance, not a ceiling).
+MODEL_CONTEXT_TOKENS = int(os.environ.get("ARIA_RESEARCH_MODEL_CONTEXT_TOKENS", "1047576"))
+MAX_SEARCH_PENCE = int(-(-((MODEL_CONTEXT_TOKENS * PRICE_IN_PER_M + MAX_OUTPUT_TOKENS * PRICE_OUT_PER_M) / 1_000_000
+                           + MAX_TOOL_CALLS * PRICE_PER_SEARCH) // 1))
 METER = "outreach_research_pence"
 PILOT_ENROLMENTS = 5                     # decision E: OUT-8's pilot limit for now
 EXCLUSION_CAP = 400                      # steers the model; code checks guarantee
@@ -317,7 +326,9 @@ def _officer_match(name: str, officers: list) -> bool:
     """A role is verified only when the contact's SURNAME is the officer's
     surname and their first name is among the officer's forenames (Companies
     House writes "SURNAME, Forenames"). Codex OUT-10 reviews 1 and 2."""
-    words = [t for t in re.findall(r"[a-z]+", name.lower()) if len(t) > 1]
+    def whole(value: str) -> str:   # a surname compared as a whole, hyphens kept
+        return " ".join(re.sub(r"[^a-z\- ]", " ", value.lower()).split())
+    words = whole(name).split()
     if len(words) < 2:
         return False
     first, last = words[0], words[-1]
@@ -326,8 +337,7 @@ def _officer_match(name: str, officers: list) -> bool:
         if not forename_part:   # no comma: treat the last word as the surname
             parts = surname_part.split()
             surname_part, forename_part = (parts[-1] if parts else ""), " ".join(parts[:-1])
-        surnames, forenames = _name_tokens(surname_part), _name_tokens(forename_part)
-        if last in surnames and first in forenames:
+        if whole(surname_part) == last and first in whole(forename_part).split():
             return True
     return False
 
@@ -337,6 +347,9 @@ EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+'-])([A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(
 
 # Every character legal in an address's local part (RFC 5322 atext, plus '.').
 ATEXT = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+-/=?^_`{|}~.")
+# A quote or backslash before the address means a quoted local part
+# ("x@y"@z): the address is part of a different mailbox (review 3).
+ATEXT |= {'"', "\\"}
 
 
 def _address_on(page: str, email: str) -> bool:
@@ -417,21 +430,29 @@ def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callabl
     if not record or str(record.get("type", "")).lower() not in CORPORATE_TYPES \
             or _legal_name(record.get("name")) != _legal_name(company):
         return review
-    # The company's own website must show its REGISTERED NUMBER (Companies Act
-    # 2006 trading disclosures) on the cited page or its home page. A name can
-    # be partly matched or borrowed; a number cannot (Codex OUT-10 review 2).
+    # The company's own website must carry a proper legal disclosure binding
+    # the REGISTERED NAME to the REGISTERED NUMBER in a registration statement
+    # ("registered in England…, company number…"), in its VISIBLE text; and
+    # must not describe a sole trader or partnership. Anything less is review
+    # (Codex OUT-10 reviews 2 and 3).
     registered_number = str(record.get("number") or "").upper()
-    def discloses(text_):
-        if not re.fullmatch(r"[A-Z0-9]{8}", registered_number):
+    registered_name = _legal_name(record.get("name"))
+    def discloses(raw):
+        if not re.fullmatch(r"[A-Z0-9]{8}", registered_number) or not registered_name:
             return False
-        tokens = re.findall(r"[A-Za-z0-9]+", text_ or "")
-        if registered_number in (t.upper() for t in tokens):
-            return True
-        # "Company No. 1234567" for 01234567: only beside a registration word.
+        text_ = _visible_text(raw)
+        flat = text_.lower()
+        if SOLE_TRADER.search(flat):
+            return False
         short = registered_number.lstrip("0")
-        flat = (text_ or "").lower()
-        return bool(short) and short.isdigit() and bool(re.search(
-            r"(company|registered|registration|reg\.?)\s*(number|no\.?|num\.?)?\s*[:#]?\s*" + short + r"\b", flat))
+        for m in re.finditer(r"(?<![A-Za-z0-9])(" + re.escape(registered_number)
+                             + (("|" + re.escape(short)) if short and short.isdigit() else "") + r")(?![A-Za-z0-9])", text_,
+                             flags=re.I):
+            window = flat[max(0, m.start() - 250): m.end() + 100]
+            if REGISTRATION.search(window) and re.search(r"(?<![a-z0-9])" + re.escape(registered_name)
+                                                         + r"(?![a-z0-9])", _legal_name(window)):
+                return True
+        return False
     if not discloses(page):
         home, home_final = _page(fetch, f"https://{urlparse(final).hostname}/")
         if not (_owns(urlparse(home_final).hostname or "", domain) and discloses(home)):
@@ -439,6 +460,20 @@ def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callabl
     return {"ok": True, **base, "number": registered_number,
             "role_verified": _officer_match(name, record.get("officers") or []) if name else False,
             "company_type": record.get("type")}
+
+
+SOLE_TRADER = re.compile(r"\bsole trader\b|\btrading as\b|\bt/a\b|\bself[- ]employed\b|\bpartnership\b")
+REGISTRATION = re.compile(r"registered in (england|wales|scotland|northern ireland)|company (registration )?(number|no\b)"
+                          r"|registration (number|no\b)|registered (number|no\b)|registered office|companies house")
+
+
+def _visible_text(raw: str) -> str:
+    """What a visitor reads: scripts, styles and markup (attributes such as
+    image file names) removed, entities decoded."""
+    import html as _html
+    out = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", raw or "")
+    out = re.sub(r"(?s)<[^>]+>", " ", out)
+    return " ".join(_html.unescape(out).split())
 
 
 def _suppressed(session, bid: str, key: str, domain: str) -> bool:
@@ -863,10 +898,6 @@ def companies_house(query: str) -> Optional[dict]:
             "officers": [o.get("name", "") for o in officers.get("items", []) if not o.get("resigned_on")]}
 
 
-# Rough, conservative pence per run, in GBP. Overridable without a deploy.
-PRICE_IN_PER_M = float(os.environ.get("ARIA_RESEARCH_PRICE_IN_PENCE_PER_M", "160"))
-PRICE_OUT_PER_M = float(os.environ.get("ARIA_RESEARCH_PRICE_OUT_PENCE_PER_M", "640"))
-PRICE_PER_SEARCH = float(os.environ.get("ARIA_RESEARCH_PRICE_PER_SEARCH_PENCE", "2"))
 
 
 def web_search(brief: str) -> dict:
