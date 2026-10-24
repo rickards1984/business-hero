@@ -17,7 +17,7 @@ export interface SetupStatus { steps: Record<string, StepState>; next: string | 
 interface Account { id: string; email_address: string; display_name?: string | null; provider: string }
 interface Health { status: 'pass' | 'fail'; advice: string[]; evidence: Record<string, unknown>; enabled?: boolean; hold?: string | null }
 
-const STEPS: { key: string; label: string; optional?: boolean }[] = [
+export const STEPS: { key: string; label: string; optional?: boolean }[] = [
   { key: 'brand', label: 'Your brands' },
   { key: 'mailboxes', label: 'Sending mailboxes' },
   { key: 'audience', label: "Who you'll contact, and why" },
@@ -34,9 +34,9 @@ const setupPath = (path: string) => `/v1/outreach/setup/${path}`;
 const BusinessKey = createContext('');
 const useBusinessKey = () => useContext(BusinessKey);
 
-export function useSetupStatus(businessId: string) {
+export function useSetupStatus(businessId: string, enabled = true) {
   return useQuery<SetupStatus>({
-    queryKey: ['outreach-setup', businessId],
+    queryKey: ['outreach-setup', businessId], enabled: !!businessId && enabled,
     queryFn: async () => (await apiRequest('GET', setupPath('status'))).json(),
     staleTime: 10000, retry: false,
   });

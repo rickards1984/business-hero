@@ -11,6 +11,8 @@ import ApprovalCard from '@/components/ApprovalCard';
 import OutreachReplyCard from '@/components/OutreachReplyCard';
 import ReplyCard, { type ChaseReply } from '@/components/ReplyCard';
 import AriaHero from '@/components/AriaHero';
+import OutreachIntro from '@/components/OutreachIntro';
+import { useOutreachEnabled } from '@/hooks/useOutreachEntry';
 import { isBlocking } from '@/components/ReceptionistUsage';
 import { ago, useDashboardData } from '@/hooks/useDashboardData';
 import './DashboardPage.css';
@@ -56,6 +58,7 @@ function DashboardContent() {
   const queryClient = useQueryClient();
   const businessId = me?.id;
   const d = useDashboardData(businessId);
+  const outreachOn = useOutreachEnabled();
   const [showTasks, setShowTasks] = useState(false);
   // The open drafts are the server's list, refreshed (an edit or dismissal
   // made elsewhere updates or removes its card — Codex NS-B7 review 2). A card
@@ -107,6 +110,8 @@ function DashboardContent() {
       )}
 
       {isMobile && <AriaHero variant="card" />}
+
+      <OutreachIntro businessId={businessId} />
 
       <section className="home-section" aria-label="Needs you">
         <div className="home-section-head">
@@ -163,11 +168,11 @@ function DashboardContent() {
       <section className="home-section" aria-label="Your business">
         <div className="home-section-head"><h2>Your business</h2></div>
         <div className="home-tiles">
-          <Tile name="Outreach" onClick={() => navigate('/app/outreach')}
+          {outreachOn && <Tile name="Outreach" onClick={() => navigate('/app/outreach')}
             loading={d.outreach.isLoading} failed={d.outreach.isError}
             figure={d.outreach.data && `${d.outreach.data.totals?.unresolved_replies ?? 'Unknown'} unresolved replies`}
             line={d.outreach.data && `${d.outreach.data.totals?.campaigns ?? 'Unknown'} stored campaigns`}
-            age={d.outreach.dataUpdatedAt ? `Loaded ${new Date(d.outreach.dataUpdatedAt).toLocaleTimeString('en-GB')}; inbox freshness unknown` : undefined} />
+            age={d.outreach.dataUpdatedAt ? `Loaded ${new Date(d.outreach.dataUpdatedAt).toLocaleTimeString('en-GB')}; inbox freshness unknown` : undefined} />}
           <Tile name="Invoices" onClick={() => navigate('/app/finance?tab=invoices')}
             loading={d.summary.isLoading} failed={d.summary.isError}
             figure={inv && (inv.overdue_count > 0 ? `${money(inv.overdue_total)} overdue` : money(inv.outstanding_total))}
