@@ -1,3 +1,106 @@
+# 038 — PRODUCTION RUNBOOK: outreach replies (Mike's steps)
+
+**For:** Mike. **Ticket:** OUT-7. **Migration:** `backend/migrations/038_outreach_replies.sql`.
+
+**Rehearsed:** `audits/038-STAGING-REHEARSAL.md` (24 Oct 2026). On staging, which started at production's recorded state of 94 policies and 1,105 columns, it was applied, checked, re-pasted with no change, rolled back to the exact before-state, and re-applied.
+
+**What it does:**
+- creates two empty tables: approved business facts for Aria's answers, and the one-answer-per-prospect reservation;
+- adds one extra lookup key on outreach replies;
+- nothing is switched on or sent.
+
+**Risk:** RED, as all production SQL is. Low in practice: it only adds things, and no existing table's data changes. Takes about 10 minutes.
+
+**Run each step ONE AT A TIME in the Supabase SQL editor.** Check the EXPECT before moving on. If anything matches STOP IF, stop and send me the output.
+
+**Before you start:** confirm the project selector reads **business-hero (`oxblcmwhuwtobdhsfgyi`)**.
+
+---
+
+## STEP 0 — Read-only checks
+
+```sql
+SELECT current_database(),
+       to_regclass('public.outreach_knowledge')   AS knowledge_before,
+       to_regclass('public.outreach_reply_slots') AS slots_before,
+       to_regprocedure('public.is_business_member(uuid,uuid)') IS NOT NULL AS membership_helper,
+       (SELECT count(*) FROM (SELECT business_id, prospect_id, mailbox_id, id FROM public.outreach_replies
+          GROUP BY 1,2,3,4 HAVING count(*) > 1) d)  AS dup_reply_identity,
+       (SELECT count(*) FROM pg_policies WHERE schemaname = 'public')                        AS policies,
+       (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public')      AS columns;
+```
+
+**EXPECT:**
+- `postgres`;
+- `knowledge_before` and `slots_before` both **NULL**;
+- `membership_helper` **true**;
+- `dup_reply_identity` **0**;
+- `policies` **94** and `columns` **1105**.
+
+**STOP IF:** either `_before` value isn't NULL, `membership_helper` is false, or `dup_reply_identity` isn't 0. If `policies`/`columns` differ, stop and send me the row: something changed since 037.
+
+---
+
+## STEP 1 — One extra key (run on its own)
+
+```sql
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS outreach_replies_out7_identity_key
+  ON public.outreach_replies (business_id, prospect_id, mailbox_id, id);
+```
+
+**EXPECT:** *Success. No rows returned.* **STOP IF:** any error.
+
+---
+
+## STEP 2 — The two tables (one transaction)
+
+Open **`audits/038-STEP-3-section2.sql`**, then select all and copy it (about 155 lines). Paste it into the SQL editor and run it **once**.
+
+**EXPECT:** *Success. No rows returned.* **STOP IF:** any error. Because it's one transaction, nothing will have changed. Send me the error.
+
+---
+
+## STEP 3 — VERIFY (READ-ONLY)
+
+```sql
+SELECT (SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'outreach\_%') AS outreach_tables,
+       (SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='outreach_knowledge')   AS knowledge_columns,
+       (SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='outreach_reply_slots') AS slot_columns,
+       (SELECT count(*) FROM pg_class WHERE relname IN ('outreach_knowledge','outreach_reply_slots') AND relrowsecurity)    AS rls_on,
+       (SELECT count(*) FROM pg_policies WHERE schemaname='public')                                                        AS policies,
+       (SELECT count(*) FROM pg_policies WHERE tablename='outreach_reply_slots')                                           AS slot_policies,
+       (SELECT count(*) FROM information_schema.role_table_grants WHERE grantee='anon'
+          AND table_name IN ('outreach_knowledge','outreach_reply_slots'))                                                 AS anon_privileges,
+       (SELECT count(*) FROM information_schema.columns WHERE table_schema='public')                                       AS columns;
+```
+
+**EXPECT:** `outreach_tables` **19**; `knowledge_columns` **14**; `slot_columns` **18**; `rls_on` **2**; `policies` **95**; `slot_policies` **0**; `anon_privileges` **0**; `columns` **1137**.
+
+**STOP IF:** anything differs. Send me the row; see ROLLBACK below.
+
+---
+
+## STEP 4 — Regenerate the schema dump (READ-ONLY)
+
+As before: row limit **No limit**, run `scripts/dump-live-schema.sql`, **Download → CSV**, and drag it into the repo folder. Expect **1,137 rows**.
+
+---
+
+## ROLLBACK — only if STEP 3 failed
+
+Send me the output first. The rollback is the technical reference's STEP 6. It refuses to run if either table holds any data. I'll tell you exactly which block to paste.
+
+## Afterwards
+
+Send me STEP 0's row and STEP 3's row, and drag in the CSV. I'll regenerate the schema record, record the run here, and the OUT-7 pull request can then go to you.
+
+---
+---
+
+# Technical reference (Codex, OUT-7 Stage A)
+
+Codex's full runbook follows, unchanged. Mike's steps above are what to run. As for 037, Codex's production row archives are replaced by the staging rehearsal: 038 creates new empty tables and touches no existing rows.
+
 # 038 — DRAFT PRODUCTION RUNBOOK: outreach replies (Mike's steps)
 
 **DRAFT FOR REVIEW — NOT AUTHORISED TO RUN.** Ticket OUT-7 Stage A, 23 October 2026. Migration `backend/migrations/038_outreach_replies.sql`. No rehearsal or remote execution is claimed. Serves P2/P4/P5/P9, tenant isolation and correctness.
