@@ -891,13 +891,13 @@ def test_store_keeps_recipients_and_threading_headers(db, sent):
 
 
 def test_store_notifies_outreach_once_after_commit_even_with_nothing_new(db, sent, monkeypatch):
-    import app.email.service as service
+    import services.outreach_replies as service
     calls = []
 
     def seen(session, business):
         with db.connect() as other:   # a separate connection sees the row: committed first
             calls.append(other.execute(text("SELECT COUNT(*) FROM email_messages")).scalar())
-    monkeypatch.setattr(service, "outreach_storage_completed", seen)
+    monkeypatch.setattr(service, "storage_completed", seen)
     with Session(db) as s:
         replies()._store(s, business(), ACCT_A, [_provider_message()])
         replies()._store(s, business(), ACCT_A, [])
@@ -905,11 +905,11 @@ def test_store_notifies_outreach_once_after_commit_even_with_nothing_new(db, sen
 
 
 def test_a_failing_outreach_notification_never_breaks_chasing(db, sent, monkeypatch):
-    import app.email.service as service
+    import services.outreach_replies as service
 
     def broken(session, business):
         raise RuntimeError("outreach scan exploded")
-    monkeypatch.setattr(service, "outreach_storage_completed", broken)
+    monkeypatch.setattr(service, "storage_completed", broken)
     with Session(db) as s:
         replies()._store(s, business(), ACCT_A, [_provider_message()])
     with db.connect() as c:

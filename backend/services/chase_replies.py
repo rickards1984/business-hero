@@ -157,8 +157,8 @@ def _store(session, business, account_id: str, messages) -> None:
              "now": moment})
     session.commit()
     try:
-        from app.email import service
-        service.outreach_storage_completed(session, business)
+        from services import outreach_replies
+        outreach_replies.storage_completed(session, business)
     except Exception as exc:  # outreach must never stop a chase decision
         try:
             session.rollback()

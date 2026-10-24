@@ -677,24 +677,3 @@ def generate_email_reply_drafts(
     except Exception as e:
         _logger.error(f"Multi-tone draft generation error: {e}")
         return [fallback]
-
-
-def outreach_storage_completed(session, business):
-    """One notification after existing inbox storage commits; no new cursor.
-
-    Safety remains active without outreach entitlement. Missing rollout schema
-    or scan failure is logged, never described as an empty inbox. Approval also
-    independently rechecks stored inbound, so failed scanning cannot send.
-    Router-backed classification/drafting is an explicit later activation gate.
-    """
-    import logging
-    from services import outreach_replies, outreach_send
-    try:
-        if not outreach_send.rows(session, 'outreach_settings', business.id):
-            session.rollback()
-            return []
-        return outreach_replies.scan(session, business)
-    except Exception:
-        session.rollback()
-        logging.getLogger(__name__).exception('Outreach storage scan unavailable')
-        return None

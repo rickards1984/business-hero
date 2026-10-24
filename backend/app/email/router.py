@@ -53,8 +53,8 @@ from .service import (
     generate_email_reply_draft,
     generate_email_reply_drafts,
     analyze_email_batch,
-    outreach_storage_completed,
 )
+from services.outreach_replies import storage_completed as outreach_storage_completed
 from providers.google_gmail import GoogleGmailProvider
 from providers.microsoft_graph import MicrosoftGraphProvider
 from providers.smtp import SMTPProvider

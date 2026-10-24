@@ -66,8 +66,8 @@ def _sync_email_for_business(business_id: str):
         get_business_by_id,
         get_default_email_account,
         get_provider_for_account,
-        outreach_storage_completed,
     )
+    from services.outreach_replies import storage_completed as outreach_storage_completed
     from models import EmailSyncState, EmailMessage
 
     with get_session_context() as session:

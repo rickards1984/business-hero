@@ -481,3 +481,25 @@ def save_knowledge(session, business, *, brand_id, topic, answer, source_referen
         status='approved', approved_by=str(user_id), approved_at=moment, review_due_at=_parse(review_due_at))
     session.commit()
     return {'id': ident, 'status': 'approved'}
+
+
+def storage_completed(session, business):
+    """One notification after existing inbox storage commits; no new cursor.
+
+    Safety remains active without outreach entitlement. Missing rollout schema
+    or scan failure is logged, never described as an empty inbox. Approval also
+    independently rechecks stored inbound, so failed scanning cannot send.
+    Router-backed classification/drafting is an explicit later activation gate.
+    (Lives here, not in app/email/service.py, so that file stays untouched.)
+    """
+    import logging
+    from services import outreach_send
+    try:
+        if not outreach_send.rows(session, 'outreach_settings', business.id):
+            session.rollback()
+            return []
+        return scan(session, business)
+    except Exception:
+        session.rollback()
+        logging.getLogger(__name__).exception('Outreach storage scan unavailable')
+        return None

@@ -28,8 +28,8 @@ class MissingSharedHook(Exception):
     """Only Claude's absent reply registration is expected to fail."""
 
 
-HOOK = pytest.mark.xfail(strict=True, raises=MissingSharedHook,
-                         reason="awaits Claude's aria_actions hook")
+# Strict-xfailed until Claude's hook landed (24 Oct 2026); now they must pass.
+HOOK = pytest.mark.usefixtures()
 
 
 def require_hook():
@@ -466,7 +466,7 @@ def test_explicit_optout_needs_neither_classifier_nor_entitlement(r):
 
 
 def test_storage_completion_uses_existing_inbox_without_provider(r, monkeypatch):
-    from app.email.service import outreach_storage_completed
+    from services.outreach_replies import storage_completed as outreach_storage_completed
     incoming(r)
     def forbidden(*args, **kwargs):
         pytest.fail('storage completion must not poll')
@@ -643,3 +643,28 @@ def test_same_thread_across_campaigns_without_rfc_evidence_is_ambiguous(r):
     assert state(r) == 'paused'
     assert r.s.execute(text('SELECT matched_message_id FROM outreach_replies')).scalar_one() is None
     assert answer(r)['status'] == 'handed_over'
+
+
+# ---------------------------------------------- Claude's reply hook (OUT-7) ---
+
+def test_hook_an_answer_card_comes_only_from_a_stored_reply(r):
+    from services import aria_actions
+    assert 'reply_outreach' in aria_actions.ACTION_TYPES
+    assert 'reply_outreach' not in aria_actions.CHAT_ACTION_TYPES
+    out = aria_actions.propose(r.s, r.b, OWNER, 'reply_outreach', {'body': 'Anything at all'})
+    assert 'error' in out
+    assert 'error' in aria_actions.propose_from_chat(A, OWNER, 'reply_outreach', {'body': 'x'})
+    assert r.s.execute(text("SELECT count(*) FROM aria_actions WHERE action_type='reply_outreach'")).scalar() == 0
+
+
+def test_hook_an_answer_card_cannot_be_edited(r):
+    from services import aria_actions
+    fact(r)
+    incoming(r)
+    scan(r)
+    card = answer(r)
+    for change in ({'body': 'Invented claim'}, {}):
+        with pytest.raises(aria_actions.ActionRefused) as exc:
+            aria_actions.edit(r.s, r.b, card['id'], change)
+        assert exc.value.status_code == 422
+    assert aria_actions.approve(r.s, r.b, card['id'], OWNER, version=card['version'])['status'] == 'done'
