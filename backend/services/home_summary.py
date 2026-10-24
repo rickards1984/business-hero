@@ -157,7 +157,11 @@ def recent_automated(conn, business_id: str, now: Optional[datetime] = None,
         p = payload if isinstance(payload, dict) else json.loads(payload or "{}")
         if p.get("automation") != "invoice_chasing":
             continue
-        out.append({"kind": "invoice_chasing", "invoice_number": p.get("invoice_number"),
+        listed = p.get("invoices") or []   # AUTO-3: one email may cover several
+        numbers = ", ".join(str(i.get("invoice_number")) for i in listed) if listed \
+            else p.get("invoice_number")
+        out.append({"kind": "invoice_chasing", "invoice_number": numbers,
+                    "invoice_count": len(listed) or 1,
                     "customer_name": p.get("customer_name"), "stage": p.get("chase_stage"),
                     "sent_at": _iso(executed_at)})
     return out

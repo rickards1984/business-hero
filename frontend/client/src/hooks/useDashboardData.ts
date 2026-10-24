@@ -17,7 +17,7 @@ export interface HomeSummary {
   invoices: { outstanding_total: number; outstanding_count: number; overdue_total: number; overdue_count: number };
   emails: { action_required: number; window_days: number };
   synced: { email: string | null; accounting: string | null };
-  automated?: Array<{ kind: string; invoice_number?: string; customer_name?: string; stage?: number; sent_at?: string }>;
+  automated?: Array<{ kind: string; invoice_number?: string; invoice_count?: number; customer_name?: string; stage?: number; sent_at?: string }>;
   replies?: ChaseReply[];  // AUTO-2: replies to chases awaiting the owner
 }
 
@@ -140,7 +140,9 @@ export function briefingLines(d: Dashboard): string[] {
   }
   const auto = d.summary.data?.automated ?? [];
   if (auto.length > 0) {
-    lines.push(`In the last week I chased ${plural(auto.length, 'invoice', 'invoices')} for you on autopilot.`);
+    // AUTO-3: one email can cover several invoices; count the invoices.
+    const chased = auto.reduce((n, a) => n + (a.invoice_count ?? 1), 0);
+    lines.push(`In the last week I chased ${plural(chased, 'invoice', 'invoices')} for you on autopilot.`);
   }
   const replies = d.summary.data?.replies ?? [];
   // Codex AUTO-2 review 1: count the customers, not their emails.
