@@ -350,31 +350,56 @@ def test_eligible_contacts_are_kept_before_review_ones(db):
     assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'") == 5
 
 
-def test_two_runs_at_once_can_never_both_reserve_the_last_of_a_budget(db, monkeypatch):
-    """P1 3: with room for exactly one search, two simultaneous runs make one
-    search between them and the meter never passes the budget."""
-    from threading import Barrier, BrokenBarrierError
-    from concurrent.futures import ThreadPoolExecutor
+class Tracked(Session):
+    """Records where each transaction ends, so a test can see what was done
+    while the business lock was held."""
+    events: list = []
+
+    def commit(self):
+        self.events.append("end")
+        return super().commit()
+
+    def rollback(self):
+        self.events.append("end")
+        return super().rollback()
+
+
+def meter_writes_without_the_lock(events):
+    held, bad = False, []
+    for e in events:
+        if e == "lock":
+            held = True
+        elif e == "end":
+            held = False
+        elif not held:
+            bad.append(e)
+    return bad
+
+
+@pytest.mark.parametrize("cost_over_reserve", [0, 9])
+def test_every_meter_write_happens_under_the_business_lock(db, monkeypatch, cost_over_reserve):
+    """Review 1 P1 3 and review 2 P1 1: the budget check and reservation are
+    one locked step, and the settlement (and any overspend pause) takes the
+    business lock BEFORE touching the meter, so PostgreSQL never sees the
+    meter row and the business row locked in opposite orders."""
     biz, brand, lia, campaign = started(db)
     r = research()
-    with db.begin() as c:
-        c.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) VALUES "
-                       "(:b, :m, '2026-10', :v, :at)"),
-                  {"b": A, "m": meter(brand), "v": 2000 - r.MAX_SEARCH_PENCE, "at": NOW.isoformat()})
-    barrier, real = Barrier(2), r._spent
-
-    def both_read_the_balance(*args, **kwargs):
-        try:
-            barrier.wait(timeout=1)      # meets the other run only if nothing serialises them
-        except BrokenBarrierError:
-            pass
-        return real(*args, **kwargs)
-    monkeypatch.setattr(r, "_spent", both_read_the_balance)
-    worlds = [World([batch(0)], cost=r.MAX_SEARCH_PENCE), World([batch(1000)], cost=r.MAX_SEARCH_PENCE)]
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        list(pool.map(lambda w: run(db, biz, lia, w), worlds))
-    assert sum(len(w.briefs) for w in worlds) == 1
-    assert spent(db, brand) <= 2000
+    events = []
+    Tracked.events = events
+    real_lock, real_spend = r._lock, r._spend
+    monkeypatch.setattr(r, "_lock", lambda session, bid: (events.append("lock"), real_lock(session, bid))[1])
+    monkeypatch.setattr(r, "_spend", lambda session, bid, moment, pence, brand_id:
+                        (events.append(("spend", pence)), real_spend(session, bid, moment, pence, brand_id))[1])
+    world = World([batch(0)], cost=r.MAX_SEARCH_PENCE + cost_over_reserve)
+    with Tracked(db) as s:
+        out = r.run(s, biz, lia["id"], **world.kwargs())
+    writes = [e for e in events if isinstance(e, tuple)]
+    assert writes[0] == ("spend", r.MAX_SEARCH_PENCE) and len(writes) == 2   # reserve, then settle
+    assert meter_writes_without_the_lock(events) == []
+    if cost_over_reserve:
+        assert "paused" in out["stopped"] and spent(db, brand) == r.MAX_SEARCH_PENCE + cost_over_reserve
+        with Session(db) as s:
+            assert r.status(s, biz)["brands"][0]["enabled"] is False
 
 
 def test_aria_sees_each_brands_lessons_from_its_own_results(db):

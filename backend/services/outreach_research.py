@@ -746,13 +746,16 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             out["stopped"] = "Research was unavailable"
             break
         cost = max(0, int(result.get("cost_pence") or 0))
+        # Settle under the business lock, held through any pause and the
+        # commit: every meter write takes the business lock first, so the
+        # lock order is the same everywhere (Codex OUT-18 review 2).
+        _lock(session, bid)
         _spend(session, bid, moment, cost - MAX_SEARCH_PENCE, brand_id)   # settle the reservation
         out["spend_pence"] += cost
         if cost > MAX_SEARCH_PENCE:
             # The reservation must hold. If it ever doesn't, the full cost is
             # kept and research pauses until the owner switches it back on.
-            _lock(session, bid)
-            cfg = _config(_doc(session, bid))
+            cfg = _config(_doc(session, bid))     # still under the settlement's lock
             paused = _brand_config(cfg, brand_id)
             paused["enabled"] = False
             paused["paused_reason"] = f"A search cost {cost}p, more than its {MAX_SEARCH_PENCE}p reserve"
