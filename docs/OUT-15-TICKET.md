@@ -153,3 +153,6 @@ Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-5.md`. Overriding `query.dns` 
 Backlog fix: any failed check, including a manual one, marks a DNS pause (never over a safety hold), so the daily check re-enables the mailbox once the records are fixed.
 
 Tests: setup **86 passed**; live google.com still authorises 209.85.220.41 and refuses 192.0.2.10.
+
+## Codex review 6: APPROVE, no P1
+Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-6.md`. Its backlog item is done: the wizard's audience approval now shows **"Review this again by"**, 12 months by default and editable (decision A).
