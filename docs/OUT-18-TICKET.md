@@ -53,6 +53,8 @@ Examples:
   - the 9–5 weekday window;
   - the **monthly allowance of 500 emails per business** (`metering.reserve_outreach_usage`).
 
+**Before scaling (Codex OUT-18 C review 1, P3):** the per-brand count filters `outreach_usage_events` by business, date and state. No index matches that directly; it is fine at pilot volume. Get a representative `EXPLAIN` from production before outreach volume grows, and if needed add `(business_id, local_send_date, state)` in a later migration.
+
 **Open (pricing):** at 20 a day per brand, two brands reach 500 in about 12 weekdays. Whether the allowance becomes per brand is Mike's call.
 
 ## Part B — wizard and screens (YELLOW)
