@@ -444,11 +444,18 @@ def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callabl
         flat = text_.lower()
         if SOLE_TRADER.search(flat):
             return False
+        for m in TRADING_AS.finditer(flat):
+            # "Studio 1 Ltd trading as Fitness Club" is the company's own
+            # brand; any other "trading as" is someone else trading.
+            if not re.search(re.escape(registered_name), _legal_name(flat[max(0, m.start() - 80): m.start()])):
+                return False
         short = registered_number.lstrip("0")
         for m in re.finditer(r"(?<![A-Za-z0-9])(" + re.escape(registered_number)
                              + (("|" + re.escape(short)) if short and short.isdigit() else "") + r")(?![A-Za-z0-9])", text_,
                              flags=re.I):
             window = flat[max(0, m.start() - 250): m.end() + 100]
+            if CREDIT.search(window):
+                continue   # a designer's, host's or platform's disclosure: not the operator's
             if REGISTRATION.search(window) and re.search(r"(?<![a-z0-9])" + re.escape(registered_name)
                                                          + r"(?![a-z0-9])", _legal_name(window)):
                 return True
@@ -457,12 +464,51 @@ def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callabl
         home, home_final = _page(fetch, f"https://{urlparse(final).hostname}/")
         if not (_owns(urlparse(home_final).hostname or "", domain) and discloses(home)):
             return review
+    trading = [m.group(1) for m in re.finditer(r"trading as ([A-Za-z0-9][A-Za-z0-9 &'\-]{1,60})", _visible_text(page))]
+    if not _domain_fits(domain, record.get("name") or company, trading):
+        return review
     return {"ok": True, **base, "number": registered_number,
             "role_verified": _officer_match(name, record.get("officers") or []) if name else False,
             "company_type": record.get("type")}
 
 
-SOLE_TRADER = re.compile(r"\bsole trader\b|\btrading as\b|\bt/a\b|\bself[- ]employed\b|\bpartnership\b")
+SOLE_TRADER = re.compile(r"\bsole trader\b|\bself[- ]employed\b|\bpartnership\b")
+TRADING_AS = re.compile(r"\btrading as\b|\bt/a\b")
+# A third party's credit (the web designer, host or platform) is about THEM,
+# never the site's operator (Codex OUT-10 review 4).
+CREDIT = re.compile(r"\b(designed|built|developed|created|hosted|made|maintained|managed|powered|produced)"
+                    r"(\s+(and|&)\s+\w+)?\s+by\b|\bsite\s+by\b|\bweb\s*(site\s+)?design(ed)?\s*(by\b|:)"
+                    r"|\bdesign(ed)?\s+by\b|\bwebsite\s+by\b|\bhosting\s*(by\b|:)")
+GENERIC = {"ltd", "limited", "plc", "llp", "the", "company", "co", "group", "uk", "and", "of", "services"}
+
+
+def _significant(name: str) -> list:
+    return [t for t in re.findall(r"[a-z0-9]+", str(name or "").lower()) if t not in GENERIC]
+
+
+def _domain_fits(domain: str, company: str, trading_names: list) -> bool:
+    """Mike's sanity check (24 Oct 2026): the email's domain must fit the
+    company's name or a trading name it discloses, e.g. studio1.example for
+    Studio 1 Ltd. A personal domain that fits neither goes to review."""
+    labels = [l for l in domain.lower().split(".") if l not in ("www", "mail")]
+    label = re.sub(r"[^a-z0-9]", "", labels[0] if labels else "")
+    if not label:
+        return False
+    for name in [company, *trading_names]:
+        words = _significant(name)
+        if not words:
+            continue
+        joined = "".join(words)
+        if joined and joined in label:
+            return True
+        if len(words) >= 2 and "".join(words[:2]) in label:
+            return True
+        if any(len(w) >= 5 and w in label for w in words):
+            return True
+        initials = "".join(w[0] for w in words)
+        if len(words) >= 2 and label.startswith(initials) and len(initials) >= 2:
+            return True
+    return False
 REGISTRATION = re.compile(r"registered in (england|wales|scotland|northern ireland)|company (registration )?(number|no\b)"
                           r"|registration (number|no\b)|registered (number|no\b)|registered office|companies house")
 

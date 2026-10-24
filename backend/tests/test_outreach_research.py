@@ -737,3 +737,56 @@ def test_a_compound_surname_is_not_a_match(db):
     world.officers["Studio 1 Ltd"] = ["SMITH-JONES, Sam"]
     run(db, biz, lia, world)
     assert count(db, "SELECT fact_value FROM outreach_evidence WHERE business_id = :b AND fact_type = 'role_verified'") == "false"
+
+
+# ------------------------------- Codex OUT-10 review 4 (Mike chose: recommended) ---
+
+@pytest.mark.parametrize("credit", [
+    "Website designed and hosted by Studio 1 Ltd. Company registration number {n}.",
+    "Site by Studio 1 Ltd, registered in England, company number {n}.",
+    "Powered by Studio 1 Ltd (registered in England and Wales, company no. {n})",
+    "Web design: Studio 1 Ltd, company number {n}",
+])
+def test_a_third_party_credit_never_establishes_the_operator(db, credit):
+    """The designer's disclosure is about the designer, not the site's owner."""
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    n = World.number_for("Studio 1 Ltd")
+    page = f"<html><p>Personal training with Sam. Email sam@studio1.example</p><footer>{credit.format(n=n)}</footer></html>"
+    world.pages["https://studio1.example/team"] = page
+    world.pages["https://studio1.example/"] = page
+    assert run(db, biz, lia, world)["accepted"] == []
+
+
+def test_a_company_trading_under_another_name_is_accepted(db):
+    """Review 4 backlog: the company itself trading as a brand is fine."""
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    n = World.number_for("Studio 1 Ltd")
+    world.pages["https://studio1.example/team"] = (
+        "<html><p>Email sam@studio1.example</p><footer>Studio 1 Ltd trading as Fitness Club. "
+        f"Registered in England and Wales, company number {n}.</footer></html>")
+    assert len(run(db, biz, lia, world)["accepted"]) == 1
+
+
+def test_the_email_domain_must_fit_the_company_or_its_trading_name(db):
+    """Mike's added sanity check: a personal trainer's own domain does not fit a
+    design agency's name, so even an unusual credit cannot make them eligible."""
+    biz, brand, lia, campaign = started(db)
+    candidate = {**person(1, company="Pixel Forge Ltd", email="sam@samtaylorpt.example"),
+                 "source_url": "https://samtaylorpt.example/contact"}
+    world = World([[candidate]])
+    n = World.number_for("Pixel Forge Ltd")
+    world.pages["https://samtaylorpt.example/contact"] = (
+        f"<html><p>Email sam@samtaylorpt.example</p><footer>Pixel Forge Ltd is registered in England, "
+        f"company number {n}.</footer></html>")
+    out = run(db, biz, lia, world)
+    assert out["accepted"] == [] and "review" in out["rejected"][0]["reason"]
+
+
+@pytest.mark.parametrize("company,domain", [
+    ("Studio 1 Ltd", "studio1.example"), ("Harbour Lettings Limited", "harbourlettings.example"),
+    ("Peak Form Studios Ltd", "peakform.example"), ("MSC Company Ltd", "msccompany.example"),
+])
+def test_ordinary_company_domains_fit(company, domain):
+    assert research()._domain_fits(domain, company, [])

@@ -139,3 +139,11 @@ Preserved verbatim in `audits/OUT-10-CODEX-REVIEW-3.md`. Fixes, tests first:
 Backlog, also done: surnames compare as a whole, so "Sam Jones" no longer matches "SMITH-JONES, Sam".
 
 Tests: research **90 passed**, setup **86 passed**; `./check.sh full` is green; Postgres passes.
+
+## Codex review 4: one P1 left; escalated to Mike after three cycles
+Preserved verbatim in `audits/OUT-10-CODEX-REVIEW-4.md`. The P1 was a web designer's legal disclosure in a footer being accepted as the prospect's. **Mike's decision (24 Oct 2026): "Recommended":**
+1. **Third-party credits never count.** A number beside "designed/built/hosted/powered/made… by", "site by", "web design:" and the like is the third party's disclosure, not the operator's.
+2. **A company's own trading name is fine:** "Studio 1 Ltd trading as Fitness Club" is accepted. Any other "trading as" still means review. "Sole trader", self-employed and partnership are always review.
+3. **Mike's added sanity check:** the email's domain must fit the registered name, or a trading name the site discloses (whole name, first two words, a distinctive word of five letters or more, or initials). A personal domain that fits neither is review, so even an unusually worded credit can't make someone eligible.
+
+Tests: research **100 passed**, setup **86 passed**; `./check.sh full` is green; Postgres passes.
