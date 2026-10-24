@@ -292,7 +292,7 @@ def test_the_pace_slot_is_reserved_before_the_send(h, monkeypatch):
 
 
 def test_a_send_that_does_not_happen_releases_its_pace_slot(h):
-    m = autopilot()
+    autopilot()
     granted(h)
     h.s.execute(text("UPDATE outreach_settings SET pause_all = 1 WHERE business_id = :b"), {"b": A})
     h.s.commit()
