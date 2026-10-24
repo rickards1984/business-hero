@@ -41,6 +41,20 @@ Examples:
    - the business lock.
 6. **Legacy, fail closed.** Spend recorded on the old business-wide meter in the current month counts against every brand's budget for that month. A business-level `enabled` / `monthly_cap_pence` from before OUT-18 becomes the starting value for brands without their own settings, never below £20.
 
+## Part C — sending per brand (RED; Mike chose Option A, 24 Oct 2026)
+
+- **20 new emails a day per brand.** "20 emails total for all brands … wouldn't be useful at all."
+- The limit is `min(20, outreach_settings.business_daily_cap)` per brand. The owner's setting now means "daily new emails per brand" (still 1–20).
+- It is counted from this UK day's reserved, sent and unknown `outreach_usage_events` for the brand's campaigns, under the business lock, the same way the campaign cap is counted. **No migration.**
+- The business-scope `outreach_daily_usage` row is still maintained for reporting and settlement, but no longer limits sending.
+- Unchanged:
+  - each mailbox's warm-up cap (5 → 10 → 20);
+  - the campaign cap;
+  - the 9–5 weekday window;
+  - the **monthly allowance of 500 emails per business** (`metering.reserve_outreach_usage`).
+
+**Open (pricing):** at 20 a day per brand, two brands reach 500 in about 12 weekdays. Whether the allowance becomes per brand is Mike's call.
+
 ## Part B — wizard and screens (YELLOW)
 
 The six agreed steps:

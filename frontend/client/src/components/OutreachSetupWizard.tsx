@@ -438,8 +438,9 @@ function LimitsStep() {
   return (
     <Stack spacing={1}>
       <Typography variant="body2">
-        Up to 20 new emails a day across the business, and never more than each mailbox's warm-up allows. Emails go
-        on weekdays, 9am to 5pm UK. Copying yourself in is off unless you turn it on.
+        Up to 20 new emails a day for each brand, and never more than each mailbox's warm-up allows (5, then 10, then
+        20 a day as it builds a sending history). Emails go on weekdays, 9am to 5pm UK. Copying yourself in is off
+        unless you turn it on.
       </Typography>
       <Button component={Link} to="/app/outreach/settings" variant="text" sx={{ alignSelf: 'flex-start' }}>Change limits</Button>
     </Stack>

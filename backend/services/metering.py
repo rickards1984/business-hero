@@ -634,7 +634,18 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
         "WHERE u.business_id=:b AND m.campaign_id=:c AND u.local_send_date=:d AND u.state IN ('reserved','committed','unknown')"),
         {'b': bid, 'c': campaign['id'], 'd': local.date().isoformat()}).scalar()
     require(count < campaign['daily_cap'], 'Campaign daily capacity exhausted')
-    for scope, scope_id, limit in (('business', bid, min(20, settings['business_daily_cap'])), ('mailbox', mailbox_id, cap)):
+    # OUT-18 (Mike, Option A): the daily limit of new emails is PER BRAND —
+    # 20, or the owner's lower business_daily_cap — counted like the campaign
+    # cap from this UK day's held and sent emails, under the business lock.
+    brand_count = session.execute(text(
+        "SELECT count(*) FROM outreach_usage_events u JOIN outreach_messages m ON m.business_id=u.business_id AND m.id=u.message_id "
+        "JOIN outreach_campaigns c ON c.business_id=m.business_id AND c.id=m.campaign_id "
+        "WHERE u.business_id=:b AND c.brand_id=:br AND u.local_send_date=:d AND u.state IN ('reserved','committed','unknown')"),
+        {'b': bid, 'br': str(campaign['brand_id']), 'd': local.date().isoformat()}).scalar()
+    require(brand_count < min(20, settings['business_daily_cap']), 'Daily outreach capacity for this brand exhausted')
+    # The business row is still counted (reporting and settlement); the
+    # mailbox row enforces each mailbox's warm-up limit.
+    for scope, scope_id, limit in (('business', bid, None), ('mailbox', mailbox_id, cap)):
         usage = rows(session, 'outreach_daily_usage', bid, 'AND scope_type=:s AND scope_id=:i AND local_date=:d',
                      {'s': scope, 'i': scope_id, 'd': local.date().isoformat()}, True)
         if not usage:
@@ -642,7 +653,8 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
                            local_date=local.date().isoformat(), reserved=0, accepted=0, unknown=0)
             usage = [one(session, 'outreach_daily_usage', bid, ident)]
         u = usage[0]
-        require(sum(u[k] or 0 for k in ('reserved', 'accepted', 'unknown')) < limit, 'Daily outreach capacity exhausted')
+        if limit is not None:
+            require(sum(u[k] or 0 for k in ('reserved', 'accepted', 'unknown')) < limit, 'Daily outreach capacity exhausted')
         session.execute(text('UPDATE outreach_daily_usage SET reserved=reserved+1 WHERE business_id=:b AND id=:id'), {'b': bid, 'id': u['id']})
     month_start = start.replace(day=1)
     month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
