@@ -57,21 +57,24 @@ SURFACES = [
     ("prospects/{prospect_id}/timeline", "get_outreach_prospect_timeline", "prospect_id", "messages", "id prospect_id campaign_id mailbox_id kind origin direction state accepted_at created_at"),
     ("campaigns", "list_outreach_campaigns", None, "campaigns", "id brand_id mailbox_id name sequence_version version status timezone daily_cap"),
     ("campaigns/{campaign_id}", "get_outreach_campaign", "campaign_id", "campaigns", "id brand_id mailbox_id name sequence_version version status timezone daily_cap"),
-    ("campaigns/{campaign_id}/sequence", "get_outreach_sequence", "campaign_id", "sequence_steps", "id campaign_id sequence_version ordinal delay_business_days approved_at"),
+    ("campaigns/{campaign_id}/sequence", "get_outreach_sequence", "campaign_id", "sequence_steps", "id campaign_id sequence_version ordinal delay_business_days approved_at approved_by subject body"),
     ("replies", "list_outreach_replies", None, "replies", "id prospect_id mailbox_id inbound_email_id matched_message_id owner_id category confidence resolution received_at"),
+    ("replies/{reply_id}", "get_outreach_reply", "reply_id", "replies", "id prospect_id mailbox_id inbound_email_id matched_message_id owner_id category confidence resolution received_at subject body_text from_email original_received_at original_status original_message enrolments enrolments_total"),
+    ("suppressions", "list_outreach_suppressions", None, "suppressions", "id key_type reason suppressed_at review_at prospect_id"),
     ("mailboxes", "list_outreach_mailboxes", None, "mailboxes", "id mailbox_id enabled daily_cap warmup_stage sending_days health_status health_checked_at"),
     ("compliance", "get_outreach_compliance_status", None, "compliance", "id brand_id version decision reviewed_at review_due_at"),
-    ("settings", "get_outreach_settings_and_permissions", None, "settings", "id pause_all timezone business_daily_cap owner_cc_default retention_policy_version"),
+    ("settings", "get_outreach_settings_and_permissions", None, "settings", "id pause_all timezone business_daily_cap owner_cc_default owner_cc_address retention_policy_version"),
     ("summary", "outreach_summary", None, None, ""),
     ("knowledge", "get_outreach_knowledge", None, "knowledge", "id brand_id topic answer source_reference version status approved_at review_due_at retired_at"),
     ("reply-slots", "list_outreach_reply_slots", None, "reply_slots", "id prospect_id reply_id mailbox_id action_id state generation reserved_at dispatched_at settled_at released_at"),
 ]
-DETAILS = {"get_outreach_prospect", "get_outreach_campaign", "get_outreach_settings_and_permissions"}
+DETAILS = {"get_outreach_reply", "get_outreach_prospect", "get_outreach_campaign", "get_outreach_settings_and_permissions"}
 LISTS = [s for s in SURFACES if s[1] not in DETAILS and s[1] != "outreach_summary"]
 WITH_PARENT = [s for s in SURFACES if s[2]]
 
 # Only 037 columns needed by the reads, plus sensitive columns to catch SELECT *.
 COLUMNS = {
+    "enrolments": "prospect_id TEXT, campaign_id TEXT, state TEXT, takeover_at TEXT, stop_reason TEXT",
     "knowledge": "brand_id TEXT, topic TEXT, answer TEXT, source_reference TEXT, version INTEGER, status TEXT, approved_at TEXT, review_due_at TEXT, retired_at TEXT",
     "reply_slots": "prospect_id TEXT, reply_id TEXT, mailbox_id TEXT, action_id TEXT, state TEXT, generation INTEGER, reserved_at TEXT, dispatched_at TEXT, settled_at TEXT, released_at TEXT, outcome_evidence TEXT, payload_hash TEXT",
     "brands": "name TEXT, default_mailbox_id TEXT, privacy_url TEXT, sender_identity TEXT, version INTEGER",
@@ -108,6 +111,7 @@ def database():
                               f"{columns})"))
         conn.execute(text("CREATE TABLE email_accounts (id TEXT PRIMARY KEY, business_id TEXT, "
                           "token_ciphertext TEXT, refresh_token_ciphertext TEXT, smtp_config TEXT)"))
+        conn.execute(text("CREATE TABLE email_messages (id TEXT PRIMARY KEY, business_id TEXT, email_account_id TEXT, subject TEXT, body_text TEXT, from_email TEXT, received_at TEXT)"))
         for bid in (A, B):
             mailbox = uid(bid, "account")
             conn.execute(text("INSERT INTO email_accounts VALUES (:id,:bid,:s,:s,:s)"),
@@ -142,7 +146,7 @@ def database():
                 purpose=SECRET, necessity=SECRET, balancing_test=SECRET, safeguards=SECRET,
                 sources=json.dumps([SECRET]), decision="draft", review_due_at=STAMP)
             add(conn, "settings", bid, pause_all=True, timezone="Europe/London", business_daily_cap=20,
-                owner_cc_default=False, owner_cc_address=SECRET, retention_policy_version=1)
+                owner_cc_default=False, owner_cc_address="owner@example.test", retention_policy_version=1)
             for index, (state, origin) in enumerate((("accepted", "live"), ("unknown", "live"),
                                                      ("imported", "import"), ("failed", "live"))):
                 add(conn, "messages", bid, index, prospect_id=prospect, campaign_id=campaign,
@@ -207,7 +211,7 @@ def harness(database, monkeypatch):
 def invoke(harness, surface, via, *, bid=None, **arguments):
     path, tool, parent, _, _ = surface
     if parent:
-        kind = "prospects" if parent == "prospect_id" else "campaigns"
+        kind = {"prospect_id": "prospects", "campaign_id": "campaigns", "reply_id": "replies"}[parent]
         arguments.setdefault(parent, uid(bid or harness.biz.id, kind))
     if via == "tool":
         result = harness.tools.execute_tool(tool, arguments, harness.biz.id)
@@ -268,7 +272,7 @@ def test_feature_and_access_gate_on_every_surface(harness, surface, via, plan, f
     harness.biz.plan_tier, harness.biz.feature_flags = plan, flags
     harness.biz.subscription_status, harness.biz.is_active = status, active
     code, result = invoke(harness, surface, via)
-    if surface[3] in ("replies", "reply_slots", "knowledge") and active and not flags:
+    if surface[3] in ("replies", "reply_slots", "knowledge", "suppressions") and active and not flags:
         assert code == 200  # OUT-7: retained inbound history survives downgrade/read-only.
         return
     assert code == 403
@@ -345,6 +349,7 @@ def test_grounded_summary_separates_outcomes(harness, via):
             "unknown_live": count("messages", "origin='live' AND direction='outbound' AND state='unknown'"),
             "imported_messages": count("messages", "origin='import'"),
             "human_replies": count("replies", "category IN ('interested','question','not_now','unsubscribe','objection','wrong_person','referral')"),
+            "unresolved_replies": count("replies", "resolution IN ('pending','handed_over')"),
             "stage_meeting": count("prospects", "stage='meeting'"),
             "stage_won": count("prospects", "stage='won'"),
         }
@@ -568,3 +573,93 @@ def test_out7_knowledge_status_and_source_are_database_grounded(harness, via):
     assert result['items'][0]['source_reference'] == 'https://example.test/facts'
     foreign, _ = invoke(harness, surface, via, brand_id=uid(B, 'brands'))
     assert foreign == 404
+
+
+@pytest.mark.parametrize('via', ['api', 'tool'])
+def test_out8_unresolved_count_and_filter_are_grounded_across_pages(harness, via):
+    with harness.engine.begin() as conn:
+        for bid in (A, B):
+            for index in range(10, 76):
+                add(conn, 'replies', bid, index, mailbox_id=uid(bid, 'account'),
+                    resolution='handed_over' if index % 2 else 'resolved', received_at=STAMP)
+    surface = next(s for s in SURFACES if s[1] == 'list_outreach_replies')
+    for bid in (A, B):
+        harness.biz.id = bid
+        _, result = invoke(harness, surface, via, resolution='unresolved')
+        with harness.engine.connect() as conn:
+            expected = conn.execute(text("SELECT count(*) FROM outreach_replies WHERE business_id=:b AND resolution IN ('pending','handed_over')"), {'b': bid}).scalar_one()
+        assert result['total'] == expected == 38
+        assert len(result['items']) == 20
+        assert all(row['resolution'] in ('pending', 'handed_over') for row in result['items'])
+        _, summary = invoke(harness, next(s for s in SURFACES if s[1] == 'outreach_summary'), via)
+        assert summary['totals']['unresolved_replies'] == expected
+        assert summary['as_of'] == STAMP
+        for resolution in ('pending', 'handed_over', 'resolved', 'dismissed'):
+            _, filtered = invoke(harness, surface, via, resolution=resolution)
+            assert all(row['resolution'] == resolution for row in filtered['items'])
+    assert invoke(harness, surface, via, resolution='anything')[0] == 422
+
+
+@pytest.mark.parametrize('via', ['api', 'tool'])
+@pytest.mark.parametrize('mismatch', [None, 'business', 'mailbox', 'missing'])
+def test_out8_original_requires_exact_business_mailbox_and_id(harness, via, mismatch):
+    with harness.engine.begin() as conn:
+        conn.execute(text('INSERT INTO email_messages VALUES (:id,:b,:m,:s,:body,:sender,:at)'), {
+            'id': uid(A, 'inbound') if mismatch != 'missing' else uid(A, 'other'),
+            'b': B if mismatch == 'business' else A,
+            'm': uid(B, 'account') if mismatch == 'mailbox' else uid(A, 'account'),
+            's': 'Stored subject', 'body': 'x' * 14000, 'sender': 'sender@example.test', 'at': STAMP})
+    _, result = invoke(harness, next(s for s in SURFACES if s[1] == 'get_outreach_reply'), via)
+    item = result['item']
+    if mismatch:
+        assert item['body_text'] is None and item['subject'] is None
+        assert item['original_status'] == 'unavailable'
+    else:
+        assert item['body_text'] == 'x' * 12000
+        assert item['subject'] == 'Stored subject'
+        assert item['from_email'] == 'sender@example.test'
+        assert item['original_received_at'] == STAMP
+
+
+@pytest.mark.parametrize('via', ['api', 'tool'])
+def test_out8_suppression_link_retention_and_templates(harness, via):
+    suppression = next(s for s in SURFACES if s[1] == 'list_outreach_suppressions')
+    _, result = invoke(harness, suppression, via)
+    assert result['items'][0]['prospect_id'] == uid(A, 'prospects')
+    with harness.engine.begin() as conn:
+        conn.execute(text('UPDATE outreach_prospects SET retention_due_at=:at WHERE business_id=:b'), {'at': STAMP, 'b': A})
+        conn.execute(text('UPDATE outreach_sequence_steps SET template_text=:t, approved_by=:owner WHERE business_id=:b'),
+                     {'t': json.dumps({'schema_version': 1, 'subject': 'Stored subject', 'body': 'b' * 13000}), 'owner': uid(A, 'owner'), 'b': A})
+    _, result = invoke(harness, suppression, via)
+    assert result['items'][0]['prospect_id'] is None
+    _, result = invoke(harness, next(s for s in SURFACES if s[1] == 'get_outreach_sequence'), via)
+    assert result['items'][0]['subject'] == 'Stored subject'
+    assert result['items'][0]['body'] == 'b' * 13000
+    assert result['items'][0]['approved_by'] == uid(A, 'owner')
+
+
+def test_out8_tool_and_http_argument_schemas_match(harness):
+    definitions = {d['function']['name']: d['function']['parameters'] for d in harness.tools.TOOL_DEFINITIONS}
+    for read in harness.module.READS:
+        assert definitions[read.tool] == harness.module.argument_schema(read)
+
+
+@pytest.mark.parametrize('via', ['api', 'tool'])
+def test_out8_reply_detail_shows_scoped_stopped_sequences_and_takeover(harness, via):
+    with harness.engine.begin() as conn:
+        for bid in (A, B):
+            for index in range(55):
+                add(conn, 'enrolments', bid, index, prospect_id=uid(bid, 'prospects'),
+                    campaign_id=uid(bid, 'campaigns'), state='paused', takeover_at=STAMP,
+                    stop_reason='Owner took over')
+        add(conn, 'enrolments', A, 100, prospect_id=uid(A, 'other'),
+            campaign_id=uid(A, 'campaigns'), state='active')
+    _, result = invoke(harness, next(s for s in SURFACES if s[1] == 'get_outreach_reply'), via)
+    item = result['item']
+    assert item['enrolments_total'] == 55 and len(item['enrolments']) == 50
+    for enrolment in item['enrolments']:
+        assert enrolment['campaign_id'] == uid(A, 'campaigns')
+        assert enrolment['state'] == 'paused'
+        assert enrolment['takeover_at'] == STAMP
+        assert enrolment['stop_reason'] == 'Owner took over'
+    assert uid(B, 'campaigns') not in json.dumps(result)

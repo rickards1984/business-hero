@@ -4,6 +4,7 @@ Only fixed table/column/predicate literals enter SQL. Values always bind, and
 no ORM tables are registered. Retention redaction is minimization, not erasure.
 """
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -42,15 +43,19 @@ READS = (
     Read("campaigns", "list_outreach_campaigns", "campaigns", CAMPAIGN_FIELDS),
     Read("campaigns/{campaign_id}", "get_outreach_campaign", "campaigns", CAMPAIGN_FIELDS, "campaign_id", True),
     Read("campaigns/{campaign_id}/sequence", "get_outreach_sequence", "sequence_steps",
-         "id campaign_id sequence_version ordinal delay_business_days approved_at", "campaign_id"),
+         "id campaign_id sequence_version ordinal delay_business_days approved_at approved_by", "campaign_id"),
     Read("replies", "list_outreach_replies", "replies",
          "id prospect_id mailbox_id inbound_email_id matched_message_id owner_id category confidence resolution received_at"),
+    Read("replies/{reply_id}", "get_outreach_reply", "replies",
+         "id prospect_id mailbox_id inbound_email_id matched_message_id owner_id category confidence resolution received_at", "reply_id", True),
+    Read("suppressions", "list_outreach_suppressions", "suppressions",
+         "id key_type reason suppressed_at review_at"),
     Read("mailboxes", "list_outreach_mailboxes", "mailboxes",
          "id mailbox_id enabled daily_cap warmup_stage sending_days health_status health_checked_at"),
     Read("compliance", "get_outreach_compliance_status", "compliance",
          "id brand_id version decision reviewed_at review_due_at"),
     Read("settings", "get_outreach_settings_and_permissions", "settings",
-         "id pause_all timezone business_daily_cap owner_cc_default retention_policy_version", detail=True),
+         "id pause_all timezone business_daily_cap owner_cc_default owner_cc_address retention_policy_version", detail=True),
     Read("summary", "outreach_summary", "", "", detail=True),
     Read("knowledge", "get_outreach_knowledge", "knowledge",
          "id brand_id topic answer source_reference version status approved_at review_due_at retired_at"),
@@ -75,8 +80,10 @@ def argument_schema(read):
                           offset={"type": "integer", "minimum": 0, "maximum": 10000, "default": 0})
     if read.parent:
         properties[read.parent] = {"type": "string", "format": "uuid"}
-    if read.table in ("replies", "reply_slots"):
+    if read.table in ("replies", "reply_slots") and not read.detail:
         properties["mailbox_id"] = {"type": "string", "format": "uuid"}
+    if read.table == "replies" and not read.detail:
+        properties["resolution"] = {"type": "string", "enum": ["pending", "handed_over", "resolved", "dismissed", "unresolved"]}
     if read.table == "knowledge":
         properties["brand_id"] = {"type": "string", "format": "uuid"}
     return {"type": "object", "properties": properties,
@@ -99,6 +106,9 @@ def _arguments(read, arguments, *, http=False):
                 value = int(value) if len(value) <= 10 else -1
             if type(value) is not int or not spec["minimum"] <= value <= spec["maximum"]:
                 raise HTTPException(422, "Invalid pagination")
+        elif "enum" in spec:
+            if value not in spec["enum"]:
+                raise HTTPException(422, "Invalid resolution")
         else:
             try:
                 if not isinstance(value, str):
@@ -118,9 +128,9 @@ def _utc(value):
     return value.astimezone(timezone.utc)
 
 
-DATE_FIELDS = frozenset("evidence_checked_at fetched_at expires_at accepted_at created_at approved_at received_at health_checked_at reviewed_at review_due_at retired_at reserved_at dispatched_at settled_at released_at".split())
+DATE_FIELDS = frozenset("evidence_checked_at fetched_at expires_at accepted_at created_at approved_at received_at health_checked_at reviewed_at review_due_at retired_at reserved_at dispatched_at settled_at released_at suppressed_at review_at".split())
 BOOL_FIELDS = frozenset(("enabled", "pause_all", "owner_cc_default"))
-TEXT_FIELDS = frozenset("name privacy_url sender_identity company role domain stage eligibility subscriber_type source_type source_url excerpt fact_type fact_value kind origin direction state status timezone category resolution health_status decision topic answer source_reference".split())
+TEXT_FIELDS = frozenset("name privacy_url sender_identity company role domain stage eligibility subscriber_type source_type source_url excerpt fact_type fact_value kind origin direction state status timezone category resolution health_status decision topic answer source_reference owner_cc_address key_type reason".split())
 
 
 def _project(read, row, clock):
@@ -148,6 +158,16 @@ def _project(read, row, clock):
     if read.table == "knowledge":
         stale = (row["status"] != "approved" or not row["approved_at"] or
                  _utc(row["approved_at"]) > clock or _utc(row["review_due_at"]) <= clock)
+    if read.table == "sequence_steps":
+        try:
+            envelope = json.loads(row["template_text"] or "")
+            valid = isinstance(envelope, dict) and envelope.get("schema_version") == 1
+        except (ValueError, TypeError):
+            envelope, valid = {}, False
+        for field, bound in (("subject", 998), ("body", 20000)):
+            value = envelope.get(field) if valid else None
+            item[field] = value[:bound] if isinstance(value, str) else None
+        stale = not valid or item["subject"] is None or item["body"] is None
     return item, stale
 
 
@@ -172,6 +192,7 @@ SUMMARY = {
     "unknown_live": ("messages", "origin='live' AND direction='outbound' AND state='unknown'", "prospects"),
     "imported_messages": ("messages", "origin='import'", "prospects"),
     "human_replies": ("replies", "category IN ('interested','question','not_now','unsubscribe','objection','wrong_person','referral')", "replies"),
+    "unresolved_replies": ("replies", "resolution IN ('pending','handed_over')", "replies?resolution=unresolved"),
     "stage_meeting": ("prospects", "stage='meeting'", "prospects"),
     "stage_won": ("prospects", "stage='won'", "prospects"),
 }
@@ -180,7 +201,7 @@ SUMMARY = {
 def _read(session, read, arguments, business_id):
     # This assertion also applies to platform admins, independently of the
     # HTTP dependency's existing bypass. Never accept a model-supplied grant.
-    assert_feature_access(_load_business(session, business_id), "outreach", retained_history=read.table in ("replies", "reply_slots", "knowledge"))
+    assert_feature_access(_load_business(session, business_id), "outreach", retained_history=read.table in ("replies", "reply_slots", "knowledge", "suppressions"))
     params = {"business_id": str(business_id), **arguments}
     where = "business_id = :business_id"
     if read.parent and not read.detail:
@@ -197,11 +218,14 @@ def _read(session, read, arguments, business_id):
         _owned(session, "email_accounts", arguments["mailbox_id"], params["business_id"])
         where += " AND mailbox_id = :mailbox_id"
 
+    if "resolution" in arguments:
+        where += " AND resolution IN ('pending','handed_over')" if arguments["resolution"] == "unresolved" else " AND resolution = :resolution"
+
     if read.path == "summary":
         totals = {key: _count(session, "outreach_" + table,
                              where + " AND " + predicate, params)
                   for key, (table, predicate, _) in SUMMARY.items()}
-        return {"totals": totals,
+        return {"totals": totals, "as_of": now().isoformat(),
                 "sources": {key: "/v1/outreach/" + source for key, (_, _, source) in SUMMARY.items()},
                 "data_quality": "available" if any(totals.values()) else "none",
                 "message": "Stored outreach counts available." if any(totals.values()) else "None available."}
@@ -215,6 +239,10 @@ def _read(session, read, arguments, business_id):
                if field in TEXT_FIELDS else field for field in read.fields.split()]
     if read.table == "prospects":
         columns.append("retention_due_at")  # Internal expiry input, never returned.
+    if read.table == "sequence_steps":
+        columns.append("substr(template_text, 1, 140000) AS template_text")
+    if read.table == "suppressions":
+        columns.append("key_digest")  # Internal matching only; never serialized.
     order = "ordinal ASC, id ASC" if read.table == "sequence_steps" else "created_at DESC, id ASC"
     total = None if read.detail else _count(session, "outreach_" + read.table, where, params)
     params.update(limit=1 if read.detail else arguments["limit"],
@@ -226,6 +254,39 @@ def _read(session, read, arguments, business_id):
     if read.parent and read.detail and not rows:
         raise HTTPException(404, "Not found")
     projected = [_project(read, row, now()) for row in rows]
+    if read.table == "suppressions":
+        for row, (item, _) in zip(rows, projected):
+            match = session.execute(text(
+                "SELECT id, retention_due_at FROM outreach_prospects WHERE business_id=:business_id "
+                "AND email_key=:digest "
+                "ORDER BY id LIMIT 1"
+            ), {"business_id": str(business_id), "digest": row["key_digest"] if row["key_type"] == "email" else None,
+                }).mappings().first()
+            retained = match and (match["retention_due_at"] is None or _utc(match["retention_due_at"]) > now())
+            item["prospect_id"] = str(match["id"]) if retained else None
+    if read.table == "replies" and read.detail and projected:
+        item = projected[0][0]
+        original = session.execute(text(
+            "SELECT substr(subject,1,1000) AS subject, substr(body_text,1,12000) AS body_text, "
+            "substr(from_email,1,1000) AS from_email, received_at FROM email_messages "
+            "WHERE business_id=:business_id AND id=:id AND email_account_id=:mailbox_id LIMIT 1"
+        ), {"business_id": str(business_id), "id": item["inbound_email_id"], "mailbox_id": item["mailbox_id"]}).mappings().first()
+        item.update({field: original[field] if original else None for field in ("subject", "body_text", "from_email")})
+        item["original_received_at"] = _utc(original["received_at"]).isoformat() if original and original["received_at"] else None
+        item["original_status"] = "available" if original and original["body_text"] else "unavailable"
+        item["original_message"] = "Stored original message." if original and original["body_text"] else "Original content unavailable."
+        enrolment_params = {"business_id": str(business_id), "prospect_id": item["prospect_id"]}
+        item["enrolments_total"] = _count(session, "outreach_enrolments",
+            "business_id=:business_id AND prospect_id=:prospect_id", enrolment_params)
+        enrolments = session.execute(text(
+            "SELECT id, campaign_id, state, takeover_at, substr(stop_reason,1,1000) AS stop_reason "
+            "FROM outreach_enrolments WHERE business_id=:business_id AND prospect_id=:prospect_id "
+            "ORDER BY created_at DESC, id ASC LIMIT 50"
+        ), enrolment_params).mappings().all()
+        item["enrolments"] = [{"id": str(e["id"]), "campaign_id": str(e["campaign_id"]),
+                               "state": e["state"], "stop_reason": e["stop_reason"],
+                               "takeover_at": _utc(e["takeover_at"]).isoformat() if e["takeover_at"] else None}
+                              for e in enrolments]
     quality = "stale" if any(stale for _, stale in projected) else "available" if rows else "none"
     result = {"data_quality": quality, "message": "Outreach records available." if rows else "None available."}
     if read.detail:

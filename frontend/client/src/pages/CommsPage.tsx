@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import CallsPanel from '@/components/CallsPanel';
 import EmailsTab from '@/components/EmailsTab';
 import { useMe } from '@/hooks/useMe';
@@ -19,6 +19,7 @@ export default function CommsPage() {
 
   return (
     <div>
+      <Link to="/app/outreach" className="btn">Outreach department</Link>
       <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
         <button
           onClick={() => setSubTab('calls')}

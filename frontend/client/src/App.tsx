@@ -27,6 +27,7 @@ import Accounting from '@/pages/Accounting';
 import AppShell from '@/components/AppShell';
 import DashboardPage from '@/pages/DashboardPage';
 import CommsPage from '@/pages/CommsPage';
+import OutreachPage from '@/pages/OutreachPage';
 import FinancePage from '@/pages/FinancePage';
 import AIHubPage from '@/pages/AIHubPage';
 import QuotesPage from '@/pages/QuotesPage';
@@ -548,6 +549,7 @@ function App() {
                   <Route index element={<Navigate to="/app/dashboard" replace />} />
                   <Route path="dashboard" element={<DashboardPage />} />
                   <Route path="comms" element={<CommsPage />} />
+                  <Route path="outreach/*" element={<OutreachPage />} />
                   <Route path="finance" element={<FinancePage />} />
                   <Route path="quotes" element={<QuotesPage />} />
                   <Route path="ai" element={<AIHubPage />} />

@@ -1,0 +1,158 @@
+## TICKET OUT-8 — Stage A: screens and API acceptance contracts
+
+**Outcome** Mike can inspect and control outreach for New Body Gym/FitFutures and MSC in one department, with replies and approvals on Aria home, during his month using the product before launch.
+
+**Current evidence** `docs/OUT-1-DESIGN.md:187` assigns all six screens and home integration to OUT-8. `backend/outreach_read.py:34` defines existing projections; sequence reads omit template content and replies omit the original message. `backend/services/outreach_send.py:104` binds campaigns to their stored mailbox, and `:154` requires approved templates. `backend/services/outreach_replies.py:73` supplies owner handover; `:464` supplies immutable approved knowledge versions. `backend/app/email/router.py:1721` and `:1735` already expose those two writes. `frontend/client/src/components/ApprovalCard.tsx:18` supports four action types, excluding outreach. `frontend/client/src/pages/DashboardPage.tsx:102` is the existing Needs you surface. `frontend/client/src/App.tsx:547` has no Outreach route. `frontend/client/src/pages/EmailSettings.tsx:222` reads all connected accounts; MAIL-1 supports labels and default selection. This is local checkout evidence, not production verification.
+
+**North Star** P1 (home), P2/P8 (grounded counts and honest unknowns), P4 (owner approval), P5 (reviewed knowledge), P6 (department), P9 (tenant scope); Tool layer and Actions & permissions pillars. No new model client or model call.
+
+**Scope** Stage A changes only this ticket and `backend/tests/test_outreach_screens_api.py`. Stage B is the proposed implementation below, subject to Mike's product approval and Claude's independent review.
+
+**Non-goals** No real sends, model calls, research/enrichment, imports, enrolment wizard, new proposal/drafting engine, standing permissions, billing/add-on/standalone sales, automated resumption, provider activation, schema/ORM changes, migrations, production SQL, commits or pushes. Do not edit `aria_actions.py` or `chase_replies.py`; Claude owns them. No network and no access to `~/.openclaw` or `~/control-tower`. No global navigation redesign or general email rewrite.
+
+**Dependencies** Local OUT-1–7 and AUTO-3 head; MAIL-1 mailbox identity. Existing 037/038 contracts supply storage; 038 production rollout and current live-schema census remain separate gates. OUT-9 owns authorised pilot sends; OUT-10/router and provider gates remain in force. No new migration is needed for these fields. The current send service advances through ordinal 2 (`outreach_send.py:459`), so this version requires all three steps; shorter sequences need a separately reviewed service change. If implementation discovers a required column/table/constraint change, STOP and describe it; do not introduce a SQLModel table. RC1_SCOPE remains proposed: this explicitly commissioned Stage A does not approve broader RC1 or launch.
+
+**Affected systems** Proposed backend API/read tools and React/MUI screens; existing DB records only, no third-party calls.
+
+**Security & data risk** Stage A: tests/docs only. Stage B: AMBER screens/API integration; owner authorization and safety controls require independent security review and explicit approval of the listed actions before implementation (RED boundaries under AGENTS §2). Reuse canonical entitlement/owner checks; do not change policy. No admin impersonation exemption.
+
+**Builder** Codex. **Reviewer** Claude, pending; builder is not sole approver.
+**Branch** `ticket/OUT-8-outreach-screens` in the assigned isolated worktree.
+**Budget band** L for Stage B; Stage A S. **Max repair cycles** 3.
+**Status** proposed for Stage B; Stage A delivered for review.
+
+### What Mike will see
+
+1. **Overview — `/app/outreach`.** A short deterministic Aria summary and links to prospects, campaigns, replies, suppression and settings. Show stored prospect/campaign totals, accepted live messages, unknown send outcomes, imported messages, human replies, meeting-stage and won-stage counts. Label the latter as recorded stages, never revenue or inferred wins. Accepted means provider acceptance, not delivery. Every total comes from `/summary`, with its source link; never count only the current page. Show last successful fetch time as “loaded”, not as inbox sync freshness. Unknown sync freshness says unknown. Empty data says none recorded; failed fetch says unavailable, never zero. No fabricated percentages, pipeline value or “today” counts from lifetime totals. The home tile uses the same source and query cache.
+2. **Prospects — `/app/outreach/prospects`.** Paged company/person rows, stage, eligibility, score/confidence, evidence dates; open a row for evidence and timeline. Explain blocked/unknown eligibility without treating a high score as permission. Show imported versus live history. Existing redaction of expired personal data remains. First version is inspection plus manual opt-out; no import, enrichment, eligibility override or enrolment editor.
+3. **Campaigns — `/app/outreach/campaigns`.** List and open campaigns; create a draft with a name, existing brand, explicit connected mailbox and cap. The mailbox chooser shows address, label and provider for every connected business account, alongside outreach health/enabled state. Empty selection until owner chooses; never choose newest or silently use the general default. Disconnected/unsupported accounts cannot be saved; connected but unverified accounts may be saved as drafts with a blocked warning. Changing the default or connecting a newer account cannot change the campaign. Once dispatch history exists, changing sender requires a new campaign. For the first version choose one initial step and two follow-ups with fixed delays 0/5/7 business days; explain the additional seven-calendar-day contact spacing. Edit subject/body, then separately **Approve these templates** against the displayed campaign/sequence versions. Editing creates a new sequence version, pauses the campaign and invalidates first-batch approval; previous templates/history remain. Template approval is not approval to send, enrol prospects or enable automation. First five eligible send cards still need individual owner approval through OUT-6. Existing cards are visible; building new batches/proposals is outside this ticket.
+4. **Replies — `/app/outreach/replies`.** Filter by mailbox using the existing server filter. Show original stored text, sender, time, mailbox, category/confidence, assigned owner and stopped-sequence state; the original is distinct from any classifier label. Interested/question/unknown and handed-over unresolved replies link from home Needs you. “I'll handle this” reuses handover; **Mark handled** records resolution without sending or restarting a sequence. Deduplicate home items by reply ID and cards by action ID; resolving in either place refreshes both. Display missing original content explicitly. One bespoke answer per prospect across campaigns/mailboxes remains; later questions hand over. No generic email fallback or retry button for unknown outcomes.
+5. **Suppression — `/app/outreach/suppression`.** Paginated suppression records with reason/time and a linked prospect where still available. Existing storage is deliberately digests, so unmatched/retention-redacted records say “Address withheld”; do not promise a reversible list of raw addresses. Manual opt-out accepts an exact email address, confirms its scope is this business across all its campaigns/mailboxes, normalizes and stores the existing tenant-keyed digest, stops matching enrolments and cancels unclaimed work atomically. Repeat submissions are idempotent. No acknowledgement email, unsuppress, delete or export button. Suppression of an address not yet a prospect is supported. Display the committed-dispatch boundary: already dispatched mail cannot be recalled.
+6. **Settings — `/app/outreach/settings`.** Pause all; business and per-mailbox caps; owner CC default/address; knowledge facts grouped by brand, with source, version, approval and explicit review date. Keep UK hours and current warm-up rules visible. Caps are 1–20 and the lower business/mailbox/warm-up/remaining allowance wins; changing the cap never advances warm-up or changes health. CC is off by default and shown on each immutable card. Pausing blocks subsequent claims/dispatch checks; unpausing does not resume stopped prospects, grant permissions or send anything. Knowledge save uses existing OUT-7 approval/versioning; expired facts are visibly unavailable for replies. Link **Manage connected mailboxes** to `/app/settings/email`, reusing MAIL-1. Do not offer provider health approval or integrations that are not activated.
+7. **Existing approval cards, including home.** Add `send_outreach` and `reply_outreach` to the existing ApprovalCard surface, not a competing approval system. Show exact stored From/mailbox, To, CC, subject, body, sign-off/footer, campaign/template version, window and expiry; reply cards also show original reply and pinned fact citations/review dates. No inline editing of outreach payloads. Use existing version-bound approve/dismiss endpoints; a dismiss never releases an answer slot. Show accepted/unknown/failed accurately; timeout or stale version refetches authoritative state and never invites a duplicate send. No real approval/send is exercised in Stage A.
+
+### Entitlement and authority
+
+Business includes outreach; an existing explicit admin feature grant also enables it. Starter/Pro without a grant cannot create/edit campaigns/templates, raise mailbox caps, unpause or enable CC, save knowledge or approve sends. Never invent an add-on or offer checkout. Explicit denial, suspension and canonical access policy still apply. No tenant-name exemptions for MSC or New Body.
+
+Reuse canonical backend checks; frontend hiding is presentation only. All new writes below require the current authenticated **active owner of that business**, checked again under the mutation lock. Staff, inactive/foreign owners and platform admins without ownership cannot write. Tenant ID and approver come only from trusted context; reject extra body fields, including supplied business/owner/approval identities.
+
+Retained replies, slots and knowledge already have retained-history reads. Proposed suppression read and reply detail use that same policy. Owner handover, resolution, manual opt-out and strictly safety-only settings/mailbox patches (pause true, lower caps, CC false) remain available on plan downgrade; enabling changes do not. This does not bypass suspension or invent new access for read-only accounts: canonical request access enforcement still runs. Never gate inbound suppression processing on subscription. An outreach admin grant alone may not grant `aria_chat` or email connection access: existing action/account APIs keep their own gates. Show the dependency clearly; do not silently widen entitlements.
+
+### Exact HTTP contract
+
+All paths below have `/v1/outreach` prefix unless written in full. Reuse GET `brands`, `summary`, `prospects`, `prospects/{prospect_id}`, `prospects/{prospect_id}/evidence`, `prospects/{prospect_id}/timeline`, `campaigns`, `campaigns/{campaign_id}`, `campaigns/{campaign_id}/sequence`, `replies?mailbox_id=…`, `mailboxes`, `settings`, `knowledge?brand_id=…`, `reply-slots?mailbox_id=…`, and `compliance`. Collections use existing limit 20/max 50, offset bounds and stable ordering.
+
+Reuse POST `replies/{reply_id}/handover` and POST `knowledge` (brand_id, topic, answer, source_reference, explicit future review_due_at). Reuse `/v1/email/accounts` GET for mailbox identities and EmailSettings for connection management. Reuse `/v1/aria/actions` GET, `/{action_id}` GET, `/{action_id}/approve` POST with version, and `/{action_id}/dismiss` POST. No outreach PATCH of action payloads. `/v1/email/messages` is a bounded inbox list, not an exact reply-detail lookup; do not scan pages to guess the original message.
+
+**New writes — all owner-only and tenant-scoped, HTTP 200 on success:**
+
+| Method/path | Accepted body and effect |
+| --- | --- |
+| POST `campaigns` | `name`, `brand_id`, `mailbox_id`, `daily_cap`. Create draft, version=1, sequence_version=1, UK timezone, empty target rules with server-derived hash, no first-batch review. Return `{id, version}`. No enrolment or activation. |
+| PATCH `campaigns/{campaign_id}` | Required `version`; optional `name`, `mailbox_id`, `daily_cap`. Compare-and-swap; increment version, pause and clear first-batch review on material change. Mailbox immutable once any dispatch history exists (including unknown). Targeting/brand editing excluded. |
+| PUT `campaigns/{campaign_id}/sequence` | Required `version`, `steps` (exactly three objects: ordinal, delay_business_days, subject, body). Fixed 0/5/7 delays, consecutive ordinals, bounded nonempty strings, no unsupported interpolation. Persist OUT-6 schema_version=1 template envelopes, server hashes, allowed_variables=[]; increment campaign/sequence versions, unapproved new steps, preserve old versions, pause and invalidate first batch. |
+| POST `campaigns/{campaign_id}/approve-templates` | `version`, `sequence_version`; approve exactly displayed current steps with server timestamp/current owner. Does not create first-batch authority or dispatch. Repeated same-version approval harmless. |
+| PATCH `settings` | Subset of `pause_all`, `business_daily_cap`, `owner_cc_default`, `owner_cc_address`. Validate 1–20 cap and explicit valid address when enabling CC. Preserve every other setting/automation. Safety-only downgrade exception above. No implicit row provisioning if existing settings missing: 409 setup required. |
+| PATCH `mailboxes/{mailbox_id}` | `daily_cap` only, 1–20; lowering remains available on downgrade. Path is email_accounts.id, not outreach_mailboxes.id. Require both scoped account and outreach operational row; never create enabled/healthy mailbox state. |
+| POST `suppressions` | `email`, `reason` fixed to `manual_opt_out`. Idempotent tenant digest; stop all matching tenant prospects/enrolments, dismiss their proposed outreach actions, cancel pending dispatch jobs in the same transaction. No raw address added to suppression storage. |
+| POST `replies/{reply_id}/resolve` | Empty object. Mark resolved, keep takeover/sequence stop in place; idempotent, no slot reset, no send or draft. |
+
+Every foreign/missing referenced campaign, brand, mailbox or reply returns identical 404; malformed inputs 422, absent entitlement/ownership 403, stale version or prohibited state change 409. Failed requests roll back all changes. Reuse business/settings lock ordering from outreach_send; no HTTP request may assert health or delivery evidence. Pause/suppression and sending need real Postgres contention tests in Stage B; SQLite is not proof of serialization.
+
+**New reads:** GET `suppressions` returns `{items,total,limit,offset,data_quality}` with each item's id, key_type, reason, suppressed_at, review_at and optional matched prospect_id; never key_digest/token or credentials. GET `replies/{reply_id}` returns `{item,data_quality}` with safe reply metadata plus exact scoped original `subject`, `body_text` (max 12,000), `from_email`, `received_at`; join by stored inbound_email_id **and business/mailbox**, not thread/subject guesses. Unavailable content is null with an explanation, not invented. Both enforce retained-history policy and register tenant-scoped Aria tools `list_outreach_suppressions` and `get_outreach_reply` in the same delivery.
+
+**Existing read extensions (no new routes):** sequence projection adds bounded parsed subject/body and approval identity for current version; settings adds owner_cc_address for the owner controls; replies accepts `resolution` filter for pending/handed_over/resolved/dismissed, and summary adds server-calculated unresolved reply count with source link and as_of. Update shared Aria projections/schema and exact-allowlist/grounding tests together. Home must fetch unresolved rows server-side, not filter only the first page. No parallel model arithmetic. Existing suppression digests remain internal, even to Aria.
+
+### Files and implementation boundaries
+
+Stage A actual changes: this file and `backend/tests/test_outreach_screens_api.py` only.
+
+Stage B proposed files:
+
+- New `backend/outreach_manage.py` (typed owner HTTP router), `backend/services/outreach_manage.py` (transactional writes); register router in `backend/main.py` only after coordinating its shared-file ownership.
+- `backend/outreach_read.py`, `backend/assistant_tools.py` for projections/tools; `backend/tests/test_outreach_screens_api.py`, `test_outreach_read.py` and a new local Postgres management race test file for verification.
+- New `frontend/client/src/pages/OutreachPage.tsx`, `hooks/useOutreachData.ts`, `components/OutreachReplyCard.tsx`; `App.tsx` route `/app/outreach/*`; `pages/CommsPage.tsx` department link; `pages/DashboardPage.tsx`, `hooks/useDashboardData.ts` home tile/Needs you; `components/ApprovalCard.tsx` typed outreach previews. Use existing shell and MUI Stack/Paper/Alert/TextField/Select/Dialog patterns. Link to EmailSettings without modifying its mailbox workflows.
+
+Do not touch Claude's two owned services, migrations, auth/entitlement definitions, billing, provider clients, mail sync, production schema dumps or conformance tests. If an existing service cannot enforce a required invariant, return a concrete ownership handoff rather than bypass it in UI. No worker activation or new proposal endpoint; existing OUT-6/7 proposal paths supply cards when separately ready.
+
+### Acceptance criteria and tests
+
+The seven screen descriptions and HTTP contract above are checkable acceptance criteria. In addition:
+
+- Business switch clears drafts, selected mailbox and cached visible records; every query key includes business ID. No old tenant flash or cross-business mutation.
+- No count uses paginated array length as a total. Existing OUT-4 API/tool grounding tests remain; extend them for new counts/filter/text projections against >50 synthetic records and both tenants.
+- Errors, loading, empty, stale, disconnected, denied and unknown outcomes have distinct messages. Cached send approval is never treated as current authority.
+- Stage A tests use the existing synthetic 037/038 SQLite fixture, local TestClient, and blocked sockets. They cover every new endpoint, all write ownership roles, canonical grants, growth denial, safety downgrade, untrusted actor fields, campaign tenant IDs, mailbox selection, stale versions, template versioning, caps/CC, opt-out idempotence and reply resolution/detail. Missing-route xfails are strict and limited to `MissingRoute`: once a route exists its assertion failures fail normally and successes XPASS until its marker is removed. No unconditional xfail hides broken implementation or import errors. A passing scaffold test exercises an existing real HTTP read.
+- Stage B must add request-authentication middleware integration tests (the Stage A seam injects already-authenticated context), rollback assertions and genuine Postgres lock races, plus read/tool parity tests for the proposed existing-route extensions. Current tests do not claim to prove absent UI, production RLS or transport.
+
+**Frontend runner check:** neither `frontend/package.json` nor `frontend/client/package.json` has a test script/runner dependency; no frontend JS/TS test configuration was found. Native Android's example Java test is not a React test runner. No runner or dependencies added in Stage A. TypeScript checks cannot verify layout or interaction.
+
+**Manual click path for Stage B (synthetic business, sending disabled):** Home → Outreach → Overview (compare totals/source records) → Prospects → evidence/timeline → Campaigns → New draft → explicitly choose the older of two labelled mailboxes → Save → connect/change default in Email Settings → reopen campaign and verify same sender → edit sequence → approve templates and verify no send → Replies → original message/mailbox → I'll handle this → Mark handled → Home (item resolved) → Suppression → opt out twice (one entry; stopped contact) → Settings → pause/lower cap/CC off → approve a knowledge fact with explicit review date → switch business (no previous data). Test denied staff write/deep link and Starter without/with admin grant. Inspect synthetic outreach approval previews, dismiss/stale/unknown states; do not approve a live send. Real delivery validation belongs to separately approved OUT-9.
+
+**Mobile:** use the existing shell breakpoint. At 320/375/390px and desktop, single-column cards replace wide rows; wrap addresses, subjects and citations; horizontally scroll section tabs only, not the page. Dialogs become full-screen with labelled controls, keyboard focus/return, readable errors and 44px touch targets. Keep pause visible; approve and dismiss separated; disable repeated submission while pending. Back preserves list position and mailbox filter. Check keyboard/200% zoom, slow/error loading and business switching. Department access comes from home and Comms without adding a sixth cramped bottom-nav tab.
+
+### Decisions for Mike (recommendations)
+
+1. **Approve this first-version scope?** Recommend all six sections, draft campaigns/template approval and existing cards now; inspection-only prospects and no enrolment/batch-building wizard until the pilot workflow is reviewed. This makes the month useful without claiming the screens can start an entire campaign themselves.
+2. **How should “Mark handled” behave?** Recommend clear the home item while leaving the sequence stopped and answer slot unchanged; any future resumption is a separate explicit owner decision.
+3. **How should knowledge review dates work?** Recommend require an explicit date on every save, showing the current date when editing; do not silently assume a 90-day truth period. OUT-7 already requires a future date.
+4. **Suppression display acceptable?** Recommend show linked prospect where retained, otherwise “Address withheld”, plus reason/date; allow exact-address opt-out without attempting to reverse digests. A full historical raw-address directory would contradict the current minimization contract and is excluded.
+
+Business-only plus admin grant, several mailboxes, explicit campaign sender, CC off by default, manual first-batch approvals and the single bespoke reply limit are settled constraints, not questions to reopen.
+
+### Verification and completion evidence
+
+Commands: `.venv/bin/python -m pytest -q backend/tests/test_outreach_screens_api.py`; `PYTHONDONTWRITEBYTECODE=1 ./check.sh`; `git diff --check`. Run `./check.sh full` before any future push (none authorised here).
+
+Final `PYTHONDONTWRITEBYTECODE=1 ./check.sh` exited 1: TypeScript, Python compilation and Ruff passed; optional eslint skipped. Backend: **2,879 passed, 297 skipped, 122 strict xfailed, 220 subtests passed; exactly 2 failed**:
+
+- `LiveSchemaConformance.test_full_coverage_leaves_nothing_unguarded`
+- `LiveSchemaConformance.test_unguarded_table_count_only_ratchets_down`
+
+The new suite contributes one passing HTTP scaffold test and 122 strict missing-route expectations. Earlier focused execution passed with the then-current 120 expectations; the final full run includes the two additional persistence contracts. No implementation is claimed by those xfails. `git diff --check` passed. An independent Codex reviewer identified the three-step sender assumption and a no-op approval-test weakness; both were corrected, along with cap-downgrade consistency and stronger cancellation/isolation tests. Claude's Stage B review remains pending. Only the ticket and test file are delivered. An empty `data.db` generated by test imports was removed after verifying it was zero bytes; no existing user data was changed. The two `test_schema_conformance` failures about pending 038 are expected per this assignment; do not alter the live dump or weaken the guard. No other failure is acceptable. Checks do not establish live schema, deliverability or visual behaviour. Today Mike should open this ticket and review the four decisions; there are no new screens to click in Stage A.
+
+## Mike's approval — 24 October 2026
+- **Approved:** all six screens and the cards, plus decisions 2–4 as recommended.
+- **Decision 1, approved with Claude's addition:** **enrolment and "prepare next emails"**.
+  - The owner enrols eligible prospects into a campaign, at most 5 per campaign for now.
+  - "Prepare next emails" raises a `send_outreach` card (OUT-6 `build_payload` through `aria_actions.propose`) for each enrolled prospect whose step is due. It never sends; every card needs the owner's tap.
+  - Without this, no campaign can start during Mike's month of using the product.
+- The enrolment tests are written first in Stage B and reviewed by Claude before implementation is accepted.
+
+## Stage B — built by Codex, interrupted; Claude's review — 24 October 2026
+Codex ran out of credits after implementing, before writing its handoff; this section replaces it. The work was committed as WIP (`OUT-8 Stage B WIP`).
+
+**State:**
+- Backend: `services/outreach_manage.py` and `outreach_manage.py` routes, with every write owner-only and rechecked under lock.
+- Read extensions and the Aria tools.
+- React: `OutreachPage` with six sections; `ApprovalCard` handles `send_outreach`/`reply_outreach`; `OutreachReplyCard`; home "Needs you"; a Comms link.
+- `test_outreach_screens_api.py`: **166 passed**, no xfails left, including the enrolment and prepare tests.
+- `./check.sh`: green except the two expected `test_schema_conformance` failures (038 not yet live); tsc passes.
+
+**Postgres (Claude, local 035–038):** `test_outreach_manage_rls.py` (Codex's) with the OUT-6/7 race suites and isolation: **52 passed**. That covers:
+- the enrolment cap of 5 serialising, with the loser rolling back;
+- two prepares giving one card;
+- a pause or opt-out racing a prepare or claim.
+
+One test-fixture bug was fixed: the shared `_second_prospect` helper reused one address, so three calls collided on `outreach_prospects_email_key_idx`. It now gives a fresh address per call.
+
+**Claude's review of `outreach_manage.py`: APPROVE.**
+- Every write runs `start()`: active owner, then a fresh entitlement read under the business row lock, then the owner check again with the membership locked.
+- Growth actions require the outreach feature; safety-only changes (pause, lower caps, CC off, opt-out, handover/resolve) are allowed after a downgrade.
+- `qualified()` binds eligibility, address digest, retention, suppression (email and domain) and the approved audience to the campaign's brand and audience.
+- `prepare` rechecks everything per enrolment, reuses an existing card, and raises cards only through `aria_actions.propose`: never automation, never a send.
+
+**Backlog:**
+1. **Editing templates after enrolling strands those enrolments.** The sequence version moves on; `prepare` refuses "stale"; `enrol` refuses to restart. A future fix moves not-yet-contacted enrolments to the new version. **Until then: finalise wording before enrolling.**
+2. `prepare` scans every open outreach card per enrolment. Fine at the pilot scale of 5; index it before raising the cap.
+3. `OutreachPage.tsx` is dense, with long one-line JSX. Readability refactor (GREEN) in OUT-14.
+
+**Mike's click path (after OUT-7/8 are merged; nothing sends without his tap, and real sending also needs the provider adapter):**
+1. Home → Comms → **Outreach**; the Overview shows "none recorded", not zero.
+2. **Campaigns** → New draft: name, brand, and **choose the mailbox** (e.g. `outreach@`); save.
+3. Open it → edit the three steps → **Approve these templates**.
+4. **Settings**: check pause, caps, CC off; add one fact with a review date.
+5. **Prospects**: once there are prospects, enrol up to 5 → **Prepare next emails**. Cards appear on Home, and you tap to approve or dismiss.
+6. **Opt-out list**: opt out a test address twice; one entry is recorded.
+7. Switch business: no New Body data shows under MSC.

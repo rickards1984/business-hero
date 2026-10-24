@@ -1,6 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, Box, Button, Paper, Stack, TextField, Typography } from '@mui/material';
 import CheckIcon from '@mui/icons-material/Check';
+import { useMe } from '@/hooks/useMe';
+import { useOutreachOwner } from '@/hooks/useOutreachData';
+import OutreachReplyCard from '@/components/OutreachReplyCard';
 import { apiRequest } from '@/lib/queryClient';
 
 /**
@@ -14,7 +17,7 @@ import { apiRequest } from '@/lib/queryClient';
 
 export interface Proposal {
   id: string;
-  action_type: 'send_email' | 'send_invoice_chase' | 'create_calendar_event' | 'create_task';
+  action_type: 'send_email' | 'send_invoice_chase' | 'create_calendar_event' | 'create_task' | 'send_outreach' | 'reply_outreach';
   status: string;
   preview: Record<string, any>;
   version: string;
@@ -23,6 +26,8 @@ export interface Proposal {
 }
 
 const KIND: Record<Proposal['action_type'], { label: string; colour: string; approve: string; done: string }> = {
+  send_outreach: { label: 'Outreach email', colour: '#1F5FBF', approve: 'Approve and send', done: 'Provider accepted (delivery not confirmed)' },
+  reply_outreach: { label: 'Outreach reply', colour: '#1F5FBF', approve: 'Approve and send reply', done: 'Provider accepted (delivery not confirmed)' },
   send_email: { label: 'Email', colour: '#1F5FBF', approve: 'Approve and send', done: 'Sent from your mailbox' },
   send_invoice_chase: { label: 'Invoice chase', colour: '#B4232C', approve: 'Approve and send', done: 'Chase sent from your mailbox' },
   create_calendar_event: { label: 'Booking', colour: '#11734B', approve: 'Approve booking', done: 'Booked' },
@@ -30,6 +35,7 @@ const KIND: Record<Proposal['action_type'], { label: string; colour: string; app
 };
 
 const EDITABLE: Record<Proposal['action_type'], string[]> = {
+  send_outreach: [], reply_outreach: [],
   send_email: ['to', 'subject', 'body'],
   send_invoice_chase: ['subject', 'body'],
   create_calendar_event: ['title', 'date', 'start_time', 'duration_minutes'],
@@ -62,12 +68,16 @@ function whenText(p: Record<string, any>): string {
 }
 
 export default function ApprovalCard({ proposal, onChanged }: { proposal: Proposal; onChanged?: (card: Proposal) => void }) {
+  const { data: me } = useMe();
+  const owner = useOutreachOwner(me?.id);
   const [card, setCard] = useState<Proposal>(proposal);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [uncertain, setUncertain] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Record<string, any>>({});
+  useEffect(() => { setCard(proposal); }, [proposal]);
+  const outreach = card.action_type === 'send_outreach' || card.action_type === 'reply_outreach';
   const kind = KIND[card.action_type];
   const p = card.preview || {};
   const expired = new Date(card.expires_at).getTime() <= Date.now();
@@ -120,7 +130,7 @@ export default function ApprovalCard({ proposal, onChanged }: { proposal: Propos
   };
 
   return (
-    <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, maxWidth: 560, alignSelf: 'flex-start', width: '100%' }}>
+    <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, maxWidth: 560, alignSelf: 'flex-start', width: '100%', overflowWrap: 'anywhere' }}>
       <Stack spacing={1.25}>
         <Typography variant="caption" sx={{ fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase', color: kind.colour }}>
           {kind.label} · needs your approval
@@ -149,7 +159,24 @@ export default function ApprovalCard({ proposal, onChanged }: { proposal: Propos
                 </Box>
               </>
             )}
-            {card.action_type === 'create_calendar_event' && (
+            {outreach && <Stack spacing={1}>
+              <Typography>From: {p.from_email} · Mailbox: {p.mailbox_id} · {p.provider}</Typography>
+              <Typography>To: {p.to}</Typography><Typography>CC: {Array.isArray(p.cc) && p.cc.length ? p.cc.join(', ') : 'Off'}</Typography>
+              <Typography>Subject: {p.subject}</Typography>
+              <Typography sx={{ whiteSpace: 'pre-wrap' }}>{p.body}</Typography>
+              <Typography sx={{ whiteSpace: 'pre-wrap' }}>{p.sign_off}</Typography>
+              <Typography sx={{ whiteSpace: 'pre-wrap' }}>{p.footer}</Typography>
+              <Typography variant="caption">Campaign {p.campaign_id} · campaign v{p.campaign_version} · sequence v{p.sequence_version} · step {p.ordinal} · template {p.template_hash}</Typography>
+              <Typography variant="caption">Window: {p.sending_window} · Expires: {card.expires_at}</Typography>
+              {card.action_type === 'reply_outreach' && <>
+                {me?.id && p.reply_id && <OutreachReplyCard businessId={me.id} reply={{ id: p.reply_id, mailbox_id: p.mailbox_id, resolution: 'resolved' }} />}
+                {(p.knowledge || []).map((fact: Record<string, any>) => <Box key={fact.id}>
+                  <Typography>{fact.topic} · version {fact.version} · review due {fact.review_due_at}</Typography>
+                  <Typography sx={{ whiteSpace: 'pre-wrap' }}>{fact.answer}</Typography><Typography>Source: {fact.source_reference}</Typography>
+                </Box>)}
+              </>}
+            </Stack>}
+            {card.action_type === 'create_calendar_event'  && (
               <>
                 <Typography variant="subtitle2">{p.title}</Typography>
                 <Typography variant="body2">{whenText(p)} · {p.duration_minutes} minutes</Typography>
@@ -182,11 +209,11 @@ export default function ApprovalCard({ proposal, onChanged }: { proposal: Propos
         {message && <Alert severity="warning">{message}</Alert>}
         {uncertain && (
           <Alert severity="warning">
-            We couldn't confirm what happened to this card. Check your Sent folder or calendar, then refresh the page before asking Aria again.
+            We couldn't confirm the outcome. Refresh to load the authoritative state. Do not prepare or send a replacement while the outcome is unknown.
           </Alert>
         )}
 
-        {open && !uncertain && (
+        {open && !uncertain && (!outreach || owner.data) && (
           editing ? (
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
               <Button variant="contained" disabled={busy} onClick={() => act('PATCH', '', draft)}>Save changes</Button>
@@ -196,7 +223,7 @@ export default function ApprovalCard({ proposal, onChanged }: { proposal: Propos
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
               <Button variant="contained" disabled={busy}
                 onClick={() => act('POST', '/approve', { version: card.version })}>{kind.approve}</Button>
-              <Button variant="outlined" disabled={busy} onClick={startEdit}>Edit</Button>
+              <Button variant="outlined" disabled={busy} onClick={startEdit} sx={{ display: outreach ? 'none' : undefined }}>Edit</Button>
               <Button disabled={busy} onClick={() => act('POST', '/dismiss')}>Not now</Button>
             </Stack>
           )
@@ -212,7 +239,7 @@ export default function ApprovalCard({ proposal, onChanged }: { proposal: Propos
         )}
         {card.status === 'executing' && !uncertain && (
           <Alert severity="warning">
-            We can't confirm this finished. Check your Sent folder or calendar before asking Aria again.
+            Outcome unknown. No retry is available; await authoritative reconciliation.
           </Alert>
         )}
         {card.status === 'dismissed' && <Typography variant="body2" color="text.secondary">Dismissed.</Typography>}
