@@ -146,3 +146,13 @@ Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-4.md`. **Mike's decision (24 O
 - **Backlog fixes:** a recheck without a cap keeps the owner's daily limit; a held mailbox with valid records reports **On hold** with its reason, never "Ready".
 - **Still to come in OUT-16, also agreed by Mike:** the definitive check. Each mailbox sends a test email to the owner, and Business Hero reads the receiving server's `Authentication-Results`.
 - **Tests:** setup **84 passed**; `./check.sh full` is green; the Postgres wizard passes. `pyspf>=2.0.14` is in both requirements files.
+
+## Codex review 5: one P1 (the pyspf adapter)
+Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-5.md`. Overriding `query.dns` dropped pyspf's void-lookup limit. **Fix:** pyspf is left entirely intact. Its module-level `spf.DNSLookup` is wrapped once, and routes to the resolver for the current check through a thread-local (with no resolver set, it falls through to pyspf's original), so every pyspf safeguard (void and lookup limits, CNAMEs, cache) applies. Regression: three empty `exists:` lookups before the Google include now fail.
+
+Backlog fix: any failed check, including a manual one, marks a DNS pause (never over a safety hold), so the daily check re-enables the mailbox once the records are fixed.
+
+Tests: setup **86 passed**; live google.com still authorises 209.85.220.41 and refuses 192.0.2.10.
+
+## Codex review 6: APPROVE, no P1
+Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-6.md`. Its backlog item is done: the wizard's audience approval now shows **"Review this again by"**, 12 months by default and editable (decision A).

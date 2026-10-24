@@ -227,6 +227,10 @@ function AudienceStep({ api, brandId, setBrandId, onApproved }: { api: Api; bran
   const [segments, setSegments] = useState('');
   const [regions, setRegions] = useState('');
   const [draft, setDraft] = useState<Record<string, string> | null>(null);
+  // Decision A: 12 months by default; the owner may choose a different date.
+  const [reviewDate, setReviewDate] = useState(() => {
+    const d = new Date(); d.setFullYear(d.getFullYear() + 1); return d.toISOString().slice(0, 10);
+  });
   const list = (s: string) => s.split(',').map(x => x.trim()).filter(Boolean);
   return (
     <Stack spacing={1.5}>
@@ -247,11 +251,14 @@ function AudienceStep({ api, brandId, setBrandId, onApproved }: { api: Api; bran
             <TextField key={k} label={k.replace('_', ' ')} multiline minRows={2} value={draft[k] || ''}
               onChange={e => setDraft({ ...draft, [k]: e.target.value })} />
           ))}
-          <Button variant="contained" disabled={api.busy} onClick={async () => {
+          <TextField type="date" label="Review this again by" InputLabelProps={{ shrink: true }} value={reviewDate}
+            onChange={e => setReviewDate(e.target.value)} helperText="12 months by default; choose sooner if you prefer" />
+          <Button variant="contained" disabled={api.busy || !reviewDate} onClick={async () => {
             const { purpose, necessity, balancing_test, safeguards } = draft;
-            const out = await api.call<{ id: string }>('POST', `audience/${draft.id}/approve`, { purpose, necessity, balancing_test, safeguards });
+            const out = await api.call<{ id: string }>('POST', `audience/${draft.id}/approve`,
+              { purpose, necessity, balancing_test, safeguards, review_due_at: `${reviewDate}T23:59:59Z` });
             if (out) { onApproved(out.id); setDraft(null); }
-          }}>Approve (review again in 12 months)</Button>
+          }}>Approve</Button>
         </Stack>
       )}
     </Stack>

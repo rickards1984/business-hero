@@ -265,32 +265,54 @@ def _usable_dkim(record: str) -> bool:
     return isinstance(key, rsa.RSAPublicKey) and key.key_size >= 1024
 
 
+# pyspf performs its own lookups through the module-level `spf.DNSLookup`.
+# We route those to the resolver for THIS check via a thread-local, and leave
+# every other part of pyspf — its void-lookup and lookup-count limits, CNAME
+# handling and caching — exactly as written (Codex OUT-15 review 5: overriding
+# `query.dns` silently dropped its void-lookup limit).
+import threading as _threading
+
+_SPF_LOCAL = _threading.local()
+
+
+def _install_spf_lookup():
+    import spf
+    if getattr(spf.DNSLookup, "_business_hero", False):
+        return
+    original = spf.DNSLookup
+
+    def lookup(name, qtype, tcpfallback=True, timeout=30):
+        resolvers = getattr(_SPF_LOCAL, "resolvers", None)
+        if resolvers is None:
+            return original(name, qtype, tcpfallback, timeout)
+        txt, other = resolvers
+        name = str(name).rstrip(".")
+        try:
+            if qtype == "TXT":
+                return [((name, "TXT"), (r.encode(),)) for r in txt(name.lower())]
+            if qtype == "SPF":
+                return []
+            return [((name, qtype), v) for v in other(name.lower(), qtype)]
+        except Exception as exc:
+            raise spf.TempError(f"DNS lookup failed for {name}: {type(exc).__name__}")
+    lookup._business_hero = True
+    spf.DNSLookup = lookup
+
+
 def _spf_authorises(domain: str, sender_ip: str, txt: Callable, other: Callable) -> bool:
     """RFC 7208 via pyspf, the established implementation (Mike, 24 Oct
     2026, after Codex's OUT-15 review 4): would this domain's SPF authorise a
-    real sending address of the provider? Includes are followed, unknown
-    mechanisms are permanent errors, and a lookup that fails is a temporary
-    error — only a genuine `pass` passes."""
+    real sending address of the provider? Only a genuine `pass` passes; every
+    error, limit or failure is a fail."""
     import spf
-
-    class Query(spf.query):
-        def dns(self, name, qtype, cnames=None, ignore_void=False):
-            name = str(name).rstrip(".").lower()
-            if qtype == "SPF":
-                return []
-            if qtype == "TXT":
-                try:
-                    return [(r.encode(),) for r in txt(name)]
-                except Exception as exc:
-                    raise spf.TempError(f"DNS lookup failed for {name}: {type(exc).__name__}")
-            try:
-                return other(name, qtype)
-            except Exception as exc:
-                raise spf.TempError(f"DNS lookup failed for {name}: {type(exc).__name__}")
+    _install_spf_lookup()
+    _SPF_LOCAL.resolvers = (txt, other)
     try:
-        result = Query(i=sender_ip, s=f"postmaster@{domain}", h=domain, strict=True, timeout=15).check()[0]
+        result = spf.query(i=sender_ip, s=f"postmaster@{domain}", h=domain, strict=True, timeout=15).check()[0]
     except Exception:
         return False
+    finally:
+        _SPF_LOCAL.resolvers = None
     return result == "pass"
 
 
@@ -379,8 +401,9 @@ def _apply_health(session, bid: str, row: dict, result: dict, moment: datetime, 
         fields.update(enabled=True, pause_reason=None)
     elif not passed:
         fields["enabled"] = False
-        if daily:
-            fields["pause_reason"] = (DNS_PAUSE + " " + " ".join(result["advice"]))[:900] if not held else reason
+        # Any failed check marks a DNS pause (never over a safety hold), so the
+        # daily check re-enables the mailbox once the records are fixed.
+        fields["pause_reason"] = (DNS_PAUSE + " " + " ".join(result["advice"]))[:900] if not held else reason
     expr = "CAST(:health_evidence AS jsonb)" if send.pg(session) else ":health_evidence"
     session.execute(text(
         "UPDATE outreach_mailboxes SET " + ", ".join(
