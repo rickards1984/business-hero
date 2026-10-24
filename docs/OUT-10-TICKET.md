@@ -85,3 +85,25 @@
   - `./check.sh full` is green;
   - the Postgres run (setup, then research with faked adapters: 12 accepted, 1 sole trader kept for review, 5 enrolled, spend recorded per attempt) passes with the OUT-6/8 races and isolation suites (48).
 - **Production settings:** `COMPANIES_HOUSE_API_KEY` is required; without it, research stops and nothing is made eligible. `ARIA_RESEARCH_MODEL` defaults to gpt-4.1. The price variables are optional.
+
+## Codex review 1: REQUEST-CHANGES, seven P1s (repair cycle 1)
+Preserved verbatim in `audits/OUT-10-CODEX-REVIEW-1.md`. Tests first for each:
+1. **SSRF / DNS rebinding:** `fetch_page` resolves each hop once, refuses any non-public address, and connects to exactly that address (Host header and TLS name kept, so certificates are still verified). Bodies are streamed to a 2 MB limit. Live: gov.uk fetched over verified TLS; localhost and the metadata address refused.
+2. **Corporate identity:** a model-supplied number is used only if Companies House's registered name matches the candidate company; otherwise the lookup is by name. The registered name must match, the type must be a corporate body (limited partnership removed), and **the company's own site must show its registered number or name** (Companies Act trading disclosures) on the cited page or home page. Anything uncertain is kept for review, never eligible.
+3. **Email proof:** complete addresses are extracted and compared exactly. The source page, and its final URL after redirects, must be on the company's own domain.
+4. **Spend:** each search reserves `MAX_SEARCH_PENCE` (60p) before it is sent, and the provider call is bounded (8,000 output tokens, 8 tool calls). The reservation is settled to the real cost; a failed search keeps it and is not retried.
+5. **Quota across audiences:** each UK day's totals are read from the database (eligible contacts by type) and shared by every audience.
+6. **Authority:** `_still_allowed` re-reads the business (active, entitled), setup finished, outreach not paused, research on, and a current, unexpired audience approval. It runs before any spend and again under lock before storing.
+7. **Opt-out during verification:** storing happens under the shared business lock, re-checking suppression, holdings, quota and authority.
+
+Backlog, also done:
+- one company per batch;
+- a role is verified only on a first-and-last-name match;
+- rotation advances only after a run that found something new;
+- the daily claim is made under lock;
+- streamed size limit;
+- **decision E's morning cards:** new enrolments get their first email as a waiting card, never sent.
+
+Tests: research **53 passed**, setup **86 passed**; `./check.sh full` is green; the Postgres research run passes.
+
+**Cost note for Mike:** a search is bounded at about 60p, and a day can use up to 3. The £20 default allows roughly 11–33 research days a month, depending on how quickly each day's target is met, so a higher monthly cap may suit daily use.

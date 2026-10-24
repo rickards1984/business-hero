@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session
@@ -17,6 +17,7 @@ from db import get_session
 from services import outreach_autopilot as autopilot
 from services import outreach_research as research
 from services import outreach_setup as setup
+from rate_limiting import limiter
 from services.aria_actions import ActionRefused
 
 router = APIRouter(prefix="/v1/outreach/setup", tags=["Outreach setup"])
@@ -35,7 +36,8 @@ class Brand(Body):
 
 class Mailbox(Body):
     mailbox_id: UUID
-    daily_cap: int = Field(default=5, ge=1, le=20, strict=True)
+    # Omitted on a recheck, so the owner's chosen limit is kept (review 4).
+    daily_cap: Optional[int] = Field(default=None, ge=1, le=20, strict=True)
 
 
 class Audience(Body):
@@ -210,7 +212,8 @@ def autopilot_revoke(campaign_id: UUID, context=Depends(get_user_business_contex
 
 
 @public_router.get("/p/outreach-privacy/{brand_id}", response_class=HTMLResponse)
-def public_notice(brand_id: str, session: Session = Depends(get_session)):
+@limiter.limit("60/minute")   # public and unauthenticated (Codex OUT-15 review 1)
+def public_notice(request: Request, brand_id: str, session: Session = Depends(get_session)):
     body = setup.public_privacy_notice(session, brand_id)
     if not body:
         raise HTTPException(404, "Not found")

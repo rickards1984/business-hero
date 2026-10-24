@@ -237,3 +237,17 @@ def test_the_scheduler_runs_it_every_two_minutes_off_the_loop():
 def test_run_due_sends_for_a_business_with_a_valid_grant(h):
     granted(h)
     assert autopilot().run_due(h.s, moment=NOW) and len(h.p.sends) == 1
+
+
+def test_research_leaves_automatic_campaigns_to_the_autopilot(h):
+    """OUT-10's morning cards would block automatic sending (Aria never sends
+    over a card waiting for the owner): a campaign with a valid permission
+    gets no card; without one, the card waits for the owner as before."""
+    from services import outreach_research
+    from test_outreach_send import PROSPECT
+    assert len(outreach_research._prepare_cards(h.s, h.b, [PROSPECT])) == 1
+    h.s.execute(text("DELETE FROM aria_actions"))
+    h.s.commit()
+    granted(h)
+    assert outreach_research._prepare_cards(h.s, h.b, [PROSPECT]) == []
+    assert send(h)["sent"] and len(h.p.sends) == 1

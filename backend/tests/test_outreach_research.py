@@ -8,6 +8,7 @@ Companies House — so no network and no model call ever happens here.
 # ruff: noqa: F811 - pytest fixtures imported from test_outreach_setup are parameters by design
 
 import importlib
+import json
 import importlib.util
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -51,34 +52,55 @@ def gatekeeper(i, **kw):
 
 
 class World:
-    """Fake web, DNS and Companies House. Everything is real unless told otherwise."""
+    """Fake web, DNS and Companies House. Everything is real unless told
+    otherwise. Like a real UK company site, each page shows the company's
+    registered name and number (Companies Act 2006 trading disclosures)."""
 
     def __init__(self, batches, *, cost=10):
         self.batches = list(batches)   # one list of candidates per search attempt
         self.briefs, self.cost = [], cost
         self.missing_pages, self.no_mx, self.not_companies, self.dissolved = set(), set(), set(), set()
-        self.officers = {}
+        self.no_disclosure, self.registry, self.pages, self.types = set(), {}, {}, {}
+        self.officers, self.site_company = {}, {}
+        self.search_error = None
+
+    @staticmethod
+    def number_for(name):
+        import zlib
+        return str(zlib.crc32(name.encode()) % 10 ** 8).zfill(8)
 
     def search(self, brief):
         self.briefs.append(brief)
+        if self.search_error:
+            raise self.search_error
         found = self.batches.pop(0) if self.batches else []
+        for c in found:
+            self.site_company.setdefault(c["source_url"].split("/")[2], c["company"])
         return {"candidates": found, "cost_pence": self.cost}
 
     def fetch(self, url):
+        if url in self.pages:
+            return self.pages[url]
         if url in self.missing_pages:
             return "<html>Contact us via the form.</html>"
         domain = url.split("/")[2]
-        return f"<html>Team: sam@{domain} info@{domain} owner@{domain}</html>"
+        company = self.site_company.get(domain, "")
+        footer = "" if domain in self.no_disclosure else \
+            f"<footer>{company} is registered in England and Wales, company number {self.number_for(company)}.</footer>"
+        return f"<html>Team: sam@{domain} info@{domain} owner@{domain} jo@{domain}{footer}</html>"
 
     def mx(self, domain):
         return domain not in self.no_mx
 
     def companies(self, query):
-        name = str(query)
-        if name in self.not_companies:
+        query = str(query)
+        if query in self.registry:
+            return self.registry[query]
+        if query in self.not_companies:
             return None
-        return {"number": "01234567", "name": name, "status": "dissolved" if name in self.dissolved else "active",
-                "type": "ltd", "officers": self.officers.get(name, ["Sam Taylor"])}
+        return {"number": self.number_for(query), "name": query,
+                "status": "dissolved" if query in self.dissolved else "active",
+                "type": self.types.get(query, "ltd"), "officers": self.officers.get(query, ["TAYLOR, Sam"])}
 
     def kwargs(self):
         return dict(search=self.search, fetch=self.fetch, mx=self.mx, companies=self.companies, moment=NOW)
@@ -171,7 +193,7 @@ def test_a_sole_trader_is_kept_for_review_and_never_eligible(db):
 def test_a_name_that_matches_no_officer_is_still_a_decision_maker_but_unverified(db):
     biz, brand, lia, campaign = started(db)
     world = World([[person(1, name="Alex Morgan", role="Operations Manager")]])
-    world.officers["Studio 1 Ltd"] = ["Someone Else"]
+    world.officers["Studio 1 Ltd"] = ["ELSE, Someone"]
     out = run(db, biz, lia, world)
     assert out["decision_makers"] == 1
     assert count(db, "SELECT fact_value FROM outreach_evidence WHERE business_id = :b AND fact_type = 'role_verified'") == "false"
@@ -341,12 +363,12 @@ def test_research_switched_off_or_outreach_paused_never_runs(db):
 
 def test_new_contacts_are_enrolled_into_the_audience_campaign_within_its_limit(db):
     """Decision E: verified contacts join the active campaign for their
-    audience (pilot limit 5 for now); research never sends or raises cards."""
+    audience (pilot limit 5 for now); research never sends."""
     biz, brand, lia, campaign = started(db)
     run(db, biz, lia, World([[person(i) for i in range(8)]]))
     assert count(db, "SELECT count(*) FROM outreach_enrolments WHERE business_id = :b AND campaign_id = :c",
                  c=campaign["id"]) == 5
-    assert count(db, "SELECT count(*) FROM aria_actions WHERE business_id = :b") == 0
+    assert count(db, "SELECT count(*) FROM aria_actions WHERE business_id = :b AND status <> 'proposed'") == 0
 
 
 def test_research_never_touches_another_business(db):
@@ -368,3 +390,190 @@ def test_the_hourly_pass_runs_research():
     import inspect
     from services import automations
     assert "outreach_research" in inspect.getsource(automations.run_all_due)
+
+
+# ------------------------------------------------ Codex OUT-10 review 1 (P1s) ---
+
+def test_the_fetcher_connects_only_to_the_address_it_checked():
+    """P1 1, DNS rebinding: a name that answers public then private must be
+    fetched from the public address it was checked against, never re-resolved."""
+    import httpx
+    r = research()
+    answers = iter([[("93.184.216.34",)], [("127.0.0.1",)]])
+    seen = []
+
+    def resolve(host):
+        return next(answers)
+
+    def handler(request):
+        seen.append((request.url.host, request.headers.get("host")))
+        return httpx.Response(200, text="<html>hello@site.example</html>")
+    out = r.fetch_page("https://site.example/team", resolve=resolve, transport=httpx.MockTransport(handler))
+    assert out and out["text"].startswith("<html>")
+    assert seen == [("93.184.216.34", "site.example")], "connected to the checked address, with the real Host"
+
+
+def test_a_redirect_to_a_private_address_is_refused():
+    import httpx
+    r = research()
+
+    def resolve(host):
+        return [("93.184.216.34",)] if host == "site.example" else [("10.0.0.5",)]
+
+    def handler(request):
+        return httpx.Response(302, headers={"location": "https://internal.example/admin"})
+    assert r.fetch_page("https://site.example/team", resolve=resolve, transport=httpx.MockTransport(handler)) is None
+
+
+def test_an_unrelated_company_number_never_makes_a_contact_eligible(db):
+    """P1 2: the model names an active PLC's number for a sole trader."""
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1, company="Sam's Studio", number="99999999")]])
+    world.registry["99999999"] = {"number": "99999999", "name": "BIG HOLDINGS PLC", "status": "active",
+                                  "type": "plc", "officers": ["TAYLOR, Sam"]}
+    world.not_companies.add("Sam's Studio")   # a sole trader: not on the register by name
+    out = run(db, biz, lia, world)
+    assert out["accepted"] == []
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'eligible'") == 0
+
+
+def test_the_companys_own_site_must_show_its_registration(db):
+    """P1 2: Companies House and the website must agree on the legal entity."""
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    world.no_disclosure.add("studio1.example")
+    out = run(db, biz, lia, world)
+    assert out["accepted"] == [] and "review" in out["rejected"][0]["reason"].lower()
+
+
+def test_a_limited_partnership_is_not_a_corporate_subscriber(db):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    world.types["Studio 1 Ltd"] = "limited-partnership"
+    assert run(db, biz, lia, world)["accepted"] == []
+
+
+@pytest.mark.parametrize("page", [
+    "<html>notsam@studio1.example.evil.example</html>",     # a longer, different address
+    "<html>xsam@studio1.example</html>",
+])
+def test_the_email_must_appear_as_a_complete_address(db, page):
+    """P1 3."""
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    world.pages["https://studio1.example/team"] = page
+    assert run(db, biz, lia, world)["accepted"] == []
+
+
+def test_the_source_must_be_the_companys_own_website(db):
+    """P1 3: an attacker's page listing the address proves nothing."""
+    biz, brand, lia, campaign = started(db)
+    candidate = {**person(1), "source_url": "https://attacker.example/list"}
+    world = World([[candidate]])
+    world.pages["https://attacker.example/list"] = "<html>sam@studio1.example Studio 1 Ltd company number " \
+        + World.number_for("Studio 1 Ltd") + "</html>"
+    out = run(db, biz, lia, world)
+    assert out["accepted"] == [] and "own website" in out["rejected"][0]["reason"]
+
+
+def test_spend_is_reserved_before_each_search_so_the_cap_holds(db):
+    """P1 4: with 1,990p of 2,000p spent, a search that could cost more than
+    the 10p left never starts."""
+    biz, brand, lia, campaign = started(db)
+    with db.begin() as c:
+        c.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) VALUES "
+                       "(:b, 'outreach_research_pence', '2026-10', 1990, :at)"), {"b": A, "at": NOW.isoformat()})
+    world = World([[person(1)]], cost=37)
+    out = run(db, biz, lia, world)
+    assert world.briefs == [] and "budget" in out["stopped"]
+
+
+def test_a_failed_search_keeps_its_reserved_spend_and_never_retries(db):
+    """P1 4: billable work may have happened; it stays counted, no retry."""
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    world.search_error = TimeoutError("provider timeout")
+    out = run(db, biz, lia, world)
+    assert len(world.briefs) == 1 and out["stopped"]
+    held = int(float(count(db, "SELECT value FROM usage_meters WHERE business_id = :b AND meter = 'outreach_research_pence'")))
+    assert held == research().MAX_SEARCH_PENCE
+
+
+def test_the_daily_quota_is_shared_across_audiences(db):
+    """P1 5: two audiences never make more than 20 a day, 10 gatekeepers."""
+    m = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+    with Session(db) as s:
+        lia2 = m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Studios in Kent",
+                                               "segments": ["gym"], "regions": ["Kent"]},
+                                draft=lambda ctx: {k: k for k in ("purpose", "necessity", "balancing_test", "safeguards")})
+        m.approve_audience(s, biz, OWNER, lia2["id"], {})
+    run(db, biz, lia, World([[person(i) for i in range(15)] + [gatekeeper(100 + i) for i in range(10)]]))
+    second = run(db, biz, lia2, World([[person(200 + i) for i in range(15)] + [gatekeeper(300 + i) for i in range(10)]]))
+    assert len(second["accepted"]) == 0
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'eligible'") == 20
+
+
+@pytest.mark.parametrize("change", ["inactive", "cancelled", "grant_removed", "lia_expired", "not_finished"])
+def test_research_needs_current_authority_before_it_spends(db, change):
+    """P1 6."""
+    biz, brand, lia, campaign = started(db)
+    with db.begin() as c:
+        if change == "inactive":
+            c.execute(text("UPDATE businesses SET is_active = 0 WHERE id = :b"), {"b": A})
+        elif change == "cancelled":
+            c.execute(text("UPDATE businesses SET subscription_status = 'canceled' WHERE id = :b"), {"b": A})
+        elif change == "grant_removed":
+            c.execute(text("UPDATE businesses SET feature_flags = '{}' WHERE id = :b"), {"b": A})
+        elif change == "lia_expired":
+            c.execute(text("UPDATE outreach_compliance SET review_due_at = :t"), {"t": (NOW - timedelta(days=1)).isoformat()})
+        else:
+            doc = json.loads(c.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"), {"b": A}).scalar())
+            doc.pop("outreach_setup", None)
+            c.execute(text("UPDATE business_settings SET settings = :s WHERE business_id = :b"), {"s": json.dumps(doc), "b": A})
+    world = World([[person(1)]])
+    out = run(db, biz, lia, world)
+    assert world.briefs == [] and out["stopped"] and out["accepted"] == []
+
+
+def test_an_opt_out_during_verification_wins(db):
+    """P1 7: re-checked under the business lock just before storing."""
+    from services.outreach_send import suppression_digest
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    real_mx = world.mx
+
+    def mx_then_opt_out(domain):
+        with db.begin() as c:
+            c.execute(text("INSERT INTO outreach_suppressions (id, business_id, key_type, key_digest, digest_version, "
+                           "reason, suppressed_at) VALUES (:id, :b, 'email', :d, 1, 'unsubscribe', :at)"),
+                      {"id": str(uuid.uuid4()), "b": A, "d": suppression_digest(A, "email", "sam@studio1.example"),
+                       "at": NOW.isoformat()})
+        return real_mx(domain)
+    world.mx = mx_then_opt_out
+    run(db, biz, lia, world)
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'eligible'") == 0
+
+
+# ---------------------------------------------------------- review 1 backlog ---
+
+def test_two_addresses_at_one_company_in_one_batch_store_only_one(db):
+    biz, brand, lia, campaign = started(db)
+    out = run(db, biz, lia, World([[person(1), person(1, name="Jo Bloggs", role="Director", email="jo@studio1.example")]]))
+    assert len(out["accepted"]) == 1
+
+
+def test_a_first_name_alone_never_verifies_a_role(db):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1, name="Sam", role="Director")]])
+    world.officers["Studio 1 Ltd"] = ["OTHERPERSON, Sam"]
+    run(db, biz, lia, world)
+    assert count(db, "SELECT fact_value FROM outreach_evidence WHERE business_id = :b AND fact_type = 'role_verified'") == "false"
+
+
+def test_new_contacts_have_their_first_email_waiting_for_approval(db):
+    """Decision E: enrolled contacts get their morning card (never sent)."""
+    biz, brand, lia, campaign = started(db)
+    run(db, biz, lia, World([[person(i) for i in range(3)]]))
+    assert count(db, "SELECT count(*) FROM aria_actions WHERE business_id = :b AND action_type = 'send_outreach' "
+                     "AND status = 'proposed'") == 3

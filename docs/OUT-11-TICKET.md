@@ -81,3 +81,6 @@ No migration.
   - all OUT-6/7/8/10/15, AUTO and home suites give **601 passed**;
   - `./check.sh full` is green, with tsc;
   - Postgres: an automatic send with the grant recorded passes alongside the existing OUT race and isolation suites.
+
+## Merged with OUT-10's review fixes — 24 October 2026
+**Interaction found and fixed:** OUT-10 now prepares a waiting card each morning for every new enrolment. Aria never sends over a card waiting for the owner, so those cards would have blocked automatic sending. A campaign with a valid OUT-11 permission now gets **no** research card; the autopilot sends it. Without a permission, the card waits for the owner as before. Test: `test_research_leaves_automatic_campaigns_to_the_autopilot`.
