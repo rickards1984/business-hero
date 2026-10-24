@@ -102,3 +102,20 @@ From the backlog, also done:
 - interactive checks run DNS outside locks and re-read before writing.
 
 Tests: setup **46 passed**; `./check.sh full` is green; the Postgres wizard passes.
+
+## Codex review 2: REQUEST-CHANGES, two P1s (repair cycle 2)
+Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-2.md`.
+1. **Records are now read for meaning, not just shape:**
+   - DKIM `p=` must decode, using `cryptography`, to a real RSA key of at least 1024 bits, or a 32-byte Ed25519 key;
+   - SPF terms are read in order, so the provider's pass-qualified include must come before any `all`;
+   - there must be exactly one DMARC record, with a valid policy.
+
+   Tests use a genuinely generated 2048-bit RSA key as the good record.
+2. **Setup finished is its own fact** (`outreach_setup.finished_at`, written by `finish`). Pausing outreach never brings the wizard back.
+
+From the backlog, also done:
+- the wizard intercepts only the main Outreach page, so its settings links work;
+- a drafted, unapproved campaign is picked up again after a reload;
+- overlapping daily checks skip a mailbox already checked that day once they hold the lock.
+
+Tests: setup **51 passed**; `./check.sh full` is green; the Postgres wizard passes.

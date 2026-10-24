@@ -32,7 +32,8 @@ function OutreachDepartment({ businessId }: { businessId: string }) {
   const controls = { businessId, owner: !!owner.data, busy, write };
   const setup = useSetupStatus(businessId);
   // OUT-15: the owner sees the wizard until outreach is STARTED (not merely complete).
-  if (setup.data && !setup.data.started && owner.data) return <Stack spacing={2} sx={{ minWidth: 0, '& .MuiButton-root': { minHeight: 44 }, overflowWrap: 'anywhere' }}>
+  // Only the main Outreach page shows the wizard, so its links to settings open them.
+  if (setup.data && !setup.data.started && owner.data && section === 'overview') return <Stack spacing={2} sx={{ minWidth: 0, '& .MuiButton-root': { minHeight: 44 }, overflowWrap: 'anywhere' }}>
     <Typography variant="h4">Outreach</Typography>
     <OutreachSetupWizard businessId={businessId} />
   </Stack>;

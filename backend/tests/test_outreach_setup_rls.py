@@ -18,10 +18,15 @@ from test_outreach_send import B, OWNER
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="RLS_LOCAL_DATABASE_URL is not set")
 
 BOX_ONE, BOX_TWO = str(uuid.uuid4()), str(uuid.uuid4())
+def _key():
+    from test_outreach_setup import REAL_DKIM
+    return REAL_DKIM
+
+
 RECORDS = {}
 for domain in ("setup-one.example", "setup-two.example"):
     RECORDS[domain] = ["v=spf1 include:_spf.google.com ~all"]
-    RECORDS[f"google._domainkey.{domain}"] = ["v=DKIM1; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqIDAQAB"]
+    RECORDS[f"google._domainkey.{domain}"] = ["v=DKIM1; p=" + _key()]
     RECORDS[f"_dmarc.{domain}"] = ["v=DMARC1; p=none"]
 
 

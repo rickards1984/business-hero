@@ -45,7 +45,8 @@ PROVIDERS = {
 }
 # Settings-document keys this ticket owns; the generic settings save keeps them.
 PRIVACY_KEY, AUDIENCE_KEY = "outreach_privacy", "outreach_audiences"
-DNS_PAUSE = "Daily check failed:"   # the only pause a DNS pass may lift
+DNS_PAUSE = "Daily check failed:"
+SETUP_KEY = "outreach_setup"   # the only pause a DNS pass may lift
 
 
 def now() -> datetime:
@@ -205,14 +206,41 @@ def _tags(record: str) -> dict:
 
 
 def _usable_dkim(record: str) -> bool:
-    """A published, non-revoked public key: p= is real base64 of a usable
-    length (an empty p= means the key was revoked)."""
-    import re as _re
+    """A published, non-revoked public key that really IS a key: p= decodes
+    to an RSA key of at least 1024 bits, or a 32-byte Ed25519 key (an empty
+    p= means revoked) — Codex OUT-15 reviews 1 and 2."""
+    import base64
+    import binascii
     tags = _tags(record)
     if tags.get("v", "dkim1").lower() != "dkim1":
         return False
-    key = tags.get("p", "")
-    return len(key) >= 64 and bool(_re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", key))
+    try:
+        raw = base64.b64decode(tags.get("p", ""), validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    if not raw:
+        return False
+    if tags.get("k", "rsa").lower() == "ed25519":
+        return len(raw) == 32
+    try:
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives.serialization import load_der_public_key
+        key = load_der_public_key(raw)
+    except Exception:
+        return False
+    return isinstance(key, rsa.RSAPublicKey) and key.key_size >= 1024
+
+
+def _spf_includes(record: str, provider: str) -> bool:
+    """Read SPF in order: the provider's include must come before any `all`,
+    and carry a pass qualifier (none or +)."""
+    for term in record.split()[1:]:
+        t = term.lower()
+        if t.lstrip("+-~?") == "all":
+            return False
+        if t in (f"include:{provider}", f"+include:{provider}"):
+            return True
+    return False
 
 
 def _usable_dmarc(record: str) -> bool:
@@ -245,7 +273,7 @@ def _evaluate(account: dict, resolve: Callable) -> dict:
     spf = [t for t in txt(domain) if t.strip().lower().split(" ")[0] == "v=spf1"]
     # Exactly one SPF record (two is a permanent error), naming the provider
     # as a whole mechanism — never a substring (Codex OUT-15 review 1).
-    if len(spf) == 1 and f"include:{provider['spf']}" in [m.lower() for m in spf[0].split()]:
+    if len(spf) == 1 and _spf_includes(spf[0], provider["spf"]):
         evidence["spf"] = "pass"
     else:
         advice.append(f"SPF: your domain's SPF record must include {provider['name']}. Add or edit the TXT "
@@ -256,7 +284,8 @@ def _evaluate(account: dict, resolve: Callable) -> dict:
             evidence["selectors"].append(selector)
     if evidence["dkim"] != "pass":
         advice.append("DKIM: " + provider["dkim_help"])
-    if any(_usable_dmarc(t) for t in txt(f"_dmarc.{domain}")):
+    dmarc = [t for t in txt(f"_dmarc.{domain}") if t.strip().lower().startswith("v=dmarc1")]
+    if len(dmarc) == 1 and _usable_dmarc(dmarc[0]):   # more than one is invalid
         evidence["dmarc"] = "pass"
     else:
         advice.append(f"DMARC: add a TXT record named _dmarc.{domain} with the value "
@@ -343,8 +372,9 @@ def recheck_health(session, *, resolve: Callable = dns_txt, moment: Optional[dat
                                 {"b": bid})
             send.lock_business(session, bid)
             current = send.rows(session, "outreach_mailboxes", bid, "AND id = :id", {"id": str(row["id"])}, True)
-            if not current or not current[0]["enabled"]:
-                session.rollback()
+            already = checked_before is not None and _parse(current[0]["health_checked_at"] if current else None)
+            if not current or not current[0]["enabled"] or (already and already >= checked_before):
+                session.rollback()   # retired meanwhile, or another run checked it today
                 continue
             _apply_health(session, bid, current[0], result, moment, daily=True)
             session.commit()
@@ -547,7 +577,9 @@ def status(session, business) -> dict:
         session.rollback()
         return {"steps": {s: "todo" for s in REQUIRED + ("knowledge",)}, "next": "brand", "complete": False,
                 "started": False}
-    started = not settings_rows[0]["pause_all"]
+    # Setup finished is its own durable fact; pausing outreach never undoes it
+    # (Codex OUT-15 review 2).
+    started = bool((_settings_doc(session, bid).get(SETUP_KEY) or {}).get("finished_at"))
     brands = send.rows(session, "outreach_brands", bid)
     notices = _settings_doc(session, bid).get(PRIVACY_KEY) or {}
     healthy = session.execute(text(
@@ -588,6 +620,10 @@ def finish(session, business, user) -> dict:
     _authority(session, business, user)
     row = send.one(session, "outreach_settings", str(business.id), lock=True)
     send.update(session, "outreach_settings", str(business.id), row["id"], pause_all=False, updated_at=now())
+    doc = _settings_doc(session, str(business.id))
+    doc.setdefault(SETUP_KEY, {}).setdefault("finished_at", now().isoformat())
+    doc[SETUP_KEY]["finished_by"] = str(user)
+    _save_settings_doc(session, str(business.id), doc)
     session.commit()
     return {"started": True}
 

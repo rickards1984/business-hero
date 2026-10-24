@@ -308,7 +308,13 @@ function CampaignStep({ api, accounts, brandId, setBrandId, complianceId, setCom
 }) {
   const [name, setName] = useState('');
   const [mailbox, setMailbox] = useState('');
-  const [created, setCreated] = useState('');
+  const [createdNow, setCreated] = useState('');
+  // After a reload, carry on with a drafted campaign whose emails aren't approved yet.
+  const drafts = useQuery<{ items?: { id: string; status: string }[] }>({
+    queryKey: ['outreach', useBusinessKey(), 'setup-campaigns'],
+    queryFn: async () => (await apiRequest('GET', '/v1/outreach/campaigns?limit=50')).json(), retry: false,
+  });
+  const created = createdNow || (drafts.data?.items || []).find(c => c.status === 'draft')?.id || '';
   const compliance = useQuery<{ items?: { id: string; brand_id: string; version: number; decision: string; reviewed_at?: string }[] }>({
     queryKey: ['outreach', useBusinessKey(), 'setup-compliance'], queryFn: async () => (await apiRequest('GET', '/v1/outreach/compliance?limit=50')).json(), retry: false,
   });

@@ -119,8 +119,20 @@ def dns(records):
     return lambda name: list(records.get(name.lower().rstrip("."), []))
 
 
+def _real_dkim_key() -> str:
+    """A genuine 2048-bit RSA public key, as DKIM publishes it."""
+    import base64
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048).public_key()
+    der = key.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return base64.b64encode(der).decode()
+
+
+REAL_DKIM = _real_dkim_key()
+
 GOOD_GOOGLE = {"newbody.example": ["v=spf1 include:_spf.google.com ~all"],
-               "google._domainkey.newbody.example": ["v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqIDAQAB"],
+               "google._domainkey.newbody.example": ["v=DKIM1; k=rsa; p=" + REAL_DKIM + ""],
                "_dmarc.newbody.example": ["v=DMARC1; p=quarantine"]}
 
 
@@ -427,7 +439,7 @@ def second_mailbox(db, healthy=True):
                        "'hello@newbody-studio.example', 0, '{}', 'fake', :t)"),
                   {"id": NEW_BOX, "b": A, "u": OWNER, "t": NOW.isoformat()})
     records = {"newbody-studio.example": ["v=spf1 include:_spf.google.com ~all"],
-               "google._domainkey.newbody-studio.example": ["v=DKIM1; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqIDAQAB"]}
+               "google._domainkey.newbody-studio.example": ["v=DKIM1; p=" + REAL_DKIM + ""]}
     if healthy:
         records["_dmarc.newbody-studio.example"] = ["v=DMARC1; p=none"]
     return records
@@ -658,3 +670,36 @@ def test_setup_stays_on_screen_until_outreach_is_started(db):
         assert state["complete"] is True and state["started"] is False
         m.finish(s, biz, OWNER)
         assert m.status(s, biz)["started"] is True
+
+
+# ------------------------------------------- Codex OUT-15 review 2 (P1s) ---
+
+@pytest.mark.parametrize("records,word", [
+    ({**GOOD_GOOGLE, "google._domainkey.newbody.example": ["v=DKIM1; k=rsa; p=" + "A" * 64]}, "DKIM"),   # not a key
+    ({**GOOD_GOOGLE, "newbody.example": ["v=spf1 -all include:_spf.google.com"]}, "SPF"),               # all first
+    ({**GOOD_GOOGLE, "newbody.example": ["v=spf1 -include:_spf.google.com ~all"]}, "SPF"),               # fail-qualified
+    ({**GOOD_GOOGLE, "_dmarc.newbody.example": ["v=DMARC1; p=reject", "v=DMARC1; p=none"]}, "DMARC"),   # two records
+])
+def test_records_are_read_for_meaning_not_just_shape(db, records, word):
+    m = setup_module_or_missing()
+    biz = grant(db)
+    with Session(db) as s:
+        m.begin(s, biz, OWNER)
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": WORKSPACE, "daily_cap": 5})
+        out = m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(records))
+    assert out["status"] == "fail" and word in " ".join(out["advice"])
+
+
+def test_pausing_after_setup_never_brings_the_wizard_back(db):
+    """Review 2 P1: setup finished is its own fact, not the pause switch."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    brand, lia, campaign = ready(m, db, biz)
+    with Session(db) as s:
+        from services import outreach_manage
+        c = s.execute(text("SELECT version, sequence_version FROM outreach_campaigns")).one()
+        outreach_manage.approve_templates(s, biz, OWNER, campaign["id"], {"version": int(c[0]), "sequence_version": int(c[1])})
+        m.finish(s, biz, OWNER)
+        outreach_manage.settings(s, biz, OWNER, {"pause_all": True})
+        state = m.status(s, biz)
+    assert state["started"] is True, "paused is still set up"
