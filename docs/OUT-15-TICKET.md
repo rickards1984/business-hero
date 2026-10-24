@@ -75,3 +75,16 @@ No migration: the notice lives in `business_settings`.
   - The old inbox stays **connected**, so replies are still read.
   - `copy_campaign_to_mailbox(session, business, user, campaign_id, {"mailbox_id", "name"?}) -> {"id"}` creates a new draft campaign with the same brand, audience and wording on the new mailbox. Its steps are unapproved, so one tap re-approves them.
   - Owner-only, tenant-scoped, one transaction under the business lock.
+
+## Build — 24 October 2026 (Claude)
+- **Service:** `services/outreach_setup.py`, implementing every step plus `replace_mailbox`, `copy_campaign_to_mailbox`, `recheck_health` and `daily_health`.
+- **Routes:** `outreach_setup_api.py`, under `/v1/outreach/setup/*`, plus the public `/p/outreach-privacy/{brand_id}`.
+- **Settings protection:** `preserve_automations` keeps every `outreach_*` settings key.
+- **Daily check:** decision C runs from the hourly `automations.run_all_due` pass (weekdays from 07:00 UK, mailboxes not yet checked that UK day). `briefing_scheduler.py` (CRLF) is untouched.
+- **DNS:** `dnspython>=2.6` added to both requirements files.
+- **Frontend:** `OutreachSetupWizard.tsx` (stepper; Aria drafts then the owner approves; mailbox checks show plain advice; "Start outreach"). `ChangeSendingMailbox` sits in Outreach settings. `OutreachPage` shows the wizard to the owner until setup is complete.
+- **Verification:**
+  - `test_outreach_setup.py` has **34 passed**;
+  - `./check.sh full` is green, with tsc;
+  - the Postgres `test_outreach_setup_rls.py` runs the whole wizard plus a mailbox change, and passes alongside the OUT-6/8 races and the isolation suite.
+- **Production settings needed before use:** `PUBLIC_BASE_URL` (the backend's public HTTPS address, for privacy links) and `OPENAI_API_KEY` (already set). `ARIA_DRAFT_MODEL` is optional and defaults to gpt-4o.

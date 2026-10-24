@@ -1,0 +1,168 @@
+"""OUT-15 setup wizard routes. The actor and tenant come from authentication,
+never from the body; every write is owner-only in services.outreach_setup.
+The public privacy page is the only unauthenticated route, and it shows an
+approved notice and nothing else."""
+from datetime import datetime
+from typing import Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
+from sqlmodel import Session
+
+import auth
+from auth import get_user_business_context
+from db import get_session
+from services import outreach_setup as setup
+from services.aria_actions import ActionRefused
+
+router = APIRouter(prefix="/v1/outreach/setup", tags=["Outreach setup"])
+public_router = APIRouter(tags=["Public"])
+
+
+class Body(BaseModel):
+    model_config = {"extra": "forbid"}
+
+
+class Brand(Body):
+    name: str = Field(min_length=1, max_length=120)
+    sender_identity: str = Field(min_length=1, max_length=200)
+    default_mailbox_id: Optional[UUID] = None
+
+
+class Mailbox(Body):
+    mailbox_id: UUID
+    daily_cap: int = Field(default=5, ge=1, le=20, strict=True)
+
+
+class Audience(Body):
+    brand_id: UUID
+    description: str = Field(min_length=1, max_length=2000)
+    segments: list[str] = Field(default_factory=list, max_length=20)
+    regions: list[str] = Field(default_factory=list, max_length=20)
+
+
+class AudienceApproval(Body):
+    purpose: Optional[str] = Field(default=None, max_length=4000)
+    necessity: Optional[str] = Field(default=None, max_length=4000)
+    balancing_test: Optional[str] = Field(default=None, max_length=4000)
+    safeguards: Optional[str] = Field(default=None, max_length=4000)
+    review_due_at: Optional[datetime] = None
+
+
+class Notice(Body):
+    text: str = Field(min_length=1, max_length=20000)
+
+
+class Campaign(Body):
+    name: str = Field(min_length=1, max_length=120)
+    brand_id: UUID
+    mailbox_id: UUID
+    compliance_id: UUID
+    daily_cap: int = Field(default=5, ge=1, le=20, strict=True)
+
+
+class Replace(Body):
+    old_mailbox_id: UUID
+    new_mailbox_id: UUID
+    reason: str = Field(min_length=1, max_length=300)
+    retire_old: bool = False
+
+
+class Copy(Body):
+    mailbox_id: UUID
+    name: Optional[str] = Field(default=None, max_length=120)
+
+
+def _run(fn, session, context, *args, **kwargs):
+    business = auth._load_business(session, context["business_id"])
+    try:
+        return fn(session, business, context["user_id"], *args, **kwargs)
+    except ActionRefused as exc:
+        session.rollback()
+        raise HTTPException(exc.status_code, exc.detail) from None
+    except Exception:
+        session.rollback()
+        raise
+
+
+def _body(body: Body) -> dict:
+    return body.model_dump(mode="json", exclude_none=True)
+
+
+@router.get("/status")
+def get_status(context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return setup.status(session, auth._load_business(session, context["business_id"]))
+
+
+@router.post("/begin")
+def begin(context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return _run(setup.begin, session, context)
+
+
+@router.post("/brands")
+def brand(body: Brand, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return _run(setup.save_brand, session, context, _body(body))
+
+
+@router.post("/mailboxes")
+def register(body: Mailbox, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return _run(setup.register_mailbox, session, context, _body(body))
+
+
+@router.post("/mailboxes/{mailbox_id}/check")
+def check(mailbox_id: UUID, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return _run(setup.check_mailbox_health, session, context, str(mailbox_id))
+
+
+@router.post("/audience/draft")
+def draft_audience(body: Audience, context=Depends(get_user_business_context),
+                   session: Session = Depends(get_session)):
+    return _run(setup.draft_audience, session, context, _body(body))
+
+
+@router.post("/audience/{compliance_id}/approve")
+def approve_audience(compliance_id: UUID, body: AudienceApproval, context=Depends(get_user_business_context),
+                     session: Session = Depends(get_session)):
+    return _run(setup.approve_audience, session, context, str(compliance_id), _body(body))
+
+
+@router.post("/brands/{brand_id}/privacy/draft")
+def draft_notice(brand_id: UUID, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return _run(setup.draft_privacy_notice, session, context, str(brand_id))
+
+
+@router.post("/brands/{brand_id}/privacy/approve")
+def approve_notice(brand_id: UUID, body: Notice, context=Depends(get_user_business_context),
+                   session: Session = Depends(get_session)):
+    return _run(setup.approve_privacy_notice, session, context, str(brand_id), _body(body))
+
+
+@router.post("/campaign")
+def campaign(body: Campaign, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return _run(setup.create_first_campaign, session, context, _body(body))
+
+
+@router.post("/finish")
+def finish(context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return _run(setup.finish, session, context)
+
+
+@router.post("/mailboxes/replace")
+def replace(body: Replace, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return _run(setup.replace_mailbox, session, context, _body(body))
+
+
+@router.post("/campaigns/{campaign_id}/copy")
+def copy(campaign_id: UUID, body: Copy, context=Depends(get_user_business_context),
+         session: Session = Depends(get_session)):
+    return _run(setup.copy_campaign_to_mailbox, session, context, str(campaign_id), _body(body))
+
+
+@public_router.get("/p/outreach-privacy/{brand_id}", response_class=HTMLResponse)
+def public_notice(brand_id: str, session: Session = Depends(get_session)):
+    body = setup.public_privacy_notice(session, brand_id)
+    if not body:
+        raise HTTPException(404, "Not found")
+    return HTMLResponse(setup.render_public_notice(body), headers={"Cache-Control": "public, max-age=300"})

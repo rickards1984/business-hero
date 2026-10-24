@@ -27,7 +27,7 @@ class MissingSetup(AssertionError):
     """Only the intentional Stage 1 absence may be xfailed."""
 
 
-pytestmark = pytest.mark.xfail(strict=True, raises=MissingSetup, reason="OUT-15 not built yet: tests first")
+# Stage 1's strict-xfail marker was removed once the implementation landed.
 
 
 def uid(label):
@@ -76,7 +76,8 @@ def db(tmp_path, monkeypatch):
             "CREATE TABLE email_accounts (id TEXT PRIMARY KEY, business_id TEXT, user_id TEXT, provider TEXT, "
             "email_address TEXT, display_name TEXT, capabilities TEXT, is_default BOOLEAN, token_ciphertext TEXT, "
             "refresh_token_ciphertext TEXT, token_expires_at TEXT, smtp_config TEXT, created_at TEXT, updated_at TEXT)",
-            "CREATE TABLE aria_actions (id TEXT PRIMARY KEY, business_id TEXT, action_type TEXT, payload TEXT, status TEXT)",
+            "CREATE TABLE aria_actions (id TEXT PRIMARY KEY, business_id TEXT, action_type TEXT, payload TEXT, status TEXT, "
+            "error TEXT, updated_at TEXT)",
             "CREATE UNIQUE INDEX settings_once ON outreach_settings (business_id)",
             "CREATE UNIQUE INDEX brand_name_once ON outreach_brands (business_id, name)",
             "CREATE UNIQUE INDEX mailbox_once ON outreach_mailboxes (business_id, mailbox_id)",
@@ -537,3 +538,31 @@ def test_only_the_owner_changes_the_sending_mailbox(db, who):
         m.replace_mailbox(s, biz, who, {"old_mailbox_id": WORKSPACE, "new_mailbox_id": WORKSPACE,
                                         "reason": "x", "retire_old": True})
     assert getattr(exc.value, "status_code", None) == 403
+
+
+def test_the_daily_check_runs_once_from_seven_on_weekdays(db, monkeypatch):
+    """Decision C, wired to the hourly scheduler pass: any pass from 07:00 UK
+    on a weekday rechecks mailboxes not yet checked that UK day; no more."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    ready(m, db, biz)
+    calls = []
+    resolve = dns(GOOD_GOOGLE)
+
+    def counting(name):
+        calls.append(name)
+        return resolve(name)
+    tue = datetime(2026, 10, 27, 6, 59, tzinfo=timezone.utc)        # 06:59 UK (GMT)
+    with Session(db) as s:
+        assert m.daily_health(s, resolve=counting, moment=tue)["checked"] == []
+        assert m.daily_health(s, resolve=counting, moment=tue + timedelta(minutes=31))["checked"] == [WORKSPACE]
+        assert m.daily_health(s, resolve=counting, moment=tue + timedelta(hours=3))["checked"] == []
+        sat = datetime(2026, 10, 31, 9, tzinfo=timezone.utc)
+        assert m.daily_health(s, resolve=counting, moment=sat)["checked"] == []
+
+
+def test_the_hourly_autopilot_pass_runs_the_daily_check():
+    setup_module_or_missing()
+    import inspect
+    from services import automations
+    assert "daily_health" in inspect.getsource(automations.run_all_due)

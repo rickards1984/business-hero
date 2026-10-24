@@ -605,6 +605,14 @@ def scan_replies_everywhere(session, *, exclude=()) -> int:
 
 def run_all_due(session) -> int:
     """The scheduler's pass: every business that switched the autopilot on."""
+    try:
+        # OUT-15 decision C: outreach sends need a same-day mailbox health
+        # pass; this hourly pass runs the weekday check from 07:00 UK.
+        from services import outreach_setup
+        outreach_setup.daily_health(session)
+    except Exception as exc:  # never stops invoice chasing
+        session.rollback()
+        logger.error("[Autopilot] outreach mailbox check failed: %s", type(exc).__name__)
     rows = session.execute(text("SELECT business_id, settings FROM business_settings")).fetchall()
     total = 0
     done_here = set()

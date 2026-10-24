@@ -8,6 +8,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { OutreachRecord, outreachError, useOutreachData, useOutreachOwner, useOutreachSummary, useRefreshOutreach } from '@/hooks/useOutreachData';
 import ApprovalCard, { Proposal } from '@/components/ApprovalCard';
 import OutreachReplyCard from '@/components/OutreachReplyCard';
+import OutreachSetupWizard, { ChangeSendingMailbox, useSetupStatus } from '@/components/OutreachSetupWizard';
 const sections = ['overview', 'prospects', 'campaigns', 'replies', 'suppression', 'settings'];
 const href = (section: string) => `/app/outreach${section === 'overview' ? '' : '/' + section}`;
 const labels: Record<string, string> = { prospects: 'Prospects', campaigns: 'Campaigns', accepted_live: 'Provider-accepted live messages (not delivery)', unknown_live: 'Unknown send outcomes', imported_messages: 'Imported messages', human_replies: 'Human replies', stage_meeting: 'Recorded meeting stage', stage_won: 'Recorded won stage', unresolved_replies: 'Unresolved replies' };
@@ -29,6 +30,12 @@ function OutreachDepartment({ businessId }: { businessId: string }) {
     catch (e) { setError(outreachError(e)); refresh(); return null; } finally { setBusy(false); }
   }
   const controls = { businessId, owner: !!owner.data, busy, write };
+  const setup = useSetupStatus(businessId);
+  // OUT-15: until setup is complete, the owner sees the wizard first.
+  if (setup.data && !setup.data.complete && owner.data) return <Stack spacing={2} sx={{ minWidth: 0, '& .MuiButton-root': { minHeight: 44 }, overflowWrap: 'anywhere' }}>
+    <Typography variant="h4">Outreach</Typography>
+    <OutreachSetupWizard businessId={businessId} />
+  </Stack>;
   return <Stack spacing={2} sx={{ minWidth: 0, '& .MuiButton-root': { minHeight: 44 }, overflowWrap: 'anywhere' }}>
     <Typography variant="h4">Outreach</Typography>
     <Typography>Aria prepares; you decide. Every email needs your individual approval. Inbox sync freshness: unknown.</Typography>
@@ -41,7 +48,7 @@ function OutreachDepartment({ businessId }: { businessId: string }) {
     {section === 'campaigns' && <Campaigns {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
     {section === 'replies' && <Replies businessId={businessId} offset={offset} mailbox={mailbox} setParams={setParams} />}
     {section === 'suppression' && <Suppressions {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
-    {section === 'settings' && <Settings {...controls} />}
+    {section === 'settings' && <><Settings {...controls} />{owner.data && <ChangeSendingMailbox businessId={businessId} />}</>}
   </Stack>;
 }
 type Controls = { businessId: string; owner: boolean; busy: boolean; write: (method: string, path: string, body: unknown) => Promise<any> };
