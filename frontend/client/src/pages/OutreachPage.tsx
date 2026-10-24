@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Button, Checkbox, Dialog, DialogActions, DialogContent, DialogTitle, FormControlLabel, MenuItem, Paper, Stack, Tab, Tabs, TextField, Typography } from '@mui/material';
+import { Alert, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent, DialogTitle, FormControlLabel, MenuItem, Paper, Stack, Tab, Tabs, TextField, Typography } from '@mui/material';
 import { useMe } from '@/hooks/useMe';
 import { useShellMobile } from '@/hooks/useShellMobile';
 import { apiRequest } from '@/lib/queryClient';
@@ -44,7 +44,7 @@ function OutreachDepartment({ businessId }: { businessId: string }) {
     {!owner.data && <Alert severity="info">Inspection only. Write controls require an active owner. The server checks account access on every request.</Alert>}
     {error && <Alert severity="error">{error}</Alert>}{notice && <Alert severity="success">{notice}</Alert>}
     <Tabs value={sections.includes(section) ? section : 'overview'} variant="scrollable" scrollButtons="auto" aria-label="Outreach sections">{sections.map(s => <Tab key={s} value={s} label={s} component={Link} to={href(s)} />)}</Tabs>
-    {section === 'overview' && <><ResearchSummary businessId={businessId} /><Overview businessId={businessId} /></>}
+    {section === 'overview' && <><ResearchSummary businessId={businessId} />{owner.data && <BrandsPanel businessId={businessId} />}<Overview businessId={businessId} /></>}
     {section === 'prospects' && <Prospects {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
     {section === 'campaigns' && <Campaigns {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
     {section === 'replies' && <Replies businessId={businessId} offset={offset} mailbox={mailbox} setParams={setParams} />}
@@ -55,6 +55,27 @@ function OutreachDepartment({ businessId }: { businessId: string }) {
 type Controls = { businessId: string; owner: boolean; busy: boolean; write: (method: string, path: string, body: unknown) => Promise<any> };
 type Paging = { offset: number; setOffset: (n: number) => void };
 function Pages({ offset, setOffset, total }: Paging & { total?: number }) { return <Stack direction="row" spacing={2}><Button disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 20))}>Previous</Button><Typography sx={{ alignSelf: 'center' }}>{total == null ? 'Total unavailable' : `${total} recorded`}</Typography><Button disabled={total == null || offset + 20 >= total} onClick={() => setOffset(offset + 20)}>Next</Button></Stack>; }
+// OUT-18: each brand, product or service at a glance, and setting up another
+// (or finishing one) by repeating the steps, any time after outreach starts.
+function BrandsPanel({ businessId }: { businessId: string }) {
+  const setup = useSetupStatus(businessId);
+  const [mode, setMode] = useState<'' | 'add' | 'continue'>('');
+  const brands = setup.data?.brands || [];
+  if (mode) return <OutreachSetupWizard businessId={businessId} adding={mode === 'add'} onClose={() => setMode('')} />;
+  return <Paper variant="outlined" sx={{ p: 2 }}><Stack spacing={1.5}>
+    <Typography variant="h6">Your brands, products and services</Typography>
+    {brands.map(b => <Stack key={b.id} direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Typography sx={{ fontWeight: 600 }}>{b.name}</Typography>
+      <Chip size="small" color={b.ready ? 'success' : 'default'} label={b.ready ? 'Ready' : 'Setup not finished'} />
+      {b.mailbox_address && <Typography variant="body2" color="text.secondary">{b.mailbox_address}</Typography>}
+      <Typography variant="body2" color="text.secondary">{b.audiences.filter(a => a.approved).length} audience(s)</Typography>
+    </Stack>)}
+    <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+      <Button variant="outlined" onClick={() => setMode('add')}>+ Set up another business, service or product</Button>
+      {brands.some(b => !b.ready) && <Button onClick={() => setMode('continue')}>Continue setup</Button>}
+    </Stack>
+  </Stack></Paper>;
+}
 function Overview({ businessId }: { businessId: string }) {
   const q = useOutreachSummary(businessId);
   return <><QueryState query={q} />{q.data && !q.isError && <><Typography>Aria's stored overview · loaded {new Date(q.dataUpdatedAt).toLocaleString('en-GB')}</Typography>{Object.entries(q.data.totals || {}).map(([key, value]) => <Paper variant="outlined" sx={{ p: 2 }} key={key}><Typography>{labels[key] || key}: {value}</Typography><Button component={Link} to={href((q.data?.sources?.[key] || '').includes('replies') ? 'replies' : key === 'campaigns' ? 'campaigns' : 'prospects')}>View source records</Button></Paper>)}</>}{sections.slice(1).map(s => <Button key={s} component={Link} to={href(s)}>{s}</Button>)}</>;
