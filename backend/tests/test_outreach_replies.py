@@ -185,13 +185,59 @@ def test_concurrent_sync_and_proposals_create_exactly_one_card(r):
             worker = SimpleNamespace(**{**vars(r), 's': session})
             barrier.wait(timeout=5)
             scan(worker)
-            return answer(worker)['id']
+            return answer(worker)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        ids = list(pool.map(sync, range(2)))
-    assert ids[0] == ids[1]
+        results = list(pool.map(sync, range(2)))
+    # A worker that answers while the other is still classifying is told to
+    # wait (never a handover); the classifying worker then proposes the card.
+    assert {c['status'] for c in results} <= {'proposed', 'awaiting_classification'}
+    ids = {c['id'] for c in results if c['status'] == 'proposed'}
+    assert len(ids) == 1
+    assert answer(r)['id'] in ids
     assert r.s.execute(text('SELECT count(*) FROM outreach_replies WHERE business_id=:b'), {'b': A}).scalar_one() == 1
     assert r.s.execute(text('SELECT count(*) FROM outreach_reply_slots')).scalar_one() == 1
     assert r.s.execute(text("SELECT count(*) FROM aria_actions WHERE action_type='reply_outreach'")).scalar_one() == 1
+
+
+
+def test_answer_while_reply_is_being_classified_waits_without_handing_over(r):
+    """OUT-7 race (the flaky concurrent test): a second sync can ask for an
+    answer while the first is still classifying the reply. Handing over then
+    made the classification lose and the owner got a reply Aria could answer."""
+    fact(r)
+    incoming(r)
+    seen = []
+    def classify(_):
+        with Session(r.engine) as other:
+            worker = SimpleNamespace(**{**vars(r), 's': other})
+            seen.append(answer(worker, rid=other.execute(text('SELECT id FROM outreach_replies')).scalar_one()))
+        return {'category': 'question', 'confidence': 100, 'classification_version': 1}
+    scan(r, classify=classify)
+    assert seen[0]['status'] == 'awaiting_classification'
+    assert r.s.execute(text('SELECT resolution, category FROM outreach_replies')).one() == ('pending', 'question')
+    assert r.s.execute(text('SELECT count(*) FROM outreach_reply_slots')).scalar_one() == 0
+    assert answer(r)['status'] == 'proposed'
+
+
+def test_a_reply_left_unclassified_is_handed_to_the_owner_not_kept_waiting(r, monkeypatch):
+    """If classification never finished (a crash between storing and
+    classifying), the owner still gets the reply after a bounded wait."""
+    from datetime import datetime, timedelta, timezone
+    fact(r)
+    incoming(r)
+    # Stored rows carry the real clock (outreach_send.insert), so wait from that.
+    later = datetime.now(timezone.utc) + timedelta(minutes=16)
+    def stalled(_):
+        # The reply is stored as pending/unknown; 16 minutes pass with no classification.
+        rid = r.s.execute(text('SELECT id FROM outreach_replies')).scalar_one()
+        monkeypatch.setattr(r.replies, 'now', lambda: later)
+        with Session(r.engine) as other:
+            worker = SimpleNamespace(**{**vars(r), 's': other})
+            assert answer(worker, rid=rid)['status'] == 'handed_over'
+        return {'category': 'question', 'confidence': 100, 'classification_version': 1}
+    scan(r, classify=stalled)
+    assert r.s.execute(text('SELECT resolution FROM outreach_replies')).scalar_one() == 'handed_over'
+    assert r.s.execute(text('SELECT count(*) FROM outreach_reply_slots')).scalar_one() == 0
 
 
 @pytest.mark.parametrize('changes', [{'status': 'draft'}, {'status': 'retired', 'retired_at': STAMP},

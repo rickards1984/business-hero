@@ -230,10 +230,27 @@ def _card(action):
     return {'id': str(action['id']), 'status': action['status'], 'version': version_of(payload), 'preview': payload}
 
 
+CLASSIFICATION_WAIT = timedelta(minutes=15)
+
+
+def _awaiting_classification(reply):
+    """Stored by a sync that has not classified it yet. Bounded: a reply left
+    unclassified (its worker died) goes to the owner after CLASSIFICATION_WAIT."""
+    if reply['resolution'] != 'pending' or reply['category'] != 'unknown':
+        return False
+    stored = _parse(reply['updated_at'])
+    return stored is not None and now() - stored < CLASSIFICATION_WAIT
+
+
 def propose_answer(session, business, *, reply_id, draft, moment):
     bid = str(business.id)
     _start(session, bid)
     reply = send.one(session, 'outreach_replies', bid, reply_id, True)
+    if _awaiting_classification(reply):
+        # Another sync stored this reply and is classifying it now; it proposes
+        # the answer itself. Handing over here made its classification lose.
+        session.commit()
+        return {'id': None, 'status': 'awaiting_classification', 'reply_id': str(reply_id)}
     slots = send.rows(session, 'outreach_reply_slots', bid, 'AND prospect_id=:p', {'p': str(reply['prospect_id'])})
     if slots:
         slot = slots[0]
