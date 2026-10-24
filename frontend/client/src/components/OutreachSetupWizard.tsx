@@ -441,3 +441,70 @@ export function ResearchPanel({ businessId }: { businessId: string }) {
     </Paper>
   );
 }
+
+// ------------------------------------------------- OUT-11: auto-approve ---
+
+interface AutopilotState { enabled: boolean; valid: boolean; reason?: string | null; manual_accepted: number; needed: number; granted_at?: string | null }
+
+export function AutopilotSwitch({ businessId, campaign }: { businessId: string; campaign: { id: string; version: number; sequence_version: number } }) {
+  const client = useQueryClient();
+  const api = useCall(businessId);
+  const [confirming, setConfirming] = useState(false);
+  const state = useQuery<Record<string, AutopilotState>>({
+    queryKey: ['outreach-autopilot', businessId],
+    queryFn: async () => (await apiRequest('GET', setupPath('autopilot'))).json(), retry: false,
+  });
+  const s = state.data?.[campaign.id];
+  if (!s) return null;
+  const refresh = () => client.invalidateQueries({ queryKey: ['outreach-autopilot', businessId] });
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Stack spacing={1.5}>
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+          <Typography variant="h6">Automatic sending</Typography>
+          <Chip size="small" color={s.enabled && s.valid ? 'success' : 'default'}
+            label={s.enabled && s.valid ? 'On' : s.enabled ? 'Paused' : 'Off'} />
+        </Stack>
+        {s.needed > 0 ? (
+          <Typography variant="body2">
+            Approve this campaign's first emails yourself to build trust: {s.manual_accepted} of 5 done, {s.needed} to go.
+            Then you can let Aria send them for you.
+          </Typography>
+        ) : s.enabled ? (
+          <>
+            <Typography variant="body2">
+              Aria sends this campaign's approved emails for you: one at a time, spread through the day, weekdays 9–5,
+              within your limits. Answers to replies still wait for you.
+            </Typography>
+            {!s.valid && s.reason && <Alert severity="warning">{s.reason}</Alert>}
+            <Button variant="outlined" color="warning" disabled={api.busy} sx={{ alignSelf: 'flex-start' }}
+              onClick={async () => { await api.call('DELETE', `autopilot/${campaign.id}`); refresh(); }}>
+              Turn off automatic sending
+            </Button>
+          </>
+        ) : confirming ? (
+          <>
+            <Alert severity="info">
+              Aria will send this campaign's emails without asking each time: only the wording you approved, from this
+              campaign's mailbox, within its caps and warm-up, weekdays 9–5. Every opt-out, reply check and pause still
+              applies. Changing the wording or sender turns it off until you switch it on again.
+            </Alert>
+            <Stack direction="row" spacing={1}>
+              <Button variant="contained" disabled={api.busy} onClick={async () => {
+                if (await api.call('POST', `autopilot/${campaign.id}`, { version: campaign.version, sequence_version: campaign.sequence_version })) {
+                  setConfirming(false); refresh();
+                }
+              }}>Yes, let Aria send them</Button>
+              <Button onClick={() => setConfirming(false)}>Cancel</Button>
+            </Stack>
+          </>
+        ) : (
+          <Button variant="contained" sx={{ alignSelf: 'flex-start' }} onClick={() => setConfirming(true)}>
+            Let Aria send this campaign's emails automatically
+          </Button>
+        )}
+        {api.error && <Alert severity="error">{api.error}</Alert>}
+      </Stack>
+    </Paper>
+  );
+}

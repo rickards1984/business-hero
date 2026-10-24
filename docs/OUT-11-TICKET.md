@@ -64,3 +64,20 @@ No migration.
 
 ## Tests
 `backend/tests/test_outreach_autopilot.py`, strictly xfailed until `services.outreach_autopilot` exists. They use the OUT-6 harness (fake provider, no network) and the real `aria_actions` path.
+
+## Mike's approval — 24 October 2026
+**Approved:** the tests and decisions A–E, all as recommended ("absolutely approved").
+
+## Build — 24 October 2026 (Claude)
+- **Service:** `services/outreach_autopilot.py`: grant, revoke, status, `valid_grant` (read fresh, and under lock inside the claim), `send_next` (pace, window, pause, due enrolment, propose with the marker, approve with no user), `run_due`.
+- **`aria_actions`:** `propose` accepts `automation="outreach_autopilot"` for `send_outreach` only with a valid grant. `_approve_outreach` takes the automatic path only for a `send_outreach` card carrying that marker and `user_id=None`; it re-reads the grant after `prepare_claim` (business settings locked) and claims with `approved_by NULL`. Replies can never take it.
+- **`outreach_send.prepare_claim`** (Codex's file; a reviewed change): accepts the marker only with a validated `authority`, never for a reply. Every OUT-6 check is unchanged. The authority snapshot records `automation`, `granted_by`, `granted_at`, version and search time. `_settle` now sets `executed_at` on finished cards.
+- **Scheduler:** `briefing_scheduler._run_outreach_autopilot_if_due` runs every 2 minutes, off the loop, never two at once. It was edited byte-for-byte, so the CRLF file kept its line endings: +35 lines only.
+- **Home:** `recent_automated` lists automatic outreach sends, and the home line says so.
+- **Routes:** `GET/POST/DELETE /v1/outreach/setup/autopilot[/{campaign_id}]`.
+- **UI:** `AutopilotSwitch` on each campaign shows progress to 5, a confirmation of exactly what it allows, and the off switch.
+- **Verification:**
+  - `test_outreach_autopilot.py` has **21 passed**;
+  - all OUT-6/7/8/10/15, AUTO and home suites give **601 passed**;
+  - `./check.sh full` is green, with tsc;
+  - Postgres: an automatic send with the grant recorded passes alongside the existing OUT race and isolation suites.

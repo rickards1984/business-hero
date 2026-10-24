@@ -148,13 +148,19 @@ def recent_automated(conn, business_id: str, now: Optional[datetime] = None,
     now = now or datetime.now(timezone.utc)
     rows = conn.execute(text("""
         SELECT payload, executed_at FROM aria_actions
-        WHERE business_id = :business_id AND action_type = 'send_invoice_chase'
+        WHERE business_id = :business_id AND action_type IN ('send_invoice_chase', 'send_outreach')
           AND status = 'done' AND approved_by IS NULL AND executed_at >= :since
         ORDER BY executed_at DESC
     """), {"business_id": str(business_id), "since": now - timedelta(days=days)}).fetchall()
     out = []
     for payload, executed_at in rows:
         p = payload if isinstance(payload, dict) else json.loads(payload or "{}")
+        if p.get("automation") == "outreach_autopilot":
+            # OUT-11: an outreach email Aria sent under the owner's permission.
+            out.append({"kind": "outreach_autopilot", "to": p.get("to"), "subject": p.get("subject"),
+                        "campaign_id": p.get("campaign_id"), "invoice_count": 0,
+                        "sent_at": _iso(executed_at)})
+            continue
         if p.get("automation") != "invoice_chasing":
             continue
         listed = p.get("invoices") or []   # AUTO-3: one email may cover several

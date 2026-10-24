@@ -140,6 +140,36 @@ async def _run_invoice_autopilot_if_due():
     _invoice_autopilot_task = asyncio.create_task(asyncio.to_thread(_run))
 
 
+_last_outreach_autopilot = None
+_outreach_autopilot_task = None
+
+
+async def _run_outreach_autopilot_if_due():
+    """OUT-11: automatic outreach sends under the owner's standing permission.
+    Every 2 minutes, off the loop, never two at once; the 6-12 minute pace
+    and every send rule live in services.outreach_autopilot."""
+    global _last_outreach_autopilot, _outreach_autopilot_task
+    if _outreach_autopilot_task is not None and not _outreach_autopilot_task.done():
+        return
+    current = datetime.now(timezone.utc)
+    if _last_outreach_autopilot and current - _last_outreach_autopilot < timedelta(minutes=2):
+        return
+    _last_outreach_autopilot = current
+
+    def _run():
+        from db import get_session_context
+        from services import outreach_autopilot
+        try:
+            with get_session_context() as session:
+                sent = outreach_autopilot.run_due(session)
+            if sent:
+                logger.info(f"[Scheduler] Outreach autopilot sent {len(sent)} email(s)")
+        except Exception as e:
+            logger.error(f"[Scheduler] Outreach autopilot failed: {type(e).__name__}")
+
+    _outreach_autopilot_task = asyncio.create_task(asyncio.to_thread(_run))
+
+
 async def _deliver_metering_notices():
     """BH-012: send pending usage notices every tick, in a worker thread. In a
     thread there is no running event loop, so the WhatsApp send is awaited to
@@ -199,6 +229,11 @@ async def _scheduler_loop():
             await _run_invoice_autopilot_if_due()
         except Exception as e:
             logger.error(f"[Scheduler] Invoice autopilot scheduling failed: {e}")
+
+        try:
+            await _run_outreach_autopilot_if_due()
+        except Exception as e:
+            logger.error(f"[Scheduler] Outreach autopilot scheduling failed: {e}")
 
         try:
             await _reconcile_stripe_if_due()

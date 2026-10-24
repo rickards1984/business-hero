@@ -18,7 +18,7 @@ export interface HomeSummary {
   invoices: { outstanding_total: number; outstanding_count: number; overdue_total: number; overdue_count: number };
   emails: { action_required: number; window_days: number };
   synced: { email: string | null; accounting: string | null };
-  automated?: Array<{ kind: string; invoice_number?: string; invoice_count?: number; customer_name?: string; stage?: number; sent_at?: string }>;
+  automated?: Array<{ kind: string; invoice_number?: string; invoice_count?: number; customer_name?: string; stage?: number; sent_at?: string; to?: string; subject?: string }>;
   replies?: ChaseReply[];  // AUTO-2: replies to chases awaiting the owner
 }
 
@@ -145,8 +145,11 @@ export function briefingLines(d: Dashboard): string[] {
   const auto = d.summary.data?.automated ?? [];
   if (auto.length > 0) {
     // AUTO-3: one email can cover several invoices; count the invoices.
-    const chased = auto.reduce((n, a) => n + (a.invoice_count ?? 1), 0);
-    lines.push(`In the last week I chased ${plural(chased, 'invoice', 'invoices')} for you on autopilot.`);
+    const chased = auto.filter(a => a.kind !== 'outreach_autopilot').reduce((n, a) => n + (a.invoice_count ?? 1), 0);
+    if (chased > 0) lines.push(`In the last week I chased ${plural(chased, 'invoice', 'invoices')} for you on autopilot.`);
+    // OUT-11: outreach Aria sent under the owner's permission.
+    const outreach = auto.filter(a => a.kind === 'outreach_autopilot').length;
+    if (outreach > 0) lines.push(`I sent ${plural(outreach, 'outreach email', 'outreach emails')} for you automatically.`);
   }
   const replies = d.summary.data?.replies ?? [];
   // Codex AUTO-2 review 1: count the customers, not their emails.

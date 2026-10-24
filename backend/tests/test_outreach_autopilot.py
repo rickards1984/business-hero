@@ -25,7 +25,7 @@ class MissingAutopilot(AssertionError):
     """Only the intentional Stage 1 absence may be xfailed."""
 
 
-pytestmark = pytest.mark.xfail(strict=True, raises=MissingAutopilot, reason="OUT-11 not built yet: tests first")
+# Stage 1's strict-xfail marker was removed once the implementation landed.
 
 
 def autopilot():
@@ -223,3 +223,17 @@ def test_a_card_the_owner_taps_still_works_with_autopilot_on(h):
                      {"campaign_id": CAMPAIGN, "enrolment_id": ENROLMENT, "step_id": STEP}, owner_name="Owner")["proposal"]
     assert a.approve(h.s, h.b, card["id"], OWNER, version=card["version"])["status"] == "done"
     assert sends(h) == 1
+
+
+def test_the_scheduler_runs_it_every_two_minutes_off_the_loop():
+    autopilot()
+    import inspect
+    from services import briefing_scheduler
+    source = inspect.getsource(briefing_scheduler._run_outreach_autopilot_if_due)
+    assert "outreach_autopilot.run_due" in source and "to_thread" in source and "minutes=2" in source
+    assert "_run_outreach_autopilot_if_due()" in inspect.getsource(briefing_scheduler._scheduler_loop)
+
+
+def test_run_due_sends_for_a_business_with_a_valid_grant(h):
+    granted(h)
+    assert autopilot().run_due(h.s, moment=NOW) and len(h.p.sends) == 1
