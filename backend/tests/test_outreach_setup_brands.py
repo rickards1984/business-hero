@@ -239,3 +239,25 @@ def test_status_never_shows_another_business_brands(db, biz):
         fitfutures(m, s, biz)
         names = [b["name"] for b in m.status(s, biz)["brands"]]
     assert names == ["FitFutures"]
+
+
+def test_a_legacy_brands_inbox_never_comes_from_an_audience_no_longer_approved(db, biz):
+    """Part B review 2: a pre-OUT-18 brand (no chosen inbox) whose older
+    campaign's audience has a newer draft must take its inbox from the
+    campaign that can actually send."""
+    m = setup_module_or_missing()
+    with Session(db) as s:
+        m.begin(s, biz, OWNER)
+        for box in (WORKSPACE, PARTNERS):
+            m.register_mailbox(s, biz, OWNER, {"mailbox_id": box, "daily_cap": 5})
+            m.check_mailbox_health(s, biz, OWNER, box, resolve=dns(GOOD_GOOGLE))
+        gym = m.save_brand(s, biz, OWNER, {"name": "New Body Gym", "sender_identity": "New Body Gym Ltd"})
+        m.approve_privacy_notice(s, biz, OWNER, gym["id"], {"text": draft_notice({})})
+        schools = audience(m, s, biz, gym, "Schools", "school")
+        campaign(m, s, biz, gym, schools, WORKSPACE, "Schools email")
+        m.draft_audience(s, biz, OWNER, {"brand_id": gym["id"], "description": "Schools", "segments": ["school"],
+                                         "regions": ["Essex"]}, draft=draft_lia)     # a newer draft of that audience
+        charities = audience(m, s, biz, gym, "Charities", "charity")
+        campaign(m, s, biz, gym, charities, PARTNERS, "Charities email")
+        row = brand_row(m.status(s, biz), gym)
+    assert row["mailbox_id"] == PARTNERS and row["ready"] is True

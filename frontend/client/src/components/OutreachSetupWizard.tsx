@@ -144,7 +144,8 @@ export default function OutreachSetupWizard({ businessId, adding = false, onClos
         )}
         {showReady && brand ? (
           <BrandReady brand={brand} started={!!status.data?.started} busy={api.busy}
-            onAnother={another} onStart={() => api.call('POST', 'finish')} onClose={onClose} />
+            onAnother={another} onStart={() => api.call('POST', 'finish')} onClose={onClose}
+            onReview={() => { setActive('mailboxes'); setRevisiting(true); }} />
         ) : (
           <Stepper orientation="vertical" nonLinear activeStep={STEPS.findIndex(s => s.key === current)}>
             {STEPS.map(step => (
@@ -193,8 +194,9 @@ function NeedBrand() {
   return <Alert severity="info">Add what you do outreach for first.</Alert>;
 }
 
-function BrandReady({ brand, started, busy, onAnother, onStart, onClose }: {
+function BrandReady({ brand, started, busy, onAnother, onStart, onClose, onReview }: {
   brand: BrandSetup; started: boolean; busy: boolean; onAnother: () => void; onStart: () => void; onClose?: () => void;
+  onReview: () => void;
 }) {
   const audiences = brand.audiences.filter(a => a.approved && a.campaign?.ready);
   return (
@@ -212,6 +214,7 @@ function BrandReady({ brand, started, busy, onAnother, onStart, onClose }: {
         </Typography>
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
           <Button variant="outlined" onClick={onAnother}>+ Set up another</Button>
+          <Button onClick={onReview}>Review or change {brand.name}'s setup</Button>
           {!started && <Button variant="contained" disabled={busy} onClick={onStart}>Start outreach</Button>}
           {started && onClose && <Button variant="contained" onClick={onClose}>Done</Button>}
         </Stack>

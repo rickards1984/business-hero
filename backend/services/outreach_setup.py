@@ -683,15 +683,21 @@ def _brand_status(brand, notices, rules, boxes, accounts, healthy_ids, lias, cam
     def sendable(c) -> bool:
         return bool(approved_steps.get(str(c["id"]))) and str(c["mailbox_id"]) in healthy_ids
 
-    # Pre-OUT-18 brands chose no inbox: use the one a sendable campaign uses,
-    # else the newest campaign's (Codex OUT-18 part B review 1).
-    fallback = next((c for c in mine if sendable(c)), mine[-1] if mine else None)
-    mailbox = chosen or (str(fallback["mailbox_id"]) if fallback else None)
     latest = {}
     for lia in lias:
         if str(lia["brand_id"]) == bid_:
             if lia["audience_hash"] not in latest or int(lia["version"]) >= int(latest[lia["audience_hash"]]["version"]):
                 latest[lia["audience_hash"]] = lia
+
+    def audience_ok(c) -> bool:
+        lia = latest.get(c["target_hash"])
+        return bool(lia and lia["decision"] == "approved")
+
+    # Pre-OUT-18 brands chose no inbox: use the one a sendable campaign of a
+    # currently approved audience uses, else the newest campaign's (Codex
+    # OUT-18 part B reviews 1 and 2).
+    fallback = next((c for c in mine if sendable(c) and audience_ok(c)), mine[-1] if mine else None)
+    mailbox = chosen or (str(fallback["mailbox_id"]) if fallback else None)
     audiences = []
     for lia in latest.values():
         found = [c for c in mine if c["target_hash"] == lia["audience_hash"]]
