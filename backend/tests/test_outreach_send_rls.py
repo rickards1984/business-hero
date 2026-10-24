@@ -220,6 +220,11 @@ def test_the_last_monthly_slot_goes_to_exactly_one(pg):
     weekdays = sum(1 for d in range(1, 32) if __import__("datetime").date(2026, 10, d).weekday() < 5)
     with pg.engine.begin() as c:
         c.execute(text("UPDATE outreach_settings SET business_daily_cap = 2 WHERE business_id = :b"), {"b": A})
+        # The month's sent/held meters already exist, so no meter insert can
+        # serialise the race (Codex OUT-18 C review 3).
+        c.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) "
+                       "VALUES (:b, 'outreach_emails_sent', '2026-10', 0, now()), "
+                       "(:b, 'outreach_emails_reserved', '2026-10', 0, now())"), {"b": A})
         for i in range(2 * weekdays - 1):
             message = str(uuid.uuid4())
             c.execute(text(
@@ -244,7 +249,7 @@ def test_the_last_monthly_slot_goes_to_exactly_one(pg):
     one, two = _propose(pg), _propose(pg, enrolment=other)
     results, errors = _together(pg, lambda: _approve(pg, one), lambda: _approve(pg, two))
     assert len(pg.p.sends) == 1, (results, errors)
-    assert len(errors) == 1
+    assert len(errors) == 1 and "Monthly outreach allowance for this brand" in str(errors[0]), errors
     assert _count(pg, "SELECT count(*) FROM outreach_usage_events WHERE business_id = :b AND local_send_date >= '2026-10-01' "
                       "AND state IN ('reserved', 'committed', 'unknown')", b=A) == 2 * weekdays
 

@@ -538,6 +538,43 @@ def test_another_brands_full_month_never_stops_this_brand(h):
     assert approve(h, card)['status'] == 'done'
 
 
+@pytest.mark.parametrize('day,first,following,weekdays', [
+    ('2026-10-23', '2026-10-01', '2026-11-01', 22),
+    ('2026-12-31', '2026-12-01', '2027-01-01', 23),     # December rolls into the next year
+    ('2026-02-14', '2026-02-01', '2026-03-01', 20),     # a 28-day month
+    ('2028-02-29', '2028-02-01', '2028-03-01', 21),     # a leap-year February
+    ('2026-11-01', '2026-11-01', '2026-12-01', 21),     # the first day of a month starting on a Sunday
+])
+def test_month_bounds_and_weekdays(day, first, following, weekdays):
+    from datetime import date
+    from services.metering import month_bounds
+    got = month_bounds(date.fromisoformat(day))
+    assert (got[0].isoformat(), got[1].isoformat(), got[2]) == (first, following, weekdays)
+
+
+@pytest.mark.parametrize('states', [('reserved',), ('unknown',), ('committed', 'reserved', 'unknown')])
+def test_held_and_unknown_emails_count_toward_the_monthly_allowance(h, states):
+    card = propose(h)
+    sent_today(h, 20 * OCT_2026_WEEKDAYS, BRAND, states=states, day='2026-10-02')
+    refused_today(h, card, 20 * OCT_2026_WEEKDAYS)
+
+
+def test_released_emails_never_count_toward_the_monthly_allowance(h):
+    card = propose(h)
+    sent_today(h, 20 * OCT_2026_WEEKDAYS, BRAND, states=('released',), day='2026-10-02')
+    assert approve(h, card)['status'] == 'done'
+
+
+def test_the_last_day_of_the_month_counts_and_the_next_month_does_not(h):
+    card = propose(h)
+    sent_today(h, 20 * OCT_2026_WEEKDAYS - 1, BRAND, day='2026-10-31')
+    sent_today(h, 50, BRAND, day='2026-11-01')
+    assert approve(h, card)['status'] == 'done'          # 439 counted; November ignored
+    assert h.s.execute(text("SELECT count(*) FROM outreach_usage_events WHERE local_send_date >= '2026-10-01' "
+                            "AND local_send_date < '2026-11-01' AND state IN ('reserved','committed','unknown')")
+                       ).scalar() == 20 * OCT_2026_WEEKDAYS
+
+
 def test_the_owners_lower_daily_limit_lowers_the_monthly_allowance_too(h):
     card = propose(h)
     change(h, 'outreach_settings', business_daily_cap=5)

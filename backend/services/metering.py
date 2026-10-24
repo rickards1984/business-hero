@@ -598,6 +598,15 @@ def _outreach_delta(session, bid, meter, period, amount):
                     {'b': bid, 'm': meter, 'p': period, 'n': amount})
 
 
+def month_bounds(day):
+    """A UK calendar month as (first day, first day of the next month, Monday–
+    Friday count): the window and size of a brand's monthly allowance (OUT-18)."""
+    first = day.replace(day=1)
+    following = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+    weekdays = sum(1 for n in range((following - first).days) if (first + timedelta(days=n)).weekday() < 5)
+    return first, following, weekdays
+
+
 def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, prospect_id, message_id, moment):
     """Reserve once; caller owns transaction, rollback and action claim."""
     from services.outreach_send import rows, one, require, insert, loads, _parse
@@ -645,9 +654,7 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
     # The monthly allowance is per brand too (Mike, 25 Oct 2026): the daily
     # limit times this UK month's weekdays, so no brand runs out mid-campaign.
     # The business-wide sent/held meters are still kept for reporting.
-    first = local.date().replace(day=1)
-    following = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
-    weekdays = sum(1 for n in range((following - first).days) if (first + timedelta(days=n)).weekday() < 5)
+    first, following, weekdays = month_bounds(local.date())
     month_count = session.execute(text(
         "SELECT count(*) FROM outreach_usage_events u JOIN outreach_messages m ON m.business_id=u.business_id AND m.id=u.message_id "
         "JOIN outreach_campaigns c ON c.business_id=m.business_id AND c.id=m.campaign_id "
