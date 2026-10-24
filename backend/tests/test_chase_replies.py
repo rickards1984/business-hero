@@ -101,7 +101,7 @@ def db():
         c.execute(text("""CREATE TABLE email_messages (id TEXT PRIMARY KEY, business_id TEXT NOT NULL,
             email_account_id TEXT NOT NULL, provider_message_id TEXT NOT NULL,
             provider_thread_id TEXT, folder TEXT, from_email TEXT, from_name TEXT, to_emails TEXT,
-            subject TEXT, snippet TEXT, body_text TEXT, received_at TEXT, ai_category TEXT,
+            cc_emails TEXT, raw_headers TEXT, subject TEXT, snippet TEXT, body_text TEXT, received_at TEXT, ai_category TEXT,
             created_at TEXT, updated_at TEXT)"""))
         c.execute(text("""CREATE TABLE email_sync_states (id TEXT PRIMARY KEY,
             email_account_id TEXT NOT NULL UNIQUE, cursor TEXT DEFAULT '{}', last_synced_at TEXT,
@@ -857,3 +857,60 @@ def test_a_mailbox_of_another_business_is_never_searched(db, sent, mail):
     result = autopilot(db)
     assert result["skipped"].get(iid) == "reply_check_failed"
     assert ACCT_B not in {call[0] for call in mail.calls}
+
+
+# ---------------------------------------- OUT-7: the shared storage boundary ---
+# Claude owns _store (AUTO-2). OUT-7 needs recipients and threading headers
+# kept, and one notification after storage commits (docs/OUT-7-TICKET.md).
+
+def _provider_message(**extra):
+    from providers.base import ProviderMessage
+    fields = dict(provider_message_id="pm-1", provider_thread_id="th-1", from_email=CUSTOMER,
+                  to_emails=["owner@aaaa.example"], cc_emails=["partner@aaaa.example"],
+                  subject="Re: Invoice", snippet="paid", body_text="paid",
+                  received_at=UTC_NOW - timedelta(hours=1),
+                  raw_headers={"Message-ID": "<in-1@harper.example>", "In-Reply-To": "<out-1@aaaa.example>",
+                               "References": "<out-0@aaaa.example> <out-1@aaaa.example>",
+                               "X-Tracking": "x" * 9000, "Received": "secret relay path"})
+    fields.update(extra)
+    return ProviderMessage(**fields)
+
+
+def test_store_keeps_recipients_and_threading_headers(db, sent):
+    with Session(db) as s:
+        replies()._store(s, business(), ACCT_A, [_provider_message()])
+    with db.connect() as c:
+        to, cc, headers = c.execute(text(
+            "SELECT to_emails, cc_emails, raw_headers FROM email_messages WHERE provider_message_id='pm-1'")).one()
+    assert "owner@aaaa.example" in to and "partner@aaaa.example" in cc
+    kept = json.loads(headers)
+    assert kept["Message-ID"] == "<in-1@harper.example>"
+    assert kept["In-Reply-To"] == "<out-1@aaaa.example>"
+    assert kept["References"] == "<out-0@aaaa.example> <out-1@aaaa.example>"
+    assert "X-Tracking" not in kept and "Received" not in kept, "only the threading headers, bounded"
+
+
+def test_store_notifies_outreach_once_after_commit_even_with_nothing_new(db, sent, monkeypatch):
+    import services.outreach_replies as service
+    calls = []
+
+    def seen(session, business):
+        with db.connect() as other:   # a separate connection sees the row: committed first
+            calls.append(other.execute(text("SELECT COUNT(*) FROM email_messages")).scalar())
+    monkeypatch.setattr(service, "storage_completed", seen)
+    with Session(db) as s:
+        replies()._store(s, business(), ACCT_A, [_provider_message()])
+        replies()._store(s, business(), ACCT_A, [])
+    assert calls == [1, 1]
+
+
+def test_a_failing_outreach_notification_never_breaks_chasing(db, sent, monkeypatch):
+    import services.outreach_replies as service
+
+    def broken(session, business):
+        raise RuntimeError("outreach scan exploded")
+    monkeypatch.setattr(service, "storage_completed", broken)
+    with Session(db) as s:
+        replies()._store(s, business(), ACCT_A, [_provider_message()])
+    with db.connect() as c:
+        assert c.execute(text("SELECT COUNT(*) FROM email_messages")).scalar() == 1

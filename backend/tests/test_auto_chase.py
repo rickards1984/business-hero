@@ -88,7 +88,9 @@ def db():
             sync_status TEXT, last_error TEXT)"""))
         c.execute(text("""CREATE TABLE email_messages (id TEXT PRIMARY KEY, business_id TEXT NOT NULL,
             email_account_id TEXT, provider_message_id TEXT, provider_thread_id TEXT,
-            from_email TEXT, subject TEXT, snippet TEXT, body_text TEXT, received_at TEXT)"""))
+            folder TEXT, from_email TEXT, from_name TEXT, to_emails TEXT, cc_emails TEXT,
+            raw_headers TEXT, subject TEXT, snippet TEXT, body_text TEXT, received_at TEXT,
+            created_at TEXT, updated_at TEXT)"""))
         c.execute(text("""CREATE TABLE chase_replies (id TEXT PRIMARY KEY, business_id TEXT NOT NULL,
             email_message_id TEXT, customer_email TEXT NOT NULL, invoice_ids TEXT NOT NULL,
             category TEXT NOT NULL, summary TEXT, status TEXT NOT NULL DEFAULT 'open',

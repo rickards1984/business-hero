@@ -15,7 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session
 
 import auth
-from auth import assert_feature_access, get_user_business_context, require_feature
+from auth import assert_feature_access, get_user_business_context
 from db import engine, get_session
 
 
@@ -44,7 +44,7 @@ READS = (
     Read("campaigns/{campaign_id}/sequence", "get_outreach_sequence", "sequence_steps",
          "id campaign_id sequence_version ordinal delay_business_days approved_at", "campaign_id"),
     Read("replies", "list_outreach_replies", "replies",
-         "id prospect_id mailbox_id category confidence resolution received_at"),
+         "id prospect_id mailbox_id inbound_email_id matched_message_id owner_id category confidence resolution received_at"),
     Read("mailboxes", "list_outreach_mailboxes", "mailboxes",
          "id mailbox_id enabled daily_cap warmup_stage sending_days health_status health_checked_at"),
     Read("compliance", "get_outreach_compliance_status", "compliance",
@@ -52,7 +52,10 @@ READS = (
     Read("settings", "get_outreach_settings_and_permissions", "settings",
          "id pause_all timezone business_daily_cap owner_cc_default retention_policy_version", detail=True),
     Read("summary", "outreach_summary", "", "", detail=True),
-    Read("knowledge", "get_outreach_knowledge", "", ""),
+    Read("knowledge", "get_outreach_knowledge", "knowledge",
+         "id brand_id topic answer source_reference version status approved_at review_due_at retired_at"),
+    Read("reply-slots", "list_outreach_reply_slots", "reply_slots",
+         "id prospect_id reply_id mailbox_id action_id state generation reserved_at dispatched_at settled_at released_at"),
 )
 READ_BY_TOOL = {read.tool: read for read in READS}
 
@@ -72,8 +75,10 @@ def argument_schema(read):
                           offset={"type": "integer", "minimum": 0, "maximum": 10000, "default": 0})
     if read.parent:
         properties[read.parent] = {"type": "string", "format": "uuid"}
-    if read.table == "replies":
+    if read.table in ("replies", "reply_slots"):
         properties["mailbox_id"] = {"type": "string", "format": "uuid"}
+    if read.table == "knowledge":
+        properties["brand_id"] = {"type": "string", "format": "uuid"}
     return {"type": "object", "properties": properties,
             "required": [read.parent] if read.parent else [], "additionalProperties": False}
 
@@ -113,9 +118,9 @@ def _utc(value):
     return value.astimezone(timezone.utc)
 
 
-DATE_FIELDS = frozenset("evidence_checked_at fetched_at expires_at accepted_at created_at approved_at received_at health_checked_at reviewed_at review_due_at".split())
+DATE_FIELDS = frozenset("evidence_checked_at fetched_at expires_at accepted_at created_at approved_at received_at health_checked_at reviewed_at review_due_at retired_at reserved_at dispatched_at settled_at released_at".split())
 BOOL_FIELDS = frozenset(("enabled", "pause_all", "owner_cc_default"))
-TEXT_FIELDS = frozenset("name privacy_url sender_identity company role domain stage eligibility subscriber_type source_type source_url excerpt fact_type fact_value kind origin direction state status timezone category resolution health_status decision".split())
+TEXT_FIELDS = frozenset("name privacy_url sender_identity company role domain stage eligibility subscriber_type source_type source_url excerpt fact_type fact_value kind origin direction state status timezone category resolution health_status decision topic answer source_reference".split())
 
 
 def _project(read, row, clock):
@@ -132,7 +137,7 @@ def _project(read, row, clock):
             elif isinstance(value, Decimal):
                 value = float(value)
             if isinstance(value, str):
-                value = value[:2000 if field in ("excerpt", "fact_value") else 1000]
+                value = value[:4000 if field == "answer" else 2000 if field in ("excerpt", "fact_value", "source_reference") else 1000]
         item[field] = value
     stale = False
     expiry = row.get("retention_due_at") if read.table == "prospects" else row.get("expires_at")
@@ -140,6 +145,9 @@ def _project(read, row, clock):
         stale = True
         for field in (("company", "name", "role", "domain") if read.table == "prospects" else ("excerpt", "fact_value")):
             item[field] = None
+    if read.table == "knowledge":
+        stale = (row["status"] != "approved" or not row["approved_at"] or
+                 _utc(row["approved_at"]) > clock or _utc(row["review_due_at"]) <= clock)
     return item, stale
 
 
@@ -172,7 +180,7 @@ SUMMARY = {
 def _read(session, read, arguments, business_id):
     # This assertion also applies to platform admins, independently of the
     # HTTP dependency's existing bypass. Never accept a model-supplied grant.
-    assert_feature_access(_load_business(session, business_id), "outreach", retained_history=False)
+    assert_feature_access(_load_business(session, business_id), "outreach", retained_history=read.table in ("replies", "reply_slots", "knowledge"))
     params = {"business_id": str(business_id), **arguments}
     where = "business_id = :business_id"
     if read.parent and not read.detail:
@@ -197,13 +205,13 @@ def _read(session, read, arguments, business_id):
                 "sources": {key: "/v1/outreach/" + source for key, (_, _, source) in SUMMARY.items()},
                 "data_quality": "available" if any(totals.values()) else "none",
                 "message": "Stored outreach counts available." if any(totals.values()) else "None available."}
-    if read.path == "knowledge":
-        return {"items": [], "total": 0, **arguments, "data_quality": "not_available",
-                "message": "None available: approved outreach knowledge awaits OUT-7."}
+    if "brand_id" in arguments:
+        _owned(session, "outreach_brands", arguments["brand_id"], params["business_id"])
+        where += " AND brand_id = :brand_id"
 
     # Cap text in SQL as well as at serialization, so large source text cannot
     # turn a bounded row count into an unbounded response/context allocation.
-    columns = [f"substr({field}, 1, {2000 if field in ('excerpt', 'fact_value') else 1000}) AS {field}"
+    columns = [f"substr({field}, 1, {4000 if field == 'answer' else 2000 if field in ('excerpt', 'fact_value', 'source_reference') else 1000}) AS {field}"
                if field in TEXT_FIELDS else field for field in read.fields.split()]
     if read.table == "prospects":
         columns.append("retention_due_at")  # Internal expiry input, never returned.
@@ -259,8 +267,7 @@ def execute_read_tool(tool_name, arguments, business_id):
         return {"status_code": 500, "error": "Outreach records unavailable"}
 
 
-router = APIRouter(prefix="/v1/outreach", tags=["Outreach"],
-                   dependencies=[Depends(require_feature("outreach", retained_history=False))])
+router = APIRouter(prefix="/v1/outreach", tags=["Outreach"])
 
 
 def _endpoint(read):

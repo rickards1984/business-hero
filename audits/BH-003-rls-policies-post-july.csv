@@ -58,3 +58,7 @@ outreach_prospects,outreach_prospects_member_read,SELECT,{authenticated},"is_bus
 outreach_evidence,outreach_evidence_member_read,SELECT,{authenticated},"is_business_member(auth.uid(), business_id)",null
 outreach_compliance,outreach_compliance_member_read,SELECT,{authenticated},"is_business_member(auth.uid(), business_id)",null
 outreach_replies,outreach_replies_member_read,SELECT,{authenticated},"is_business_member(auth.uid(), business_id)",null
+# OUT-7 / 038 DRAFT, 23 Oct 2026: one member-only SELECT on approved outreach
+# knowledge. Verified by Claude against the local 038 replay's pg_policies
+# rendering (identical to 037's six). reply_slots has NO policy (backend only).
+outreach_knowledge,outreach_knowledge_member_read,SELECT,{authenticated},"is_business_member(auth.uid(), business_id)",null

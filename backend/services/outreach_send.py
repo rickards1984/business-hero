@@ -65,7 +65,7 @@ def one(session, table, bid, ident=None, lock=False):
 
 def insert(session, table, bid, **fields):
     fields = dict(id=str(uuid.uuid4()), business_id=str(bid), created_at=now(),
-                  updated_at=now(), **fields)
+                  updated_at=now()) | fields
     expressions = []
     for key, value in fields.items():
         if isinstance(value, (dict, list)):
@@ -192,6 +192,22 @@ def build_payload(session, business, args, owner_name=None, timezone=None):
     return payload
 
 
+def _binding_matches(payload, binding):
+    # The reply operation belongs to the permanent slot/generation, not step.
+    return all(payload.get(k) == v for k, v in binding.items()
+               if not (payload.get('action_kind') == 'reply_outreach' and k == 'idempotency_key'))
+
+
+def recheck_inbound(session, bid, payload, since, allowed_inbound=None):
+    own = {_address(r['email_address']) for r in rows(session, 'email_accounts', bid)}
+    # SQL sender filter fixes OUT-6's whole-inbox materialization backlog.
+    inbox = rows(session, 'email_messages', bid,
+        'AND received_at>=:since AND lower(from_email) LIKE :sender_hint',
+        {'since': since, 'sender_hint': '%' + payload['to'] + '%'})
+    require(not any(str(r['id']) != allowed_inbound and _address(r['from_email']) == payload['to']
+                    and _address(r['from_email']) not in own for r in inbox), 'Recipient has replied')
+
+
 def search_before_claim(session, business, *, action_id, payload):
     """Read-only provider search outside locks, AUTO-2 storage before claim.
 
@@ -200,7 +216,7 @@ def search_before_claim(session, business, *, action_id, payload):
     """
     require(not session.new and not session.dirty and not session.deleted)
     c, e, s, p, b, a = _records(session, business, payload)
-    require(all(payload.get(k) == v for k, v in _binding(c, e, s, p, b, a).items()))
+    require(_binding_matches(payload, _binding(c, e, s, p, b, a)))
     prev = _previous(session, business.id, c, p)
     since = _parse(prev['accepted_at']) if prev else _parse(p['captured_at'])
     require(since is not None)
@@ -260,7 +276,7 @@ def prepare_claim(session, business, *, action_id, payload, user_id, version, mo
         raise ActionRefused(403, 'Outreach entitlement unavailable') from None
     metering.lock_outreach_usage(session, business, moment=moment, mailbox_id=payload['mailbox_id'])
     c, e, s, p, b, a = _records(session, business, payload, lock=True)
-    require(all(payload.get(k) == v for k, v in _binding(c, e, s, p, b, a).items()), 'Outreach preview is stale')
+    require(_binding_matches(payload, _binding(c, e, s, p, b, a)), 'Outreach preview is stale')
     settings = one(session, 'outreach_settings', bid, lock=True)
     lia = one(session, 'outreach_compliance', bid, p['lia_id'], True)
     evidence = rows(session, 'outreach_evidence', bid, 'AND prospect_id=:p', {'p': str(p['id'])}, True)
@@ -270,8 +286,15 @@ def prepare_claim(session, business, *, action_id, payload, user_id, version, mo
     moment = checked_at
     require(not settings['pause_all'] and c['status'] in ('ready', 'running'))
     require(c['timezone'] == settings['timezone'] == 'Europe/London')
-    require(e['state'] == 'active' and not e['takeover_at'] and e['next_step'] == s['ordinal'])
-    require(_parse(e['next_due_at']) and _parse(e['next_due_at']) <= moment)
+    is_reply = payload.get('action_kind') == 'reply_outreach'
+    if is_reply:
+        from services.outreach_replies import validate_claim
+        allowed_inbound = validate_claim(session, business, payload, action_id, moment)
+        require(e['state'] == 'replied' and not e['takeover_at'])
+    else:
+        allowed_inbound = None
+        require(e['state'] == 'active' and not e['takeover_at'] and e['next_step'] == s['ordinal'])
+        require(_parse(e['next_due_at']) and _parse(e['next_due_at']) <= moment)
     require(p['email_key'] == suppression_digest(bid, 'email', p['email']), 'Address verification binding is stale')
     require(p['eligibility'] == 'eligible' and p['subscriber_type'] == 'corporate' and p['lawful_basis'] == 'legitimate_interests')
     require(_parse(p['retention_due_at']) and moment < _parse(p['retention_due_at']))
@@ -290,19 +313,18 @@ def prepare_claim(session, business, *, action_id, payload, user_id, version, mo
         blocked = rows(session, 'outreach_suppressions', bid, 'AND key_type=:k AND (key_digest=:d OR key_digest=:stored)',
                        {'k': kind, 'd': digest, 'stored': p['email_key'] if kind == 'email' else digest})
         require(not blocked, 'Recipient is suppressed')
-    require(not rows(session, 'outreach_replies', bid, 'AND prospect_id=:p', {'p': str(p['id'])}), 'Recipient has replied')
-    own = {_address(r['email_address']) for r in rows(session, 'email_accounts', bid)}
-    inbox = rows(session, 'email_messages', bid, 'AND received_at>=:since', {'since': receipt[2]})
-    require(not any(_address(r['from_email']) == payload['to'] and _address(r['from_email']) not in own for r in inbox), 'Recipient has replied')
+    if not is_reply:
+        require(not rows(session, 'outreach_replies', bid, 'AND prospect_id=:p', {'p': str(p['id'])}), 'Recipient has replied')
+    recheck_inbound(session, bid, payload, receipt[2], allowed_inbound)
     current_moment = max(moment, now())
     require(current_moment.astimezone(LONDON).date() == moment.astimezone(LONDON).date(), 'Sending period changed; search again')
     moment = current_moment
     local = moment.astimezone(LONDON)
     require(local.weekday() < 5 and 9 <= local.hour < 17, 'Outside outreach sending window')
     require(moment < _parse(payload['expires_at']))
-    if p['last_contact_at']:
+    if p['last_contact_at'] and not is_reply:
         require(moment >= _parse(p['last_contact_at']) + timedelta(days=7), 'Contact spacing')
-    if s['ordinal']:
+    if s['ordinal'] and not is_reply:
         prev = _previous(session, bid, c, p)
         require(prev and prev['provider_message_id'] and prev['provider_thread_id'] == payload['provider_thread_id'] and
                 prev['rfc_message_id'] == payload['in_reply_to'] and str(prev['mailbox_id']) == payload['mailbox_id'])
@@ -311,7 +333,7 @@ def prepare_claim(session, business, *, action_id, payload, user_id, version, mo
     require(not rows(session, 'outreach_dispatch_jobs', bid, 'AND logical_key=:k', {'k': payload['idempotency_key']}), 'Operation already claimed')
     message_id = insert(session, 'outreach_messages', bid, prospect_id=p['id'], campaign_id=c['id'],
                         enrolment_id=e['id'], step_id=s['id'], sequence_version=s['sequence_version'],
-                        mailbox_id=a['id'], action_id=action_id, kind='followup' if s['ordinal'] else 'initial',
+                        mailbox_id=a['id'], action_id=action_id, kind='bespoke' if is_reply else ('followup' if s['ordinal'] else 'initial'),
                         origin='live', direction='outbound', to_emails=[payload['to']], cc_emails=payload['cc'],
                         subject=payload['subject'], body='\n\n'.join(payload[k] for k in ('body', 'sign_off', 'footer')),
                         payload_hash=version, payload_version=1, state='claimed', provider=a['provider'],
@@ -319,8 +341,17 @@ def prepare_claim(session, business, *, action_id, payload, user_id, version, mo
                         authority_snapshot={'user_id': str(user_id), 'version': version, 'search_at': receipt[1].isoformat()})
     metering.reserve_outreach_usage(session, business, operation_key=payload['idempotency_key'],
                                    mailbox_id=str(a['id']), prospect_id=str(p['id']), message_id=message_id, moment=moment)
+    if is_reply:
+        reply = one(session, 'outreach_replies', bid, payload['reply_id'])
+        update(session, 'outreach_messages', bid, message_id, reply_target_id=reply['matched_message_id'])
+        # 038 stores the full SHA-256; the card version is its first 16 characters.
+        full_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':'),
+                                              default=str).encode()).hexdigest()
+        require(full_hash.startswith(version))
+        update(session, 'outreach_reply_slots', bid, payload['slot_id'], message_id=message_id,
+               payload_hash=full_hash)
     action = one(session, 'aria_actions', bid, action_id, True)
-    require(action['action_type'] == 'send_outreach' and action['status'] == 'proposed' and
+    require(action['action_type'] == ('reply_outreach' if is_reply else 'send_outreach') and action['status'] == 'proposed' and
             loads(action['payload']) == payload and moment < _parse(action['expires_at']))
     insert(session, 'outreach_dispatch_jobs', bid, message_id=message_id, enrolment_id=e['id'], step_id=s['id'],
            logical_key=payload['idempotency_key'], status='claimed', due_at=moment, action_id=action_id)
@@ -340,20 +371,50 @@ def dispatch(session, business, *, action_id, payload):
     job = rows(session, 'outreach_dispatch_jobs', bid, 'AND action_id=:a', {'a': str(action_id)})
     require(len(job) == 1 and job[0]['status'] == 'claimed' and not job[0]['dispatch_started_at'])
     at = now()
+    lock_business(session, bid)
+    blocked = False
+    try:
+        prospect = one(session, 'outreach_prospects', bid, payload['prospect_id'])
+        for kind, value in (('email', prospect['email']), ('domain', _address(prospect['email']).split('@')[-1])):
+            require(not rows(session, 'outreach_suppressions', bid, 'AND key_type=:k AND key_digest=:d',
+                             {'k': kind, 'd': suppression_digest(bid, kind, value)}))
+        require(not one(session, 'outreach_settings', bid)['pause_all'])
+        boxes = rows(session, 'outreach_mailboxes', bid, 'AND mailbox_id=:m', {'m': payload['mailbox_id']})
+        require(len(boxes) == 1 and boxes[0]['enabled'] and boxes[0]['health_status'] == 'pass')
+        enrolment = one(session, 'outreach_enrolments', bid, payload['enrolment_id'])
+        require(not enrolment['takeover_at'] and enrolment['state'] == ('replied' if payload.get('action_kind') == 'reply_outreach' else 'active'))
+        allowed = None
+        if payload.get('action_kind') == 'reply_outreach':
+            reply = one(session, 'outreach_replies', bid, payload['reply_id'])
+            allowed = str(reply['inbound_email_id'])
+            from services.outreach_replies import _eligible, _facts, _grounded
+            require(_eligible(session, bid, reply))
+            facts = _facts(session, bid, payload['brand_id'], at)
+            require(facts == payload['knowledge'] and _grounded({'body': payload['body'], 'knowledge_refs': payload['knowledge_refs']}, facts))
+        recheck_inbound(session, bid, payload, _parse(prospect['captured_at']), allowed)
+    except ActionRefused:
+        blocked = True
     claimed = session.execute(text("UPDATE outreach_dispatch_jobs SET dispatch_started_at=:at WHERE business_id=:b AND id=:id AND status='claimed' AND dispatch_started_at IS NULL"),
                               {'at': at, 'b': bid, 'id': job[0]['id']})
     require(claimed.rowcount == 1)
     account = SimpleNamespace(**one(session, 'email_accounts', bid, payload['mailbox_id']))
     require(account.provider == payload['provider'] and _address(account.email_address) == payload['from_email'] and account.token_ciphertext, 'Campaign mailbox changed after claim')
+    if payload.get('action_kind') == 'reply_outreach':
+        update(session, 'outreach_reply_slots', bid, payload['slot_id'], dispatched_at=at)
     session.commit()
     evidence = {'outcome': 'unknown'}
     try:
-        evidence = get_provider_for_account(account).send_outreach(
-            account=account, operation_key=payload['idempotency_key'], to_emails=[payload['to']],
-            cc_emails=payload['cc'], subject=payload['subject'],
-            body_text='\n\n'.join(payload[k] for k in ('body', 'sign_off', 'footer')), body_html=None,
-            rfc_message_id=payload['rfc_message_id'], in_reply_to=payload['in_reply_to'],
-            references=payload['references'], provider_thread_id=payload['provider_thread_id'], headers=payload['headers'])
+        if blocked:
+            evidence = {'outcome': 'definitely_not_accepted', 'provider': payload['provider'],
+                        'mailbox_id': payload['mailbox_id'], 'reason': 'Stopped before transport'}
+        else:
+            evidence = get_provider_for_account(account).send_outreach(
+                account=account, operation_key=payload['idempotency_key'], to_emails=[payload['to']],
+                cc_emails=payload['cc'], subject=payload['subject'],
+                body_text='\n\n'.join(payload[k] for k in ('body', 'sign_off', 'footer')), body_html=None,
+                rfc_message_id=payload['rfc_message_id'], in_reply_to=payload['in_reply_to'],
+                references=payload['references'], provider_thread_id=payload['provider_thread_id'], headers=payload['headers'],
+                **({'reply_provider_message_id': payload['reply_provider_message_id']} if payload.get('action_kind') == 'reply_outreach' else {}))
         require(evidence['mailbox_id'] == payload['mailbox_id'] and evidence['provider'] == payload['provider'])
         require(evidence['outcome'] in ('accepted', 'definitely_not_accepted', 'unknown'))
         require(all(evidence.get(k) is None or (isinstance(evidence[k], str) and len(evidence[k]) <= 512) for k in ('provider_message_id', 'provider_thread_id', 'rfc_message_id')))
@@ -393,11 +454,24 @@ def _settle(session, business, action_id, payload, job, evidence, result):
                          's': payload['subject'], 'body': payload['body'][:500], 'pid': evidence.get('provider_message_id'), 'at': now()})
         fields.update(outbox_id=outbox, accepted_at=_parse(evidence.get('accepted_at')) or now())
         session.execute(text('UPDATE outreach_prospects SET first_contact_at=COALESCE(first_contact_at,:at),last_contact_at=:at,notice_provided_at=COALESCE(notice_provided_at,:at) WHERE business_id=:b AND id=:p'), {'at': fields['accepted_at'], 'b': bid, 'p': payload['prospect_id']})
-        if payload['ordinal'] < 2:
+        if payload.get('action_kind') == 'reply_outreach':
+            pass  # A reply never advances or restarts a stopped sequence.
+        elif payload['ordinal'] < 2:
             update(session, 'outreach_enrolments', bid, payload['enrolment_id'], next_step=payload['ordinal'] + 1,
                    next_due_at=_business_days(fields['accepted_at'], (5, 7)[payload['ordinal']]))
         else:
             update(session, 'outreach_enrolments', bid, payload['enrolment_id'], state='completed')
+    if payload.get('action_kind') == 'reply_outreach':
+        slot = one(session, 'outreach_reply_slots', bid, payload['slot_id'], True)
+        require(str(slot['action_id']) == str(action_id) and slot['generation'] == payload['slot_generation'])
+        require(slot['state'] != 'accepted' or outcome == 'accepted', 'Accepted answer is terminal')
+        # Definite refusal is recorded but the slot stays held until an owner
+        # independently reviews release. No automatic replacement is possible.
+        update(session, 'outreach_reply_slots', bid, slot['id'],
+               state='accepted' if outcome == 'accepted' else 'unknown', settled_at=now(), updated_at=now())
+        expr = 'CAST(:e AS jsonb)' if pg(session) else ':e'
+        session.execute(text(f'UPDATE outreach_reply_slots SET outcome_evidence={expr} WHERE business_id=:b AND id=:id'),
+                        {'e': json.dumps(evidence), 'b': bid, 'id': slot['id']})
     update(session, 'outreach_messages', bid, job['message_id'], **fields)
     update(session, 'outreach_dispatch_jobs', bid, job['id'], status='completed' if outcome == 'accepted' else state)
     expr = 'CAST(:r AS jsonb)' if pg(session) else ':r'
@@ -425,8 +499,26 @@ def unsubscribe(session, *, token, method):
     for prospect in prospects:
         session.execute(text("UPDATE outreach_enrolments SET state='suppressed', stop_reason='unsubscribe' WHERE business_id=:b AND prospect_id=:p"), {'b': bid, 'p': prospect['id']})
         session.execute(text("UPDATE outreach_dispatch_jobs SET status='cancelled' WHERE business_id=:b AND status='pending' AND message_id IN (SELECT id FROM outreach_messages WHERE business_id=:b AND prospect_id=:p)"), {'b': bid, 'p': prospect['id']})
-        for action in rows(session, 'aria_actions', bid, "AND action_type='send_outreach' AND status='proposed'", lock=True):
+        for action in rows(session, 'aria_actions', bid, "AND action_type IN ('send_outreach','reply_outreach') AND status='proposed'", lock=True):
             if loads(action['payload']).get('prospect_id') == str(prospect['id']):
                 update(session, 'aria_actions', bid, action['id'], status='dismissed', error='Recipient unsubscribed')
     session.commit()
     return {'unsubscribed': True}
+
+
+def search_reply_before_claim(session, business, *, action_id, payload):
+    """Claude's reply registration must use this typed preflight."""
+    require(payload.get('action_kind') == 'reply_outreach')
+    require(one(session, 'aria_actions', business.id, action_id)['action_type'] == 'reply_outreach')
+    return search_before_claim(session, business, action_id=action_id, payload=payload)
+
+
+def prepare_reply_claim(session, business, *, action_id, payload, user_id, version, moment):
+    require(payload.get('action_kind') == 'reply_outreach')
+    return prepare_claim(session, business, action_id=action_id, payload=payload,
+                         user_id=user_id, version=version, moment=moment)
+
+
+def dispatch_reply(session, business, *, action_id, payload):
+    require(payload.get('action_kind') == 'reply_outreach')
+    return dispatch(session, business, action_id=action_id, payload=payload)

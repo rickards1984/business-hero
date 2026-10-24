@@ -34,7 +34,9 @@ logger = logging.getLogger(__name__)
 # What Aria may raise in chat or voice. Outreach is deliberately absent: an
 # outreach card is raised only by its campaign (OUT-6), never by the model.
 CHAT_ACTION_TYPES = ("send_email", "send_invoice_chase", "create_calendar_event", "create_task")
-ACTION_TYPES = CHAT_ACTION_TYPES + ("send_outreach",)
+ACTION_TYPES = CHAT_ACTION_TYPES + ("send_outreach", "reply_outreach")
+# Outreach cards follow their own owner-only path (OUT-6, OUT-7).
+OUTREACH_ACTION_TYPES = ("send_outreach", "reply_outreach")
 EXPIRY = timedelta(hours=72)
 RECENT_CHASE = timedelta(days=7)   # Mike: "the usual rule" for asking before re-chasing
 DEFAULT_ASSISTANT_NAME = "Aria"
@@ -47,6 +49,7 @@ _FEATURES = {
     "create_calendar_event": ("aria_chat", "calendar_sync"),
     "create_task": ("aria_chat",),
     "send_outreach": ("outreach",),  # rechecked from the database at the claim
+    "reply_outreach": ("outreach",),
 }
 
 # What the owner may change on a card before approving it. The sign-off is
@@ -60,6 +63,8 @@ _EDITABLE = {
     # Recipient, mailbox, footer, unsubscribe headers and threading are bound
     # to the campaign and rechecked at the claim (OUT-6).
     "send_outreach": {"subject", "body"},
+    # OUT-7: an answer is exactly the cited approved facts; never edited.
+    "reply_outreach": set(),
 }
 
 SENT_MESSAGE = ("Shown to the owner as an approval card. Nothing has been sent or "
@@ -430,6 +435,10 @@ def propose(session, business, user_id, action_type: str, args: dict, *,
     audit trail can tell it from one Aria proposed in conversation."""
     if action_type not in ACTION_TYPES:
         return {"error": f"{action_type} cannot be proposed."}
+    if action_type == "reply_outreach":
+        # OUT-7: only outreach_replies.propose_answer creates an answer card,
+        # together with its one-answer slot.
+        return {"error": "An outreach answer is drafted only from a stored reply."}
     if action_type == "send_outreach" and (automation or raised_by):
         # OUT-6: every outreach email is a card the owner taps. No standing
         # permission sends one, and none raises one.
@@ -565,7 +574,7 @@ def approve(session, business, action_id: str, user_id, version: Optional[str] =
     if problem:
         session.rollback()
         raise ActionRefused(403, problem)
-    if action_type == "send_outreach":
+    if action_type in OUTREACH_ACTION_TYPES:
         return _approve_outreach(session, business, action_id, row, user_id, version)
     stored = row[2] if isinstance(row[2], str) else json.dumps(row[2])
     if version is not None and version != version_of(_loads(row[2])):
@@ -692,6 +701,12 @@ def _approve_outreach(session, business, action_id: str, row, user_id, version) 
          bookkeeping are never used.
     """
     from services import outreach_send
+    if row[1] == "reply_outreach":   # OUT-7: the typed reply boundary
+        search, prepare, dispatch = (outreach_send.search_reply_before_claim,
+                                     outreach_send.prepare_reply_claim, outreach_send.dispatch_reply)
+    else:
+        search, prepare, dispatch = (outreach_send.search_before_claim,
+                                     outreach_send.prepare_claim, outreach_send.dispatch)
     if not user_id or not _is_active_owner(session, business, user_id):
         session.rollback()
         raise ActionRefused(403, "Only the business owner can approve outreach.")
@@ -706,11 +721,11 @@ def _approve_outreach(session, business, action_id: str, row, user_id, version) 
         _refuse_unclaimable(session, business, row)
     stored = row[2] if isinstance(row[2], str) else json.dumps(row[2])
     session.rollback()  # no transaction or pending write may span the search
-    outreach_send.search_before_claim(session, business, action_id=str(action_id), payload=payload)
+    search(session, business, action_id=str(action_id), payload=payload)
     try:
         moment = outreach_send.now()
-        outreach_send.prepare_claim(session, business, action_id=str(action_id), payload=payload,
-                                    user_id=str(user_id), version=version, moment=moment)
+        prepare(session, business, action_id=str(action_id), payload=payload,
+                user_id=str(user_id), version=version, moment=moment)
         # Again inside the claim, holding the membership row until commit, so
         # ownership removed during the search stops it.
         if not _is_active_owner(session, business, user_id, lock=True):
@@ -730,7 +745,7 @@ def _approve_outreach(session, business, action_id: str, row, user_id, version) 
         session.rollback()
         session.info.get("outreach_dispatch", {}).pop(str(action_id), None)
         raise
-    outreach_send.dispatch(session, business, action_id=str(action_id), payload=payload)
+    dispatch(session, business, action_id=str(action_id), payload=payload)
     return _view(_scoped(session, business, action_id))
 
 
@@ -847,6 +862,9 @@ def edit(session, business, action_id: str, changes: dict) -> dict:
         session.rollback()
         raise ActionRefused(409, f"Only a card awaiting approval can be edited (this one is {status}).")
     changes = dict(changes or {})
+    if action_type == "reply_outreach":
+        session.rollback()
+        raise ActionRefused(422, "An outreach answer is the approved facts it cites; it cannot be edited.")
     if "sign_off" in changes:
         raise ActionRefused(422, "The sign-off cannot be changed.")
     unknown = set(changes) - _EDITABLE[action_type]

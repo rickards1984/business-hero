@@ -693,6 +693,20 @@ col   outreach_evidence.updated_at timestamp with time zone null=NO def=now()
 col   outreach_evidence.verification_status text null=YES def=-
 col   outreach_evidence.verification_subject_email_key text null=YES def=-
 col   outreach_evidence.verified_at timestamp with time zone null=YES def=-
+col   outreach_knowledge.answer text null=NO def=-
+col   outreach_knowledge.approved_at timestamp with time zone null=YES def=-
+col   outreach_knowledge.approved_by uuid null=YES def=-
+col   outreach_knowledge.brand_id uuid null=NO def=-
+col   outreach_knowledge.business_id uuid null=NO def=-
+col   outreach_knowledge.created_at timestamp with time zone null=NO def=now()
+col   outreach_knowledge.id uuid null=NO def=gen_random_uuid()
+col   outreach_knowledge.retired_at timestamp with time zone null=YES def=-
+col   outreach_knowledge.review_due_at timestamp with time zone null=NO def=-
+col   outreach_knowledge.source_reference text null=NO def=-
+col   outreach_knowledge.status text null=NO def='draft'::text
+col   outreach_knowledge.topic text null=NO def=-
+col   outreach_knowledge.updated_at timestamp with time zone null=NO def=now()
+col   outreach_knowledge.version integer(32,0) null=NO def=-
 col   outreach_mailboxes.business_id uuid null=NO def=-
 col   outreach_mailboxes.created_at timestamp with time zone null=NO def=now()
 col   outreach_mailboxes.daily_cap integer(32,0) null=NO def=-
@@ -783,6 +797,24 @@ col   outreach_replies.received_at timestamp with time zone null=NO def=-
 col   outreach_replies.resolution text null=NO def='pending'::text
 col   outreach_replies.suggested_body text null=YES def=-
 col   outreach_replies.updated_at timestamp with time zone null=NO def=now()
+col   outreach_reply_slots.action_id uuid null=NO def=-
+col   outreach_reply_slots.business_id uuid null=NO def=-
+col   outreach_reply_slots.created_at timestamp with time zone null=NO def=now()
+col   outreach_reply_slots.dispatched_at timestamp with time zone null=YES def=-
+col   outreach_reply_slots.generation integer(32,0) null=NO def=1
+col   outreach_reply_slots.id uuid null=NO def=gen_random_uuid()
+col   outreach_reply_slots.mailbox_id uuid null=NO def=-
+col   outreach_reply_slots.message_id uuid null=YES def=-
+col   outreach_reply_slots.outcome_evidence jsonb null=NO def='{}'::jsonb
+col   outreach_reply_slots.payload_hash text null=YES def=-
+col   outreach_reply_slots.prospect_id uuid null=NO def=-
+col   outreach_reply_slots.release_reason text null=YES def=-
+col   outreach_reply_slots.released_at timestamp with time zone null=YES def=-
+col   outreach_reply_slots.reply_id uuid null=NO def=-
+col   outreach_reply_slots.reserved_at timestamp with time zone null=NO def=-
+col   outreach_reply_slots.settled_at timestamp with time zone null=YES def=-
+col   outreach_reply_slots.state text null=NO def='reserved'::text
+col   outreach_reply_slots.updated_at timestamp with time zone null=NO def=now()
 col   outreach_sequence_steps.allowed_variables jsonb null=NO def=-
 col   outreach_sequence_steps.approved_at timestamp with time zone null=YES def=-
 col   outreach_sequence_steps.approved_by uuid null=YES def=-

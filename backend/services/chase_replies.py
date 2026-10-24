@@ -111,9 +111,26 @@ def _mailboxes(session, business) -> tuple:
     return [str(r[0]) for r in rows], default_mailbox(session, business.id)
 
 
+# OUT-7 matches replies by thread, so these headers are kept, verbatim and
+# bounded; nothing else from the provider's header map is stored.
+_THREAD_HEADERS = ("Message-ID", "In-Reply-To", "References")
+_HEADER_LIMIT = 4000
+
+
+def _thread_headers(raw) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    lower = {str(k).lower(): v for k, v in raw.items()}
+    return {name: str(lower[name.lower()])[:_HEADER_LIMIT]
+            for name in _THREAD_HEADERS if lower.get(name.lower())}
+
+
 def _store(session, business, account_id: str, messages) -> None:
-    """Keep what the search found, once per mailbox and provider message."""
+    """Keep what the search found, once per mailbox and provider message.
+    Then, once committed, tell outreach that storage completed (OUT-7). That
+    notification can never break chasing."""
     moment = now()
+    pg = _is_postgres(session)
     for m in messages:
         exists = session.execute(text(
             "SELECT 1 FROM email_messages WHERE business_id = :b AND email_account_id = :a "
@@ -121,18 +138,34 @@ def _store(session, business, account_id: str, messages) -> None:
             {"b": str(business.id), "a": str(account_id), "m": m.provider_message_id}).fetchone()
         if exists:
             continue
+        to = [str(x) for x in (getattr(m, "to_emails", None) or [])]
+        cc = [str(x) for x in (getattr(m, "cc_emails", None) or [])]
+        headers = json.dumps(_thread_headers(getattr(m, "raw_headers", None)))
         session.execute(text(
             "INSERT INTO email_messages (id, business_id, email_account_id, provider_message_id, "
-            "provider_thread_id, folder, from_email, from_name, subject, snippet, body_text, "
-            "received_at, created_at, updated_at) VALUES (:id, :b, :a, :m, :t, 'INBOX', :f, :fn, "
-            ":s, :sn, :body, :at, :now, :now)"),
+            "provider_thread_id, folder, from_email, from_name, to_emails, cc_emails, raw_headers, "
+            "subject, snippet, body_text, received_at, created_at, updated_at) VALUES (:id, :b, :a, "
+            ":m, :t, 'INBOX', :f, :fn, :to, :cc, "
+            + ("CAST(:h AS jsonb)" if pg else ":h") +
+            ", :s, :sn, :body, :at, :now, :now)"),
             {"id": str(uuid.uuid4()), "b": str(business.id), "a": str(account_id),
              "m": m.provider_message_id, "t": getattr(m, "provider_thread_id", None),
              "f": getattr(m, "from_email", None), "fn": getattr(m, "from_name", None),
+             "to": to if pg else json.dumps(to), "cc": cc if pg else json.dumps(cc), "h": headers,
              "s": getattr(m, "subject", None), "sn": getattr(m, "snippet", None),
              "body": getattr(m, "body_text", None), "at": getattr(m, "received_at", None),
              "now": moment})
     session.commit()
+    try:
+        from services import outreach_replies
+        outreach_replies.storage_completed(session, business)
+    except Exception as exc:  # outreach must never stop a chase decision
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning("[ChaseReplies] outreach notification failed for %s: %s",
+                       business.id, type(exc).__name__)
 
 
 def find_replies(session, business, *, lookup: Callable, classify: Callable,

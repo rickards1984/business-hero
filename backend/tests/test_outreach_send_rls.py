@@ -39,8 +39,9 @@ import test_outreach_send as base  # noqa: E402
 from test_outreach_send import A, B, OWNER, STAFF, CAMPAIGN, STEP, ENROLMENT, LIA, NOW, STAMP  # noqa: E402
 
 SECRET = "synthetic-key-" * 4
-TABLES = ("outreach_dispatch_jobs", "outreach_usage_events", "outreach_daily_usage",
-          "outreach_messages", "outreach_replies", "outreach_unsubscribe_tokens",
+TABLES = ("outreach_reply_slots", "outreach_dispatch_jobs", "outreach_usage_events",
+          "outreach_daily_usage", "outreach_replies", "outreach_messages", "outreach_knowledge",
+          "outreach_unsubscribe_tokens",
           "outreach_suppressions", "outreach_enrolments", "outreach_sequence_steps",
           "outreach_campaigns", "outreach_evidence", "outreach_prospects", "outreach_compliance",
           "outreach_mailboxes", "outreach_brands", "outreach_settings")

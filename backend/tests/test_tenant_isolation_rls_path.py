@@ -415,7 +415,8 @@ def test_every_policy_matches_its_reviewed_definition(db):
     # aria_actions_member_read (each new migration's policies raise this on purpose).
     # 88 with 036's chase_replies_member_read.
     # 94 with 037's six outreach member reads.
-    assert len(live) == len(approved) == 94
+    # 95 with 038's outreach_knowledge_member_read (OUT-7 draft, replayed locally).
+    assert len(live) == len(approved) == 95
 
 
 def test_no_policy_negates_membership_or_short_circuits_to_true(db):
