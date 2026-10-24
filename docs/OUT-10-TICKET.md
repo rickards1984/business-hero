@@ -147,3 +147,11 @@ Preserved verbatim in `audits/OUT-10-CODEX-REVIEW-4.md`. The P1 was a web design
 3. **Mike's added sanity check:** the email's domain must fit the registered name, or a trading name the site discloses (whole name, first two words, a distinctive word of five letters or more, or initials). A personal domain that fits neither is review, so even an unusually worded credit can't make someone eligible.
 
 Tests: research **100 passed**, setup **86 passed**; `./check.sh full` is green; Postgres passes.
+
+## Codex review 5: APPROVE, no P1
+Preserved verbatim in `audits/OUT-10-CODEX-REVIEW-5.md`. Its three false rejections are fixed, with tests:
+- a designer credit **after** the company's own disclosure no longer cancels it; only a credit leading up to the number does;
+- trading names are recognised in any case, as "trading as" or "t/a", on the cited page or the home page;
+- only the business describing itself as a partnership is review, not "in partnership with local schools".
+
+Research tests: **106 passed**.

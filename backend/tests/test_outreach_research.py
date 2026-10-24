@@ -790,3 +790,38 @@ def test_the_email_domain_must_fit_the_company_or_its_trading_name(db):
 ])
 def test_ordinary_company_domains_fit(company, domain):
     assert research()._domain_fits(domain, company, [])
+
+
+# ------------------------------------- Codex OUT-10 review 5 backlog: false rejections ---
+
+def _accepted_with(db, team, home=None, company="Studio 1 Ltd", domain="studio1.example"):
+    biz, brand, lia, campaign = started(db)
+    candidate = {**person(1, company=company, email=f"sam@{domain}"), "source_url": f"https://{domain}/team"}
+    world = World([[candidate]])
+    n = World.number_for(company)
+    world.pages[f"https://{domain}/team"] = team.format(n=n)
+    world.pages[f"https://{domain}/"] = (home or team).format(n=n)
+    return len(run(db, biz, lia, world)["accepted"]) == 1
+
+
+def test_a_real_disclosure_followed_by_a_designer_credit_is_accepted(db):
+    assert _accepted_with(db, "<html><p>Email sam@studio1.example</p><footer>Studio 1 Ltd is registered in England, "
+                              "company number {n}. Website designed by Pixel Forge Ltd.</footer></html>")
+
+
+@pytest.mark.parametrize("phrase", ["Trading As", "t/a", "trading as"])
+def test_trading_names_are_recognised_however_written_and_on_the_home_page(db, phrase):
+    team = "<html><p>Email sam@fitnessclub.example</p></html>"
+    home = ("<html><footer>Studio 1 Ltd " + phrase + " Fitness Club. Registered in England and Wales, "
+            "company number {n}.</footer></html>")
+    assert _accepted_with(db, team, home=home, domain="fitnessclub.example")
+
+
+def test_ordinary_partnership_wording_is_not_a_partnership(db):
+    assert _accepted_with(db, "<html><p>We work in partnership with local schools. Email sam@studio1.example</p>"
+                              "<footer>Studio 1 Ltd is registered in England, company number {n}.</footer></html>")
+
+
+def test_a_business_that_is_a_partnership_is_still_review(db):
+    assert not _accepted_with(db, "<html><p>We are a partnership of two coaches. Email sam@studio1.example</p>"
+                                  "<footer>Studio 1 Ltd is registered in England, company number {n}.</footer></html>")

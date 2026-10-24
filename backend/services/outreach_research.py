@@ -454,8 +454,10 @@ def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callabl
                              + (("|" + re.escape(short)) if short and short.isdigit() else "") + r")(?![A-Za-z0-9])", text_,
                              flags=re.I):
             window = flat[max(0, m.start() - 250): m.end() + 100]
-            if CREDIT.search(window):
-                continue   # a designer's, host's or platform's disclosure: not the operator's
+            # Only a credit LEADING UP TO the number makes it a third party's;
+            # a designer credit after the company's own disclosure doesn't.
+            if CREDIT.search(flat[max(0, m.start() - 150): m.end()]):
+                continue
             if REGISTRATION.search(window) and re.search(r"(?<![a-z0-9])" + re.escape(registered_name)
                                                          + r"(?![a-z0-9])", _legal_name(window)):
                 return True
@@ -464,15 +466,28 @@ def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callabl
         home, home_final = _page(fetch, f"https://{urlparse(final).hostname}/")
         if not (_owns(urlparse(home_final).hostname or "", domain) and discloses(home)):
             return review
-    trading = [m.group(1) for m in re.finditer(r"trading as ([A-Za-z0-9][A-Za-z0-9 &'\-]{1,60})", _visible_text(page))]
+    def trading_names(raw):
+        return [m.group(2).strip() for m in re.finditer(
+            r"(trading as|t/a)\s+([A-Za-z0-9][A-Za-z0-9 &'\-]{1,60}?)(?=[.,;:]|\s+(registered|company)\b|$)",
+            _visible_text(raw), flags=re.I)]
+    trading = trading_names(page)
     if not _domain_fits(domain, record.get("name") or company, trading):
-        return review
+        # The trading name may be disclosed on the home page instead.
+        home, home_final = _page(fetch, f"https://{urlparse(final).hostname}/")
+        if _owns(urlparse(home_final).hostname or "", domain):
+            trading += trading_names(home)
+        if not _domain_fits(domain, record.get("name") or company, trading):
+            return review
     return {"ok": True, **base, "number": registered_number,
             "role_verified": _officer_match(name, record.get("officers") or []) if name else False,
             "company_type": record.get("type")}
 
 
-SOLE_TRADER = re.compile(r"\bsole trader\b|\bself[- ]employed\b|\bpartnership\b")
+# The business describing ITSELF as unincorporated — not ordinary wording such
+# as "in partnership with local schools" (Codex OUT-10 review 5).
+SOLE_TRADER = re.compile(r"\bsole trader\b|\bself[- ]employed\b"
+                         r"|\b(we are|we're|is|are)\s+(a|an)\s+(\w+\s+)?partnership\b"
+                         r"|\b(general|ordinary|limited)\s+partnership\b")
 TRADING_AS = re.compile(r"\btrading as\b|\bt/a\b")
 # A third party's credit (the web designer, host or platform) is about THEM,
 # never the site's operator (Codex OUT-10 review 4).
