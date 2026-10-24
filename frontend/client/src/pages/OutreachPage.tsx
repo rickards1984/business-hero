@@ -8,7 +8,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { OutreachRecord, outreachError, useOutreachData, useOutreachOwner, useOutreachSummary, useRefreshOutreach } from '@/hooks/useOutreachData';
 import ApprovalCard, { Proposal } from '@/components/ApprovalCard';
 import OutreachReplyCard from '@/components/OutreachReplyCard';
-import OutreachSetupWizard, { ChangeSendingMailbox, useSetupStatus } from '@/components/OutreachSetupWizard';
+import OutreachSetupWizard, { ChangeSendingMailbox, ResearchPanel, ResearchSummary, useSetupStatus } from '@/components/OutreachSetupWizard';
 const sections = ['overview', 'prospects', 'campaigns', 'replies', 'suppression', 'settings'];
 const href = (section: string) => `/app/outreach${section === 'overview' ? '' : '/' + section}`;
 const labels: Record<string, string> = { prospects: 'Prospects', campaigns: 'Campaigns', accepted_live: 'Provider-accepted live messages (not delivery)', unknown_live: 'Unknown send outcomes', imported_messages: 'Imported messages', human_replies: 'Human replies', stage_meeting: 'Recorded meeting stage', stage_won: 'Recorded won stage', unresolved_replies: 'Unresolved replies' };
@@ -43,12 +43,12 @@ function OutreachDepartment({ businessId }: { businessId: string }) {
     {!owner.data && <Alert severity="info">Inspection only. Write controls require an active owner. The server checks account access on every request.</Alert>}
     {error && <Alert severity="error">{error}</Alert>}{notice && <Alert severity="success">{notice}</Alert>}
     <Tabs value={sections.includes(section) ? section : 'overview'} variant="scrollable" scrollButtons="auto" aria-label="Outreach sections">{sections.map(s => <Tab key={s} value={s} label={s} component={Link} to={href(s)} />)}</Tabs>
-    {section === 'overview' && <Overview businessId={businessId} />}
+    {section === 'overview' && <><ResearchSummary businessId={businessId} /><Overview businessId={businessId} /></>}
     {section === 'prospects' && <Prospects {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
     {section === 'campaigns' && <Campaigns {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
     {section === 'replies' && <Replies businessId={businessId} offset={offset} mailbox={mailbox} setParams={setParams} />}
     {section === 'suppression' && <Suppressions {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
-    {section === 'settings' && <><Settings {...controls} />{owner.data && <ChangeSendingMailbox businessId={businessId} />}</>}
+    {section === 'settings' && <><Settings {...controls} />{owner.data && <><ResearchPanel businessId={businessId} /><ChangeSendingMailbox businessId={businessId} /></>}</>}
   </Stack>;
 }
 type Controls = { businessId: string; owner: boolean; busy: boolean; write: (method: string, path: string, body: unknown) => Promise<any> };

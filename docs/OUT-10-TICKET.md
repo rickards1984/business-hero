@@ -66,3 +66,22 @@
 
 ## Tests
 `backend/tests/test_outreach_research.py`, strictly xfailed until `services.outreach_research` exists. Synthetic data only; every adapter is faked; no network and no model call.
+
+## Mike's approval — 24 October 2026
+**Approved:** the tests and decisions A–E, all as recommended.
+
+## Build — 24 October 2026 (Claude)
+- **Service:** `services/outreach_research.py`: plan, run, verification, quota, rotation, spend meter, enrolment, lessons, `run_due`, and the default adapters:
+  - OpenAI Responses `web_search`;
+  - `fetch_page`, which refuses private, loopback, link-local and non-web addresses and checks every redirect hop;
+  - dnspython MX;
+  - the Companies House REST API.
+- **Scheduling:** `run_due` runs from the hourly `automations.run_all_due` pass.
+- **Routes:** `GET/POST /v1/outreach/setup/research` and `POST …/research/lessons`.
+- **Frontend:** `ResearchPanel` (the switch, budget against spend, lessons notes) in Outreach settings, and Aria's latest line on the Overview.
+- **Fixes along the way:** the business load moved to `outreach_setup.load_business_row`, so the research module never reads `feature_flags` (it satisfies `test_entitlement_reads`' guard). The OUT-15 SQLite fixture gained `usage_meters`.
+- **Verification:**
+  - `test_outreach_research.py` has **33 passed**;
+  - `./check.sh full` is green;
+  - the Postgres run (setup, then research with faked adapters: 12 accepted, 1 sole trader kept for review, 5 enrolled, spend recorded per attempt) passes with the OUT-6/8 races and isolation suites (48).
+- **Production settings:** `COMPANIES_HOUSE_API_KEY` is required; without it, research stops and nothing is made eligible. `ARIA_RESEARCH_MODEL` defaults to gpt-4.1. The price variables are optional.

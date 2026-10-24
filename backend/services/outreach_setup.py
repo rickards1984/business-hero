@@ -90,6 +90,14 @@ def _authority(session, business, user, *, settings_required: bool = True, growt
     return fresh
 
 
+def load_business_row(session, bid: str):
+    """The business as a plain record, for system jobs with no request."""
+    row = session.execute(text(
+        "SELECT id, name, plan_tier, feature_flags, subscription_status, is_active, trial_ends_at "
+        "FROM businesses WHERE id = :b"), {"b": str(bid)}).mappings().first()
+    return SimpleNamespace(**row) if row else None
+
+
 def _clean(value, field: str, limit: int, *, one_line: bool = True) -> str:
     out = str(value or "").strip()
     if not out or len(out) > limit or (one_line and ("\r" in out or "\n" in out)):

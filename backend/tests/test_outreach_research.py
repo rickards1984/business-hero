@@ -23,7 +23,7 @@ class MissingResearch(AssertionError):
     """Only the intentional Stage 1 absence may be xfailed."""
 
 
-pytestmark = pytest.mark.xfail(strict=True, raises=MissingResearch, reason="OUT-10 not built yet: tests first")
+# Stage 1's strict-xfail marker was removed once the implementation landed.
 
 NOW = datetime(2026, 10, 27, 7, 30, tzinfo=timezone.utc)   # Tuesday 07:30 UK
 
@@ -354,3 +354,17 @@ def test_research_never_touches_another_business(db):
     run(db, biz, lia, World([[person(i) for i in range(5)]]))
     for table in ("outreach_prospects", "outreach_evidence", "outreach_enrolments"):
         assert count(db, f"SELECT count(*) FROM {table} WHERE business_id = :o", o=B) == 0
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1/admin", "http://169.254.169.254/latest/meta-data",
+                                 "http://10.0.0.5/", "http://[::1]/", "file:///etc/passwd", "ftp://example.invalid/"])
+def test_the_page_fetcher_never_reaches_private_or_non_web_addresses(url):
+    """The model names the URLs; none may reach Business Hero's own network."""
+    assert research().fetch_page(url) is None
+
+
+def test_the_hourly_pass_runs_research():
+    research()
+    import inspect
+    from services import automations
+    assert "outreach_research" in inspect.getsource(automations.run_all_due)

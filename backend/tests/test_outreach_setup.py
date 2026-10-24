@@ -78,6 +78,8 @@ def db(tmp_path, monkeypatch):
             "refresh_token_ciphertext TEXT, token_expires_at TEXT, smtp_config TEXT, created_at TEXT, updated_at TEXT)",
             "CREATE TABLE aria_actions (id TEXT PRIMARY KEY, business_id TEXT, action_type TEXT, payload TEXT, status TEXT, "
             "error TEXT, updated_at TEXT)",
+            "CREATE TABLE usage_meters (business_id TEXT, meter TEXT, period TEXT, value NUMERIC, updated_at TEXT, "
+            "UNIQUE (business_id, meter, period))",
             "CREATE UNIQUE INDEX settings_once ON outreach_settings (business_id)",
             "CREATE UNIQUE INDEX brand_name_once ON outreach_brands (business_id, name)",
             "CREATE UNIQUE INDEX mailbox_once ON outreach_mailboxes (business_id, mailbox_id)",

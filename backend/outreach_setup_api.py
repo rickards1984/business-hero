@@ -14,6 +14,7 @@ from sqlmodel import Session
 import auth
 from auth import get_user_business_context
 from db import get_session
+from services import outreach_research as research
 from services import outreach_setup as setup
 from services.aria_actions import ActionRefused
 
@@ -158,6 +159,31 @@ def replace(body: Replace, context=Depends(get_user_business_context), session: 
 def copy(campaign_id: UUID, body: Copy, context=Depends(get_user_business_context),
          session: Session = Depends(get_session)):
     return _run(setup.copy_campaign_to_mailbox, session, context, str(campaign_id), _body(body))
+
+
+class ResearchConfig(Body):
+    enabled: Optional[bool] = None
+    monthly_cap_pence: Optional[int] = Field(default=None, ge=0, le=100000, strict=True)
+
+
+class Lessons(Body):
+    lessons: list[str] = Field(default_factory=list, max_length=30)
+
+
+@router.get("/research")
+def research_status(context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return research.status(session, auth._load_business(session, context["business_id"]))
+
+
+@router.post("/research")
+def research_configure(body: ResearchConfig, context=Depends(get_user_business_context),
+                       session: Session = Depends(get_session)):
+    return _run(research.configure, session, context, _body(body))
+
+
+@router.post("/research/lessons")
+def research_lessons(body: Lessons, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return _run(research.save_lessons, session, context, body.lessons)
 
 
 @public_router.get("/p/outreach-privacy/{brand_id}", response_class=HTMLResponse)
