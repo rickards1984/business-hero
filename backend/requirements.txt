@@ -23,3 +23,5 @@ twilio>=9.0.0
 reportlab>=4.0
 # Rate limiting on cost-attack endpoints
 slowapi>=0.1.9
+dnspython>=2.6
+pyspf>=2.0.14

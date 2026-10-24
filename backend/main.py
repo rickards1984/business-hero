@@ -465,6 +465,9 @@ from outreach_read import router as outreach_router
 app.include_router(outreach_router)
 from outreach_manage import router as outreach_manage_router
 app.include_router(outreach_manage_router)
+from outreach_setup_api import router as outreach_setup_router, public_router as outreach_public_router
+app.include_router(outreach_setup_router)
+app.include_router(outreach_public_router)
 
 
 
@@ -1463,9 +1466,12 @@ def preserve_automations(incoming: dict, existing: dict) -> dict:
     /v1/automations/*, which validates and serialises them (Codex AUTO-1
     review 1, finding 5). The stored `automations` are kept, whatever the
     client sends."""
-    out = {k: v for k, v in (incoming or {}).items() if k != "automations"}
-    if isinstance(existing, dict) and "automations" in existing:
-        out["automations"] = existing["automations"]
+    # OUT-15: the outreach setup's privacy notices and approved audiences are
+    # written only by the setup wizard, never replaced by this save.
+    protected = lambda k: k == "automations" or k.startswith("outreach_")
+    out = {k: v for k, v in (incoming or {}).items() if not protected(k)}
+    if isinstance(existing, dict):
+        out.update({k: v for k, v in existing.items() if protected(k)})
     return out
 
 
