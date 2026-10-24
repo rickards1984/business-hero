@@ -18,8 +18,8 @@ function snoozedUntil(businessId: string): number {
 }
 
 const POINTS = [
-  { title: 'Finds the right people', text: "Aria researches up to 20 new contacts a day who match the customers you describe, favouring the people who make the decision, and checks every business on its own website and at Companies House." },
-  { title: 'Writes in your voice', text: 'She drafts each email from the facts you have approved, with your brand, your mailbox and your privacy notice, so every message is accurate and compliant.' },
+  { title: 'Finds the right people', text: "Switch on research and Aria looks for up to 20 new contacts a day who match the customers you describe, favouring the people who make the decision. She checks each business on its own website and at Companies House before suggesting it." },
+  { title: 'Writes in your voice', text: 'She drafts each email from the facts you have approved, sent under your brand, from your mailbox, with the privacy notice you approve linked.' },
   { title: 'You stay in control', text: 'Nothing is sent until you approve it. Replies come straight back to your home screen, and one switch pauses everything.' },
 ];
 
@@ -46,7 +46,7 @@ export default function OutreachIntro({ businessId }: { businessId: string }) {
         <p>
           {begun
             ? `${done} of ${required.length} steps done. Your progress is saved${next ? ` — next: ${next.label.toLowerCase()}` : ''}.`
-            : 'Outreach is switched on for your business. Tell Aria who you want to reach, and she finds them, checks them and drafts the first email for you to approve.'}
+            : 'Outreach is switched on for your business. Tell Aria who you want to reach; she helps find them, checks them and drafts the emails for you to approve.'}
         </p>
       </div>
 
