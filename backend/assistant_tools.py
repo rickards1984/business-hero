@@ -519,6 +519,8 @@ OUTREACH_READ_TOOLS = {
     "get_outreach_campaign": ("campaign_id", False),
     "get_outreach_sequence": ("campaign_id", True),
     "list_outreach_replies": (None, True),
+    "get_outreach_reply": ("reply_id", False),
+    "list_outreach_suppressions": (None, True),
     "list_outreach_mailboxes": (None, True),
     "get_outreach_compliance_status": (None, True),
     "get_outreach_settings_and_permissions": (None, False),
@@ -537,6 +539,8 @@ def _outreach_definition(name, parent, paginated):
         properties[parent] = {"type": "string", "format": "uuid"}
     if name in ("list_outreach_replies", "list_outreach_reply_slots"):
         properties["mailbox_id"] = {"type": "string", "format": "uuid"}
+    if name == "list_outreach_replies":
+        properties["resolution"] = {"type": "string", "enum": ["pending", "handed_over", "resolved", "dismissed", "unresolved"]}
     if name == "get_outreach_knowledge":
         properties["brand_id"] = {"type": "string", "format": "uuid"}
     return {"type": "function", "function": {

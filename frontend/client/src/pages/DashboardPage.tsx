@@ -8,6 +8,7 @@ import type { Proposal } from '@/components/ApprovalCard';
 import { apiRequest } from '@/lib/queryClient';
 import TasksPanel from '@/components/TasksPanel';
 import ApprovalCard from '@/components/ApprovalCard';
+import OutreachReplyCard from '@/components/OutreachReplyCard';
 import ReplyCard, { type ChaseReply } from '@/components/ReplyCard';
 import AriaHero from '@/components/AriaHero';
 import { isBlocking } from '@/components/ReceptionistUsage';
@@ -45,6 +46,11 @@ function Tile({ name, figure, line, age, onClick, loading, failed }: {
 
 export default function DashboardPage() {
   const { data: me } = useMe();
+  return <DashboardContent key={me?.id || 'loading'} />;
+}
+
+function DashboardContent() {
+  const { data: me } = useMe();
   const isMobile = useShellMobile();  // the shell's own decision (review 1, finding 7)
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -63,8 +69,10 @@ export default function DashboardPage() {
     setSettled(prev => ({ ...prev, [reply.id]: reply }));
     queryClient.invalidateQueries({ queryKey: ['home-summary'] });
   };
+  useEffect(() => { setFinished({}); setSettled({}); }, [businessId]);
   const cardChanged = (card: Proposal) => {
     if (card.status !== 'proposed') setFinished(prev => ({ ...prev, [card.id]: card }));
+    queryClient.invalidateQueries({ queryKey: ['outreach', businessId] });
     queryClient.invalidateQueries({ queryKey: ['aria-actions'] });
     queryClient.invalidateQueries({ queryKey: ['home-summary'] });
   };
@@ -82,6 +90,7 @@ export default function DashboardPage() {
   const cards = [...open, ...Object.values(finished).filter(c => !open.some(o => o.id === c.id))];
   const openReplies = d.summary.data?.replies ?? [];
   const replies = [...openReplies, ...Object.values(settled).filter(r => !openReplies.some(o => o.id === r.id))];
+  const outreachReplies = [...new Map([...(d.outreachPending.data?.items || []), ...(d.outreachHandedOver.data?.items || [])].map(r => [r.id, r])).values()];
   const inv = d.summary.data?.invoices;
   const em = d.summary.data?.emails;
   const synced = d.summary.data?.synced;
@@ -104,6 +113,9 @@ export default function DashboardPage() {
           <h2>Needs you</h2>
           <span>Aria drafts. You approve. She acts once, signed as your AI assistant.</span>
         </div>
+        {(d.outreachPending.isError || d.outreachHandedOver.isError) && <Alert severity="info">Outreach replies unavailable. Outreach history access is required.</Alert>}
+        {outreachReplies.map(r => <OutreachReplyCard key={`${businessId}:${r.id}`} businessId={businessId} reply={r} />)}
+        {!!d.outreach.data?.totals?.unresolved_replies && <button className="home-link" onClick={() => navigate('/app/outreach/replies')}>View all {d.outreach.data.totals.unresolved_replies} unresolved outreach replies</button>}
         {replies.length > 0 && (
           <div className="home-cards" style={{ marginBottom: 16 }}>
             {replies.map(r => <ReplyCard key={r.id} reply={r} onChanged={() => replyChanged(r)} />)}
@@ -113,7 +125,7 @@ export default function DashboardPage() {
           <div className="home-empty"><span className="skeleton" style={{ height: 16, width: '40%' }} /></div>
         ) : d.actions.isError && cards.length === 0 ? (
           <div className="home-empty">Your drafts couldn't be loaded just now.</div>
-        ) : cards.length === 0 && replies.length > 0 ? null : cards.length === 0 ? (
+        ) : cards.length === 0 && (replies.length > 0 || outreachReplies.length > 0) ? null : cards.length === 0 ? (
           <div className="home-empty">
             Nothing is waiting for your approval. Ask Aria to draft an email, chase an invoice,
             book something or add a task, and it will appear here for a tap.
@@ -122,7 +134,7 @@ export default function DashboardPage() {
           <div className="home-cards">
             {cards.map(card => (
               // Keyed by version: a draft edited elsewhere is shown afresh.
-              <ApprovalCard key={`${card.id}:${card.version}`} proposal={card}
+              <ApprovalCard key={`${businessId}:${card.id}:${card.version}`} proposal={card}
                 onChanged={cardChanged} />
             ))}
           </div>
@@ -151,6 +163,11 @@ export default function DashboardPage() {
       <section className="home-section" aria-label="Your business">
         <div className="home-section-head"><h2>Your business</h2></div>
         <div className="home-tiles">
+          <Tile name="Outreach" onClick={() => navigate('/app/outreach')}
+            loading={d.outreach.isLoading} failed={d.outreach.isError}
+            figure={d.outreach.data && `${d.outreach.data.totals?.unresolved_replies ?? 'Unknown'} unresolved replies`}
+            line={d.outreach.data && `${d.outreach.data.totals?.campaigns ?? 'Unknown'} stored campaigns`}
+            age={d.outreach.dataUpdatedAt ? `Loaded ${new Date(d.outreach.dataUpdatedAt).toLocaleTimeString('en-GB')}; inbox freshness unknown` : undefined} />
           <Tile name="Invoices" onClick={() => navigate('/app/finance?tab=invoices')}
             loading={d.summary.isLoading} failed={d.summary.isError}
             figure={inv && (inv.overdue_count > 0 ? `${money(inv.overdue_total)} overdue` : money(inv.outstanding_total))}

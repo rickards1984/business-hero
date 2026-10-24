@@ -463,6 +463,8 @@ from aria_actions_api import router as aria_actions_router
 app.include_router(aria_actions_router)
 from outreach_read import router as outreach_router
 app.include_router(outreach_router)
+from outreach_manage import router as outreach_manage_router
+app.include_router(outreach_manage_router)
 
 
 

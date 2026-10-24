@@ -1,3 +1,4 @@
+import { useOutreachData, useOutreachSummary } from '@/hooks/useOutreachData';
 import { useQuery } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
@@ -114,7 +115,10 @@ export function useDashboardData(businessId?: string) {
     ...LIVE,
   });
 
-  return { calls, summary, tasks, usage, actions };
+  const outreach = useOutreachSummary(businessId);
+  const outreachPending = useOutreachData(businessId, 'replies?resolution=pending&limit=20&offset=0');
+  const outreachHandedOver = useOutreachData(businessId, 'replies?resolution=handed_over&limit=20&offset=0');
+  return { calls, summary, tasks, usage, actions, outreach, outreachPending, outreachHandedOver };
 }
 
 type Dashboard = ReturnType<typeof useDashboardData>;
