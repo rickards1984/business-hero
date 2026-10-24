@@ -412,3 +412,128 @@ def test_setup_never_touches_another_business(db):
         for table in ("outreach_settings", "outreach_brands", "outreach_mailboxes", "outreach_compliance",
                       "outreach_campaigns"):
             assert c.execute(text(f"SELECT count(*) FROM {table} WHERE business_id = :b"), {"b": B}).scalar() == 0
+
+
+# ------------------------------------- changing the sending mailbox (Mike) ---
+
+NEW_BOX = uid("new-workspace-box")
+
+
+def second_mailbox(db, healthy=True):
+    with db.begin() as c:
+        c.execute(text("INSERT INTO email_accounts (id, business_id, user_id, provider, email_address, is_default, "
+                       "capabilities, token_ciphertext, created_at) VALUES (:id, :b, :u, 'google', "
+                       "'hello@newbody-studio.example', 0, '{}', 'fake', :t)"),
+                  {"id": NEW_BOX, "b": A, "u": OWNER, "t": NOW.isoformat()})
+    records = {"newbody-studio.example": ["v=spf1 include:_spf.google.com ~all"],
+               "google._domainkey.newbody-studio.example": ["v=DKIM1; p=MIIB"]}
+    if healthy:
+        records["_dmarc.newbody-studio.example"] = ["v=DMARC1; p=none"]
+    return records
+
+
+def sent_from(db, campaign_id, mailbox):
+    """Dispatch history on a campaign: an accepted outbound message."""
+    with db.begin() as c:
+        c.execute(text("INSERT INTO outreach_messages (id, business_id, campaign_id, mailbox_id, prospect_id, "
+                       "direction, state, origin, kind) VALUES (:id, :b, :c, :m, :p, 'outbound', 'accepted', "
+                       "'live', 'initial')"),
+                  {"id": str(uuid.uuid4()), "b": A, "c": campaign_id, "m": mailbox, "p": uid("prospect")})
+        c.execute(text("INSERT INTO outreach_enrolments (id, business_id, campaign_id, prospect_id, state, "
+                       "next_step, sequence_version) VALUES (:id, :b, :c, :p, 'active', 1, 1)"),
+                  {"id": uid("enrolment"), "b": A, "c": campaign_id, "p": uid("prospect")})
+
+
+def test_switching_moves_the_brand_and_unsent_campaigns_at_once(db):
+    m = setup_module_or_missing()
+    biz = grant(db)
+    brand, lia, campaign = ready(m, db, biz)
+    records = second_mailbox(db)
+    with db.begin() as c:
+        c.execute(text("UPDATE outreach_brands SET default_mailbox_id = :m"), {"m": WORKSPACE})
+        c.execute(text("INSERT INTO aria_actions (id, business_id, action_type, payload, status) VALUES "
+                       "('card-1', :b, 'send_outreach', :p, 'proposed')"),
+                  {"b": A, "p": json.dumps({"mailbox_id": WORKSPACE, "campaign_id": campaign["id"]})})
+    with Session(db) as s:
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": NEW_BOX, "daily_cap": 5})
+        m.check_mailbox_health(s, biz, OWNER, NEW_BOX, resolve=dns(records))
+        out = m.replace_mailbox(s, biz, OWNER, {"old_mailbox_id": WORKSPACE, "new_mailbox_id": NEW_BOX,
+                                                "reason": "Rebrand", "retire_old": False})
+    assert out["switched"] == [campaign["id"]] and out["kept_on_old"] == [] and out["dismissed_cards"] == ["card-1"]
+    with db.connect() as c:
+        assert c.execute(text("SELECT mailbox_id FROM outreach_campaigns")).scalar() == NEW_BOX
+        assert c.execute(text("SELECT default_mailbox_id FROM outreach_brands")).scalar() == NEW_BOX
+        assert c.execute(text("SELECT status FROM aria_actions WHERE id = 'card-1'")).scalar() == "dismissed"
+
+
+def test_switching_to_an_unhealthy_mailbox_changes_nothing(db):
+    m = setup_module_or_missing()
+    biz = grant(db)
+    brand, lia, campaign = ready(m, db, biz)
+    records = second_mailbox(db, healthy=False)
+    with Session(db) as s:
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": NEW_BOX, "daily_cap": 5})
+        m.check_mailbox_health(s, biz, OWNER, NEW_BOX, resolve=dns(records))
+        with pytest.raises(Exception) as exc:
+            m.replace_mailbox(s, biz, OWNER, {"old_mailbox_id": WORKSPACE, "new_mailbox_id": NEW_BOX,
+                                              "reason": "Rebrand", "retire_old": True})
+    assert getattr(exc.value, "status_code", None) == 409
+    with db.connect() as c:
+        assert c.execute(text("SELECT mailbox_id FROM outreach_campaigns")).scalar() == WORKSPACE
+        assert bool(c.execute(text("SELECT enabled FROM outreach_mailboxes WHERE mailbox_id = :m"),
+                              {"m": WORKSPACE}).scalar())
+
+
+def test_a_campaign_with_threads_stays_unless_the_old_mailbox_is_retired(db):
+    m = setup_module_or_missing()
+    biz = grant(db)
+    brand, lia, campaign = ready(m, db, biz)
+    sent_from(db, campaign["id"], WORKSPACE)
+    records = second_mailbox(db)
+    with Session(db) as s:
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": NEW_BOX, "daily_cap": 5})
+        m.check_mailbox_health(s, biz, OWNER, NEW_BOX, resolve=dns(records))
+        kept = m.replace_mailbox(s, biz, OWNER, {"old_mailbox_id": WORKSPACE, "new_mailbox_id": NEW_BOX,
+                                                 "reason": "Second brand", "retire_old": False})
+    assert kept["kept_on_old"] == [campaign["id"]] and kept["switched"] == [] and kept["paused_enrolments"] == 0
+    with Session(db) as s:
+        retired = m.replace_mailbox(s, biz, OWNER, {"old_mailbox_id": WORKSPACE, "new_mailbox_id": NEW_BOX,
+                                                    "reason": "Reputation dropped", "retire_old": True})
+    assert retired["paused_enrolments"] == 1
+    with db.connect() as c:
+        enabled, reason = c.execute(text("SELECT enabled, pause_reason FROM outreach_mailboxes WHERE mailbox_id = :m"),
+                                    {"m": WORKSPACE}).one()
+        state, stop = c.execute(text("SELECT state, stop_reason FROM outreach_enrolments")).one()
+        still_connected = c.execute(text("SELECT count(*) FROM email_accounts WHERE id = :m"), {"m": WORKSPACE}).scalar()
+    assert not bool(enabled) and "Reputation dropped" in reason
+    assert state == "paused" and stop == "sending mailbox retired"
+    assert still_connected == 1, "replies to the old inbox are still read"
+
+
+def test_a_campaign_can_be_copied_onto_the_new_mailbox(db):
+    m = setup_module_or_missing()
+    biz = grant(db)
+    brand, lia, campaign = ready(m, db, biz)
+    records = second_mailbox(db)
+    with Session(db) as s:
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": NEW_BOX, "daily_cap": 5})
+        m.check_mailbox_health(s, biz, OWNER, NEW_BOX, resolve=dns(records))
+        copy = m.copy_campaign_to_mailbox(s, biz, OWNER, campaign["id"], {"mailbox_id": NEW_BOX})
+    with db.connect() as c:
+        rows = {r[0]: r[1:] for r in c.execute(text(
+            "SELECT id, mailbox_id, target_hash, brand_id, status FROM outreach_campaigns"))}
+        steps = c.execute(text("SELECT count(*), sum(CASE WHEN approved_at IS NULL THEN 1 ELSE 0 END) "
+                               "FROM outreach_sequence_steps WHERE campaign_id = :c"), {"c": copy["id"]}).one()
+    assert rows[copy["id"]][0] == NEW_BOX and rows[copy["id"]][1:3] == rows[campaign["id"]][1:3]
+    assert rows[copy["id"]][3] == "draft" and tuple(int(x) for x in steps) == (3, 3), "one tap re-approves"
+
+
+@pytest.mark.parametrize("who", [STAFF, OTHER_OWNER])
+def test_only_the_owner_changes_the_sending_mailbox(db, who):
+    m = setup_module_or_missing()
+    biz = grant(db)
+    ready(m, db, biz)
+    with Session(db) as s, pytest.raises(Exception) as exc:
+        m.replace_mailbox(s, biz, who, {"old_mailbox_id": WORKSPACE, "new_mailbox_id": WORKSPACE,
+                                        "reason": "x", "retire_old": True})
+    assert getattr(exc.value, "status_code", None) == 403

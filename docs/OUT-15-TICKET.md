@@ -61,3 +61,17 @@ No migration: the notice lives in `business_settings`.
 
 ## Tests
 `backend/tests/test_outreach_setup.py`, strictly xfailed until `services.outreach_setup` exists. Synthetic data, no network: DNS and the model are injected.
+
+## Mike's approval — 24 October 2026
+- **Approved:** the tests and decisions A–D, as recommended.
+- **Addition (Mike): change the sending mailbox quickly, at any time** (rebrand, name change, lost reputation, or any other reason). Claude's design, recorded here:
+  - `replace_mailbox(session, business, user, {"old_mailbox_id", "new_mailbox_id", "reason", "retire_old": bool}) -> {"switched", "kept_on_old", "paused_enrolments", "dismissed_cards"}`.
+  - The new mailbox must be registered and passing its health check; otherwise nothing changes.
+  - Brands whose usual mailbox is the old one move to the new one.
+  - **Campaigns with no dispatch history move** (status kept; version up).
+  - **Waiting send cards bound to the old mailbox are dismissed**, to be prepared again from the new one.
+  - Campaigns with dispatch history stay on the old mailbox: follow-ups must keep their thread (OUT-6).
+  - With `retire_old`, the old mailbox is disabled with the reason shown, and its in-flight enrolments are paused (`stop_reason` "sending mailbox retired") and listed for the owner.
+  - The old inbox stays **connected**, so replies are still read.
+  - `copy_campaign_to_mailbox(session, business, user, campaign_id, {"mailbox_id", "name"?}) -> {"id"}` creates a new draft campaign with the same brand, audience and wording on the new mailbox. Its steps are unapproved, so one tap re-approves them.
+  - Owner-only, tenant-scoped, one transaction under the business lock.
