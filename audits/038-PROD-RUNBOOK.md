@@ -35,7 +35,7 @@ SELECT current_database(),
 - `knowledge_before` and `slots_before` both **NULL**;
 - `membership_helper` **true**;
 - `dup_reply_identity` **0**;
-- `policies` **94** and `columns` **1105**.
+- `policies` **94** and `columns` **1111**. That count includes the 033 rollback table `zz_033_flags_backup` (6 columns), which the schema dump leaves out; the dump itself is 1,105.
 
 **STOP IF:** either `_before` value isn't NULL, `membership_helper` is false, or `dup_reply_identity` isn't 0. If `policies`/`columns` differ, stop and send me the row: something changed since 037.
 
@@ -74,7 +74,7 @@ SELECT (SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename L
        (SELECT count(*) FROM information_schema.columns WHERE table_schema='public')                                       AS columns;
 ```
 
-**EXPECT:** `outreach_tables` **19**; `knowledge_columns` **14**; `slot_columns` **18**; `rls_on` **2**; `policies` **95**; `slot_policies` **0**; `anon_privileges` **0**; `columns` **1137**.
+**EXPECT:** `outreach_tables` **19**; `knowledge_columns` **14**; `slot_columns` **18**; `rls_on` **2**; `policies` **95**; `slot_policies` **0**; `anon_privileges` **0**; `columns` **1143** (1,111 + 32, including the 033 rollback table).
 
 **STOP IF:** anything differs. Send me the row; see ROLLBACK below.
 
@@ -93,6 +93,13 @@ Send me the output first. The rollback is the technical reference's STEP 6. It r
 ## Afterwards
 
 Send me STEP 0's row and STEP 3's row, and drag in the CSV. I'll regenerate the schema record, record the run here, and the OUT-7 pull request can then go to you.
+
+## RESULT — run by Mike in production, 24 October 2026
+
+- **STEP 0:** `postgres`; both `_before` values NULL; `membership_helper` true; `dup_reply_identity` 0; `policies` **94**; `columns` **1111**. Mike stopped, as the runbook said to: the draft expected 1,105. Mike then ran a check, which found `zz_033_flags_backup` with **6** columns, the 033 rollback table that the schema dump excludes. A full dump (1,105 rows) matched `audits/live-schema-public.txt` line for line, so nothing in production had drifted; only the runbook's counting method was off. The runbook's counts are now corrected.
+- **STEPs 1–3:** all passed (`policies` 95; `columns` 1,143).
+- **STEP 4:** the schema dump has **1,137 rows**. Against the record, it adds exactly the 32 columns of `outreach_knowledge` (14) and `outreach_reply_slots` (18); nothing is removed or changed. `audits/live-schema-public.txt` was regenerated from it.
+- **Rollback:** not needed.
 
 ---
 ---
