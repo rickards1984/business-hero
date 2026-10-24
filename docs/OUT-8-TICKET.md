@@ -119,3 +119,40 @@ The new suite contributes one passing HTTP scaffold test and 122 strict missing-
   - "Prepare next emails" raises a `send_outreach` card (OUT-6 `build_payload` through `aria_actions.propose`) for each enrolled prospect whose step is due. It never sends; every card needs the owner's tap.
   - Without this, no campaign can start during Mike's month of using the product.
 - The enrolment tests are written first in Stage B and reviewed by Claude before implementation is accepted.
+
+## Stage B — built by Codex, interrupted; Claude's review — 24 October 2026
+Codex ran out of credits after implementing, before writing its handoff; this section replaces it. The work was committed as WIP (`OUT-8 Stage B WIP`).
+
+**State:**
+- Backend: `services/outreach_manage.py` and `outreach_manage.py` routes, with every write owner-only and rechecked under lock.
+- Read extensions and the Aria tools.
+- React: `OutreachPage` with six sections; `ApprovalCard` handles `send_outreach`/`reply_outreach`; `OutreachReplyCard`; home "Needs you"; a Comms link.
+- `test_outreach_screens_api.py`: **166 passed**, no xfails left, including the enrolment and prepare tests.
+- `./check.sh`: green except the two expected `test_schema_conformance` failures (038 not yet live); tsc passes.
+
+**Postgres (Claude, local 035–038):** `test_outreach_manage_rls.py` (Codex's) with the OUT-6/7 race suites and isolation: **52 passed**. That covers:
+- the enrolment cap of 5 serialising, with the loser rolling back;
+- two prepares giving one card;
+- a pause or opt-out racing a prepare or claim.
+
+One test-fixture bug was fixed: the shared `_second_prospect` helper reused one address, so three calls collided on `outreach_prospects_email_key_idx`. It now gives a fresh address per call.
+
+**Claude's review of `outreach_manage.py`: APPROVE.**
+- Every write runs `start()`: active owner, then a fresh entitlement read under the business row lock, then the owner check again with the membership locked.
+- Growth actions require the outreach feature; safety-only changes (pause, lower caps, CC off, opt-out, handover/resolve) are allowed after a downgrade.
+- `qualified()` binds eligibility, address digest, retention, suppression (email and domain) and the approved audience to the campaign's brand and audience.
+- `prepare` rechecks everything per enrolment, reuses an existing card, and raises cards only through `aria_actions.propose`: never automation, never a send.
+
+**Backlog:**
+1. **Editing templates after enrolling strands those enrolments.** The sequence version moves on; `prepare` refuses "stale"; `enrol` refuses to restart. A future fix moves not-yet-contacted enrolments to the new version. **Until then: finalise wording before enrolling.**
+2. `prepare` scans every open outreach card per enrolment. Fine at the pilot scale of 5; index it before raising the cap.
+3. `OutreachPage.tsx` is dense, with long one-line JSX. Readability refactor (GREEN) in OUT-14.
+
+**Mike's click path (after OUT-7/8 are merged; nothing sends without his tap, and real sending also needs the provider adapter):**
+1. Home → Comms → **Outreach**; the Overview shows "none recorded", not zero.
+2. **Campaigns** → New draft: name, brand, and **choose the mailbox** (e.g. `outreach@`); save.
+3. Open it → edit the three steps → **Approve these templates**.
+4. **Settings**: check pause, caps, CC off; add one fact with a review date.
+5. **Prospects**: once there are prospects, enrol up to 5 → **Prepare next emails**. Cards appear on Home, and you tap to approve or dismiss.
+6. **Opt-out list**: opt out a test address twice; one entry is recorded.
+7. Switch business: no New Body data shows under MSC.

@@ -154,9 +154,10 @@ def _together(pg, *jobs):
     return results, errors
 
 
-def _second_prospect(pg):
-    """Another synthetic recipient in the same campaign."""
-    email = "second@example.invalid"
+def _second_prospect(pg, email=None):
+    """Another synthetic recipient in the same campaign (a fresh address each
+    call unless one is given)."""
+    email = email or f"second-{uuid.uuid4().hex[:8]}@example.invalid"
     key = hmac.new(SECRET.encode(), f"v1:{A}:email:{email}".encode(), hashlib.sha256).hexdigest()
     prospect, enrolment = str(uuid.uuid4()), str(uuid.uuid4())
     with Session(pg.engine) as s:
