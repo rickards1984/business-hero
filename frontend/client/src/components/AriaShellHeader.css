@@ -30,6 +30,8 @@
 .aria-shell-nav { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; border-top: 1px solid #23243A; }
 .aria-shell-nav::-webkit-scrollbar { display: none; }
 .aria-shell-nav a { flex: 0 0 auto; padding: 16px 14px 14px; font-size: 14px; font-weight: 500; color: #A3A5BD; border-bottom: 2px solid transparent; }
+.aria-shell-new { margin-left: 6px; padding: 2px 7px; border-radius: 999px; font-size: 11px; font-weight: 700;
+  letter-spacing: .2px; vertical-align: 1px; background: #F79009; color: #0B0C12; }
 .aria-shell-nav a[aria-current] { color: white; font-weight: 600; border-bottom-color: var(--shell-underline); }
 .aria-shell-header a:hover { filter: brightness(1.15); }
 .aria-shell-header a:focus-visible { outline: 2px solid #8E7CFF; outline-offset: -2px; border-radius: 4px; }

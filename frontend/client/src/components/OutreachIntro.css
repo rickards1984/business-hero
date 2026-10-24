@@ -1,0 +1,31 @@
+/* OUT-17 — the Outreach introduction on the Aria home. Dark like the shell's
+   band so it reads as a feature moment, not another task card. */
+.outreach-intro { position: relative; overflow: hidden; display: flex; flex-direction: column; gap: 18px;
+  padding: 24px; border-radius: 20px; color: #fff;
+  background: radial-gradient(120% 140% at 100% 0%, rgba(142, 124, 255, .45) 0%, rgba(142, 124, 255, 0) 55%), #12142A;
+  border: 1px solid #2A2D4A; }
+.outreach-intro-head { display: flex; flex-direction: column; gap: 8px; max-width: 720px; }
+.outreach-intro-badge { align-self: flex-start; font-size: 12px; font-weight: 700; letter-spacing: .3px; padding: 4px 10px;
+  border-radius: 999px; background: #F79009; color: #0B0C12; }
+.outreach-intro h2 { margin: 0; font-size: 24px; line-height: 1.25; font-weight: 700; letter-spacing: -.01em; }
+.outreach-intro p { margin: 0; font-size: 15px; line-height: 1.55; color: #C9CBE0; }
+.outreach-intro-points { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.outreach-intro-points li { display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border-radius: 14px;
+  background: rgba(255, 255, 255, .06); border: 1px solid rgba(255, 255, 255, .08); }
+.outreach-intro-points strong { font-size: 15px; }
+.outreach-intro-points span { font-size: 13.5px; line-height: 1.5; color: #C9CBE0; }
+.outreach-intro-progress { display: flex; gap: 6px; max-width: 520px; }
+.outreach-intro-progress span { flex: 1; height: 8px; border-radius: 999px; background: rgba(255, 255, 255, .14); }
+.outreach-intro-progress span.is-done { background: #8E7CFF; }
+.outreach-intro-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.outreach-intro-steps { font-size: 13px; color: #A3A5BD; }
+.outreach-intro-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.outreach-intro-actions button { min-height: 44px; padding: 0 18px; border-radius: 12px; font: inherit; font-size: 14px;
+  font-weight: 700; cursor: pointer; }
+.outreach-intro-go { border: 0; background: #8E7CFF; color: #0B0C12; }
+.outreach-intro-go:hover { background: #A396FF; }
+.outreach-intro-later { border: 1px solid #3A3D5C; background: transparent; color: #fff; }
+.outreach-intro-actions button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+@media (max-width: 480px) { .outreach-intro { padding: 18px; } .outreach-intro h2 { font-size: 20px; }
+  .outreach-intro-actions { width: 100%; } .outreach-intro-actions button { flex: 1; } }

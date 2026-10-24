@@ -5,6 +5,7 @@ import { useShellMobile } from '@/hooks/useShellMobile';
 import { useAuth } from '@/contexts/AuthContext';
 import { useMe } from '@/hooks/useMe';
 import { isFeatureEnabled } from '@/lib/entitlements';
+import { useOutreachEntry } from '@/hooks/useOutreachEntry';
 import AriaShellHeader from './AriaShellHeader';
 import MobileBottomNav from './MobileBottomNav';
 import SupportHelpButton from './SupportHelpButton';
@@ -12,7 +13,7 @@ import SupportPanel from './SupportPanel';
 import SectionErrorBoundary from './SectionErrorBoundary';
 import SubscriptionBanner from './SubscriptionBanner';
 
-type Section = 'dashboard' | 'comms' | 'finance' | 'quotes' | 'ai' | '';
+type Section = 'dashboard' | 'comms' | 'outreach' | 'finance' | 'quotes' | 'ai' | '';
 
 export default function AppShell() {
   const navigate = useNavigate();
@@ -26,10 +27,14 @@ export default function AppShell() {
   // by migration 033 SECTION 6. Presentation only — PART D's server-side gate
   // is the enforcement; hiding a nav item is not refusing a request.
   const showQuotes = isFeatureEnabled(me?.plan_tier, me?.feature_flags, 'quoting');
+  // OUT-17: Outreach is its own department once switched on, marked New until set up.
+  const outreach = useOutreachEntry();
+  const outreachNew = outreach.owner && !!outreach.setup.data && !outreach.setup.data.started;
 
   const activeSection: Section = useMemo(() => {
     const path = location.pathname;
     if (['/app/comms', '/app/inbox', '/app/email/outbox'].some(prefix => path.startsWith(prefix))) return 'comms';
+    if (path.startsWith('/app/outreach')) return 'outreach';
     if (['/app/finance', '/app/accounting'].some(prefix => path.startsWith(prefix))) return 'finance';
     if (path.startsWith('/app/quotes')) return 'quotes';
     if (['/app/ai', '/app/board-meeting', '/app/briefings'].some(prefix => path.startsWith(prefix))) return 'ai';
@@ -63,6 +68,8 @@ export default function AppShell() {
         businessLogo={me?.logo_url}
         isMobile={isMobile}
         showQuotes={showQuotes}
+        showOutreach={outreach.enabled}
+        outreachNew={outreachNew}
         onSignOut={signOut}
         onHelp={() => setSupportPanelOpen(true)}
       />
@@ -78,6 +85,8 @@ export default function AppShell() {
           activeSection={activeSection}
           onNavigate={handleNavigate}
           showQuotes={showQuotes}
+          showOutreach={outreach.enabled}
+          outreachNew={outreachNew}
         />
       )}
 
