@@ -58,12 +58,13 @@ SURFACES = [
     ("campaigns", "list_outreach_campaigns", None, "campaigns", "id brand_id mailbox_id name sequence_version version status timezone daily_cap"),
     ("campaigns/{campaign_id}", "get_outreach_campaign", "campaign_id", "campaigns", "id brand_id mailbox_id name sequence_version version status timezone daily_cap"),
     ("campaigns/{campaign_id}/sequence", "get_outreach_sequence", "campaign_id", "sequence_steps", "id campaign_id sequence_version ordinal delay_business_days approved_at"),
-    ("replies", "list_outreach_replies", None, "replies", "id prospect_id mailbox_id category confidence resolution received_at"),
+    ("replies", "list_outreach_replies", None, "replies", "id prospect_id mailbox_id inbound_email_id matched_message_id owner_id category confidence resolution received_at"),
     ("mailboxes", "list_outreach_mailboxes", None, "mailboxes", "id mailbox_id enabled daily_cap warmup_stage sending_days health_status health_checked_at"),
     ("compliance", "get_outreach_compliance_status", None, "compliance", "id brand_id version decision reviewed_at review_due_at"),
     ("settings", "get_outreach_settings_and_permissions", None, "settings", "id pause_all timezone business_daily_cap owner_cc_default retention_policy_version"),
     ("summary", "outreach_summary", None, None, ""),
-    ("knowledge", "get_outreach_knowledge", None, None, ""),
+    ("knowledge", "get_outreach_knowledge", None, "knowledge", "id brand_id topic answer source_reference version status approved_at review_due_at retired_at"),
+    ("reply-slots", "list_outreach_reply_slots", None, "reply_slots", "id prospect_id reply_id mailbox_id action_id state generation reserved_at dispatched_at settled_at released_at"),
 ]
 DETAILS = {"get_outreach_prospect", "get_outreach_campaign", "get_outreach_settings_and_permissions"}
 LISTS = [s for s in SURFACES if s[1] not in DETAILS and s[1] != "outreach_summary"]
@@ -71,6 +72,8 @@ WITH_PARENT = [s for s in SURFACES if s[2]]
 
 # Only 037 columns needed by the reads, plus sensitive columns to catch SELECT *.
 COLUMNS = {
+    "knowledge": "brand_id TEXT, topic TEXT, answer TEXT, source_reference TEXT, version INTEGER, status TEXT, approved_at TEXT, review_due_at TEXT, retired_at TEXT",
+    "reply_slots": "prospect_id TEXT, reply_id TEXT, mailbox_id TEXT, action_id TEXT, state TEXT, generation INTEGER, reserved_at TEXT, dispatched_at TEXT, settled_at TEXT, released_at TEXT, outcome_evidence TEXT, payload_hash TEXT",
     "brands": "name TEXT, default_mailbox_id TEXT, privacy_url TEXT, sender_identity TEXT, version INTEGER",
     "prospects": "company TEXT, name TEXT, role TEXT, domain TEXT, number TEXT, email TEXT, email_key TEXT, subscriber_type TEXT, eligibility TEXT, lawful_basis TEXT, lia_id TEXT, stage TEXT, fit_score NUMERIC, confidence NUMERIC, why_now TEXT, evidence_checked_at TEXT, captured_at TEXT, first_contact_at TEXT, last_contact_at TEXT, notice_due_at TEXT, notice_provided_at TEXT, retention_due_at TEXT, owner_user_id TEXT",
     "evidence": "prospect_id TEXT, source_type TEXT, operation TEXT, source_url TEXT, excerpt TEXT, fact_type TEXT, fact_value TEXT, provider_record_id TEXT, confidence NUMERIC, scale TEXT, verification_status TEXT, verification_subject_email_key TEXT, raw_verdict TEXT, flags TEXT, fetched_at TEXT, verified_at TEXT, expires_at TEXT, adapter_version TEXT, model_config_version TEXT",
@@ -116,6 +119,12 @@ def database():
                            subscriber_type="unknown", email="private@example.test", email_key=SECRET,
                            fit_score=94, confidence=94, captured_at=STAMP,
                            retention_due_at="2027-10-20T12:00:00+00:00")
+            add(conn, "knowledge", bid, brand_id=brand, topic="availability", answer="Weekday appointments",
+                source_reference="https://example.test/facts", version=2, status="approved", approved_at=STAMP,
+                review_due_at="2027-10-20T12:00:00+00:00")
+            add(conn, "reply_slots", bid, prospect_id=prospect, reply_id=uid(bid, "replies"),
+                mailbox_id=mailbox, action_id=uid(bid, "action"), state="unknown", generation=2,
+                reserved_at=STAMP, dispatched_at=STAMP, outcome_evidence=SECRET, payload_hash=SECRET)
             campaign = add(conn, "campaigns", bid, brand_id=brand, mailbox_id=mailbox,
                            name=f"Campaign {bid}", sequence_version=1, version=1, status="draft",
                            timezone="Europe/London", daily_cap=5, target_rules=json.dumps({"raw": SECRET}),
@@ -259,6 +268,9 @@ def test_feature_and_access_gate_on_every_surface(harness, surface, via, plan, f
     harness.biz.plan_tier, harness.biz.feature_flags = plan, flags
     harness.biz.subscription_status, harness.biz.is_active = status, active
     code, result = invoke(harness, surface, via)
+    if surface[3] in ("replies", "reply_slots", "knowledge") and active and not flags:
+        assert code == 200  # OUT-7: retained inbound history survives downgrade/read-only.
+        return
     assert code == 403
     assert not result.get("items") and not result.get("item") and "totals" not in result
     assert SECRET not in json.dumps(result)
@@ -383,13 +395,19 @@ def test_mailbox_filter_scopes_replies_and_guessed_ids(harness, via):
 
 
 @pytest.mark.parametrize("via", ["api", "tool"])
-def test_knowledge_deferred_without_fabricated_approval(harness, via):
-    """OUT-3 binding split: OUT-7 owns knowledge; no table, synthetic facts or templates-as-knowledge."""
-    surface = next(s for s in SURFACES if s[1] == "get_outreach_knowledge")
-    _, result = invoke(harness, surface, via)
-    assert result["items"] == [] and result["total"] == 0
-    assert result["data_quality"] == "not_available"
-    assert "OUT-7" in result["message"] and "none" in result["message"].lower()
+def test_knowledge_and_slot_grounding(harness, via):
+    """OUT-7 pins IDs/versions/state to stored tenant rows; no transport secrets."""
+    for tool, table in (("get_outreach_knowledge", "knowledge"), ("list_outreach_reply_slots", "reply_slots")):
+        surface = next(s for s in SURFACES if s[1] == tool)
+        _, result = invoke(harness, surface, via)
+        with harness.engine.connect() as conn:
+            row = conn.execute(text(f"SELECT * FROM outreach_{table} WHERE business_id=:b"), {"b": A}).mappings().one()
+        item = result["items"][0]
+        assert item["id"] == row["id"]
+        assert item.get("version", item.get("generation")) == row.get("version", row.get("generation"))
+        assert item.get("status", item.get("state")) == row.get("status", row.get("state"))
+        assert SECRET not in json.dumps(result)
+        assert result["total"] == 1
 
 
 def test_tools_registered_with_strict_argument_schemas(harness):
@@ -431,7 +449,8 @@ def test_read_paths_do_not_mutate_or_dispatch(harness, via, monkeypatch):
     finally:
         event.remove(harness.engine, "before_cursor_execute", record)
     assert statements and all(s.startswith("SELECT") for s in statements)
-    assert all(route.methods <= {"GET", "HEAD"} for route in harness.module.router.routes)
+    read_names = {surface[1] for surface in SURFACES}
+    assert all(route.methods <= {"GET", "HEAD"} for route in harness.module.router.routes if route.name in read_names)
 
 
 @pytest.mark.parametrize("via", ["api", "tool"])
@@ -535,3 +554,17 @@ def test_read_only_or_suspended_is_not_described_as_a_plan_problem(harness, plan
     harness.biz.subscription_status, harness.biz.is_active = status, active
     code, result = invoke(harness, SURFACES[0], "tool")
     assert code == 403 and "aria_guidance" not in result
+
+
+@pytest.mark.parametrize('via', ['api', 'tool'])
+def test_out7_knowledge_status_and_source_are_database_grounded(harness, via):
+    surface = next(s for s in SURFACES if s[1] == 'get_outreach_knowledge')
+    with harness.engine.begin() as conn:
+        conn.execute(text("UPDATE outreach_knowledge SET status='retired',retired_at=:at WHERE business_id=:b"), {'at': STAMP, 'b': A})
+    code, result = invoke(harness, surface, via)
+    assert code == 200 and result['data_quality'] == 'stale'
+    assert result['items'][0]['status'] == 'retired'
+    assert result['items'][0]['answer'] == 'Weekday appointments'
+    assert result['items'][0]['source_reference'] == 'https://example.test/facts'
+    foreign, _ = invoke(harness, surface, via, brand_id=uid(B, 'brands'))
+    assert foreign == 404

@@ -66,6 +66,7 @@ def _sync_email_for_business(business_id: str):
         get_business_by_id,
         get_default_email_account,
         get_provider_for_account,
+        outreach_storage_completed,
     )
     from models import EmailSyncState, EmailMessage
 
@@ -157,6 +158,8 @@ def _sync_email_for_business(business_id: str):
                     session.rollback()
                 except Exception:
                     pass
+
+            outreach_storage_completed(session, business)
 
             if msg_count > 0:
                 logger.info(f"[BackgroundSync] {msg_count} new/updated emails for {account.email_address}")

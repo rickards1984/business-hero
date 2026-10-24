@@ -523,6 +523,7 @@ OUTREACH_READ_TOOLS = {
     "get_outreach_settings_and_permissions": (None, False),
     "outreach_summary": (None, False),
     "get_outreach_knowledge": (None, True),
+    "list_outreach_reply_slots": (None, True),
 }
 
 
@@ -533,8 +534,10 @@ def _outreach_definition(name, parent, paginated):
                           offset={"type": "integer", "minimum": 0, "maximum": 10000, "default": 0})
     if parent:
         properties[parent] = {"type": "string", "format": "uuid"}
-    if name == "list_outreach_replies":
+    if name in ("list_outreach_replies", "list_outreach_reply_slots"):
         properties["mailbox_id"] = {"type": "string", "format": "uuid"}
+    if name == "get_outreach_knowledge":
+        properties["brand_id"] = {"type": "string", "format": "uuid"}
     return {"type": "function", "function": {
         "name": name,
         "description": (
@@ -543,7 +546,7 @@ def _outreach_definition(name, parent, paginated):
             + ("Grounded stored counts: accepted means provider acceptance, not delivery; "
                "meeting/won are recorded stages, not confirmed outcomes or revenue."
                if name == "outreach_summary" else
-               "Knowledge and standing permissions remain unavailable where indicated.")),
+               "Knowledge includes its recorded status and review date; stale facts must not support answers. Answer slots are redacted state, never send authority. Standing permissions remain unavailable where indicated.")),
         "parameters": {"type": "object", "properties": properties,
                        "required": [parent] if parent else [], "additionalProperties": False},
     }}

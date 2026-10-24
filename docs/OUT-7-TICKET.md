@@ -105,3 +105,265 @@ Independent draft review checked SQL/FK targets, counts, fixture validity and ru
   - **Codex:** `outreach_replies.py`, the `outreach_send.py` integration, the storage-completion → scan wiring in `app/email/*` and `background_sync.py`, and the `outreach_read.py`/`assistant_tools.py` projections.
   - **Claude:** the `reply_outreach` registration and owner hook in `aria_actions.py`, and any `chase_replies._store` boundary change. Codex does not edit those two files.
 - **Order to production:** Codex builds → Claude reviews → 038 is rehearsed on staging → Mike runs 038 on production → only then is OUT-7 merged.
+
+## Stage B builder handoff — 24 October 2026
+
+**Builder:** Codex, in `ticket/OUT-7-outreach-replies`. **Reviewer:** Claude.
+Serves P2/P4/P5/P8/P9, Tool layer and Actions & permissions. Mike's approval
+above is the implementation authority. Migration 038, `aria_actions.py` and
+`chase_replies.py` are untouched. No network, provider/model call, real send,
+SQL against an external database, commit or push was performed. The pre-existing
+untracked `data.db` is untouched. This is not activation or deployment approval.
+
+### Implemented behaviour
+
+- `outreach_replies.scan` consumes existing tenant-scoped inbox storage. Matching
+  uses exact sender, accepted outbound history, mailbox and provider thread;
+  available recipient/RFC evidence must also agree. Subject is never identity.
+  Ambiguity pauses every candidate prospect's sequences and hands over. Self-mail
+  is ignored. Stop/cancellation and explicit opt-out suppression commit before
+  classification; no callback runs with locks held. Classification errors,
+  missing bodies, disconnected mailboxes, unknown/low-confidence, OOO, not-now,
+  wrong-person and referrals become assigned `handed_over` reply records.
+  Existing resolved/dismissed replies, suppression and takeover are not reopened.
+- `propose_answer` rechecks capture state and immutable current brand facts after
+  drafting, then creates the card and permanent prospect slot atomically. Retries
+  return the existing proposed card; later replies hand over. Proposal does not
+  reserve sending allowance. No facts means no draft callback. The deterministic
+  grounding rule accepts only the referenced facts' exact answers joined with
+  blank lines; invented citations, extra claims and changed/expired facts refuse.
+  This deliberately conservative extractive draft policy is not a claim that a
+  model can establish semantic answer relevance. Router activation/evaluation
+  remains a gate, including relevance and approved booking-link selection.
+- Typed reply claims reuse OUT-6 entitlement, compliance, exact mailbox, footer,
+  opt-in CC, current window, warm-up and shared allowance/cap gates. They allow
+  exactly the matched inbound and stopped (`replied`) enrolment, and do not impose
+  sequence-follow-up delay on an answer. Other stored inbound blocks even before
+  scanning/classification. A reply never advances/restarts a sequence. The
+  message has kind `bespoke` and links its matched outbound via `reply_target_id`.
+- Dispatch adds a database recheck for suppression, pause/takeover, mailbox health,
+  inbound and reply facts before fencing transport. This also addresses OUT-6's
+  suppression-between-claim-and-dispatch backlog. The SQL sender filter replaces
+  its whole-inbox Python filter. The remote arrival window after final search/
+  database recheck still exists. UK bank holidays and unapproved-card token
+  revocation remain OUT-6 backlog.
+- Slot, message/job, action, outbox and shared metering settle in one transaction.
+  Accepted is terminal; unknown holds the slot and allowance with no resend.
+  Definite non-acceptance releases allowance, but holds the answer slot until
+  explicit owner review. `reconcile` verifies outside locks without transport;
+  repeated terminal evidence is idempotent and contradictory terminal evidence
+  refuses. `release_slot` archives the entire old slot binding/evidence on the old
+  action result. `replace_answer` requires active owner review, a released slot,
+  still-current facts and no later reply/takeover; it reuses the original draft,
+  increments generation and issues a new card/operation/RFC ID. No automatic
+  redraft, timeout reset or retry is exposed.
+- `observe_health` accepts a **trusted, authenticated provider-adapter observation**,
+  not a model classification or public request body. It binds the stored event
+  to an accepted message's provider ID and mailbox. Hard bounces suppress that
+  tenant recipient; complaints pause only the attributed mailbox; three distinct
+  hard-bounced messages among its latest 50 accepted sends pause it. Repeated
+  stored events do not double-count and old events never reopen a mailbox.
+  Live provider health ingestion/authentication is still an adapter gate.
+- `outreach_storage_completed(session, business)` in `app/email/service.py` is
+  called after committed storage in `_run_inbox_sync`, `sync_email_inbox` and
+  `_sync_email_for_business`. No poller or cursor was added. No plan gate disables
+  safety scanning. The default has **no model callback** and hands over safely;
+  missing rollout schema/scan errors are logged as unavailable, not empty inbox.
+  Approval independently checks stored inbound even if that notification fails.
+- `POST /v1/outreach/replies/{reply_id}/handover` and
+  `POST /v1/outreach/knowledge` use authenticated context and active-owner checks,
+  including membership recheck under lock. Handover remains available after a
+  plan downgrade. Knowledge writes require outreach access and an explicit
+  future review date; approval retires the previous version of the topic and
+  creates a new immutable version. No 90-day default is silently stored.
+- Existing Aria/API read registration now supplies knowledge (IDs, versions,
+  answer/source, status and review dates) and `list_outreach_reply_slots`
+  (`GET /v1/outreach/reply-slots`). Slots expose state/generation/timestamps and
+  related record IDs, never payload hashes, transport evidence, token or digest.
+  Reply reads include original inbound/matched-message and assigned-owner IDs.
+  These history reads use the existing retained-history gate: downgrade does not
+  hide them; explicit feature denial and suspension still apply. Grounding tests
+  compare scoped stored values, including stale knowledge and slot state.
+
+### Exact Claude integration contract
+
+`outreach_replies.propose_answer(session, business, *, reply_id, draft, moment)`
+returns `{id, status, preview, version}` or `{status: 'handed_over', ...}`. It owns
+its transactions and creates **both** the `reply_outreach` action and slot; do not
+call generic `propose` afterwards or create another card. `draft(context)` is a
+trusted server-configured router callback receiving bounded untrusted reply text
+and scoped knowledge, and returns `{body, knowledge_refs: [{id, version}]}`.
+`scan(session, business, *, classify=None, moment=None)` owns its transactions;
+`classify(context)` returns `{category, confidence, classification_version}` and
+cannot grant authority. Neither callback is accepted from a request/model tool.
+The production storage notification currently invokes neither model nor drafter.
+
+Register `reply_outreach` in the server action types/features, **not** chat/voice
+or standing-permission types. Refuse NULL owner, staff, inactive/foreign owner,
+platform-admin-without-ownership and automation markers before searching. Keep
+the public `aria_actions.approve` signature unchanged. Use the existing active
+owner check both before search and under membership lock after action preparation.
+Do not build a reply with the generic task/email builder. A stored reply preview
+has `action_kind='reply_outreach'`; this is checked against its actual action row,
+permanent slot/action/generation and deterministic operation key.
+
+```python
+# Scoped stored proposed card, authenticated active owner, exact version and
+# expiry already validated; end preliminary read transaction first.
+outreach_send.search_reply_before_claim(
+    session, business, action_id=action_id, payload=payload)
+# Same session; provider search and AUTO-2 storage have finished outside locks.
+outreach_send.prepare_reply_claim(
+    session, business, action_id=action_id, payload=payload,
+    user_id=user_id, version=version, moment=outreach_send.now())
+# Recheck active owner WITH membership lock, then existing scoped, exact-payload
+# proposed -> executing CAS. Any exception/lost CAS: rollback EVERYTHING and
+# remove session.info['outreach_dispatch'][action_id]. Otherwise commit once.
+result = outreach_send.dispatch_reply(
+    session, business, action_id=action_id, payload=payload)
+# No generic _execute, _bookkeep_email, meter increment or finalisation.
+# Return the persisted card view, as OUT-6 does.
+```
+
+Preparation performs no commit/rollback/provider call; slot message binding and
+usage reservation participate in the action CAS transaction. Dispatch requires
+no active transaction after claim commit and consumes the same-session one-use
+permit. It returns `status`/`outcome`/`search_at`/`dispatch_at` and owns settlement.
+Crash/restart cannot recover a permit or resend. Preserve all preview bindings,
+including pinned knowledge and exact footer/CC. Do not allow arbitrary reply
+body editing: current deterministic claim validation only permits the exact
+cited approved answers. Dismissal never releases/re-proposes the slot. The next
+proposal attempt hands over; the permanent row remains held.
+
+Transport uses the existing `send_outreach` envelope plus, **only for replies**,
+`reply_provider_message_id` naming the inbound provider message. Preserve its
+mailbox/thread and RFC headers when available. The adapter must implement genuine
+provider reply semantics (particularly Graph's original-message reply path) and
+fail closed if it cannot; no fallback to generic `send_email`. No such production
+adapter is added by this work.
+
+**Claude-owned `_store` change needed:** keep `_store(session, business,
+account_id, messages)`'s signature and commit ownership. Store available
+`to_emails`, `cc_emails` and `raw_headers` alongside the existing body/thread
+fields; retain provider `Message-ID`, `In-Reply-To`, `References` verbatim within
+the existing bounded stored representation. After its storage commit, call
+`app.email.service.outreach_storage_completed(session, business)` once, including
+when the search returned no new rows. Do not call it before commit or from a
+locked claim. The notification catches/logs its own scan errors. Do not alter
+invoice matching/categories/resolution. This single change also covers OUT-6/7
+preflight `search_before_claim`, which already calls `_store`; no duplicate
+notification was added around it here. Inbound already stored between search
+and claim is checked independently of this future notification.
+
+**Other public service boundaries for adapter/UI work:**
+
+```python
+handover(session, business, *, reply_id, user_id, moment)
+save_knowledge(session, business, *, brand_id, topic, answer, source_reference,
+               review_due_at, user_id, moment)
+observe_health(session, business, *, inbound_email_id, message_id, kind,
+               evidence, moment)  # kind: hard_bounce | complaint
+reconcile(session, business, *, action_id, verify, moment)
+release_slot(session, business, *, slot_id, user_id, moment)
+replace_answer(session, business, *, slot_id, user_id, moment)
+```
+
+`verify(query)` is a trusted read-only adapter callback, never a user assertion;
+query contains original operation/mailbox/provider/RFC IDs. Its result must
+include terminal `outcome`, matching `operation_key`/`mailbox_id`/`provider` and
+an independent `verification_reference`. Health evidence must include matching
+provider message ID/mailbox/provider and `authenticated=True` set only by a
+verified adapter. These are internal contracts, not new public webhooks.
+All mutation writers take the existing business/settings locks first. SQLite's
+local writer lock tests idempotency but is not PostgreSQL locking evidence.
+
+### Remaining strict xfails
+
+Exactly eight cases have reason **`awaits Claude's aria_actions hook`**:
+
+- `test_answer_card_uses_real_owner_only_approval_boundary`: five identities.
+- `test_active_owner_can_approve_one_answer_through_real_hook`: one case.
+- `test_knowledge_changed_after_proposal_refuses_claim`: retire/expire, two cases.
+
+Their original assertions remain. Only missing `reply_outreach` registration
+raises `MissingSharedHook`; imports, fixture setup, service proposal and all
+other failures are real failures. Once Claude registers the action, passing
+cases are strict XPASS until he removes their marks. Separate direct service/CAS
+tests exercise claim, dispatch, settlement, rollback and knowledge/race checks
+now; they do **not** claim to prove the absent owner hook.
+
+### PostgreSQL verification Claude must run
+
+No loopback connection was attempted in Stage B: this sandbox cannot reach it.
+Against the already authorised **local synthetic** 035–038 harness, run with
+`RLS_LOCAL_DATABASE_URL` set to that loopback harness (never a remote URL):
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q \
+  backend/tests/test_outreach_replies_schema_rls.py \
+  backend/tests/test_outreach_schema_rls.py \
+  backend/tests/test_outreach_send_rls.py \
+  backend/tests/test_tenant_isolation_rls_path.py
+```
+
+Add/run genuine two-session **service-path** tests, beyond the existing unique-key
+schema race: simultaneous scans/proposals for one prospect across two mailboxes;
+reply storage/pause versus sequence claim; owner takeover/suppression versus
+reply claim and dispatch; fact retirement/expiry versus drafting and claim;
+last monthly/business/mailbox/campaign slot with sequence and reply competing;
+lost action CAS/hook exception rolling back slot message binding, messages/jobs,
+events and every meter; duplicate approvals and stale slot generation; owner
+membership demotion during search; unknown -> acceptance/non-acceptance twice;
+owner-reviewed release/replacement preserving old audit; crash after claim,
+after fence and after provider acceptance, including settlement failure and no
+resend; original UK month/day and DST settlement. Observe actual blocked locks,
+not sleeps, and fail races on worker exceptions/timeouts/missing outcomes.
+
+Verify native UUID/JSONB/text[]/timestamptz binding, 037 composite FKs/triggers,
+038 immutable knowledge and slot constraints, service grants and member-only
+knowledge SELECT with no slot browser access. Re-paste/rollback/reapply and the
+95-policy baseline remain required. Extend teardown to remove reply slots and
+knowledge before their parents if sharing the OUT-6 synthetic tenants. Rerun
+AUTO regressions after `_store` changes and API-chain ownership tests after the
+hook. Gmail/Graph wire fixtures, authenticated health-event parsing, router
+relevance evals, UI and live delivery are **not** established by SQLite tests.
+
+**Mike's eventual behaviour check:** after Claude's hook, adapter/router gates,
+038 rollout and pilot approval, open a campaign reply; confirm the sequence is
+stopped, the original mailbox/message and fact citations are shown on one card;
+approve once as owner, then verify the next question goes to Needs you. An
+opt-out must suppress without an acknowledgement; switching business must hide
+all these records. No new frontend or real-send check was performed here.
+
+### Stage B verification result and scope blocker
+
+**Status: implementation handed off, acceptance blocked; `./check.sh` is not green.**
+Final `PYTHONDONTWRITEBYTECODE=1 ./check.sh` exited 1: frontend TypeScript, Python
+compilation and Ruff passed; optional eslint skipped. Backend: **2,827 passed,
+291 skipped, 8 xfailed, 220 subtests passed; 2 failed**. The only failures are:
+
+- `LiveSchemaConformance.test_full_coverage_leaves_nothing_unguarded`
+- `LiveSchemaConformance.test_unguarded_table_count_only_ratchets_down`
+
+Both correctly identify `outreach_reply_slots` as absent from the **live** schema
+dump. This is expected before 038 deployment under Mike's approved rollout order;
+it is not evidence that 038 is wrong. The earlier read-router assertion was
+repaired to assert GET-only methods for the enumerated read surfaces while
+retaining its SELECT-only SQL check; the new owner writes are separately tested.
+Final targeted OUT-7 service suite: **46 passed, 8 xfailed**. `git diff --check`
+passed. All original Stage A assertions remain, with only the absent-module
+expectation replaced by the eight explicit Claude-hook expectations above.
+
+The live dump, conformance guard and migration have **not** been changed, and
+SQL has not been disguised to evade the scanner. The conformance test is outside
+Mike's assigned file list. Codex requested permission for one additional test-file
+change: validate the two reviewed pending 038 tables against a byte-digest-pinned
+migration contract, explicitly separate from live evidence, with the live dump
+still authoritative for every observed table and the unguarded budget still zero.
+A concrete unapplied patch was prepared at `/tmp/OUT-7-schema-guard-proposal.patch`;
+its standalone test copy passed **12 tests**. That is a proposed repair, not a
+passing repository gate or deployment evidence. Apply/review it only after the
+scope extension is authorised, then rerun `./check.sh`. Updating the live dump
+requires a separately authorised real census after deployment, never invented
+columns from migration text. No change to Claude-owned files is needed to resolve
+this particular guard conflict.

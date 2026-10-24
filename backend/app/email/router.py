@@ -53,6 +53,7 @@ from .service import (
     generate_email_reply_draft,
     generate_email_reply_drafts,
     analyze_email_batch,
+    outreach_storage_completed,
 )
 from providers.google_gmail import GoogleGmailProvider
 from providers.microsoft_graph import MicrosoftGraphProvider
@@ -899,6 +900,7 @@ def _run_inbox_sync(business_id: str) -> EmailSyncRunResponse:
         sync_state.last_error = None
         session.add(sync_state)
         session.commit()
+        outreach_storage_completed(session, business)
 
         response = EmailSyncRunResponse(
             email_account_id=str(account.id),
@@ -1116,6 +1118,7 @@ async def sync_email_inbox(
     sync_state.last_error = None
     session.add(sync_state)
     session.commit()
+    outreach_storage_completed(session, business)
 
     return EmailSyncRunResponse(
         email_account_id=str(account.id),
@@ -1698,3 +1701,47 @@ async def microsoft_oauth_callback(
     )
     await _settle_default_after_connect(payload["business_id"], email_address, "microsoft", before)
     return RedirectResponse(url=_frontend_settings_url("microsoft"))
+
+
+# Outreach safety handlers share its existing router, not email entitlement.
+# All authority is derived from authenticated context; no tenant/actor in body.
+from outreach_read import router as outreach_router
+from uuid import UUID
+
+
+class OutreachKnowledgeWrite(BaseModel):
+    model_config = {'extra': 'forbid'}
+    brand_id: UUID
+    topic: str = Field(min_length=1, max_length=200)
+    answer: str = Field(min_length=1, max_length=4000)
+    source_reference: str = Field(min_length=1, max_length=2000)
+    review_due_at: datetime
+
+
+@outreach_router.post('/replies/{reply_id}/handover')
+def handover_outreach_reply(reply_id: UUID, context=Depends(get_user_business_context),
+                           session: Session = Depends(get_session)):
+    from services import outreach_replies
+    from services.aria_actions import ActionRefused
+    business = get_business_by_id(session, context['business_id'])
+    try:
+        return outreach_replies.handover(session, business, reply_id=str(reply_id),
+            user_id=context['user_id'], moment=outreach_replies.now())
+    except ActionRefused as exc:
+        session.rollback()
+        raise HTTPException(exc.status_code, exc.detail) from None
+
+
+@outreach_router.post('/knowledge')
+def approve_outreach_knowledge(body: OutreachKnowledgeWrite, context=Depends(get_user_business_context),
+                               session: Session = Depends(get_session)):
+    from services import outreach_replies
+    from services.aria_actions import ActionRefused
+    business = get_business_by_id(session, context['business_id'])
+    try:
+        return outreach_replies.save_knowledge(session, business, brand_id=str(body.brand_id),
+            topic=body.topic, answer=body.answer, source_reference=body.source_reference,
+            review_due_at=body.review_due_at, user_id=context['user_id'], moment=outreach_replies.now())
+    except ActionRefused as exc:
+        session.rollback()
+        raise HTTPException(exc.status_code, exc.detail) from None
