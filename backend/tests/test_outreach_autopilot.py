@@ -251,3 +251,83 @@ def test_research_leaves_automatic_campaigns_to_the_autopilot(h):
     granted(h)
     assert outreach_research._prepare_cards(h.s, h.b, [PROSPECT]) == []
     assert send(h)["sent"] and len(h.p.sends) == 1
+
+
+# ------------------------------------------------ Codex OUT-11 review 1 (P1s) ---
+
+def test_a_revoke_during_a_send_is_never_undone(h, monkeypatch):
+    """P1 1: the pace write must not restore a permission revoked meanwhile."""
+    from sqlmodel import Session as S
+    a, m = actions(), autopilot()
+    granted(h)
+    real = a.approve
+
+    def approve_then_owner_revokes(*args, **kwargs):
+        out = real(*args, **kwargs)
+        with S(h.engine) as other:
+            m.revoke(other, h.b, OWNER, CAMPAIGN)
+        return out
+    monkeypatch.setattr(a, "approve", approve_then_owner_revokes)
+    assert send(h)["sent"]
+    doc = json.loads(h.s.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"), {"b": A}).scalar())
+    assert CAMPAIGN not in (doc.get("outreach_autopilot") or {}), "the revoke stands"
+
+
+def test_the_pace_slot_is_reserved_before_the_send(h, monkeypatch):
+    """P1 2: a second run during a send sees the slot taken and waits."""
+    from sqlmodel import Session as S
+    a, m = actions(), autopilot()
+    granted(h)
+    real = a.approve
+    seen = {}
+
+    def approve_while_another_run_tries(*args, **kwargs):
+        with S(h.engine) as other:
+            seen["other"] = m.send_next(other, h.b, CAMPAIGN, moment=NOW, rng=lambda: 0.0)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(a, "approve", approve_while_another_run_tries)
+    assert send(h)["sent"]
+    assert seen["other"]["sent"] is None and "minute" in (seen["other"]["waiting"] or "")
+    assert len(h.p.sends) == 1
+
+
+def test_a_send_that_does_not_happen_releases_its_pace_slot(h):
+    m = autopilot()
+    granted(h)
+    h.s.execute(text("UPDATE outreach_settings SET pause_all = 1 WHERE business_id = :b"), {"b": A})
+    h.s.commit()
+    assert send(h)["sent"] is None
+    h.s.execute(text("UPDATE outreach_settings SET pause_all = 0 WHERE business_id = :b"), {"b": A})
+    h.s.commit()
+    assert send(h, moment=NOW + timedelta(seconds=30))["sent"], "no slot was held by the send that didn't happen"
+
+
+def test_the_audit_records_the_permission_checked_under_lock(h, monkeypatch):
+    """Backlog: revoke and re-grant during the search; the record shows the
+    grant that actually authorised the send."""
+    from sqlmodel import Session as S
+    m = autopilot()
+    granted(h)
+    real = h.m.search_before_claim
+
+    def search_then_regrant(*args, **kwargs):
+        out = real(*args, **kwargs)
+        with S(h.engine) as other:
+            m.revoke(other, h.b, OWNER, CAMPAIGN)
+            m.grant(other, h.b, OWNER, CAMPAIGN, versions(h))
+        return out
+    monkeypatch.setattr(h.m, "search_before_claim", search_then_regrant)
+    out = send(h)
+    final = json.loads(h.s.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"),
+                                   {"b": A}).scalar())["outreach_autopilot"][CAMPAIGN]
+    snapshot = json.loads(h.s.execute(text("SELECT authority_snapshot FROM outreach_messages WHERE action_id = :id"),
+                                      {"id": out["sent"]}).scalar())
+    assert snapshot["granted_at"] == final["granted_at"]
+
+
+def test_the_home_line_names_its_period():
+    autopilot()
+    from pathlib import Path as _P
+    hook = (_P(__file__).parents[2] / "frontend/client/src/hooks/useDashboardData.ts").read_text()
+    assert "outreach emails for you automatically in the last week" in hook or \
+        "In the last week I sent ${plural(outreach" in hook

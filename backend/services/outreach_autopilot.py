@@ -140,6 +140,48 @@ def status(session, business) -> dict:
     return out
 
 
+def _lock(session, bid: str) -> None:
+    """The shared business lock (OUT-6's order) for pace and settings writes."""
+    if not send.pg(session):
+        session.execute(text("UPDATE business_settings SET business_id = business_id WHERE business_id = :b"), {"b": bid})
+    send.lock_business(session, bid)
+
+
+def _reserve_pace(session, bid: str, moment: datetime, gap: timedelta):
+    """Claim the business's next automatic-send slot BEFORE sending, under the
+    lock, changing only the pace key (Codex OUT-11 review 1: pace written
+    after the send let two runs both send, and a whole-document write could
+    restore a permission revoked meanwhile). Returns (token, previous) or
+    (None, waiting message)."""
+    import uuid as _uuid
+    _lock(session, bid)
+    doc = setup._settings_doc(session, bid)
+    current = doc.get(PACE_KEY) or {}
+    pace = _parse(current.get("next_at"))
+    if pace and moment < pace:
+        session.rollback()
+        minutes = max(1, int((pace - moment).total_seconds() // 60) + 1)
+        return None, f"Next automatic email in about {minutes} minute(s)"
+    token = _uuid.uuid4().hex
+    doc[PACE_KEY] = {"next_at": (moment + gap).isoformat(), "token": token}
+    setup._save_settings_doc(session, bid, doc)
+    session.commit()
+    return token, current
+
+
+def _release_pace(session, bid: str, token: str, previous: dict) -> None:
+    """A send that did not happen gives its slot back, if still ours."""
+    _lock(session, bid)
+    doc = setup._settings_doc(session, bid)
+    if (doc.get(PACE_KEY) or {}).get("token") == token:
+        if previous:
+            doc[PACE_KEY] = previous
+        else:
+            doc.pop(PACE_KEY, None)
+        setup._save_settings_doc(session, bid, doc)
+    session.commit()
+
+
 def _due_enrolment(session, bid: str, campaign_id: str, moment: datetime):
     open_for = set()
     for action in send.rows(session, "aria_actions", bid,
@@ -188,10 +230,14 @@ def send_next(session, business, campaign_id, *, moment: Optional[datetime] = No
     session.rollback()
     if step is None:
         return {"sent": None, "waiting": "No approved step is due"}
+    token, previous = _reserve_pace(session, bid, moment, MIN_GAP + RANDOM_GAP * float(rng()))
+    if token is None:
+        return {"sent": None, "waiting": previous}
     proposed = aria_actions.propose(session, business, None, "send_outreach",
                                     {"campaign_id": cid, "enrolment_id": str(e["id"]), "step_id": str(step["id"])},
                                     automation=MARKER)
     if "proposal" not in proposed:
+        _release_pace(session, bid, token, previous)
         return {"sent": None, "waiting": proposed.get("error") or "Could not prepare the email"}
     card = proposed["proposal"]
     try:
@@ -201,13 +247,13 @@ def send_next(session, business, campaign_id, *, moment: Optional[datetime] = No
             aria_actions.dismiss(session, business, card["id"])
         except aria_actions.ActionRefused:
             pass
+        _release_pace(session, bid, token, previous)
         return {"sent": None, "waiting": exc.detail}
-    doc = setup._settings_doc(session, bid)
-    doc[PACE_KEY] = {"next_at": (moment + MIN_GAP + RANDOM_GAP * float(rng())).isoformat()}
-    setup._save_settings_doc(session, bid, doc)
-    session.commit()
-    return {"sent": card["id"] if result.get("status") in ("done", "executing") else None,
-            "waiting": None if result.get("status") in ("done", "executing") else f"Send {result.get('status')}"}
+    went = result.get("status") in ("done", "executing")
+    if not went:
+        _release_pace(session, bid, token, previous)
+    return {"sent": card["id"] if went else None,
+            "waiting": None if went else f"Send {result.get('status')}"}
 
 
 def run_due(session, *, moment: Optional[datetime] = None) -> list:

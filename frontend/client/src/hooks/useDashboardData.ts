@@ -149,7 +149,7 @@ export function briefingLines(d: Dashboard): string[] {
     if (chased > 0) lines.push(`In the last week I chased ${plural(chased, 'invoice', 'invoices')} for you on autopilot.`);
     // OUT-11: outreach Aria sent under the owner's permission.
     const outreach = auto.filter(a => a.kind === 'outreach_autopilot').length;
-    if (outreach > 0) lines.push(`I sent ${plural(outreach, 'outreach email', 'outreach emails')} for you automatically.`);
+    if (outreach > 0) lines.push(`In the last week I sent ${plural(outreach, 'outreach email', 'outreach emails')} for you automatically.`);
   }
   const replies = d.summary.data?.replies ?? [];
   // Codex AUTO-2 review 1: count the customers, not their emails.

@@ -751,6 +751,18 @@ def _approve_outreach(session, business, action_id: str, row, user_id, version) 
             held, why = outreach_autopilot.valid_grant(session, business, str(payload.get("campaign_id")), lock=True)
             if not held:
                 raise ActionRefused(403, why or "Automatic sending is off for this campaign.")
+            # Record the grant validated UNDER LOCK, the one that actually
+            # authorises this send (Codex OUT-11 review 1).
+            snap = session.execute(text(
+                "SELECT id, authority_snapshot FROM outreach_messages WHERE business_id = :b AND action_id = :a"),
+                {"b": str(business.id), "a": str(action_id)}).fetchone()
+            if snap is not None:
+                record = dict(_loads(snap[1]) or {})
+                record.update(granted_by=str(held["granted_by"]), granted_at=held.get("granted_at"))
+                cast = "CAST(:s AS jsonb)" if _is_postgres(session) else ":s"
+                session.execute(text(f"UPDATE outreach_messages SET authority_snapshot = {cast} "
+                                     "WHERE business_id = :b AND id = :id"),
+                                {"s": json.dumps(record), "b": str(business.id), "id": str(snap[0])})
         else:
             prepare(session, business, action_id=str(action_id), payload=payload,
                     user_id=str(user_id), version=version, moment=moment)

@@ -84,3 +84,14 @@ No migration.
 
 ## Merged with OUT-10's review fixes — 24 October 2026
 **Interaction found and fixed:** OUT-10 now prepares a waiting card each morning for every new enrolment. Aria never sends over a card waiting for the owner, so those cards would have blocked automatic sending. A campaign with a valid OUT-11 permission now gets **no** research card; the autopilot sends it. Without a permission, the card waits for the owner as before. Test: `test_research_leaves_automatic_campaigns_to_the_autopilot`.
+
+## Codex review 1: REQUEST-CHANGES, two P1s (repair cycle 1)
+Preserved verbatim in `audits/OUT-11-CODEX-REVIEW-1.md`.
+1. **A revoke could be undone by the pace write.** The pace is no longer written after the send. Instead, `_reserve_pace` takes the shared business lock, re-reads the settings document and changes **only** the pace key.
+2. **Concurrent runs bypassed pacing.** The business-wide slot is now **reserved before the send**, under lock, so a second run sees it at once and waits. A send that doesn't happen gives its slot back, but only if the slot is still its own (a token check).
+
+Backlog, also done:
+- the message's authority snapshot records the grant validated **under lock** at the claim;
+- the home line now says "In the last week I sent N outreach emails for you automatically".
+
+Tests: autopilot **26 passed**; with send and research, **229 passed**; `./check.sh full` is green; Postgres passes.
