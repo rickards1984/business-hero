@@ -51,4 +51,6 @@ The six agreed steps:
 5. **Limits.**
 6. **A sequence per audience:** Aria drafts, the owner edits and approves.
 
-Setup is finished when one brand is ready. The message then reads: "to set up another business, service or product, repeat the process." The Outreach dashboard gets a brand switcher (All · each brand), as OUT-14.
+Setup is finished when one brand is ready. The message then reads: "to set up another business, service or product, repeat the process." After outreach starts, the Outreach overview lists each brand, with "+ Set up another" and "Continue setup".
+
+**Not in OUT-18:** the dashboard brand switcher (All · each brand, each with its own pipeline, replies and results). It is built with the OUT-14 dashboard, from the approved design, on top of the per-brand status this ticket adds.

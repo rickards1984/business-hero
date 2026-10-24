@@ -679,7 +679,14 @@ def _brand_status(brand, notices, rules, boxes, accounts, healthy_ids, lias, cam
     bid_ = str(brand["id"])
     mine = [c for c in campaigns if str(c["brand_id"]) == bid_]
     chosen = str(brand["default_mailbox_id"]) if brand["default_mailbox_id"] else None
-    mailbox = chosen or (str(mine[0]["mailbox_id"]) if mine else None)   # pre-OUT-18 brands chose none
+
+    def sendable(c) -> bool:
+        return bool(approved_steps.get(str(c["id"]))) and str(c["mailbox_id"]) in healthy_ids
+
+    # Pre-OUT-18 brands chose no inbox: use the one a sendable campaign uses,
+    # else the newest campaign's (Codex OUT-18 part B review 1).
+    fallback = next((c for c in mine if sendable(c)), mine[-1] if mine else None)
+    mailbox = chosen or (str(fallback["mailbox_id"]) if fallback else None)
     latest = {}
     for lia in lias:
         if str(lia["brand_id"]) == bid_:
@@ -688,14 +695,23 @@ def _brand_status(brand, notices, rules, boxes, accounts, healthy_ids, lias, cam
     audiences = []
     for lia in latest.values():
         found = [c for c in mine if c["target_hash"] == lia["audience_hash"]]
-        best = next((c for c in found if approved_steps.get(str(c["id"]))), found[-1] if found else None)
+        on_inbox = [c for c in found if str(c["mailbox_id"]) == mailbox]
+
+        def ready_(c) -> bool:
+            return sendable(c) and str(c["mailbox_id"]) == mailbox
+
+        # A campaign that is ready wins; then the newest on the brand's inbox
+        # (waiting for approval); then the newest at all (on another inbox).
+        best = next((c for c in found if ready_(c)), None) or (on_inbox[-1] if on_inbox else None) \
+            or (found[-1] if found else None)
         audiences.append({
             "id": str(lia["id"]), "description": ((rules.get(str(lia["id"])) or {}).get("description") or ""),
             "approved": lia["decision"] == "approved",
             "campaign": None if not best else {
                 "id": str(best["id"]), "name": best["name"], "mailbox_id": str(best["mailbox_id"]),
-                "ready": bool(approved_steps.get(str(best["id"])) and str(best["mailbox_id"]) in healthy_ids
-                              and (not chosen or str(best["mailbox_id"]) == chosen))}})
+                "approved": bool(approved_steps.get(str(best["id"]))),
+                "other_inbox": str(best["mailbox_id"]) != mailbox,
+                "ready": ready_(best)}})
     privacy = bid_ in notices
     mailbox_ok = bool(mailbox and mailbox in healthy_ids)
     ready = privacy and mailbox_ok and any(a["approved"] and a["campaign"] and a["campaign"]["ready"] for a in audiences)

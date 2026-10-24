@@ -13,7 +13,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { outreachError } from '@/hooks/useOutreachData';
 
 type StepState = 'done' | 'todo' | 'blocked';
-export interface BrandAudience { id: string; description: string; approved: boolean; campaign: null | { id: string; name: string; mailbox_id: string; ready: boolean } }
+export interface BrandAudience { id: string; description: string; approved: boolean; campaign: null | { id: string; name: string; mailbox_id: string; approved: boolean; other_inbox: boolean; ready: boolean } }
 export interface BrandSetup { id: string; name: string; sender_identity: string; mailbox_id: string | null; mailbox_address: string | null; mailbox_ok: boolean; privacy: boolean; audiences: BrandAudience[]; ready: boolean }
 export interface SetupStatus { steps: Record<string, StepState>; next: string | null; complete: boolean; started: boolean; brands?: BrandSetup[] }
 interface Account { id: string; email_address: string; display_name?: string | null; provider: string }
@@ -102,14 +102,18 @@ export default function OutreachSetupWizard({ businessId, adding = false, onClos
   const [active, setActive] = useState<string | null>(adding ? 'brand' : null);
   const [brandId, setBrandId] = useState('');
   const [newBrand, setNewBrand] = useState(adding);
+  // A ready brand shows its summary unless the owner opens one of its steps
+  // (Codex OUT-18 part B review 1: finishing the steps must reach the summary).
+  const [revisiting, setRevisiting] = useState(false);
   const brands = status.data?.brands || [];
   const brand = brandId ? brands.find(b => b.id === brandId)
     : newBrand ? undefined : (brands.find(b => !b.ready) || brands[0]);
   const steps = brandSteps(brand, status.data?.steps?.knowledge);
   const begun = !!status.data && (brands.length > 0 || Object.values(status.data.steps || {}).some(x => x === 'done'));
   const current = active || REQUIRED_STEPS.find(k => steps[k] !== 'done') || 'campaign';
-  const choose = (id: string) => { setBrandId(id); setNewBrand(false); setActive(null); };
-  const another = () => { setBrandId(''); setNewBrand(true); setActive('brand'); };
+  const choose = (id: string) => { setBrandId(id); setNewBrand(false); setActive(null); setRevisiting(false); };
+  const another = () => { setBrandId(''); setNewBrand(true); setActive('brand'); setRevisiting(false); };
+  const showReady = !!brand?.ready && !revisiting;
 
   if (status.isLoading) return <Typography>Loading setup…</Typography>;
   if (status.isError) return <Alert severity="warning">{outreachError(status.error)}</Alert>;
@@ -138,7 +142,7 @@ export default function OutreachSetupWizard({ businessId, adding = false, onClos
             {brands.map(b => <MenuItem key={b.id} value={b.id}>{b.name}{b.ready ? ' · ready' : ' · in progress'}</MenuItem>)}
           </TextField>
         )}
-        {brand?.ready && !active ? (
+        {showReady && brand ? (
           <BrandReady brand={brand} started={!!status.data?.started} busy={api.busy}
             onAnother={another} onStart={() => api.call('POST', 'finish')} onClose={onClose} />
         ) : (
@@ -147,7 +151,7 @@ export default function OutreachSetupWizard({ businessId, adding = false, onClos
               <Step key={step.key} completed={steps[step.key] === 'done'}>
                 <StepLabel
                   optional={step.optional ? <Typography variant="caption">Optional, can be done later</Typography> : undefined}
-                  onClick={() => setActive(step.key)} sx={{ cursor: 'pointer' }}
+                  onClick={() => { setActive(step.key); if (brand?.ready) setRevisiting(true); }} sx={{ cursor: 'pointer' }}
                 >
                   {step.label}
                 </StepLabel>
@@ -156,17 +160,18 @@ export default function OutreachSetupWizard({ businessId, adding = false, onClos
                     onSaved={id => { choose(id); setActive('mailboxes'); }} onChoose={choose} />}
                   {step.key === 'mailboxes' && <><MailboxStep api={api} accounts={accounts.data || []} />
                     {brand && <BrandInbox api={api} brand={brand} accounts={accounts.data || []} />}</>}
-                  {step.key === 'audience' && (brand ? <AudiencesStep api={api} brand={brand} /> : <NeedBrand />)}
-                  {step.key === 'privacy' && (brand ? <PrivacyStep api={api} brand={brand} /> : <NeedBrand />)}
+                  {step.key === 'audience' && (brand ? <AudiencesStep key={brand.id} api={api} brand={brand} /> : <NeedBrand />)}
+                  {step.key === 'privacy' && (brand ? <PrivacyStep key={brand.id} api={api} brand={brand} /> : <NeedBrand />)}
                   {step.key === 'knowledge' && <KnowledgeStep brandId={brand?.id || ''} />}
                   {step.key === 'limits' && <LimitsStep />}
-                  {step.key === 'campaign' && (brand ? <EmailsStep api={api} brand={brand} /> : <NeedBrand />)}
+                  {step.key === 'campaign' && (brand ? <EmailsStep key={brand.id} api={api} brand={brand} /> : <NeedBrand />)}
                 </StepContent>
               </Step>
             ))}
           </Stepper>
         )}
-        {status.data?.complete && !status.data.started && !(brand?.ready && !active) && (
+        {brand?.ready && revisiting && <Button sx={{ alignSelf: 'flex-start' }} onClick={() => setRevisiting(false)}>Back to {brand.name}'s summary</Button>}
+        {status.data?.complete && !status.data.started && !showReady && (
           <Box>
             <Button variant="contained" size="large" disabled={api.busy} onClick={() => api.call('POST', 'finish')}>
               Start outreach
@@ -272,7 +277,7 @@ function BrandsStep({ api, brands, current, onSaved, onChoose }: {
 
 function BrandInbox({ api, brand, accounts }: { api: Api; brand: BrandSetup; accounts: Account[] }) {
   return (
-    <Stack spacing={1} sx={{ mt: 2 }}>
+    <Stack spacing={1} sx={{ mt: 2 }} key={brand.id}>
       <TextField select label={`Send ${brand.name} emails from`} value={brand.mailbox_id || ''}
         helperText={brand.mailbox_id && !brand.mailbox_ok ? 'Check this mailbox above before it can send.' :
           'Each brand sends from its own inbox. Your general email default never changes this.'}
@@ -454,8 +459,8 @@ function EmailsStep({ api, brand }: { api: Api; brand: BrandSetup }) {
           <Stack spacing={1}>
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
               <Typography sx={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{a.description}</Typography>
-              {a.campaign && <Chip size="small" color={a.campaign.ready ? 'success' : 'default'}
-                label={a.campaign.ready ? 'Emails approved' : 'Waiting for your approval'} />}
+              {a.campaign && <Chip size="small" color={a.campaign.ready ? 'success' : a.campaign.other_inbox ? 'warning' : 'default'}
+                label={a.campaign.ready ? 'Emails approved' : a.campaign.other_inbox ? 'On another inbox' : !a.campaign.approved ? 'Waiting for your approval' : 'Inbox needs its check'} />}
             </Stack>
             {!a.campaign ? (
               <Button variant="contained" sx={{ alignSelf: 'flex-start' }} disabled={api.busy || !brand.mailbox_id}
@@ -463,6 +468,17 @@ function EmailsStep({ api, brand }: { api: Api; brand: BrandSetup }) {
                   mailbox_id: brand.mailbox_id, compliance_id: a.id, daily_cap: 5 })}>
                 Ask Aria to draft the emails
               </Button>
+            ) : a.campaign.other_inbox ? (
+              <Stack spacing={1}>
+                <Typography variant="body2">
+                  These emails send from a different inbox to {brand.name}'s{brand.mailbox_address ? ` (${brand.mailbox_address})` : ''}.
+                  Copy them across: same wording, which you approve once more.
+                </Typography>
+                <Button variant="contained" sx={{ alignSelf: 'flex-start' }} disabled={api.busy || !brand.mailbox_id}
+                  onClick={() => api.call('POST', `campaigns/${a.campaign!.id}/copy`, { mailbox_id: brand.mailbox_id })}>
+                  Copy the emails to {brand.name}'s inbox
+                </Button>
+              </Stack>
             ) : a.campaign.ready && open !== a.id ? (
               <Button size="small" sx={{ alignSelf: 'flex-start' }} onClick={() => setOpen(a.id)}>Read or edit the emails</Button>
             ) : <CampaignTemplates campaignId={a.campaign.id} />}

@@ -179,3 +179,63 @@ def test_choosing_a_brand_mailbox_later_keeps_the_brand(db, biz):
                                              "default_mailbox_id": WORKSPACE})
         row = brand_row(m.status(s, biz), gym)
     assert again["id"] == gym["id"] and row["mailbox_id"] == WORKSPACE
+
+
+# ------------------------------------------ Codex OUT-18 part B review 1 ---
+
+def test_an_older_campaign_on_a_failing_inbox_never_hides_a_ready_one(db, biz):
+    m = setup_module_or_missing()
+    with Session(db) as s:
+        m.begin(s, biz, OWNER)
+        for box in (WORKSPACE, PARTNERS):
+            m.register_mailbox(s, biz, OWNER, {"mailbox_id": box, "daily_cap": 5})
+            m.check_mailbox_health(s, biz, OWNER, box, resolve=dns(GOOD_GOOGLE))
+        gym = m.save_brand(s, biz, OWNER, {"name": "New Body Gym", "sender_identity": "New Body Gym Ltd"})
+        m.approve_privacy_notice(s, biz, OWNER, gym["id"], {"text": draft_notice({})})
+        schools = audience(m, s, biz, gym, "Schools", "school")
+        campaign(m, s, biz, gym, schools, WORKSPACE, "Old")            # approved, on an inbox that then fails
+        campaign(m, s, biz, gym, schools, PARTNERS, "New")             # approved, on a healthy inbox
+        s.execute(text("UPDATE outreach_mailboxes SET health_status = 'fail' WHERE mailbox_id = :m"), {"m": WORKSPACE})
+        s.commit()
+        row = brand_row(m.status(s, biz), gym)
+    assert row["mailbox_id"] == PARTNERS and row["ready"] is True
+    assert row["audiences"][0]["campaign"]["name"] == "New"
+
+
+def test_after_changing_a_brands_inbox_its_old_emails_show_as_on_another_inbox(db, biz):
+    m = setup_module_or_missing()
+    with Session(db) as s:
+        m.begin(s, biz, OWNER)
+        fit, _ = fitfutures(m, s, biz)
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": WORKSPACE, "daily_cap": 5})
+        m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(GOOD_GOOGLE))
+        m.save_brand(s, biz, OWNER, {"name": "FitFutures", "sender_identity": "FitFutures by UKFI",
+                                     "default_mailbox_id": WORKSPACE})
+        row = brand_row(m.status(s, biz), fit)
+    c = row["audiences"][0]["campaign"]
+    assert row["ready"] is False and c["approved"] is True and c["other_inbox"] is True and c["ready"] is False
+
+
+def test_a_newer_version_of_an_audience_replaces_the_older_one(db, biz):
+    m = setup_module_or_missing()
+    with Session(db) as s:
+        m.begin(s, biz, OWNER)
+        fit, first = fitfutures(m, s, biz, emails=False)
+        again = m.draft_audience(s, biz, OWNER, {"brand_id": fit["id"], "description": "Gyms and health centres that could host an intern",
+                                                "segments": ["gym"], "regions": ["Essex"]}, draft=draft_lia)
+        row = brand_row(m.status(s, biz), fit)
+    assert [a["id"] for a in row["audiences"]] == [again["id"]] and row["audiences"][0]["approved"] is False
+    assert first["id"] != again["id"]
+
+
+def test_status_never_shows_another_business_brands(db, biz):
+    from test_outreach_setup import B, OTHER_OWNER
+    m = setup_module_or_missing()
+    other = grant(db, bid=B)
+    with Session(db) as s:
+        m.begin(s, other, OTHER_OWNER)
+        m.save_brand(s, other, OTHER_OWNER, {"name": "MSC", "sender_identity": "MSC Ltd"})
+        m.begin(s, biz, OWNER)
+        fitfutures(m, s, biz)
+        names = [b["name"] for b in m.status(s, biz)["brands"]]
+    assert names == ["FitFutures"]
