@@ -299,8 +299,9 @@ def _read(session, read, arguments, business_id):
                 "scope": "per_brand",
                 "new_emails_per_brand_per_day": min(20, int(result["item"]["business_daily_cap"])) if result["item"] else 20,
                 "message": "business_daily_cap applies separately to EACH brand, product or service (at most 20 new "
-                           "emails a day per brand), never to the business as a whole. Each mailbox's warm-up limit "
-                           "and the monthly allowance also apply; the lowest limit wins."}
+                           "emails a day per brand), never to the business as a whole. Each brand's monthly allowance is "
+                           "its daily limit times that month's UK weekdays. Each mailbox's warm-up limit also "
+                           "applies; the lowest limit wins."}
     else:
         result.update(items=[item for item, _ in projected], total=total,
                       limit=arguments["limit"], offset=arguments["offset"])

@@ -51,11 +51,14 @@ Examples:
   - each mailbox's warm-up cap (5 → 10 → 20);
   - the campaign cap;
   - the 9–5 weekday window;
-  - the **monthly allowance of 500 emails per business** (`metering.reserve_outreach_usage`).
+- **Monthly allowance per brand (Mike, 25 Oct 2026):** "We don't want businesses like mine running out mid campaign." It replaces the fixed 500 a month per business.
+  - Each brand's allowance is its daily limit × the UK weekdays in the month (440 in October 2026 at 20 a day).
+  - It is counted from the brand's usage events for the month, under the same lock.
+  - The business-wide sent/held meters remain for reporting and billing.
 
 **Before scaling (Codex OUT-18 C review 1, P3):** the per-brand count filters `outreach_usage_events` by business, date and state. No index matches that directly; it is fine at pilot volume. Get a representative `EXPLAIN` from production before outreach volume grows, and if needed add `(business_id, local_send_date, state)` in a later migration.
 
-**Open (pricing):** at 20 a day per brand, two brands reach 500 in about 12 weekdays. Whether the allowance becomes per brand is Mike's call.
+**Pricing (OUT-19):** budgets, top-ups and boost are priced so outreach always covers its AI and sending costs with a net profit. That is designed separately, for Mike's approval.
 
 ## Part B — wizard and screens (YELLOW)
 

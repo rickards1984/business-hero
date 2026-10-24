@@ -443,7 +443,7 @@ def test_daily_cap_includes_accepted_reserved_and_unknown(h):
 
 # OUT-18 (Mike, Option A): 20 new emails a day PER BRAND, not per business.
 
-def sent_today(h, n, brand, *, states=('committed',)):
+def sent_today(h, n, brand, *, states=('committed',), day='2026-10-23'):
     """n outreach emails already held or sent today for `brand`, from a
     campaign on another mailbox (so only the brand's count is affected)."""
     campaign = add(h.s, 'campaigns', brand_id=brand, mailbox_id=DEFAULT, name=f'Other {brand[:4]}',
@@ -453,7 +453,7 @@ def sent_today(h, n, brand, *, states=('committed',)):
         message = add(h.s, 'messages', campaign_id=campaign, mailbox_id=DEFAULT, direction='outbound',
                       state='accepted')
         add(h.s, 'usage_events', operation_key=f'{campaign}:{i}', kind='outreach_emails_sent', quantity=1,
-            state=states[i % len(states)], mailbox_id=DEFAULT, local_send_date='2026-10-23', message_id=message,
+            state=states[i % len(states)], mailbox_id=DEFAULT, local_send_date=day, message_id=message,
             period_start=STAMP, period_end=STAMP)
     h.s.commit()
 
@@ -498,12 +498,51 @@ def test_the_owners_lower_daily_limit_applies_to_each_brand(h):
     refused_today(h, card, 5)
 
 
-def test_monthly_allowance_comes_from_generic_meter(h):
+# OUT-18 (Mike, 25 Oct 2026): the monthly allowance is PER BRAND — its daily
+# limit times the UK weekdays in the month — so no brand runs out mid-campaign.
+OCT_2026_WEEKDAYS = sum(1 for d in range(1, 32) if datetime(2026, 10, d).weekday() < 5)   # 22
+
+
+def test_the_business_wide_500_no_longer_stops_a_brand(h):
     card = propose(h)
     insert(h.s, 'usage_meters', business_id=A, meter='outreach_emails_sent', period='2026-10',
            value=500, updated_at=STAMP)
     h.s.commit()
-    refused(h, card)
+    assert approve(h, card)['status'] == 'done'
+
+
+def test_a_brand_at_its_monthly_allowance_sends_no_more(h):
+    card = propose(h)
+    sent_today(h, 20 * OCT_2026_WEEKDAYS, BRAND, day='2026-10-01')
+    refused_today(h, card, 20 * OCT_2026_WEEKDAYS)
+
+
+def test_a_brand_one_short_of_its_monthly_allowance_can_still_send(h):
+    card = propose(h)
+    sent_today(h, 20 * OCT_2026_WEEKDAYS - 1, BRAND, day='2026-10-01')
+    assert approve(h, card)['status'] == 'done'
+
+
+def test_last_months_sends_never_count_toward_this_months_allowance(h):
+    card = propose(h)
+    sent_today(h, 20 * OCT_2026_WEEKDAYS, BRAND, day='2026-09-30')
+    assert approve(h, card)['status'] == 'done'
+
+
+def test_another_brands_full_month_never_stops_this_brand(h):
+    card = propose(h)
+    other = uid('other-brand')
+    add(h.s, 'brands', id=other, name='FitFutures', privacy_url='https://example.invalid/p2',
+        sender_identity='FitFutures', version=1)
+    sent_today(h, 20 * OCT_2026_WEEKDAYS, other, day='2026-10-01')
+    assert approve(h, card)['status'] == 'done'
+
+
+def test_the_owners_lower_daily_limit_lowers_the_monthly_allowance_too(h):
+    card = propose(h)
+    change(h, 'outreach_settings', business_daily_cap=5)
+    sent_today(h, 5 * OCT_2026_WEEKDAYS, BRAND, day='2026-10-01')
+    refused_today(h, card, 5 * OCT_2026_WEEKDAYS)
 
 
 @pytest.mark.parametrize('moment,allowed', [

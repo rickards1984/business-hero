@@ -213,11 +213,27 @@ def test_two_cards_for_the_same_email_at_once_send_once(pg):
 
 
 def test_the_last_monthly_slot_goes_to_exactly_one(pg):
+    """OUT-18: the monthly allowance is per brand (daily limit x UK weekdays).
+    With a daily limit of 2, October 2026 allows 44; with 43 already sent this
+    month (none today), two simultaneous approvals send exactly one."""
     other = _second_prospect(pg)
+    weekdays = sum(1 for d in range(1, 32) if __import__("datetime").date(2026, 10, d).weekday() < 5)
     with pg.engine.begin() as c:
-        c.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) "
-                       "VALUES (:b, 'outreach_emails_sent', '2026-10', 499, now()), "
-                       "(:b, 'outreach_emails_reserved', '2026-10', 0, now())"), {"b": A})
+        c.execute(text("UPDATE outreach_settings SET business_daily_cap = 2 WHERE business_id = :b"), {"b": A})
+        for i in range(2 * weekdays - 1):
+            message = str(uuid.uuid4())
+            c.execute(text(
+                "INSERT INTO outreach_messages (id, business_id, prospect_id, campaign_id, mailbox_id, kind, origin, "
+                "direction, to_emails, cc_emails, subject, body, payload_hash, payload_version, state, "
+                "idempotency_key, authority_snapshot) VALUES (:id, :b, :p, :c, :m, 'imported', 'import', 'outbound', "
+                "ARRAY['someone@example.invalid'], ARRAY[]::text[], 'Earlier', 'Earlier', 'h', 1, 'imported', :k, "
+                "'{}'::jsonb)"),
+                {"id": message, "b": A, "p": base.PROSPECT, "c": CAMPAIGN, "m": base.BOX, "k": f"earlier-{i}"})
+            c.execute(text(
+                "INSERT INTO outreach_usage_events (business_id, operation_key, kind, quantity, state, period_start, "
+                "period_end, mailbox_id, local_send_date, message_id) VALUES (:b, :k, 'outreach_emails_sent', 1, "
+                "'committed', '2026-09-30T23:00:00Z', '2026-10-31T23:59:59Z', :m, '2026-10-01', :msg)"),
+                {"b": A, "k": f"earlier-{i}", "m": base.BOX, "msg": message})
     # Steady state: every row the claim touches already exists, so no insert
     # conflict quietly serialises the two approvals; only the locks can.
     with Session(pg.engine) as s:
@@ -229,8 +245,8 @@ def test_the_last_monthly_slot_goes_to_exactly_one(pg):
     results, errors = _together(pg, lambda: _approve(pg, one), lambda: _approve(pg, two))
     assert len(pg.p.sends) == 1, (results, errors)
     assert len(errors) == 1
-    assert _count(pg, "SELECT value FROM usage_meters WHERE business_id = :b AND meter = 'outreach_emails_sent' "
-                      "AND period = '2026-10'", b=A) == 500
+    assert _count(pg, "SELECT count(*) FROM outreach_usage_events WHERE business_id = :b AND local_send_date >= '2026-10-01' "
+                      "AND state IN ('reserved', 'committed', 'unknown')", b=A) == 2 * weekdays
 
 
 def test_a_lost_claim_rolls_everything_back(pg, monkeypatch):
