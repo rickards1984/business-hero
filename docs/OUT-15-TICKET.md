@@ -137,3 +137,12 @@ From the backlog, also done:
 - **Copy to another mailbox** is on each campaign.
 
 Tests: setup **77 passed**; `./check.sh full` is green; the Postgres wizard passes.
+
+## Codex review 4: one P1 left; escalated to Mike after three cycles
+Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-4.md`. **Mike's decision (24 Oct 2026): "Recommended — let's be sure everything works as well as it possibly could."** Stop hand-writing SPF:
+- **SPF:** evaluated by **pyspf** (the established RFC 7208 implementation). The question asked is the real one: does this domain's SPF authorise a real provider sending address (Google 209.85.220.41; Microsoft 40.107.22.50)? Includes are followed, unknown mechanisms are permanent errors, a failed lookup is a temporary error, and only `pass` passes. Production TXT lookups raise on timeouts, so an outage is never "no record".
+- **DKIM:** tag names are case-sensitive (RFC 6376 §3.2).
+- **Real-DNS check** (Claude, live): google.com authorises 209.85.220.41 (True) and refuses TEST-NET 192.0.2.10 (False); its DMARC is usable.
+- **Backlog fixes:** a recheck without a cap keeps the owner's daily limit; a held mailbox with valid records reports **On hold** with its reason, never "Ready".
+- **Still to come in OUT-16, also agreed by Mike:** the definitive check. Each mailbox sends a test email to the owner, and Business Hero reads the receiving server's `Authentication-Results`.
+- **Tests:** setup **84 passed**; `./check.sh full` is green; the Postgres wizard passes. `pyspf>=2.0.14` is in both requirements files.

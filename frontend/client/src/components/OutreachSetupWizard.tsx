@@ -15,7 +15,7 @@ import { outreachError } from '@/hooks/useOutreachData';
 type StepState = 'done' | 'todo' | 'blocked';
 export interface SetupStatus { steps: Record<string, StepState>; next: string | null; complete: boolean; started: boolean }
 interface Account { id: string; email_address: string; display_name?: string | null; provider: string }
-interface Health { status: 'pass' | 'fail'; advice: string[]; evidence: Record<string, unknown> }
+interface Health { status: 'pass' | 'fail'; advice: string[]; evidence: Record<string, unknown>; enabled?: boolean; hold?: string | null }
 
 const STEPS: { key: string; label: string; optional?: boolean }[] = [
   { key: 'brand', label: 'Your brands' },
@@ -171,7 +171,8 @@ function BrandStep({ api, accounts, onSaved }: { api: Api; accounts: Account[]; 
 function MailboxStep({ api, accounts }: { api: Api; accounts: Account[] }) {
   const [results, setResults] = useState<Record<string, Health>>({});
   async function addAndCheck(id: string) {
-    if (!(await api.call('POST', 'mailboxes', { mailbox_id: id, daily_cap: 5 }))) return;
+    // No cap on a check: a new mailbox starts at 5 and an existing limit is kept.
+    if (!(await api.call('POST', 'mailboxes', { mailbox_id: id }))) return;
     const health = await api.call<Health>('POST', `mailboxes/${id}/check`);
     if (health) setResults(r => ({ ...r, [id]: health }));
   }
@@ -193,12 +194,13 @@ function MailboxStep({ api, accounts }: { api: Api; accounts: Account[] }) {
               <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
                 <Typography sx={{ overflowWrap: 'anywhere' }}>{a.email_address}</Typography>
                 {a.display_name && <Chip size="small" label={a.display_name} />}
-                {health && <Chip size="small" color={health.status === 'pass' ? 'success' : 'warning'}
-                  label={health.status === 'pass' ? 'Ready' : 'Needs attention'} />}
+                {health && <Chip size="small" color={health.status === 'pass' && !health.hold ? 'success' : 'warning'}
+                  label={health.hold ? 'On hold' : health.status === 'pass' ? 'Ready' : 'Needs attention'} />}
               </Stack>
               <Button size="small" variant="outlined" disabled={api.busy} onClick={() => addAndCheck(a.id)}>
                 {health ? 'Check again' : 'Use for outreach and check'}
               </Button>
+              {health?.hold && <Alert severity="warning" sx={{ overflowWrap: 'anywhere' }}>Its records are fine, but this mailbox is on hold: {health.hold}. A passing check never lifts a hold.</Alert>}
               {health?.advice?.map(line => <Alert key={line} severity="info" sx={{ overflowWrap: 'anywhere' }}>{line}</Alert>)}
             </Stack>
           </Paper>

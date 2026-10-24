@@ -23,7 +23,8 @@ def _key():
     return REAL_DKIM
 
 
-RECORDS = {}
+RECORDS = {"_spf.google.com": ["v=spf1 include:_netblocks.google.com ~all"],
+           "_netblocks.google.com": ["v=spf1 ip4:209.85.128.0/17 ~all"]}
 for domain in ("setup-one.example", "setup-two.example"):
     RECORDS[domain] = ["v=spf1 include:_spf.google.com ~all"]
     RECORDS[f"google._domainkey.{domain}"] = ["v=DKIM1; p=" + _key()]

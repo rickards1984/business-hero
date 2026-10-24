@@ -34,7 +34,8 @@ class Brand(Body):
 
 class Mailbox(Body):
     mailbox_id: UUID
-    daily_cap: int = Field(default=5, ge=1, le=20, strict=True)
+    # Omitted on a recheck, so the owner's chosen limit is kept (review 4).
+    daily_cap: Optional[int] = Field(default=None, ge=1, le=20, strict=True)
 
 
 class Audience(Body):

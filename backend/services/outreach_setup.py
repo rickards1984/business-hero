@@ -36,9 +36,13 @@ FREE_WEBMAIL = {                           # decision B: never an outreach sende
 }
 PROVIDERS = {
     "google": {"spf": "_spf.google.com", "selectors": ("google",), "name": "Google Workspace",
+               # a real Gmail/Workspace outbound address; SPF must authorise it
+               "sender_ip": "209.85.220.41",
                "dkim_help": "In the Google Workspace admin console, open Apps, Google Workspace, "
                             "Gmail, Authenticate email, generate a DKIM key and publish the record it gives you."},
     "microsoft": {"spf": "spf.protection.outlook.com", "selectors": ("selector1", "selector2"),
+                  # a real Exchange Online outbound address (40.107.0.0/16)
+                  "sender_ip": "40.107.22.50",
                   "name": "Microsoft 365",
                   "dkim_help": "In Microsoft 365 Defender, open Email authentication settings, DKIM, "
                                "enable signing for your domain and publish the two selector CNAME records."},
@@ -172,11 +176,13 @@ def register_mailbox(session, business, user, data: dict) -> dict:
     _authority(session, business, user)
     bid = str(business.id)
     account = send.one(session, "email_accounts", bid, data.get("mailbox_id"), True)
-    cap = int(data.get("daily_cap") or 5)
+    given = data.get("daily_cap")
+    cap = int(given or 5)
     send.require(1 <= cap <= 20, "A daily cap is 1–20", 422)
     found = send.rows(session, "outreach_mailboxes", bid, "AND mailbox_id = :m", {"m": str(account["id"])}, True)
     if found:
-        send.update(session, "outreach_mailboxes", bid, found[0]["id"], daily_cap=cap, updated_at=now())
+        if given is not None:   # a recheck without a cap never resets the owner's limit
+            send.update(session, "outreach_mailboxes", bid, found[0]["id"], daily_cap=cap, updated_at=now())
         row = found[0]
     else:
         send.insert(session, "outreach_mailboxes", bid, mailbox_id=str(account["id"]), enabled=False,
@@ -191,8 +197,10 @@ def dns_txt(name: str) -> list:
     import dns.resolver
     try:
         answer = dns.resolver.resolve(name, "TXT", lifetime=5)
-    except Exception:  # NXDOMAIN, no answer, timeout: treated as no record
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
         return []
+    # A timeout or broken nameserver raises: SPF then reports a temporary
+    # error rather than mistaking an outage for "no record".
     return [b"".join(r.strings).decode("utf-8", "replace") for r in answer]
 
 
@@ -219,10 +227,10 @@ def _usable_dkim(record: str) -> bool:
     tags = _tag_list(record)
     if not tags:
         return False
-    names = [k.lower() for k, _ in tags]
+    names = [k for k, _ in tags]          # tag names are case-sensitive (RFC 6376 3.2)
     if len(set(names)) != len(names):
         return False                                   # duplicate tags are invalid
-    t = {k.lower(): v for k, v in tags}
+    t = dict(tags)
     if "v" in t and (names[0] != "v" or t["v"] != "DKIM1"):
         return False
     key_type = t.get("k", "rsa").lower()
@@ -249,23 +257,33 @@ def _usable_dkim(record: str) -> bool:
     return isinstance(key, rsa.RSAPublicKey) and key.key_size >= 1024
 
 
-def _spf_passes_provider(record: str, provider: str) -> bool:
-    """RFC 7208, read left to right: the FIRST mechanism that can match the
-    provider decides. The provider's include passes only with a pass
-    qualifier (none or +); any include of it with -, ~ or ? fails, and an
-    `all` before it ends evaluation. A redirect without the include fails."""
-    terms = record.split()
-    if not terms or terms[0] != "v=spf1":
+def _spf_authorises(domain: str, sender_ip: str, txt: Callable, other: Callable) -> bool:
+    """RFC 7208 via pyspf, the established implementation (Mike, 24 Oct
+    2026, after Codex's OUT-15 review 4): would this domain's SPF authorise a
+    real sending address of the provider? Includes are followed, unknown
+    mechanisms are permanent errors, and a lookup that fails is a temporary
+    error — only a genuine `pass` passes."""
+    import spf
+
+    class Query(spf.query):
+        def dns(self, name, qtype, cnames=None, ignore_void=False):
+            name = str(name).rstrip(".").lower()
+            if qtype == "SPF":
+                return []
+            if qtype == "TXT":
+                try:
+                    return [(r.encode(),) for r in txt(name)]
+                except Exception as exc:
+                    raise spf.TempError(f"DNS lookup failed for {name}: {type(exc).__name__}")
+            try:
+                return other(name, qtype)
+            except Exception as exc:
+                raise spf.TempError(f"DNS lookup failed for {name}: {type(exc).__name__}")
+    try:
+        result = Query(i=sender_ip, s=f"postmaster@{domain}", h=domain, strict=True, timeout=15).check()[0]
+    except Exception:
         return False
-    for term in terms[1:]:
-        t = term.lower()
-        qualifier = t[0] if t[0] in "+-~?" else "+"
-        mechanism = t[1:] if t[0] in "+-~?" else t
-        if mechanism == "all":
-            return False
-        if mechanism == f"include:{provider}":
-            return qualifier == "+"
-    return False
+    return result == "pass"
 
 
 def _usable_dmarc(record: str) -> bool:
@@ -278,7 +296,23 @@ def _usable_dmarc(record: str) -> bool:
     return policy in ("none", "quarantine", "reject")
 
 
-def _evaluate(account: dict, resolve: Callable) -> dict:
+def dns_other(name: str, qtype: str) -> list:
+    """A, AAAA, MX and PTR lookups for SPF mechanisms, in pyspf's shape."""
+    import dns.resolver
+    try:
+        answer = dns.resolver.resolve(name, qtype, lifetime=5)
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return []
+    if qtype in ("A", "AAAA"):
+        return [r.address for r in answer]
+    if qtype == "MX":
+        return [(r.preference, r.exchange.to_text(True)) for r in answer]
+    if qtype == "PTR":
+        return [r.target.to_text(True) for r in answer]
+    return []
+
+
+def _evaluate(account: dict, resolve: Callable, other_records: Optional[Callable] = None) -> dict:
     """Plain DNS checks for one sending mailbox. Never raises."""
     address = _address(account["email_address"])
     domain = address.split("@")[-1] if "@" in address else ""
@@ -299,11 +333,10 @@ def _evaluate(account: dict, resolve: Callable) -> dict:
             return [str(t) for t in (resolve(name) or [])]
         except Exception:  # a resolver failure is a missing record, never a pass
             return []
+    if other_records is None:   # an injected TXT resolver (tests) has no other records
+        other_records = dns_other if resolve is dns_txt else (lambda name, qtype: [])
     advice = []
-    spf = [t for t in txt(domain) if t.strip().split(" ")[0].lower() == "v=spf1"]
-    # Exactly one SPF record (two is a permanent error), naming the provider
-    # as a whole mechanism — never a substring (Codex OUT-15 review 1).
-    if len(spf) == 1 and _spf_passes_provider(spf[0].strip(), provider["spf"]):
+    if _spf_authorises(domain, provider["sender_ip"], resolve, other_records):
         evidence["spf"] = "pass"
     else:
         advice.append(f"SPF: your domain's SPF record must include {provider['name']}. Add or edit the TXT "
@@ -359,8 +392,11 @@ def check_mailbox_health(session, business, user, mailbox_id, *, resolve: Callab
     found = send.rows(session, "outreach_mailboxes", bid, "AND mailbox_id = :m", {"m": str(account["id"])}, True)
     send.require(found, "Add this mailbox to outreach first", 409)
     _apply_health(session, bid, found[0], result, now(), daily=False)   # the CURRENT row, under lock
+    after = send.rows(session, "outreach_mailboxes", bid, "AND id = :id", {"id": str(found[0]["id"])})[0]
     session.commit()
-    return result
+    reason = after["pause_reason"]
+    return {**result, "enabled": bool(after["enabled"]),
+            "hold": reason if reason and not str(reason).startswith(DNS_PAUSE) else None}
 
 
 def daily_health(session, *, resolve: Callable = dns_txt, moment: Optional[datetime] = None) -> dict:
