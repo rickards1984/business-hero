@@ -331,3 +331,23 @@ def test_the_home_line_names_its_period():
     hook = (_P(__file__).parents[2] / "frontend/client/src/hooks/useDashboardData.ts").read_text()
     assert "outreach emails for you automatically in the last week" in hook or \
         "In the last week I sent ${plural(outreach" in hook
+
+
+def test_the_pace_slot_is_reserved_from_the_current_time_not_a_stale_one(h, monkeypatch):
+    """Review 2 P1: a run that started 7 minutes ago must reserve from NOW,
+    or its slot has already expired and another run could send at once."""
+    m = autopilot()
+    granted(h)
+    later = NOW + timedelta(minutes=7)
+    monkeypatch.setattr(m, "now", lambda: later)
+    assert m.send_next(h.s, h.b, CAMPAIGN, moment=NOW, rng=lambda: 0.0)["sent"]   # stale moment passed in
+    doc = json.loads(h.s.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"), {"b": A}).scalar())
+    from services.chase_replies import _parse
+    assert _parse(doc["outreach_autopilot_pace"]["next_at"]) >= later + timedelta(minutes=6)
+
+
+def test_run_due_reads_the_clock_for_each_business():
+    autopilot()
+    import inspect
+    source = inspect.getsource(autopilot().run_due)
+    assert "send_next(session, business, cid)" in source, "no single stale moment passed down"

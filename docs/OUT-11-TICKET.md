@@ -95,3 +95,9 @@ Backlog, also done:
 - the home line now says "In the last week I sent N outreach emails for you automatically".
 
 Tests: autopilot **26 passed**; with send and research, **229 passed**; `./check.sh full` is green; Postgres passes.
+
+## Codex review 2: one P1 (repair cycle 2)
+Preserved verbatim in `audits/OUT-11-CODEX-REVIEW-2.md`. The revoke fix was confirmed.
+- **Pacing from a stale moment:** `run_due` no longer passes one moment captured at its start. Each `send_next` reads the clock afresh, and `_reserve_pace` reserves from `max(moment, now())`, so a run that has been busy for a while can never hand out an already-expired slot.
+
+Its Ruff backlog item was already fixed (`fc4…`, the unused variable). Tests: autopilot **29 passed**.

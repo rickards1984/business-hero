@@ -230,7 +230,9 @@ def send_next(session, business, campaign_id, *, moment: Optional[datetime] = No
     session.rollback()
     if step is None:
         return {"sent": None, "waiting": "No approved step is due"}
-    token, previous = _reserve_pace(session, bid, moment, MIN_GAP + RANDOM_GAP * float(rng()))
+    # Reserve from the CURRENT time, never a moment captured earlier in the
+    # run (Codex OUT-11 review 2: a stale moment could hand out an expired slot).
+    token, previous = _reserve_pace(session, bid, max(moment, now()), MIN_GAP + RANDOM_GAP * float(rng()))
     if token is None:
         return {"sent": None, "waiting": previous}
     proposed = aria_actions.propose(session, business, None, "send_outreach",
@@ -275,7 +277,7 @@ def run_due(session, *, moment: Optional[datetime] = None) -> list:
         business.feature_flags = send.loads(business.feature_flags) or {}
         for cid in sorted(grants):
             try:
-                out = send_next(session, business, cid, moment=moment)
+                out = send_next(session, business, cid)   # each reads the clock afresh
             except Exception:
                 session.rollback()
                 continue
