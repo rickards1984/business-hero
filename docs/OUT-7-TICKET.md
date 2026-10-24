@@ -367,3 +367,27 @@ scope extension is authorised, then rerun `./check.sh`. Updating the live dump
 requires a separately authorised real census after deployment, never invented
 columns from migration text. No change to Claude-owned files is needed to resolve
 this particular guard conflict.
+
+## Claude's review of Stage B, and Claude's parts — 24 October 2026
+**Claude's parts:**
+- `aria_actions`: `reply_outreach` is registered, owner-only, through `search_reply_before_claim` / `prepare_reply_claim` / `dispatch_reply` (the OUT-6 path, parameterised). It can't be raised by `propose` or from chat, and can't be edited.
+- `chase_replies._store`: keeps recipients and the three threading headers (bounded), then calls `services.outreach_replies.storage_completed` once after commit. A failure there never breaks chasing.
+- The storage notification moved from `app/email/service.py` to `services/outreach_replies.py`, so that file is unchanged; the pre-push secret scan flags any change to it.
+
+**Postgres review** (local harness, 035–038): the new `test_outreach_replies_rls.py` exercises the real service path, with two sessions:
+- one reply gives one card and one send;
+- two syncs drafting the same reply give one card;
+- two replies on different threads at once give at most one answer (both handed over: decision 3);
+- two taps send once;
+- an owner takeover between search and claim stops the answer;
+- a lost claim rolls back events, jobs, messages, the slot binding and the meters.
+
+It passes alongside the OUT-6 races and the schema and isolation suites (76).
+
+**Bug found on Postgres and fixed (Claude, in Codex's `outreach_send.py`):** the slot stored the 16-character card version as `payload_hash`, which 038's CHECK (64 characters) rejects, so every answer send would have failed in production. It now stores the full SHA-256, whose first 16 characters are the version. Test: `test_hook_the_slot_records_the_full_payload_hash`.
+
+**Review of Codex's Stage B: APPROVE after that fix.** Backlog:
+1. Microsoft Graph's search returns no threading headers, so its replies always hand over until the adapter fetches `internetMessageId`/headers.
+2. The default storage notification calls no classifier, so every reply hands over until router-backed classification is activated (a stated gate).
+
+**Push blocked on purpose:** `test_schema_conformance` refuses writes to `outreach_knowledge`/`outreach_reply_slots` until 038 is live and the schema dump is regenerated.

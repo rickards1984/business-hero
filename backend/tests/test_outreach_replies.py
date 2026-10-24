@@ -668,3 +668,16 @@ def test_hook_an_answer_card_cannot_be_edited(r):
             aria_actions.edit(r.s, r.b, card['id'], change)
         assert exc.value.status_code == 422
     assert aria_actions.approve(r.s, r.b, card['id'], OWNER, version=card['version'])['status'] == 'done'
+
+
+def test_hook_the_slot_records_the_full_payload_hash(r):
+    """Found on Postgres (Claude, 24 Oct): 038 requires a 64-character hash;
+    the card version is its first 16 characters. SQLite does not enforce it."""
+    from services import aria_actions
+    fact(r)
+    incoming(r)
+    scan(r)
+    card = answer(r)
+    aria_actions.approve(r.s, r.b, card['id'], OWNER, version=card['version'])
+    stored = r.s.execute(text('SELECT payload_hash FROM outreach_reply_slots')).scalar_one()
+    assert len(stored) == 64 and stored.startswith(card['version'])

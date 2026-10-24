@@ -344,7 +344,12 @@ def prepare_claim(session, business, *, action_id, payload, user_id, version, mo
     if is_reply:
         reply = one(session, 'outreach_replies', bid, payload['reply_id'])
         update(session, 'outreach_messages', bid, message_id, reply_target_id=reply['matched_message_id'])
-        update(session, 'outreach_reply_slots', bid, payload['slot_id'], message_id=message_id, payload_hash=version)
+        # 038 stores the full SHA-256; the card version is its first 16 characters.
+        full_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':'),
+                                              default=str).encode()).hexdigest()
+        require(full_hash.startswith(version))
+        update(session, 'outreach_reply_slots', bid, payload['slot_id'], message_id=message_id,
+               payload_hash=full_hash)
     action = one(session, 'aria_actions', bid, action_id, True)
     require(action['action_type'] == ('reply_outreach' if is_reply else 'send_outreach') and action['status'] == 'proposed' and
             loads(action['payload']) == payload and moment < _parse(action['expires_at']))
