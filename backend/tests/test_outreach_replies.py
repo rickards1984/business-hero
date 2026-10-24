@@ -219,23 +219,54 @@ def test_answer_while_reply_is_being_classified_waits_without_handing_over(r):
     assert answer(r)['status'] == 'proposed'
 
 
-def test_a_reply_left_unclassified_is_handed_to_the_owner_not_kept_waiting(r, monkeypatch):
-    """If classification never finished (a crash between storing and
-    classifying), the owner still gets the reply after a bounded wait."""
-    from datetime import datetime, timedelta, timezone
+def _stored(r, session):
+    from services.chase_replies import _parse
+    return _parse(session.execute(text('SELECT updated_at FROM outreach_replies')).scalar_one())
+
+
+def test_an_unclassified_reply_waits_at_most_fifteen_minutes(r, monkeypatch):
+    """The wait is measured from the stored reply: just under 15 minutes it
+    still waits; at 15 minutes the owner gets the reply."""
+    from datetime import timedelta
     fact(r)
     incoming(r)
-    # Stored rows carry the real clock (outreach_send.insert), so wait from that.
-    later = datetime.now(timezone.utc) + timedelta(minutes=16)
+    seen = []
     def stalled(_):
-        # The reply is stored as pending/unknown; 16 minutes pass with no classification.
-        rid = r.s.execute(text('SELECT id FROM outreach_replies')).scalar_one()
-        monkeypatch.setattr(r.replies, 'now', lambda: later)
+        # Results are checked after scan: scan's classifier guard swallows exceptions.
         with Session(r.engine) as other:
             worker = SimpleNamespace(**{**vars(r), 's': other})
-            assert answer(worker, rid=rid)['status'] == 'handed_over'
+            stored = _stored(r, other)
+            monkeypatch.setattr(r.replies, 'now', lambda: stored + timedelta(minutes=15) - timedelta(seconds=1))
+            seen.append(answer(worker)['status'])
+            monkeypatch.setattr(r.replies, 'now', lambda: stored + timedelta(minutes=15))
+            seen.append(answer(worker)['status'])
         return {'category': 'question', 'confidence': 100, 'classification_version': 1}
     scan(r, classify=stalled)
+    assert seen == ['awaiting_classification', 'handed_over']
+    assert r.s.execute(text('SELECT resolution, category FROM outreach_replies')).one() == ('handed_over', 'unknown')
+    assert r.s.execute(text('SELECT count(*) FROM outreach_reply_slots')).scalar_one() == 0
+
+
+class WorkerDied(BaseException):
+    """Not an Exception: scan's classifier guard must not catch it."""
+
+
+def test_a_reply_whose_classifier_died_reaches_the_owner_on_a_later_scan(r, monkeypatch):
+    from datetime import timedelta
+    fact(r)
+    incoming(r)
+    def dies(_):
+        raise WorkerDied()
+    with pytest.raises(WorkerDied):
+        scan(r, classify=dies)
+    r.s.rollback()
+    stored = _stored(r, r.s)
+    assert r.s.execute(text('SELECT resolution, category FROM outreach_replies')).one() == ('pending', 'unknown')
+    monkeypatch.setattr(r.replies, 'now', lambda: stored + timedelta(minutes=14))
+    scan(r)
+    assert r.s.execute(text('SELECT resolution FROM outreach_replies')).scalar_one() == 'pending'
+    monkeypatch.setattr(r.replies, 'now', lambda: stored + timedelta(minutes=15))
+    scan(r)
     assert r.s.execute(text('SELECT resolution FROM outreach_replies')).scalar_one() == 'handed_over'
     assert r.s.execute(text('SELECT count(*) FROM outreach_reply_slots')).scalar_one() == 0
 

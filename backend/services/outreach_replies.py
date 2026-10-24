@@ -111,6 +111,11 @@ def scan(session, business, *, classify=None, moment=None):
     _start(session, bid)
     accounts = {str(a['id']): a for a in send.rows(session, 'email_accounts', bid)}
     own = {_address(a['email_address']) for a in accounts.values()}
+    # A reply whose classifying worker died is never captured again: after the
+    # bounded wait it goes to the owner (Codex OUT-7 fix review 1).
+    for reply in send.rows(session, 'outreach_replies', bid, "AND resolution='pending' AND category='unknown'"):
+        if not _awaiting_classification(reply):
+            _hand_over(session, bid, reply, 'Reply needs owner review: classification did not finish', moment)
     captured = []
     inbox = send.rows(session, 'email_messages', bid,
         "AND NOT EXISTS (SELECT 1 FROM outreach_replies r WHERE r.business_id=:bid AND r.inbound_email_id=email_messages.id) ORDER BY received_at,id")
