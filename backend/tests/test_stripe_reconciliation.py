@@ -66,9 +66,9 @@ def rig(monkeypatch):
         if not kw.get("customer") or s.customer == kw["customer"]]))
     monkeypatch.setattr(stripe.Subscription, "retrieve", retrieve)
     monkeypatch.setattr(stripe.Subscription, "list", listing)
-    import main
+    from app.billing import plans
     resolver = Mock(side_effect=lambda price: {"price_pro": "pro"}.get(price))
-    monkeypatch.setattr(main, "_resolve_plan_from_price", resolver)
+    monkeypatch.setattr(plans, "resolve_plan_from_price", resolver)
     alert = Mock()
     monkeypatch.setattr(mod, "alert", alert)
     engine = create_engine("sqlite://")
@@ -373,3 +373,25 @@ def test_due_tick_skips_running_stripe_reconciliation(monkeypatch):
             if scheduler._stripe_reconcile_task:
                 await scheduler._stripe_reconcile_task
     asyncio.run(exercise())
+
+
+def test_runs_without_importing_main(rig, monkeypatch):
+    """Production ran this from the scheduler thread and failed with
+    "cannot import name '_plan_item' from 'main'": the server process does not
+    have to be the module named `main`. Reconciliation needs only the shared
+    plan helpers, so it must work when `main` cannot be imported at all."""
+    import sys
+    monkeypatch.setitem(sys.modules, "main", None)
+    result = run(rig)
+    assert result["complete"] is True and not result["errors"]
+
+
+def test_webhook_and_reconciliation_share_one_plan_reading():
+    """One definition of "which item is the plan" and "when does the period
+    end", so the daily check cannot disagree with the webhook it checks."""
+    import main
+    from app.billing import plans
+    assert main._plan_item is plans.plan_item
+    assert main._resolve_plan_from_price is plans.resolve_plan_from_price
+    assert main._resolve_current_period_end is plans.resolve_current_period_end
+    assert main._epoch_to_utc is plans.epoch_to_utc
