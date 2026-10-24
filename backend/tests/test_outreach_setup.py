@@ -116,13 +116,36 @@ def grant(db, bid=A, flags=None):
     return business(bid, flags=flags if flags is not None else {"outreach": True})
 
 
-def dns(records):
-    """A fake DNS: name -> list of TXT strings."""
-    return lambda name: list(records.get(name.lower().rstrip("."), []))
+def dns(records, *, failing=()):
+    """A fake DNS: name -> list of TXT strings. A name in `failing` raises,
+    as a resolver timeout does."""
+    def resolve(name):
+        name = name.lower().rstrip(".")
+        if name in failing:
+            raise TimeoutError(f"DNS timeout for {name}")
+        return list(records.get(name, []))
+    return resolve
 
 
-GOOD_GOOGLE = {"newbody.example": ["v=spf1 include:_spf.google.com ~all"],
-               "google._domainkey.newbody.example": ["v=DKIM1; k=rsa; p=MIIB"],
+def _real_dkim_key() -> str:
+    """A genuine 2048-bit RSA public key, as DKIM publishes it."""
+    import base64
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048).public_key()
+    der = key.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return base64.b64encode(der).decode()
+
+
+REAL_DKIM = _real_dkim_key()
+
+# Google's real SPF chain, in miniature: an include whose netblocks hold the
+# representative Google sending address the check tests (209.85.220.41).
+GOOGLE_SPF_CHAIN = {"_spf.google.com": ["v=spf1 include:_netblocks.google.com ~all"],
+                    "_netblocks.google.com": ["v=spf1 ip4:209.85.128.0/17 ~all"]}
+
+GOOD_GOOGLE = {**GOOGLE_SPF_CHAIN, "newbody.example": ["v=spf1 include:_spf.google.com ~all"],
+               "google._domainkey.newbody.example": ["v=DKIM1; k=rsa; p=" + REAL_DKIM + ""],
                "_dmarc.newbody.example": ["v=DMARC1; p=quarantine"]}
 
 
@@ -428,8 +451,8 @@ def second_mailbox(db, healthy=True):
                        "capabilities, token_ciphertext, created_at) VALUES (:id, :b, :u, 'google', "
                        "'hello@newbody-studio.example', 0, '{}', 'fake', :t)"),
                   {"id": NEW_BOX, "b": A, "u": OWNER, "t": NOW.isoformat()})
-    records = {"newbody-studio.example": ["v=spf1 include:_spf.google.com ~all"],
-               "google._domainkey.newbody-studio.example": ["v=DKIM1; p=MIIB"]}
+    records = {**GOOGLE_SPF_CHAIN, "newbody-studio.example": ["v=spf1 include:_spf.google.com ~all"],
+               "google._domainkey.newbody-studio.example": ["v=DKIM1; p=" + REAL_DKIM + ""]}
     if healthy:
         records["_dmarc.newbody-studio.example"] = ["v=DMARC1; p=none"]
     return records
@@ -568,3 +591,285 @@ def test_the_hourly_autopilot_pass_runs_the_daily_check():
     import inspect
     from services import automations
     assert "daily_health" in inspect.getsource(automations.run_all_due)
+
+
+# ------------------------------------------- Codex OUT-15 review 1 (P1s) ---
+
+@pytest.mark.parametrize("records,word", [
+    ({**GOOD_GOOGLE, "google._domainkey.newbody.example": ["v=DKIM1; k=rsa; p="]}, "DKIM"),      # revoked key
+    ({**GOOD_GOOGLE, "google._domainkey.newbody.example": ["v=DKIM1; p=!!notbase64!!"]}, "DKIM"),
+    ({**GOOD_GOOGLE, "newbody.example": ["v=spf1 include:_spf.google.com ~all",
+                                         "v=spf1 include:other.example ~all"]}, "SPF"),      # two SPF = permerror
+    ({**GOOD_GOOGLE, "newbody.example": ["v=spf1 include:_spf.google.com.evil.example ~all"]}, "SPF"),
+    ({**GOOD_GOOGLE, "_dmarc.newbody.example": ["v=DMARC1"]}, "DMARC"),                       # no policy
+    ({**GOOD_GOOGLE, "_dmarc.newbody.example": ["v=DMARC1; p=bogus"]}, "DMARC"),
+])
+def test_only_genuinely_usable_records_pass(db, records, word):
+    """P1 4: loose string matching passed unusable records."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    with Session(db) as s:
+        m.begin(s, biz, OWNER)
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": WORKSPACE, "daily_cap": 5})
+        out = m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(records))
+    assert out["status"] == "fail" and word in " ".join(out["advice"])
+    with db.connect() as c:
+        assert not bool(c.execute(text("SELECT enabled FROM outreach_mailboxes")).scalar())
+
+
+@pytest.mark.parametrize("hold", ["Complaint received: paused", "Hard bounces: 3 of the last 50", "Retired by owner: x"])
+def test_a_dns_pass_never_lifts_a_safety_hold(db, hold):
+    """P1 3: only a DNS-caused pause may be lifted by a DNS pass."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    ready(m, db, biz)
+    with db.begin() as c:
+        c.execute(text("UPDATE outreach_mailboxes SET enabled = 0, pause_reason = :r WHERE mailbox_id = :m"),
+                  {"r": hold, "m": WORKSPACE})
+    with Session(db) as s:
+        m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(GOOD_GOOGLE))
+        m.recheck_health(s, resolve=dns(GOOD_GOOGLE), moment=NOW + timedelta(days=1))
+    with db.connect() as c:
+        enabled, reason = c.execute(text("SELECT enabled, pause_reason FROM outreach_mailboxes WHERE mailbox_id = :m"),
+                                    {"m": WORKSPACE}).one()
+    assert not bool(enabled) and reason == hold
+
+
+def test_a_dns_caused_pause_is_lifted_by_a_later_pass(db):
+    m = setup_module_or_missing()
+    biz = grant(db)
+    ready(m, db, biz)
+    broken = {k: v for k, v in GOOD_GOOGLE.items() if not k.startswith("_dmarc")}
+    with Session(db) as s:
+        m.recheck_health(s, resolve=dns(broken), moment=NOW + timedelta(days=1))
+        m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(GOOD_GOOGLE))
+    with db.connect() as c:
+        assert bool(c.execute(text("SELECT enabled FROM outreach_mailboxes WHERE mailbox_id = :m"),
+                              {"m": WORKSPACE}).scalar())
+
+
+def test_the_daily_check_never_overwrites_a_retirement_made_during_its_lookups(db):
+    """P1 2: the owner retires the mailbox while DNS is being looked up."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    ready(m, db, biz)
+    calls = {"n": 0}
+
+    def slow(name):
+        calls["n"] += 1
+        if calls["n"] == 1:   # mid-lookup, from another session
+            with db.begin() as c:
+                c.execute(text("UPDATE outreach_mailboxes SET enabled = 0, pause_reason = 'Retired by owner: rebrand' "
+                               "WHERE mailbox_id = :m"), {"m": WORKSPACE})
+        return GOOD_GOOGLE.get(name, [])
+    with Session(db) as s:
+        m.recheck_health(s, resolve=slow, moment=NOW + timedelta(days=1))
+    with db.connect() as c:
+        enabled, reason = c.execute(text("SELECT enabled, pause_reason FROM outreach_mailboxes WHERE mailbox_id = :m"),
+                                    {"m": WORKSPACE}).one()
+    assert not bool(enabled) and reason.startswith("Retired")
+
+
+def test_setup_stays_on_screen_until_outreach_is_started(db):
+    """P1 1: the wizard must not vanish at `complete` before Start outreach."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    brand, lia, campaign = ready(m, db, biz)
+    with Session(db) as s:
+        from services import outreach_manage
+        c = s.execute(text("SELECT version, sequence_version FROM outreach_campaigns")).one()
+        outreach_manage.approve_templates(s, biz, OWNER, campaign["id"], {"version": int(c[0]), "sequence_version": int(c[1])})
+        state = m.status(s, biz)
+        assert state["complete"] is True and state["started"] is False
+        m.finish(s, biz, OWNER)
+        assert m.status(s, biz)["started"] is True
+
+
+# ------------------------------------------- Codex OUT-15 review 2 (P1s) ---
+
+@pytest.mark.parametrize("records,word", [
+    ({**GOOD_GOOGLE, "google._domainkey.newbody.example": ["v=DKIM1; k=rsa; p=" + "A" * 64]}, "DKIM"),   # not a key
+    ({**GOOD_GOOGLE, "newbody.example": ["v=spf1 -all include:_spf.google.com"]}, "SPF"),               # all first
+    ({**GOOD_GOOGLE, "newbody.example": ["v=spf1 -include:_spf.google.com ~all"]}, "SPF"),               # fail-qualified
+    ({**GOOD_GOOGLE, "_dmarc.newbody.example": ["v=DMARC1; p=reject", "v=DMARC1; p=none"]}, "DMARC"),   # two records
+])
+def test_records_are_read_for_meaning_not_just_shape(db, records, word):
+    m = setup_module_or_missing()
+    biz = grant(db)
+    with Session(db) as s:
+        m.begin(s, biz, OWNER)
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": WORKSPACE, "daily_cap": 5})
+        out = m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(records))
+    assert out["status"] == "fail" and word in " ".join(out["advice"])
+
+
+def test_pausing_after_setup_never_brings_the_wizard_back(db):
+    """Review 2 P1: setup finished is its own fact, not the pause switch."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    brand, lia, campaign = ready(m, db, biz)
+    with Session(db) as s:
+        from services import outreach_manage
+        c = s.execute(text("SELECT version, sequence_version FROM outreach_campaigns")).one()
+        outreach_manage.approve_templates(s, biz, OWNER, campaign["id"], {"version": int(c[0]), "sequence_version": int(c[1])})
+        m.finish(s, biz, OWNER)
+        outreach_manage.settings(s, biz, OWNER, {"pause_all": True})
+        state = m.status(s, biz)
+    assert state["started"] is True, "paused is still set up"
+
+
+# ------------------------------------------- Codex OUT-15 review 3 (P1s) ---
+# The records are evaluated by their rules, not checked against examples:
+# SPF left to right with qualifiers (first match wins), DKIM's v/k/t/s tags,
+# DMARC's exact first tag.
+
+def _health(db, records):
+    m = setup_module_or_missing()
+    biz = grant(db)
+    with Session(db) as s:
+        m.begin(s, biz, OWNER)
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": WORKSPACE, "daily_cap": 5})
+        return m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(records))["status"]
+
+
+DKIM_NAME, SPF_NAME, DMARC_NAME = "google._domainkey.newbody.example", "newbody.example", "_dmarc.newbody.example"
+
+
+@pytest.mark.parametrize("spf,expected", [
+    ("v=spf1 include:_spf.google.com ~all", "pass"),
+    ("v=spf1 include:_spf.google.com -all", "pass"),
+    ("v=spf1 +include:_spf.google.com ~all", "pass"),
+    ("v=spf1 ip4:192.0.2.1 include:_spf.google.com ~all", "pass"),
+    ("v=spf1 -include:_spf.google.com include:_spf.google.com ~all", "fail"),   # first match rejects
+    ("v=spf1 ~include:_spf.google.com ~all", "fail"),
+    ("v=spf1 ?include:_spf.google.com ~all", "fail"),
+    ("v=spf1 ~all include:_spf.google.com", "fail"),
+    ("v=spf1 redirect=_spf.other.example", "fail"),
+    ("v=spf10 include:_spf.google.com ~all", "fail"),
+])
+def test_spf_is_evaluated_left_to_right_with_qualifiers(db, spf, expected):
+    assert _health(db, {**GOOD_GOOGLE, SPF_NAME: [spf]}) == expected
+
+
+@pytest.mark.parametrize("dkim,expected", [
+    ("v=DKIM1; k=rsa; p={key}", "pass"),
+    ("k=rsa; p={key}", "pass"),
+    ("v=DKIM1; p={key}", "pass"),
+    ("v=DKIM1; k=invalid; p={key}", "fail"),
+    ("v=DKIM2; k=rsa; p={key}", "fail"),
+    ("v=DKIM1; k=rsa; t=y; p={key}", "fail"),        # testing mode: verifiers treat mail as unsigned
+    ("v=DKIM1; k=rsa; s=other; p={key}", "fail"),     # not for email
+    ("v=DKIM1; k=rsa; s=email; p={key}", "pass"),
+])
+def test_dkim_tags_are_respected(db, dkim, expected):
+    assert _health(db, {**GOOD_GOOGLE, DKIM_NAME: [dkim.format(key=REAL_DKIM)]}) == expected
+
+
+@pytest.mark.parametrize("dmarc,expected", [
+    ("v=DMARC1; p=none; rua=mailto:x@newbody.example", "pass"),
+    ("v=DMARC1;p=quarantine", "pass"),
+    ("v=DMARC1invalid; p=reject", "fail"),
+    ("p=reject; v=DMARC1", "fail"),                    # v must be the first tag
+    ("v=DMARC1; sp=reject", "fail"),                   # no p
+])
+def test_dmarc_must_start_with_its_exact_version_and_carry_a_policy(db, dmarc, expected):
+    assert _health(db, {**GOOD_GOOGLE, DMARC_NAME: [dmarc]}) == expected
+
+
+def test_a_dns_glitch_after_setup_recovers_by_itself_next_day(db):
+    """Review 3 P1: a DNS-paused mailbox stays in the daily check, so
+    repaired records re-enable it; safety holds still never lift."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    ready(m, db, biz)
+    broken = {k: v for k, v in GOOD_GOOGLE.items() if not k.startswith("_dmarc")}
+    with Session(db) as s:
+        m.recheck_health(s, resolve=dns(broken), moment=NOW + timedelta(days=1))
+        assert m.daily_health(s, resolve=dns(GOOD_GOOGLE),
+                              moment=datetime(2026, 10, 28, 8, tzinfo=timezone.utc))["checked"] == [WORKSPACE]
+    with db.connect() as c:
+        enabled, reason = c.execute(text("SELECT enabled, pause_reason FROM outreach_mailboxes WHERE mailbox_id = :m"),
+                                    {"m": WORKSPACE}).one()
+    assert bool(enabled) and reason is None
+
+
+def test_mailboxes_can_be_added_and_checked_after_setup(db):
+    """Review 3 P1: registration and Check again stay available once
+    outreach has started, so a replacement can be prepared."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    brand, lia, campaign = ready(m, db, biz)
+    with Session(db) as s:
+        from services import outreach_manage
+        c = s.execute(text("SELECT version, sequence_version FROM outreach_campaigns")).one()
+        outreach_manage.approve_templates(s, biz, OWNER, campaign["id"], {"version": int(c[0]), "sequence_version": int(c[1])})
+        m.finish(s, biz, OWNER)
+    records = second_mailbox(db)
+    with Session(db) as s:
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": NEW_BOX, "daily_cap": 5})
+        assert m.check_mailbox_health(s, biz, OWNER, NEW_BOX, resolve=dns(records))["status"] == "pass"
+        out = m.replace_mailbox(s, biz, OWNER, {"old_mailbox_id": WORKSPACE, "new_mailbox_id": NEW_BOX,
+                                                "reason": "Rebrand", "retire_old": False})
+    assert out["switched"] == [campaign["id"]]
+
+
+def test_the_settings_screen_offers_mailbox_checks_and_campaign_copy():
+    setup_module_or_missing()
+    from pathlib import Path as _P
+    page = (_P(__file__).parents[2] / "frontend/client/src/pages/OutreachPage.tsx").read_text()
+    assert "OutreachMailboxes" in page and "CopyCampaign" in page
+
+
+# ------------------------------------------- Codex OUT-15 review 4 (P1) ---
+# Mike, 24 Oct 2026: use the established RFC 7208 implementation (pyspf) and
+# test the real question — would this domain's SPF authorise a real Google
+# sending address?
+
+@pytest.mark.parametrize("spf", [
+    "v=spf1 -ip4:0.0.0.0/0 include:_spf.google.com ~all",    # every IPv4 sender rejected first
+    "v=spf1 foo:bar include:_spf.google.com ~all",           # unknown mechanism: permanent error
+    "v=spf1 include:broken.example include:_spf.google.com ~all",   # earlier include times out
+])
+def test_spf_follows_the_standard_through_includes_and_errors(db, spf):
+    m = setup_module_or_missing()
+    biz = grant(db)
+    with Session(db) as s:
+        m.begin(s, biz, OWNER)
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": WORKSPACE, "daily_cap": 5})
+        out = m.check_mailbox_health(s, biz, OWNER, WORKSPACE,
+                                     resolve=dns({**GOOD_GOOGLE, SPF_NAME: [spf]}, failing={"broken.example"}))
+    assert out["status"] == "fail" and "SPF" in " ".join(out["advice"])
+
+
+def test_spf_must_actually_authorise_the_provider_not_just_name_it(db):
+    """An include of the provider whose chain does not cover its senders fails."""
+    records = {**GOOD_GOOGLE, "_netblocks.google.com": ["v=spf1 ip4:192.0.2.0/24 ~all"]}
+    assert _health(db, records) == "fail"
+
+
+def test_dkim_tag_names_are_case_sensitive(db):
+    assert _health(db, {**GOOD_GOOGLE, DKIM_NAME: ["v=DKIM1; k=rsa; P=" + REAL_DKIM]}) == "fail"
+
+
+def test_checking_again_keeps_the_owners_daily_cap(db):
+    """Review 4 backlog: a recheck never resets an owner-chosen limit."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    with Session(db) as s:
+        m.begin(s, biz, OWNER)
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": WORKSPACE, "daily_cap": 12})
+        m.register_mailbox(s, biz, OWNER, {"mailbox_id": WORKSPACE})
+    with db.connect() as c:
+        assert int(c.execute(text("SELECT daily_cap FROM outreach_mailboxes")).scalar()) == 12
+
+
+def test_a_held_mailbox_is_reported_as_held_not_ready(db):
+    """Review 4 backlog: valid DNS on a held mailbox must not read as Ready."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    ready(m, db, biz)
+    with db.begin() as c:
+        c.execute(text("UPDATE outreach_mailboxes SET enabled = 0, pause_reason = 'Complaint received: paused'"))
+    with Session(db) as s:
+        out = m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(GOOD_GOOGLE))
+    assert out["status"] == "pass" and out["enabled"] is False and out["hold"] == "Complaint received: paused"

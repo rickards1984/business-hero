@@ -8,7 +8,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { OutreachRecord, outreachError, useOutreachData, useOutreachOwner, useOutreachSummary, useRefreshOutreach } from '@/hooks/useOutreachData';
 import ApprovalCard, { Proposal } from '@/components/ApprovalCard';
 import OutreachReplyCard from '@/components/OutreachReplyCard';
-import OutreachSetupWizard, { ChangeSendingMailbox, ResearchPanel, ResearchSummary, useSetupStatus } from '@/components/OutreachSetupWizard';
+import OutreachSetupWizard, { ChangeSendingMailbox, CopyCampaign, OutreachMailboxes, ResearchPanel, ResearchSummary, useSetupStatus } from '@/components/OutreachSetupWizard';
 const sections = ['overview', 'prospects', 'campaigns', 'replies', 'suppression', 'settings'];
 const href = (section: string) => `/app/outreach${section === 'overview' ? '' : '/' + section}`;
 const labels: Record<string, string> = { prospects: 'Prospects', campaigns: 'Campaigns', accepted_live: 'Provider-accepted live messages (not delivery)', unknown_live: 'Unknown send outcomes', imported_messages: 'Imported messages', human_replies: 'Human replies', stage_meeting: 'Recorded meeting stage', stage_won: 'Recorded won stage', unresolved_replies: 'Unresolved replies' };
@@ -31,8 +31,9 @@ function OutreachDepartment({ businessId }: { businessId: string }) {
   }
   const controls = { businessId, owner: !!owner.data, busy, write };
   const setup = useSetupStatus(businessId);
-  // OUT-15: until setup is complete, the owner sees the wizard first.
-  if (setup.data && !setup.data.complete && owner.data) return <Stack spacing={2} sx={{ minWidth: 0, '& .MuiButton-root': { minHeight: 44 }, overflowWrap: 'anywhere' }}>
+  // OUT-15: the owner sees the wizard until outreach is STARTED (not merely complete).
+  // Only the main Outreach page shows the wizard, so its links to settings open them.
+  if (setup.data && !setup.data.started && owner.data && section === 'overview') return <Stack spacing={2} sx={{ minWidth: 0, '& .MuiButton-root': { minHeight: 44 }, overflowWrap: 'anywhere' }}>
     <Typography variant="h4">Outreach</Typography>
     <OutreachSetupWizard businessId={businessId} />
   </Stack>;
@@ -48,7 +49,7 @@ function OutreachDepartment({ businessId }: { businessId: string }) {
     {section === 'campaigns' && <Campaigns {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
     {section === 'replies' && <Replies businessId={businessId} offset={offset} mailbox={mailbox} setParams={setParams} />}
     {section === 'suppression' && <Suppressions {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
-    {section === 'settings' && <><Settings {...controls} />{owner.data && <><ResearchPanel businessId={businessId} /><ChangeSendingMailbox businessId={businessId} /></>}</>}
+    {section === 'settings' && <><Settings {...controls} />{owner.data && <><ResearchPanel businessId={businessId} /><OutreachMailboxes businessId={businessId} /><ChangeSendingMailbox businessId={businessId} /></>}</>}
   </Stack>;
 }
 type Controls = { businessId: string; owner: boolean; busy: boolean; write: (method: string, path: string, body: unknown) => Promise<any> };
@@ -86,7 +87,7 @@ function CampaignDetail(c: Controls & { id: string; accounts: OutreachRecord[]; 
   const actions = useQuery<Proposal[]>({ queryKey: ['aria-actions', c.businessId], queryFn: async () => (await (await apiRequest('GET', '/v1/aria/actions')).json()).actions || [] });
   const campaign = q.data?.item;
   const shown: OutreachRecord[] = steps || (sequence.data?.items?.length ? sequence.data.items : null) || [0, 1, 2].map(ordinal => ({ ordinal, subject: '', body: '', delay_business_days: [0, 5, 7][ordinal] }));
-  return <><QueryState query={q} />{campaign && <><RecordText item={campaign} /><TextField label="Campaign name" value={name ?? campaign.name} onChange={e => setName(e.target.value)} /><MailboxChooser value={mailbox ?? campaign.mailbox_id} onChange={setMailbox} accounts={c.accounts} operational={c.mailboxes} /><Typography>After any dispatch history, use a new campaign to change sender.</Typography><TextField type="number" label="Daily cap" value={cap ?? campaign.daily_cap} onChange={e => setCap(Number(e.target.value))} /><Button disabled={!c.owner || c.busy} onClick={() => c.write('PATCH', `campaigns/${c.id}`, { version: campaign.version, name: name ?? campaign.name, mailbox_id: mailbox ?? campaign.mailbox_id, daily_cap: cap ?? campaign.daily_cap })}>Save campaign changes</Button>
+  return <><QueryState query={q} />{campaign && <>{c.owner && <CopyCampaign businessId={c.businessId} campaignId={c.id} />}<RecordText item={campaign} /><TextField label="Campaign name" value={name ?? campaign.name} onChange={e => setName(e.target.value)} /><MailboxChooser value={mailbox ?? campaign.mailbox_id} onChange={setMailbox} accounts={c.accounts} operational={c.mailboxes} /><Typography>After any dispatch history, use a new campaign to change sender.</Typography><TextField type="number" label="Daily cap" value={cap ?? campaign.daily_cap} onChange={e => setCap(Number(e.target.value))} /><Button disabled={!c.owner || c.busy} onClick={() => c.write('PATCH', `campaigns/${c.id}`, { version: campaign.version, name: name ?? campaign.name, mailbox_id: mailbox ?? campaign.mailbox_id, daily_cap: cap ?? campaign.daily_cap })}>Save campaign changes</Button>
     <Typography variant="h6">Three-step sequence</Typography><Typography>Delays: 0, 5 and 7 business days. An additional seven-calendar-day contact spacing applies. Editing pauses the campaign and invalidates first-batch approval.</Typography><QueryState query={sequence} />{shown.map((step, i) => <Stack key={i} spacing={1}><Typography>Step {i + 1} · {[0, 5, 7][i]} business days · {step.approved_at ? `Approved ${step.approved_at} by ${step.approved_by}` : 'Unapproved'}</Typography>{['subject', 'body'].map(field => <TextField key={field} label={`Step ${i + 1} ${field}`} value={step[field] || ''} multiline={field === 'body'} minRows={field === 'body' ? 4 : 1} disabled={!c.owner} onChange={e => setSteps(shown.map((s, n) => n === i ? { ...s, [field]: e.target.value } : s))} />)}</Stack>)}
     <Button disabled={!c.owner || c.busy || sequence.isLoading || sequence.isError} onClick={async () => { if (await c.write('PUT', `campaigns/${c.id}/sequence`, { version: campaign.version, steps: shown.map((s, i) => ({ ordinal: i, delay_business_days: [0, 5, 7][i], subject: s.subject, body: s.body })) })) setSteps(null); }}>Save new sequence version</Button>
     <Button variant="outlined" disabled={!c.owner || c.busy || !!steps || shown.length !== 3 || sequence.isFetching || q.isFetching || sequence.isError} onClick={() => c.write('POST', `campaigns/${c.id}/approve-templates`, { version: campaign.version, sequence_version: campaign.sequence_version })}>Approve these displayed templates (v{campaign.sequence_version})</Button><Typography>Template approval never sends or grants standing permission.</Typography>

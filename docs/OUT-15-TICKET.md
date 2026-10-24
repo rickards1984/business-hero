@@ -88,3 +88,61 @@ No migration: the notice lives in `business_settings`.
   - `./check.sh full` is green, with tsc;
   - the Postgres `test_outreach_setup_rls.py` runs the whole wizard plus a mailbox change, and passes alongside the OUT-6/8 races and the isolation suite.
 - **Production settings needed before use:** `PUBLIC_BASE_URL` (the backend's public HTTPS address, for privacy links) and `OPENAI_API_KEY` (already set). `ARIA_DRAFT_MODEL` is optional and defaults to gpt-4o.
+
+## Codex review 1: REQUEST-CHANGES, four P1s (repair cycle 1)
+Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-1.md`. Tests first for each:
+1. **Setup couldn't be finished in the app.** The wizard now stays until outreach is **started** (`status.started`), not merely complete. The campaign step shows the three drafted emails to edit, save and "Approve these templates" in place.
+2. **The daily check could overwrite a retirement made during its lookups.** DNS now runs with no lock held. Each result is applied only to the mailbox row re-read under the business lock, and only if it's still enabled.
+3. **A DNS pass lifted complaint, bounce and retirement holds.** A pass now lifts only a pause the DNS check itself caused (`Daily check failed:`). Every other hold stays.
+4. **Unusable records passed.** DKIM needs a real base64 `p=` of usable length (an empty `p=`, meaning a revoked key, fails). SPF needs exactly one record, naming the provider as a whole mechanism. DMARC needs a `p=` of none, quarantine or reject.
+
+From the backlog, also done:
+- the wizard's cached lists are keyed by business;
+- the public privacy page is limited to 60 requests a minute;
+- interactive checks run DNS outside locks and re-read before writing.
+
+Tests: setup **46 passed**; `./check.sh full` is green; the Postgres wizard passes.
+
+## Codex review 2: REQUEST-CHANGES, two P1s (repair cycle 2)
+Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-2.md`.
+1. **Records are now read for meaning, not just shape:**
+   - DKIM `p=` must decode, using `cryptography`, to a real RSA key of at least 1024 bits, or a 32-byte Ed25519 key;
+   - SPF terms are read in order, so the provider's pass-qualified include must come before any `all`;
+   - there must be exactly one DMARC record, with a valid policy.
+
+   Tests use a genuinely generated 2048-bit RSA key as the good record.
+2. **Setup finished is its own fact** (`outreach_setup.finished_at`, written by `finish`). Pausing outreach never brings the wizard back.
+
+From the backlog, also done:
+- the wizard intercepts only the main Outreach page, so its settings links work;
+- a drafted, unapproved campaign is picked up again after a reload;
+- overlapping daily checks skip a mailbox already checked that day once they hold the lock.
+
+Tests: setup **51 passed**; `./check.sh full` is green; the Postgres wizard passes.
+
+## Codex review 3: REQUEST-CHANGES, two P1s (repair cycle 3 of 3, the last before escalating to Mike)
+Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-3.md`. The pause P1 is closed.
+1. **DNS records are evaluated by their RFC rules, not checked against examples:**
+   - **SPF** (RFC 7208): read left to right. The first `include` of the provider decides, and passes only with a + or no qualifier; an `all` before it fails; so does `redirect` without it.
+   - **DKIM** (RFC 6376): `v`, if present, is first and exactly `DKIM1`; `k` is rsa or ed25519; testing mode (`t=y`) fails; `s` must allow email; no duplicate tags; `p` decodes to a real key.
+   - **DMARC** (RFC 7489): the first tag is exactly `v=DMARC1`, and there must be a valid `p`.
+
+   23 parametrised cases cover pass and fail on each.
+2. **Mailbox checks after setup:**
+   - a DNS-paused mailbox stays in the daily check, so repaired records re-enable it (safety holds still never lift);
+   - Outreach settings has a **Sending mailboxes** panel (register, check, check again) at any time, so a replacement can be prepared and **Change sending mailbox** can use it.
+
+From the backlog, also done:
+- edited (paused) drafts are picked up after a reload;
+- **Copy to another mailbox** is on each campaign.
+
+Tests: setup **77 passed**; `./check.sh full` is green; the Postgres wizard passes.
+
+## Codex review 4: one P1 left; escalated to Mike after three cycles
+Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-4.md`. **Mike's decision (24 Oct 2026): "Recommended — let's be sure everything works as well as it possibly could."** Stop hand-writing SPF:
+- **SPF:** evaluated by **pyspf** (the established RFC 7208 implementation). The question asked is the real one: does this domain's SPF authorise a real provider sending address (Google 209.85.220.41; Microsoft 40.107.22.50)? Includes are followed, unknown mechanisms are permanent errors, a failed lookup is a temporary error, and only `pass` passes. Production TXT lookups raise on timeouts, so an outage is never "no record".
+- **DKIM:** tag names are case-sensitive (RFC 6376 §3.2).
+- **Real-DNS check** (Claude, live): google.com authorises 209.85.220.41 (True) and refuses TEST-NET 192.0.2.10 (False); its DMARC is usable.
+- **Backlog fixes:** a recheck without a cap keeps the owner's daily limit; a held mailbox with valid records reports **On hold** with its reason, never "Ready".
+- **Still to come in OUT-16, also agreed by Mike:** the definitive check. Each mailbox sends a test email to the owner, and Business Hero reads the receiving server's `Authentication-Results`.
+- **Tests:** setup **84 passed**; `./check.sh full` is green; the Postgres wizard passes. `pyspf>=2.0.14` is in both requirements files.
