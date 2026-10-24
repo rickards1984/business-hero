@@ -156,6 +156,11 @@ def _last_chase_by_customer(session, business) -> dict:
     return latest
 
 
+def _due_day(due):
+    return due if hasattr(due, "year") and not isinstance(due, str) else \
+        datetime.fromisoformat(str(due)[:10]).date()
+
+
 def _candidates(session, business):
     not_owed = ", ".join(f"'{s}'" for s in _NOT_OWED)
     return session.execute(text(f"""
@@ -363,8 +368,19 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             last_by_customer[who] = created_at
     chased_now: set = set()
 
-    for invoice_id, email, stage, last_chased, due in _candidates(session, business):
+    # AUTO-3: one email per customer, listing every overdue invoice they owe.
+    candidates = _candidates(session, business)
+    by_customer: dict = {}
+    for invoice_id, email, stage, _, due in candidates:
+        who = _who(email)
+        if who:
+            by_customer.setdefault(who, []).append((str(invoice_id), int(stage or 0), _due_day(due)))
+    covered: set = set()   # already in an email or card this run
+
+    for invoice_id, email, stage, last_chased, due in candidates:
         iid = str(invoice_id)
+        if iid in covered:
+            continue
         customer = _who(email)
         if not customer:
             result["skipped"][iid] = "no_customer_email"
@@ -394,8 +410,7 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
         if iid in waiting:
             result["skipped"][iid] = "card_waiting"
             continue
-        due_day = due if hasattr(due, "year") and not isinstance(due, str) else \
-            datetime.fromisoformat(str(due)[:10]).date()
+        due_day = _due_day(due)
         stage = int(stage or 0)
         if stage == 0:
             is_due = (uk_today(moment) - due_day).days >= s["first_after_days"]
@@ -411,14 +426,31 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             continue
         next_stage = min(stage + 1, 4)
 
+        # Every invoice of this customer that is past due and not stopped by
+        # the owner (Mike's decision A), oldest first. The email goes at the
+        # most overdue invoice's next stage.
+        listed = [row for row in by_customer.get(customer, [])
+                  if row[0] not in stopped and row[2] < uk_today(moment)]
+        if any(row[0] in waiting for row in listed):
+            # Decision B: never two emails about the same debt.
+            result["skipped"][iid] = "card_waiting"
+            continue
+        ids = [row[0] for row in listed]
+        if len(ids) > 1:
+            next_stage = min(listed[0][1] + 1, 4)
+            chase_args = {"invoice_ids": ids, "chase_stage": next_stage}
+        else:
+            ids = [iid]
+            chase_args = {"invoice_id": iid, "chase_stage": next_stage}
+
         if next_stage > s["max_auto_stage"]:
             # A later stage is the owner's call: a card, never a send.
             card = aria_actions.propose(session, business, None, "send_invoice_chase",
-                                        {"invoice_id": iid, "chase_stage": next_stage},
-                                        owner_name=owner_name, raised_by=KIND)
+                                        chase_args, owner_name=owner_name, raised_by=KIND)
             if "proposal" in card:
-                result["cards"].append(iid)
-                waiting.add(iid)
+                result["cards"].extend(ids)
+                waiting.update(ids)
+                covered.update(ids)
             else:
                 result["skipped"][iid] = card.get("error") or "not_proposed"
             continue
@@ -450,14 +482,13 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
             result["skipped"][iid] = "reply_check_failed"
             continue
         replied_now, stopped_now = chase_replies.blocked(session, business)
-        if customer in replied_now or iid in stopped_now:
+        if customer in replied_now or set(ids) & stopped_now:
             _give_back(session, business, tickets)
             replied.add(customer)
-            result["skipped"][iid] = "chasing_stopped" if iid in stopped_now else "customer_replied"
+            result["skipped"][iid] = "chasing_stopped" if set(ids) & stopped_now else "customer_replied"
             continue
         proposed = aria_actions.propose(session, business, None, "send_invoice_chase",
-                                        {"invoice_id": iid, "chase_stage": next_stage},
-                                        owner_name=owner_name, automation=KIND)
+                                        chase_args, owner_name=owner_name, automation=KIND)
         if "proposal" not in proposed:
             _give_back(session, business, tickets)
             result["skipped"][iid] = proposed.get("error") or "not_proposed"
@@ -504,8 +535,9 @@ def run_invoice_autopilot(session, business, settings: Optional[dict], *,
         # Sent, failed or unconfirmed: this customer is done for this run, and
         # the tickets stay used.
         chased_now.add(customer)
+        covered.update(ids)
         if outcome.get("status") == "done":
-            result["sent"].append(iid)
+            result["sent"].extend(ids)
         else:
             result["skipped"][iid] = f"send_{outcome.get('status')}"
             if outcome.get("status") == "executing":

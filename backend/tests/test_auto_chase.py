@@ -261,12 +261,9 @@ def test_nothing_settled_or_unaddressable_is_chased(db, sent, kwargs):
     assert run(db, on())["sent"] == [] and sent == []
 
 
-def test_one_chase_per_customer_per_week(db, sent):
-    a = invoice(db, days_overdue=30, email="pay@harper.example")
-    b = invoice(db, days_overdue=20, email="PAY@harper.example")
-    result = run(db, on())
-    assert len(result["sent"]) == 1 and len(sent) == 1
-    assert result["skipped"][b if result["sent"] == [a] else a] == "customer_chased_recently"
+# test_one_chase_per_customer_per_week moved to AUTO-3 (approved by Mike, 23 Oct
+# 2026): two overdue invoices for one customer are now ONE email covering both.
+# See test_combined_chase.py::test_two_overdue_invoices_one_customer_one_email.
 
 
 def test_a_customer_chased_by_hand_this_week_waits(db, sent):
@@ -804,7 +801,13 @@ def test_an_old_ticket_with_a_waiting_automatic_draft_is_not_reclaimed(db, sent)
                        "VALUES (:b, 'autochase-inflight:pay@harper.example', '2000-01', 1, :u)"),
                   {"b": A, "u": stale})
     result = run(db, on())
-    assert sent == [] and result["skipped"][other] == "chase_in_progress"
+    # AUTO-3 decision B (Mike, 23 Oct 2026) now holds this customer earlier,
+    # because a card is waiting for one of their invoices; before AUTO-3 the
+    # ticket check caught it. Either way: nothing sent, the ticket untouched.
+    assert sent == [] and result["skipped"][other] in ("card_waiting", "chase_in_progress")
+    with db.connect() as c:
+        assert c.execute(text("SELECT value, updated_at FROM usage_meters WHERE meter = "
+                              "'autochase-inflight:pay@harper.example'")).one() == ("1", stale)
 
 
 def test_a_reclaim_racing_a_finishing_run_still_sends_once(db, sent, monkeypatch):
