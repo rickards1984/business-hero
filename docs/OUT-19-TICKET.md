@@ -1,0 +1,83 @@
+# OUT-19 — Outreach that always pays its way: costs, prices, top-ups, boosts and AI failover
+
+**Tier:** RED. It covers billing (Stripe), sending limits and AI spend.
+**Decided by Mike, 25 Oct 2026.** Every feature must cover all its AI and sending costs with a net profit on top: never "a money losing monster". Builds on OUT-18 (per-brand research, setup, sending and monthly allowance).
+
+## Decisions
+
+1. **"20 a day" means 20 emails per inbox (A).**
+   - Research finds only as many new contacts as the brand's inbox can email, about 8 a day once follow-ups run, instead of a fixed 20.
+   - No paid research is wasted on contacts that can't be emailed.
+2. **Replies are never held back by the cold-email cap.**
+   - Answering someone who wrote back is conversation, not cold outreach. Replies don't count toward the brand's 20 a day.
+   - They are bounded only by a per-inbox safety ceiling (warm-up cap + 20, at most 70 a day).
+   - When replies near that ceiling, Aria offers three choices, in a few clicks:
+     1. **Boost** the inbox (if it qualifies, see 5);
+     2. **Add a warmed second inbox** for the brand;
+     3. **"I'll reply myself"**: Aria briefs the owner (who, what they asked, the suggested answer and the facts behind it) to send from their own email.
+3. **Prices:**
+   - the first brand is included in Business (£269);
+   - each extra brand is **£79/month**;
+   - the add-on on Pro is **£99/month** for its first brand.
+
+   Mike monitors real costs during his own month as a customer, and prices are adjusted from that evidence.
+4. **Top-ups through Stripe, in a few clicks.**
+   - One-off payments: Checkout with the saved card, no new card entry.
+   - Each is priced at cost × 3 or more.
+   - Each raises only its own share of the AI cost ceiling, so the margin stays locked in.
+5. **Boost.**
+   - An inbox that has sent 20 a day for 4–6 weeks with clean results may step up to 30, then 40, then 50 a day. Each step is held about 2 weeks; it drops back a step automatically if results worsen.
+   - "Clean results" means:
+     - bounces under 2%;
+     - no complaints;
+     - unsubscribes under about 1%;
+     - SPF/DKIM/DMARC passing daily;
+     - healthy replies.
+   - **50 a day per inbox is the ceiling.**
+   - More volume comes from a properly warmed additional inbox, each with its own limits. Rotating inboxes to evade limits is never allowed (OUT-2).
+   - The boost screen says reputation is judged from our own evidence. Business Hero can't see Google's or Microsoft's internal score.
+6. **AI provider failover.**
+   - Every outreach AI call goes through one routing layer with an ordered list of providers and models: research, drafting, reply classification, suggested answers and summaries.
+   - If the primary fails, the next one in the list is used. Example order: OpenAI → xAI Grok → Anthropic Claude, each at a comparable capability. Failure means an outage, rate limit, exhausted credit or repeated errors.
+   - The order is a setting, not code: no deploy is needed.
+   - Each provider has its own prices for the cost reservation, so the spend caps hold whichever one runs.
+   - Research uses each provider's own web-search tool. A provider without one that matches our verification rules is skipped for research.
+   - The admin panel shows which provider served each call and any failover.
+
+## What gets built
+
+### A — Cost ledger (first: it measures everything else)
+- Every outreach AI call records: provider, model, tokens, tool calls, cost in pence, brand and business.
+- The admin panel shows per business and per brand: revenue, AI cost and margin, this month and last.
+- **A platform-wide monthly AI spend alarm and kill switch,** set by Mike.
+
+### B — Hidden cost ceiling per brand
+- Each brand's AI spend is capped at a share of what it pays: 25–30%, e.g. £79 → about £20/month.
+- When it is reached, research stops until next month or a top-up. Drafting replies continues within a small reserve, so conversations are never stranded.
+- This replaces today's owner-set £20+ research budget as the hard ceiling. The owner's budget (C) can only lower it.
+
+### C — The owner's monthly budget
+- A single £ figure for add-on brands and top-ups. Aria suggests a realistic amount from the brands, inboxes and warm-up stages. Nothing is charged beyond it.
+
+### D — Research sized to sending capacity (decision 1)
+
+### E — Replies outside the cold cap, with the over-ceiling choices (decision 2)
+
+### F — Stripe: extra brands as subscription items, top-ups and boosts as one-off payments (decisions 3–4)
+- Entitlement checks follow the existing webhook rules (BH-006).
+
+### G — Boost eligibility and steps (decision 5)
+
+### H — AI routing and failover (decision 6)
+
+## Order
+
+1. **A** (ledger), then **H** (routing). The ledger makes every later number real; routing protects Mike from a single provider failing.
+2. Then **D** and **E**, which are about deliverability and user experience.
+3. Then **B, C, F and G**: money. Each gets its own tests, Codex review and click test.
+4. Any migration gets a runbook run by Mike.
+
+## Not in OUT-19
+
+- Changing the published plan prices (£69/£129/£269).
+- Outreach as a standalone product without Business Hero.
