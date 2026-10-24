@@ -107,3 +107,51 @@ Backlog, also done:
 Tests: research **53 passed**, setup **86 passed**; `./check.sh full` is green; the Postgres research run passes.
 
 **Cost note for Mike:** a search is bounded at about 60p, and a day can use up to 3. The £20 default allows roughly 11–33 research days a month, depending on how quickly each day's target is met, so a higher monthly cap may suit daily use.
+
+## Codex review 2: REQUEST-CHANGES, three P1s (repair cycle 2)
+Preserved verbatim in `audits/OUT-10-CODEX-REVIEW-2.md`. DNS pinning, the shared quota and the locked suppression check were confirmed. Fixes, tests first:
+1. **Identity:**
+   - Companies House status must be exactly `active` (an empty status fails);
+   - the site must show the **registered company number**, as a whole token, on the cited page or the home page. A short form such as "Company No. 1234567" counts only beside a registration word.
+
+   Name-based disclosure is gone, because a name can be partly matched or borrowed and a number can't.
+2. **Email proof:** `_address_on` requires the complete address. The character before it can't be any RFC 5322 atext character or a dot, and the domain mustn't continue after it.
+3. **Spend:**
+   - the OpenAI client has `max_retries=0`, so no silent second billable request;
+   - web search uses `search_context_size: "low"`, plus the existing output and tool-call limits;
+   - the reserve is now 100p per search;
+   - the cap and the on/off switch are **re-read before every reservation**;
+   - if a search ever costs more than its reserve, the full cost is kept and **research pauses** for the business until the owner switches it back on.
+
+Backlog, also done:
+- role verification needs the surname to match the officer's surname, and the first name to be among their forenames;
+- `prepare_due_cards` gives follow-ups on existing enrolments their morning card, daily from `run_due`;
+- the Aria tool `get_outreach_research` (status, spend, summary, lessons; outreach access checked; this business only).
+
+Tests: research **82 passed**, setup **86 passed**; `./check.sh full` is green; Postgres passes. The installed OpenAI SDK (3.9.0) supports `max_tool_calls` and `search_context_size`.
+
+## Codex review 3: REQUEST-CHANGES, three P1s (repair cycle 3 of 3, the last before escalating to Mike)
+Preserved verbatim in `audits/OUT-10-CODEX-REVIEW-3.md`. Fixes, tests first:
+1. **A proper legal disclosure binds the entity.** In the page's **visible text** (scripts, styles and markup removed, so image names don't count), the registered number must sit within a registration statement ("registered in England…", "company number…", "registered office"…), together with the **registered name**. A page describing a sole trader, "trading as", "t/a", self-employment or a partnership is always review.
+2. **Quoted local parts:** a quote or backslash before the address disqualifies it (`"x@y"@z`).
+3. **The reserve is a true maximum,** computed from limits the provider enforces: the model's whole context window (1,047,576 tokens) × the input price, plus the output cap × the output price, plus the tool-call cap × the search price. That's **189p** per search. Only the real cost is kept once a search settles.
+
+Backlog, also done: surnames compare as a whole, so "Sam Jones" no longer matches "SMITH-JONES, Sam".
+
+Tests: research **90 passed**, setup **86 passed**; `./check.sh full` is green; Postgres passes.
+
+## Codex review 4: one P1 left; escalated to Mike after three cycles
+Preserved verbatim in `audits/OUT-10-CODEX-REVIEW-4.md`. The P1 was a web designer's legal disclosure in a footer being accepted as the prospect's. **Mike's decision (24 Oct 2026): "Recommended":**
+1. **Third-party credits never count.** A number beside "designed/built/hosted/powered/made… by", "site by", "web design:" and the like is the third party's disclosure, not the operator's.
+2. **A company's own trading name is fine:** "Studio 1 Ltd trading as Fitness Club" is accepted. Any other "trading as" still means review. "Sole trader", self-employed and partnership are always review.
+3. **Mike's added sanity check:** the email's domain must fit the registered name, or a trading name the site discloses (whole name, first two words, a distinctive word of five letters or more, or initials). A personal domain that fits neither is review, so even an unusually worded credit can't make someone eligible.
+
+Tests: research **100 passed**, setup **86 passed**; `./check.sh full` is green; Postgres passes.
+
+## Codex review 5: APPROVE, no P1
+Preserved verbatim in `audits/OUT-10-CODEX-REVIEW-5.md`. Its three false rejections are fixed, with tests:
+- a designer credit **after** the company's own disclosure no longer cancels it; only a credit leading up to the number does;
+- trading names are recognised in any case, as "trading as" or "t/a", on the cited page or the home page;
+- only the business describing itself as a partnership is review, not "in partnership with local schools".
+
+Research tests: **106 passed**.

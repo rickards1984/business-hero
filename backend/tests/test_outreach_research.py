@@ -577,3 +577,251 @@ def test_new_contacts_have_their_first_email_waiting_for_approval(db):
     run(db, biz, lia, World([[person(i) for i in range(3)]]))
     assert count(db, "SELECT count(*) FROM aria_actions WHERE business_id = :b AND action_type = 'send_outreach' "
                      "AND status = 'proposed'") == 3
+
+
+# ------------------------------------------------ Codex OUT-10 review 2 (P1s) ---
+
+@pytest.mark.parametrize("footer", [
+    "<footer>Sam Taylor, sole trader trading as Studio 1.</footer>",     # the name, not the company
+    "<footer>Studio 10 Ltd is registered in England, company number 87654321.</footer>",
+])
+def test_the_site_must_show_the_registered_company_number(db, footer):
+    """P1 1: only the registered number is an unambiguous disclosure."""
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    world.pages["https://studio1.example/team"] = "<html>sam@studio1.example " + footer + "</html>"
+    world.pages["https://studio1.example/"] = "<html>" + footer + "</html>"
+    assert run(db, biz, lia, world)["accepted"] == []
+
+
+def test_a_company_with_no_status_is_not_active(db):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    record = world.companies("Studio 1 Ltd")
+    world.registry["Studio 1 Ltd"] = {**record, "status": ""}
+    assert run(db, biz, lia, world)["accepted"] == []
+
+
+@pytest.mark.parametrize("prefix", ["!", "/", "=", "#", "$", "%", "&", "'", "*", "+", "-", "?", "^", "_", "`",
+                                    "{", "|", "}", "~", "."])
+def test_part_of_a_longer_address_is_never_proof(db, prefix):
+    """P1 2: every character legal in an address belongs to it."""
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    number = World.number_for("Studio 1 Ltd")
+    world.pages["https://studio1.example/team"] = f"<html>{prefix}sam@studio1.example company number {number}</html>"
+    assert run(db, biz, lia, world)["accepted"] == []
+
+
+def test_the_research_call_never_retries_by_itself_and_bounds_its_search_context():
+    """P1 3: an SDK retry after a timeout would double uncertain spend."""
+    import inspect
+    source = inspect.getsource(research().web_search)
+    assert "max_retries=0" in source and '"search_context_size": "low"' in source
+
+
+def test_a_search_costing_more_than_its_reservation_pauses_research(db):
+    """P1 3: the reservation must hold; if it ever doesn't, research stops
+    for the business until the owner looks, and the full cost is kept."""
+    biz, brand, lia, campaign = started(db)
+    r = research()
+    world = World([[person(1)]], cost=r.MAX_SEARCH_PENCE + 9)
+    out = run(db, biz, lia, world)
+    assert "paused" in out["stopped"]
+    assert int(float(count(db, "SELECT value FROM usage_meters WHERE business_id = :b "
+                               "AND meter = 'outreach_research_pence'"))) == r.MAX_SEARCH_PENCE + 9
+    with Session(db) as s:
+        assert r.status(s, biz)["enabled"] is False
+
+
+def test_lowering_the_budget_mid_run_stops_the_next_search(db):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)], [person(2)], [person(3)]])
+    real = world.search
+
+    def search_then_lower(brief):
+        out = real(brief)
+        with db.begin() as c:
+            doc = json.loads(c.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"),
+                                       {"b": A}).scalar())
+            doc["outreach_research"]["monthly_cap_pence"] = 0
+            c.execute(text("UPDATE business_settings SET settings = :s WHERE business_id = :b"),
+                      {"s": json.dumps(doc), "b": A})
+        return out
+    world.search = search_then_lower
+    run(db, biz, lia, world)
+    assert len(world.briefs) == 1
+
+
+# ---------------------------------------------------------- review 2 backlog ---
+
+def test_a_role_is_verified_only_when_the_surname_matches(db):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1, name="Sam James", role="Director")]])
+    world.officers["Studio 1 Ltd"] = ["SMITH, Sam James"]
+    run(db, biz, lia, world)
+    assert count(db, "SELECT fact_value FROM outreach_evidence WHERE business_id = :b AND fact_type = 'role_verified'") == "false"
+
+
+def test_followups_due_on_existing_enrolments_get_their_morning_card(db):
+    biz, brand, lia, campaign = started(db)
+    run(db, biz, lia, World([[person(1)]]))
+    with db.begin() as c:
+        c.execute(text("DELETE FROM aria_actions WHERE business_id = :b"), {"b": A})
+    with Session(db) as s:
+        made = research().prepare_due_cards(s, biz, NOW)
+    assert len(made) == 1
+
+
+def test_aria_can_read_the_research_status_and_lessons():
+    research()
+    import assistant_tools
+    names = [t["function"]["name"] for t in assistant_tools.TOOL_DEFINITIONS]
+    assert "get_outreach_research" in names
+
+
+# ------------------------------------------------ Codex OUT-10 review 3 (P1s) ---
+
+@pytest.mark.parametrize("page", [
+    # an unrelated company's number in the credits of a sole trader's site
+    "<html><p>Sam Taylor is a sole trader. Email sam@studio1.example.</p>"
+    "<footer>Website built by Studio 1 Ltd (company number {n})</footer></html>",
+    # the number only inside markup, not visible text
+    "<html><p>Email sam@studio1.example</p><img src=\"/img/{n}.png\" alt=\"logo\"></html>",
+    # name and number, but no registration statement binding them
+    "<html><p>Studio 1 Ltd. Email sam@studio1.example. Ref {n}</p></html>",
+    # a proper disclosure, but the page says the business trades as a sole trader
+    "<html><p>Sam trading as Studio 1. Email sam@studio1.example.</p>"
+    "<footer>Studio 1 Ltd is registered in England and Wales, company number {n}.</footer></html>",
+])
+def test_only_a_proper_legal_disclosure_binds_the_company(db, page):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    n = World.number_for("Studio 1 Ltd")
+    world.pages["https://studio1.example/team"] = page.format(n=n)
+    world.pages["https://studio1.example/"] = page.format(n=n)
+    assert run(db, biz, lia, world)["accepted"] == []
+
+
+def test_a_proper_disclosure_is_accepted(db):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    n = World.number_for("Studio 1 Ltd")
+    world.pages["https://studio1.example/team"] = (
+        "<html><p>Email sam@studio1.example</p><footer>Studio 1 Limited. Registered in England and Wales. "
+        f"Company registration number: {n}. Registered office: 1 High St.</footer></html>")
+    assert len(run(db, biz, lia, world)["accepted"]) == 1
+
+
+def test_a_quoted_local_part_is_never_proof(db):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    n = World.number_for("Studio 1 Ltd")
+    world.pages["https://studio1.example/team"] = (
+        f'<html>"sam@studio1.example"@other.example Studio 1 Ltd is registered in England, company number {n}.</html>')
+    assert run(db, biz, lia, world)["accepted"] == []
+
+
+def test_the_reserve_covers_the_models_hard_maximum():
+    """P1 3: the reservation is computed from limits the provider enforces:
+    the model's whole context window, the output cap and the tool-call cap."""
+    r = research()
+    worst = (r.MODEL_CONTEXT_TOKENS * r.PRICE_IN_PER_M + r.MAX_OUTPUT_TOKENS * r.PRICE_OUT_PER_M) / 1_000_000 \
+        + r.MAX_TOOL_CALLS * r.PRICE_PER_SEARCH
+    assert r.MAX_SEARCH_PENCE >= worst
+
+
+def test_a_compound_surname_is_not_a_match(db):
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1, name="Sam Jones", role="Director")]])
+    world.officers["Studio 1 Ltd"] = ["SMITH-JONES, Sam"]
+    run(db, biz, lia, world)
+    assert count(db, "SELECT fact_value FROM outreach_evidence WHERE business_id = :b AND fact_type = 'role_verified'") == "false"
+
+
+# ------------------------------- Codex OUT-10 review 4 (Mike chose: recommended) ---
+
+@pytest.mark.parametrize("credit", [
+    "Website designed and hosted by Studio 1 Ltd. Company registration number {n}.",
+    "Site by Studio 1 Ltd, registered in England, company number {n}.",
+    "Powered by Studio 1 Ltd (registered in England and Wales, company no. {n})",
+    "Web design: Studio 1 Ltd, company number {n}",
+])
+def test_a_third_party_credit_never_establishes_the_operator(db, credit):
+    """The designer's disclosure is about the designer, not the site's owner."""
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    n = World.number_for("Studio 1 Ltd")
+    page = f"<html><p>Personal training with Sam. Email sam@studio1.example</p><footer>{credit.format(n=n)}</footer></html>"
+    world.pages["https://studio1.example/team"] = page
+    world.pages["https://studio1.example/"] = page
+    assert run(db, biz, lia, world)["accepted"] == []
+
+
+def test_a_company_trading_under_another_name_is_accepted(db):
+    """Review 4 backlog: the company itself trading as a brand is fine."""
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    n = World.number_for("Studio 1 Ltd")
+    world.pages["https://studio1.example/team"] = (
+        "<html><p>Email sam@studio1.example</p><footer>Studio 1 Ltd trading as Fitness Club. "
+        f"Registered in England and Wales, company number {n}.</footer></html>")
+    assert len(run(db, biz, lia, world)["accepted"]) == 1
+
+
+def test_the_email_domain_must_fit_the_company_or_its_trading_name(db):
+    """Mike's added sanity check: a personal trainer's own domain does not fit a
+    design agency's name, so even an unusual credit cannot make them eligible."""
+    biz, brand, lia, campaign = started(db)
+    candidate = {**person(1, company="Pixel Forge Ltd", email="sam@samtaylorpt.example"),
+                 "source_url": "https://samtaylorpt.example/contact"}
+    world = World([[candidate]])
+    n = World.number_for("Pixel Forge Ltd")
+    world.pages["https://samtaylorpt.example/contact"] = (
+        f"<html><p>Email sam@samtaylorpt.example</p><footer>Pixel Forge Ltd is registered in England, "
+        f"company number {n}.</footer></html>")
+    out = run(db, biz, lia, world)
+    assert out["accepted"] == [] and "review" in out["rejected"][0]["reason"]
+
+
+@pytest.mark.parametrize("company,domain", [
+    ("Studio 1 Ltd", "studio1.example"), ("Harbour Lettings Limited", "harbourlettings.example"),
+    ("Peak Form Studios Ltd", "peakform.example"), ("MSC Company Ltd", "msccompany.example"),
+])
+def test_ordinary_company_domains_fit(company, domain):
+    assert research()._domain_fits(domain, company, [])
+
+
+# ------------------------------------- Codex OUT-10 review 5 backlog: false rejections ---
+
+def _accepted_with(db, team, home=None, company="Studio 1 Ltd", domain="studio1.example"):
+    biz, brand, lia, campaign = started(db)
+    candidate = {**person(1, company=company, email=f"sam@{domain}"), "source_url": f"https://{domain}/team"}
+    world = World([[candidate]])
+    n = World.number_for(company)
+    world.pages[f"https://{domain}/team"] = team.format(n=n)
+    world.pages[f"https://{domain}/"] = (home or team).format(n=n)
+    return len(run(db, biz, lia, world)["accepted"]) == 1
+
+
+def test_a_real_disclosure_followed_by_a_designer_credit_is_accepted(db):
+    assert _accepted_with(db, "<html><p>Email sam@studio1.example</p><footer>Studio 1 Ltd is registered in England, "
+                              "company number {n}. Website designed by Pixel Forge Ltd.</footer></html>")
+
+
+@pytest.mark.parametrize("phrase", ["Trading As", "t/a", "trading as"])
+def test_trading_names_are_recognised_however_written_and_on_the_home_page(db, phrase):
+    team = "<html><p>Email sam@fitnessclub.example</p></html>"
+    home = ("<html><footer>Studio 1 Ltd " + phrase + " Fitness Club. Registered in England and Wales, "
+            "company number {n}.</footer></html>")
+    assert _accepted_with(db, team, home=home, domain="fitnessclub.example")
+
+
+def test_ordinary_partnership_wording_is_not_a_partnership(db):
+    assert _accepted_with(db, "<html><p>We work in partnership with local schools. Email sam@studio1.example</p>"
+                              "<footer>Studio 1 Ltd is registered in England, company number {n}.</footer></html>")
+
+
+def test_a_business_that_is_a_partnership_is_still_review(db):
+    assert not _accepted_with(db, "<html><p>We are a partnership of two coaches. Email sam@studio1.example</p>"
+                                  "<footer>Studio 1 Ltd is registered in England, company number {n}.</footer></html>")
