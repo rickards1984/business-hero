@@ -33,7 +33,7 @@ from sqlalchemy import text
 
 from services import outreach_send as send
 from services import outreach_setup as setup
-from services.chase_replies import _address
+from services.chase_replies import _address, _parse
 from services.metering import period_for
 
 LONDON = ZoneInfo("Europe/London")
@@ -41,7 +41,11 @@ KEY = "outreach_research"
 DAILY_TARGET, MIN_DECISION_MAKERS, MAX_GATEKEEPERS = 20, 10, 10
 MAX_ATTEMPTS = 3
 DEFAULT_CAP_PENCE = 2000                 # decision C: £20 a month, editable
-RESERVE_PENCE = 10                       # never start a search the budget cannot cover
+# Every search reserves its maximum possible cost before it is sent (Codex
+# OUT-10 review 1): the provider call is bounded (output tokens, tool calls)
+# so this is a real ceiling, and a search that fails keeps its reservation.
+MAX_SEARCH_PENCE = int(os.environ.get("ARIA_RESEARCH_MAX_SEARCH_PENCE", "60"))
+MAX_OUTPUT_TOKENS, MAX_TOOL_CALLS = 8000, 8
 METER = "outreach_research_pence"
 PILOT_ENROLMENTS = 5                     # decision E: OUT-8's pilot limit for now
 EXCLUSION_CAP = 400                      # steers the model; code checks guarantee
@@ -52,9 +56,10 @@ ROLE_LOCALS = {"info", "hello", "contact", "enquiries", "enquiry", "admin", "off
                "team", "mail", "studio", "bookings", "booking", "support", "accounts", "general", "gym"}
 SENIOR = ("director", "owner", "founder", "co-founder", "managing", "md", "ceo", "chief", "manager", "head",
           "partner", "principal", "proprietor", "chair", "president", "lead")
+# Corporate bodies only. A limited partnership is not one (Codex OUT-10 review 1).
 CORPORATE_TYPES = {"ltd", "plc", "llp", "private-unlimited", "private-limited-guarant-nsc",
                    "private-limited-guarant-nsc-limited-exemption", "private-limited-shares-section-30-exemption",
-                   "old-public-company", "limited-partnership", "royal-charter", "industrial-and-provident-society",
+                   "old-public-company", "royal-charter", "industrial-and-provident-society",
                    "registered-society-non-jurisdictional", "charitable-incorporated-organisation",
                    "scottish-charitable-incorporated-organisation", "uk-establishment"}
 
@@ -171,11 +176,47 @@ def lessons(session, business) -> list:
 
 # ---------------------------------------------------------------- the plan ---
 
-def _audience(session, bid: str, compliance_id) -> tuple:
+def _audience(session, bid: str, compliance_id, moment: Optional[datetime] = None) -> tuple:
+    """The approved audience, only while its approval is CURRENT."""
+    moment = moment or now()
     lia = send.one(session, "outreach_compliance", bid, compliance_id)
-    send.require(lia["decision"] == "approved", "Approve this audience first", 409)
+    send.require(lia["decision"] == "approved" and lia["reviewer"] and _parse(lia["reviewed_at"])
+                 and _parse(lia["reviewed_at"]) <= moment
+                 and _parse(lia["review_due_at"]) and moment < _parse(lia["review_due_at"]),
+                 "This audience's approval is missing or out of date", 409)
     rules = (_doc(session, bid).get(setup.AUDIENCE_KEY) or {}).get(str(lia["id"])) or {}
     return lia, rules
+
+
+def _still_allowed(session, bid: str, compliance_id, moment: datetime) -> Optional[str]:
+    """Why research may not run or store right now, or None. Read FRESH
+    (Codex OUT-10 review 1): an active business with current outreach
+    access, setup finished, outreach not paused, research on, and a current
+    audience approval."""
+    from fastapi import HTTPException
+    from auth import assert_feature_access
+    business = setup.load_business_row(session, bid)
+    if business is None:
+        return "Business unavailable"
+    business.feature_flags = send.loads(business.feature_flags) or {}
+    business.trial_ends_at = _parse(business.trial_ends_at)
+    try:
+        assert_feature_access(business, "outreach")
+    except HTTPException:
+        return "Outreach isn't available on this account"
+    doc = _doc(session, bid)
+    if not (doc.get(setup.SETUP_KEY) or {}).get("finished_at"):
+        return "Outreach setup isn't finished"
+    settings = send.rows(session, "outreach_settings", bid)
+    if not settings or settings[0]["pause_all"]:
+        return "Outreach is paused"
+    if not _config(doc)["enabled"]:
+        return "Research is switched off"
+    try:
+        _audience(session, bid, compliance_id, moment)
+    except send.ActionRefused as exc:
+        return exc.detail
+    return None
 
 
 def _wheel(rules: dict) -> list:
@@ -198,7 +239,7 @@ def _held(session, bid: str) -> tuple:
 
 def plan(session, business, compliance_id, *, moment: Optional[datetime] = None, attempt: int = 1) -> dict:
     bid = str(business.id)
-    lia, rules = _audience(session, bid, compliance_id)
+    lia, rules = _audience(session, bid, compliance_id, moment)
     cfg = _config(_doc(session, bid))
     wheel = _wheel(rules)
     base = wheel[int(cfg["rotation"].get(str(lia["id"]), 0)) % len(wheel)]
@@ -246,7 +287,8 @@ def _spent(session, bid: str, moment: datetime) -> int:
 
 
 def _spend(session, bid: str, moment: datetime, pence: int) -> None:
-    if pence <= 0:
+    """Add (or, to settle a reservation, subtract) spend this month."""
+    if pence == 0:
         return
     params = {"b": bid, "m": METER, "p": period_for(moment), "v": int(pence), "at": moment}
     updated = session.execute(text("UPDATE usage_meters SET value = value + :v, updated_at = :at "
@@ -272,8 +314,39 @@ def _name_tokens(value: str) -> set:
 
 
 def _officer_match(name: str, officers: list) -> bool:
+    """A role is verified only when at least a first AND a last name match one
+    officer exactly (Codex OUT-10 review 1: a first name alone overclaimed)."""
     wanted = _name_tokens(name)
-    return bool(wanted) and any(wanted <= _name_tokens(o) or _name_tokens(o) <= wanted for o in officers or [])
+    if len(wanted) < 2:
+        return False
+    return any(len(_name_tokens(o)) >= 2 and wanted <= _name_tokens(o) for o in officers or [])
+
+
+EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+'-])([A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)(?![A-Za-z0-9-])")
+
+
+def _emails_on(page: str) -> set:
+    """Complete addresses on the page; a longer address never counts as a shorter one."""
+    return {m.lower().rstrip(".") for m in EMAIL_RE.findall(page or "")}
+
+
+def _owns(host: str, domain: str) -> bool:
+    host = (host or "").lower().rstrip(".")
+    return host == domain or host.endswith("." + domain)
+
+
+def _page(fetch: Callable, url: str) -> tuple:
+    """(text, final url) from a fetcher returning text or {"url", "text"}."""
+    got = fetch(url) if url else None
+    if isinstance(got, dict):
+        return got.get("text") or "", got.get("url") or url
+    return got or "", url
+
+
+def _legal_name(value: str) -> str:
+    out = re.sub(r"[^a-z0-9 ]", " ", str(value or "").lower().replace("&", " and "))
+    out = re.sub(r"\b(limited|ltd|plc|llp|the|company|co)\b", " ", out)
+    return " ".join(out.split())
 
 
 def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callable, companies: Callable) -> dict:
@@ -290,28 +363,77 @@ def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callabl
         return {"ok": False, "reason": "already held"}
     if domain in held["domains"]:
         return {"ok": False, "reason": "company already held or contacted"}
-    if send.rows(session, "outreach_suppressions", bid,
-                 "AND ((key_type = 'email' AND key_digest = :e) OR (key_type = 'domain' AND key_digest = :d))",
-                 {"e": key, "d": send.suppression_digest(bid, "domain", domain)}):
+    if _suppressed(session, bid, key, domain):
         return {"ok": False, "reason": "opted out"}
     source = str(c.get("source_url") or "")
-    page = fetch(source) if source else None
-    if not page or email.lower() not in page.lower():
+    if not _owns(urlparse(source).hostname or "", domain):
+        return {"ok": False, "reason": "the source isn't the company's own website"}
+    page, final = _page(fetch, source)
+    if not _owns(urlparse(final).hostname or "", domain):
+        return {"ok": False, "reason": "the source isn't the company's own website (redirected away)"}
+    if email not in _emails_on(page):
         return {"ok": False, "reason": "email not on the cited page"}
     if not mx(domain):
         return {"ok": False, "reason": f"no mail server for {domain}"}
-    record = companies(c.get("company_number") or company)
     name, role = str(c.get("contact_name") or "").strip()[:120], str(c.get("role") or "").strip()[:120]
     base = {"email": email, "email_key": key, "domain": domain, "company": company, "name": name, "role": role,
             "contact_type": _contact_type(email, name, role), "source_url": source}
+    review = {"ok": False, "review": True, **base,
+              "reason": "kept for review: couldn't confirm a registered company that matches this website "
+                        "(sole traders and partnerships need consent under PECR)"}
+    number = str(c.get("company_number") or "").strip().upper()
+    record = companies(number) if re.fullmatch(r"[A-Z0-9]{8}", number) else None
+    if not record or _legal_name(record.get("name")) != _legal_name(company):
+        record = companies(company)   # never trust a model-supplied number for a different name
     if record and str(record.get("status", "")).lower() not in ("active", ""):
         return {"ok": False, "reason": f"company is not active ({record.get('status')})"}
-    if not record or str(record.get("type", "")).lower() not in CORPORATE_TYPES:
-        return {"ok": False, "review": True, **base,
-                "reason": "not a registered company — sole traders and partnerships need consent (PECR)"}
-    return {"ok": True, **base, "number": record.get("number"),
+    if not record or str(record.get("type", "")).lower() not in CORPORATE_TYPES \
+            or _legal_name(record.get("name")) != _legal_name(company):
+        return review
+    # The company's own website must show its registration (Companies Act 2006
+    # trading disclosures): the number, or the exact registered name — on the
+    # cited page or its home page.
+    registered_number = str(record.get("number") or "")
+    def discloses(text_):
+        flat = re.sub(r"\s+", " ", text_ or "").lower()
+        return (registered_number and registered_number.lower() in re.sub(r"\D", " ", flat).split()) \
+            or (_legal_name(record.get("name")) and _legal_name(record.get("name")) in _legal_name(flat))
+    if not discloses(page):
+        home, home_final = _page(fetch, f"https://{urlparse(final).hostname}/")
+        if not (_owns(urlparse(home_final).hostname or "", domain) and discloses(home)):
+            return review
+    return {"ok": True, **base, "number": registered_number,
             "role_verified": _officer_match(name, record.get("officers") or []) if name else False,
             "company_type": record.get("type")}
+
+
+def _suppressed(session, bid: str, key: str, domain: str) -> bool:
+    return bool(send.rows(session, "outreach_suppressions", bid,
+                          "AND ((key_type = 'email' AND key_digest = :e) OR (key_type = 'domain' AND key_digest = :d))",
+                          {"e": key, "d": send.suppression_digest(bid, "domain", domain)}))
+
+
+def _today_counts(session, bid: str, moment: datetime) -> dict:
+    """Eligible contacts research added this UK day, by type — shared by every
+    audience, read from the database (Codex OUT-10 review 1)."""
+    local = moment.astimezone(LONDON)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(LONDON).isoformat()
+    counts = {"decision_maker": 0, "gatekeeper": 0}
+    for (kind,) in session.execute(text(
+            "SELECT e.fact_value FROM outreach_prospects p JOIN outreach_evidence e "
+            "ON e.business_id = p.business_id AND e.prospect_id = p.id AND e.fact_type = 'contact_type' "
+            "WHERE p.business_id = :b AND p.eligibility = 'eligible' AND p.captured_at >= :start"),
+            {"b": bid, "start": _parse(start)}):
+        if kind in counts:
+            counts[kind] += 1
+    return counts
+
+
+def _lock(session, bid: str) -> None:
+    """The shared business lock (OUT-6's order) for the store step."""
+    if not send.pg(session):
+        session.execute(text("UPDATE business_settings SET business_id = business_id WHERE business_id = :b"), {"b": bid})
+    send.lock_business(session, bid)
 
 
 def _store(session, bid: str, lia_id: str, c: dict, v: dict, moment: datetime, *, review: bool = False) -> str:
@@ -376,75 +498,117 @@ def _enrol(session, bid: str, lia: dict, prospect_ids: list, moment: datetime) -
 def run(session, business, compliance_id, *, search: Optional[Callable] = None, fetch: Optional[Callable] = None,
         mx: Optional[Callable] = None, companies: Optional[Callable] = None,
         moment: Optional[datetime] = None) -> dict:
-    """One research run for one approved audience. Commits its own work."""
+    """One research run for one approved audience. Commits its own work.
+
+    Authority is re-read fresh before any spend and again, under the shared
+    business lock, before anything is stored. Spend is reserved before each
+    search. The day's quota is shared across audiences."""
     moment = moment or now()
     bid = str(business.id)
     out = {"accepted": [], "decision_makers": 0, "gatekeepers": 0, "rejected": [], "attempts": 0,
-           "spend_pence": 0, "stopped": None, "enrolled": []}
+           "spend_pence": 0, "stopped": None, "enrolled": [], "cards": []}
     if companies is None:
         if not os.environ.get("COMPANIES_HOUSE_API_KEY"):
             out["stopped"] = "Companies House key not configured: no contact can be confirmed as a company"
             return out
         companies = companies_house
     search, fetch, mx = search or web_search, fetch or fetch_page, mx or has_mail_server
-    lia, rules = _audience(session, bid, compliance_id)
+    why = _still_allowed(session, bid, compliance_id, moment)
+    session.rollback()
+    if why:
+        out["stopped"] = why
+        return out
+    lia, rules = _audience(session, bid, compliance_id, moment)
     cfg = _config(_doc(session, bid))
     session.rollback()
-    domains, _companies = _held(session, bid)
-    keys = {r[0] for r in session.execute(text(
-        "SELECT email_key FROM outreach_prospects WHERE business_id = :b AND email_key IS NOT NULL"), {"b": bid})}
-    held = {"domains": domains, "keys": keys, "seen": set()}
-    session.rollback()
-    succeeded = False
+    found_new = False
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        if len(out["accepted"]) >= DAILY_TARGET:
+        counts = _today_counts(session, bid, moment)
+        session.rollback()
+        if counts["decision_maker"] + counts["gatekeeper"] >= DAILY_TARGET:
             break
-        if _spent(session, bid, moment) + RESERVE_PENCE > int(cfg["monthly_cap_pence"]):
+        # Reserve the search's maximum cost first; the cap is a real ceiling.
+        if _spent(session, bid, moment) + MAX_SEARCH_PENCE > int(cfg["monthly_cap_pence"]):
             out["stopped"] = "This month's research budget is reached; research resumes next month"
+            session.rollback()
             break
+        _spend(session, bid, moment, MAX_SEARCH_PENCE)
+        session.commit()
         brief = plan(session, business, compliance_id, moment=moment, attempt=attempt)["brief"]
         out["attempts"] = attempt
         try:
             result = search(brief) or {}
-        except Exception:   # an outage is a failed attempt; it never skips an area
-            out["stopped"] = out["stopped"] or "Research was unavailable"
+        except Exception:
+            # Billable work may have happened: the reservation stays counted,
+            # and nothing is retried. An outage never skips an area.
+            out["spend_pence"] += MAX_SEARCH_PENCE
+            out["stopped"] = "Research was unavailable"
             break
-        succeeded = True
-        cost = int(result.get("cost_pence") or 0)
-        _spend(session, bid, moment, cost)
-        out["spend_pence"] += cost
+        cost = max(0, int(result.get("cost_pence") or 0))
+        _spend(session, bid, moment, cost - MAX_SEARCH_PENCE)   # settle the reservation
         session.commit()
-        candidates = [c for c in (result.get("candidates") or []) if isinstance(c, dict)]
-        verified = []
-        for c in candidates:
-            v = _verify(session, bid, c, held, fetch, mx, companies)
+        out["spend_pence"] += cost
+        domains, _ = _held(session, bid)
+        keys = {r[0] for r in session.execute(text(
+            "SELECT email_key FROM outreach_prospects WHERE business_id = :b AND email_key IS NOT NULL"), {"b": bid})}
+        held = {"domains": domains, "keys": keys, "seen": set()}
+        session.rollback()
+        verified, reviews = [], []
+        for c in [c for c in (result.get("candidates") or []) if isinstance(c, dict)]:
+            v = _verify(session, bid, c, held, fetch, mx, companies)   # no lock held: network
+            session.rollback()
             held["seen"].add(v.get("email") or "")
             if v.get("review"):
-                _store(session, bid, str(lia["id"]), c, v, moment, review=True)
-                held["keys"].add(v["email_key"])
-                held["domains"].add(v["domain"])
+                reviews.append((c, v))
             if not v["ok"]:
                 out["rejected"].append({"company": str(c.get("company") or "")[:200], "reason": v["reason"]})
                 continue
             verified.append((c, v))
+        # Store under the business lock, re-checking everything that can change.
+        _lock(session, bid)
+        why = _still_allowed(session, bid, compliance_id, moment)
+        if why:
+            session.rollback()
+            out["stopped"] = why
+            break
+        counts = _today_counts(session, bid, moment)
+        stored_domains, stored_keys = _held(session, bid)[0], {r[0] for r in session.execute(text(
+            "SELECT email_key FROM outreach_prospects WHERE business_id = :b AND email_key IS NOT NULL"), {"b": bid})}
+        for c, v in reviews:
+            if v["email_key"] not in stored_keys and not _suppressed(session, bid, v["email_key"], v["domain"]):
+                _store(session, bid, str(lia["id"]), c, v, moment, review=True)
+                stored_keys.add(v["email_key"])
         # Decision-makers first; gatekeepers only fill, never more than 10.
         verified.sort(key=lambda cv: cv[1]["contact_type"] != "decision_maker")
         for c, v in verified:
-            total = out["decision_makers"] + out["gatekeepers"]
-            if total >= DAILY_TARGET or (v["contact_type"] == "gatekeeper" and out["gatekeepers"] >= MAX_GATEKEEPERS):
+            total = counts["decision_maker"] + counts["gatekeeper"]
+            if v["email_key"] in stored_keys or v["domain"] in stored_domains:
+                out["rejected"].append({"company": v["company"], "reason": "already held"})
+                continue
+            if _suppressed(session, bid, v["email_key"], v["domain"]):
+                out["rejected"].append({"company": v["company"], "reason": "opted out"})
+                continue
+            if total >= DAILY_TARGET or (v["contact_type"] == "gatekeeper" and counts["gatekeeper"] >= MAX_GATEKEEPERS):
                 out["rejected"].append({"company": v["company"], "reason": "today's quota is full"})
                 continue
             ident = _store(session, bid, str(lia["id"]), c, v, moment)
-            held["keys"].add(v["email_key"])
-            held["domains"].add(v["domain"])
+            stored_keys.add(v["email_key"])
+            stored_domains.add(v["domain"])
+            counts[v["contact_type"]] += 1
             out["accepted"].append(ident)
             out["decision_makers" if v["contact_type"] == "decision_maker" else "gatekeepers"] += 1
+            found_new = True
         session.commit()
     if out["accepted"]:
-        out["enrolled"] = _enrol(session, bid, lia, out["accepted"], moment)
+        _lock(session, bid)
+        if not _still_allowed(session, bid, compliance_id, moment):
+            out["enrolled"] = _enrol(session, bid, lia, out["accepted"], moment)
         session.commit()
+        out["cards"] = _prepare_cards(session, business, out["enrolled"])
     cfg = _config(_doc(session, bid))
-    if succeeded:   # advance the wheel only on a run that searched (Byron)
+    if found_new and out["stopped"] != "Research was unavailable":
+        # Advance the area only after a run that found something new (Byron;
+        # Codex OUT-10 review 1).
         rotation = cfg["rotation"]
         rotation[str(lia["id"])] = int(rotation.get(str(lia["id"]), 0)) + 1
     cfg["summary"] = summary(business, out)
@@ -452,6 +616,30 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
     _save_config(session, bid, cfg)
     session.commit()
     return out
+
+
+def _prepare_cards(session, business, prospect_ids: list) -> list:
+    """Decision E: each newly enrolled contact's first email waits on the home
+    page for the owner (or OUT-11's permission). Never sent here."""
+    from services import aria_actions
+    bid, cards = str(business.id), []
+    for pid in prospect_ids:
+        rows = send.rows(session, "outreach_enrolments", bid, "AND prospect_id = :p AND state = 'active'", {"p": pid})
+        session.rollback()
+        for e in rows:
+            step = next((s for s in send.rows(session, "outreach_sequence_steps", bid,
+                                              "AND campaign_id = :c AND sequence_version = :v",
+                                              {"c": str(e["campaign_id"]), "v": e["sequence_version"]})
+                         if int(s["ordinal"]) == int(e["next_step"])), None)
+            session.rollback()
+            if step is None:
+                continue
+            made = aria_actions.propose(session, business, None, "send_outreach",
+                                        {"campaign_id": str(e["campaign_id"]), "enrolment_id": str(e["id"]),
+                                         "step_id": str(step["id"])})
+            if "proposal" in made:
+                cards.append(made["proposal"]["id"])
+    return cards
 
 
 def summary(business, out: dict) -> str:
@@ -495,6 +683,11 @@ def run_due(session, *, moment: Optional[datetime] = None, runner: Callable = ru
         audiences = [r[0] for r in session.execute(text(
             "SELECT id FROM outreach_compliance WHERE business_id = :b AND decision = 'approved' ORDER BY reviewed_at"),
             {"b": bid})]
+        _lock(session, bid)   # claim the day under the business lock: two schedulers never both run
+        cfg = _config(_doc(session, bid))
+        if cfg.get("last_run") == today:
+            session.rollback()
+            continue
         cfg["last_run"] = today   # claimed before running: a crash never repeats a day's spend
         _save_config(session, bid, cfg)
         session.commit()
@@ -509,40 +702,61 @@ def run_due(session, *, moment: Optional[datetime] = None, runner: Callable = ru
 
 # ------------------------------------------------------- default adapters ---
 
-def _public_host(host: str) -> bool:
-    """No fetch may reach Business Hero's own network (the model names URLs)."""
+def _public_ip(address: str) -> bool:
     try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
         return False
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            return False
-    return True
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast
+                or ip.is_unspecified)
 
 
-def fetch_page(url: str) -> Optional[str]:
+def _system_resolve(host: str) -> list:
+    return [(info[4][0],) for info in socket.getaddrinfo(host, None)]
+
+
+def fetch_page(url: str, *, resolve: Optional[Callable] = None, transport=None,
+               limit: int = 2_000_000) -> Optional[dict]:
+    """GET a public web page. The model names the URL, so every hop resolves
+    the host ONCE, refuses any non-public address, and connects to exactly
+    that checked address (Host header and TLS name kept), so DNS rebinding
+    cannot redirect the connection (Codex OUT-10 review 1). The body is read
+    to at most `limit` bytes. Returns {"url": final url, "text"} or None."""
     import httpx
-    parts = urlparse(url)
-    if parts.scheme not in ("http", "https") or not parts.hostname or not _public_host(parts.hostname):
-        return None
-    try:
-        with httpx.Client(timeout=10.0, follow_redirects=False,
-                          headers={"User-Agent": "BusinessHero-Research/1.0 (+contact verification)"}) as client:
-            for _ in range(3):   # follow redirects by hand so each hop is checked too
-                response = client.get(url)
-                if response.is_redirect and response.headers.get("location"):
-                    url = str(response.url.join(response.headers["location"]))
-                    nxt = urlparse(url)
-                    if nxt.scheme not in ("http", "https") or not nxt.hostname or not _public_host(nxt.hostname):
+    resolve = resolve or _system_resolve
+    for _hop in range(4):
+        parts = urlparse(url)
+        host = parts.hostname
+        if parts.scheme not in ("http", "https") or not host:
+            return None
+        try:
+            addresses = [a[0] for a in resolve(host)]
+        except Exception:
+            return None
+        if not addresses or not all(_public_ip(a) for a in addresses):
+            return None
+        pinned = addresses[0]
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        target = parts._replace(netloc=f"[{pinned}]:{port}" if ":" in pinned else f"{pinned}:{port}").geturl()
+        try:
+            with httpx.Client(timeout=10.0, follow_redirects=False, transport=transport,
+                              headers={"User-Agent": "BusinessHero-Research/1.0 (+contact verification)"}) as client:
+                with client.stream("GET", target, headers={"Host": host},
+                                   extensions={"sni_hostname": host}) as response:
+                    if response.is_redirect and response.headers.get("location"):
+                        from urllib.parse import urljoin
+                        url = urljoin(url, response.headers["location"])
+                        continue
+                    if response.status_code != 200:
                         return None
-                    continue
-                if response.status_code != 200:
-                    return None
-                return response.text[:2_000_000]
-    except Exception:
-        return None
+                    body = bytearray()
+                    for chunk in response.iter_bytes():
+                        body.extend(chunk)
+                        if len(body) >= limit:
+                            break
+                    return {"url": url, "text": bytes(body[:limit]).decode(response.encoding or "utf-8", "replace")}
+        except Exception:
+            return None
     return None
 
 
@@ -593,8 +807,10 @@ def web_search(brief: str) -> dict:
     if not key:
         raise RuntimeError("no model key configured")
     client = OpenAI(api_key=key, timeout=300.0, max_retries=1)
+    # Bounded, so MAX_SEARCH_PENCE is a real ceiling on one search's cost.
     response = client.responses.create(model=os.environ.get("ARIA_RESEARCH_MODEL", "gpt-4.1"),
-                                       tools=[{"type": "web_search"}], input=brief)
+                                       tools=[{"type": "web_search"}], input=brief,
+                                       max_output_tokens=MAX_OUTPUT_TOKENS, max_tool_calls=MAX_TOOL_CALLS)
     usage = getattr(response, "usage", None)
     searches = sum(1 for item in (getattr(response, "output", None) or [])
                    if getattr(item, "type", "") == "web_search_call")

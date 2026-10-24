@@ -1,0 +1,33 @@
+**REQUEST-CHANGES — 7 P1 findings.** Reviewed only `ticket/OUT-15-outreach-setup..88bf0e0`.
+
+Both requested checks passed: **215 targeted tests**; `./check.sh` **3,244 passed, 305 skipped**, TypeScript/compilation/Ruff green. The known OUT-7 flake did not occur. Thirteen additional offline probes confirmed the defects below.
+
+**P1 — blocking**
+
+1. **DNS rebinding permits SSRF.** [outreach_research.py:528](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:528): `_public_host` validates one DNS resolution, but `client.get(url)` resolves again. An attacker-controlled hostname can return a public address first and loopback/private metadata addresses second. Reproduced with simulated DNS and transport; no network used. Pin the validated address to the connection, preserving hostname/TLS checks, on every redirect.
+
+2. **Companies House evidence does not establish the candidate’s corporate identity.** [outreach_research.py:303](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:303): a model-supplied company number takes precedence, and the returned name is never compared or bound to the website/mailbox. A sole-trader candidate paired with an unrelated active PLC was **eligible and enrolled**. The [type allowlist at line 55](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:55) also accepts `limited-partnership` without establishing corporate-subscriber status. Require evidence linking legal entity, website and mailbox; uncertain cases must remain review-only.
+
+3. **Email “proof” accepts substrings and arbitrary websites.** [outreach_research.py:297](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:297): `sam@studio1.example` passes when the page contains only `notsam@studio1.example.evil.example`. An attacker’s page also qualifies as the organisation’s source. Both were reproduced. Extract and compare complete addresses, and verify source ownership, including the final redirect destination.
+
+4. **The spend cap is not a cap; uncertain spend disappears.** [outreach_research.py:402](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:402): the 10p check neither reserves funds nor bounds the request. With 1,990p spent, a 37p search produced **2,027p against a 2,000p cap**. The [provider request at line 595](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:595) has no output/tool-call budget; a timeout after billable work records nothing and may retry. Reserve a defensible maximum before dispatch and retain uncertain charges for reconciliation.
+
+5. **Daily quotas reset for every audience.** [outreach_research.py:501](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:501): each approved audience invokes `run` with fresh counters. Two audiences produced **40 eligible contacts, including 20 gatekeepers**, in one scheduled business-day pass. Enforce shared, durable business/day totals across audiences.
+
+6. **Disabled businesses and expired approvals can still trigger collection.** [outreach_research.py:491](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:491): loading the business does not enforce active status, subscription or current outreach entitlement, nor does scheduling check setup completion. An inactive, cancelled business with its grant removed still ran. Separately, [_audience at line 174](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:174) checks only `decision == approved`; an expired LIA can therefore produce eligible records, although later enrolment refuses them. Recheck current authority before spending and before persistence.
+
+7. **Suppression can win before persistence yet leave an eligible prospect.** [outreach_research.py:420](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:420): suppression is checked before external verification, with no coordinated final check before `_store`. An opt-out committed during verification still produced an **eligible** row. Enrolment refused it in the probe, but the stored eligibility violates the requested invariant. Revalidate under the shared business locking protocol before storing/enrolling.
+
+**Backlog — non-blocking**
+
+- **Same-batch company duplicates:** [line 432](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:432). Two different addresses at one domain both pass verification before either updates held domains; both were stored and enrolled.
+- **Rotation advances without new contacts:** [line 447](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:447). Three empty searches advance the wheel; a successful response followed by an outage also qualifies.
+- **Officer matching overclaims verification:** [line 276](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:276). “Sam” matches “Sam Otherperson”; an empty officer name matches any nonempty candidate through empty-set inclusion.
+- **Daily claim is not atomic:** [line 498](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:498). Two overlapping callers can both run the same business/day; reproduced by interleaving sessions. The current single-process scheduler prevents ordinary overlap, so this is backlog rather than a separate blocker.
+- **Fetch size limit applies after download:** [line 543](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:543). A large response is fully buffered before truncation; stream with a byte limit.
+- **Decision E’s morning cards are missing:** [line 443](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:443). Research enrols contacts but never prepares their due approval cards.
+- **Research memory lacks the promised Aria read tool:** [line 115](/Users/michaelrickards/dev/bh2-OUT-10-review/backend/services/outreach_research.py:115). Status/lessons have an HTTP/UI surface but no corresponding tool registration, so Aria cannot retrieve them through the promised interface.
+
+No cross-tenant defect was found in the reviewed learning queries. No general model-controlled action execution was found; the unsafe URL and eligibility paths above remain consequential.
+
+No network, commits or pushes. The worktree is clean; the empty test-generated `data.db` was removed. Offline reproduction probes remain in [/tmp/test_out10_review.py](/tmp/test_out10_review.py).
