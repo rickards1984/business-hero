@@ -107,3 +107,25 @@ Backlog, also done:
 Tests: research **53 passed**, setup **86 passed**; `./check.sh full` is green; the Postgres research run passes.
 
 **Cost note for Mike:** a search is bounded at about 60p, and a day can use up to 3. The £20 default allows roughly 11–33 research days a month, depending on how quickly each day's target is met, so a higher monthly cap may suit daily use.
+
+## Codex review 2: REQUEST-CHANGES, three P1s (repair cycle 2)
+Preserved verbatim in `audits/OUT-10-CODEX-REVIEW-2.md`. DNS pinning, the shared quota and the locked suppression check were confirmed. Fixes, tests first:
+1. **Identity:**
+   - Companies House status must be exactly `active` (an empty status fails);
+   - the site must show the **registered company number**, as a whole token, on the cited page or the home page. A short form such as "Company No. 1234567" counts only beside a registration word.
+
+   Name-based disclosure is gone, because a name can be partly matched or borrowed and a number can't.
+2. **Email proof:** `_address_on` requires the complete address. The character before it can't be any RFC 5322 atext character or a dot, and the domain mustn't continue after it.
+3. **Spend:**
+   - the OpenAI client has `max_retries=0`, so no silent second billable request;
+   - web search uses `search_context_size: "low"`, plus the existing output and tool-call limits;
+   - the reserve is now 100p per search;
+   - the cap and the on/off switch are **re-read before every reservation**;
+   - if a search ever costs more than its reserve, the full cost is kept and **research pauses** for the business until the owner switches it back on.
+
+Backlog, also done:
+- role verification needs the surname to match the officer's surname, and the first name to be among their forenames;
+- `prepare_due_cards` gives follow-ups on existing enrolments their morning card, daily from `run_due`;
+- the Aria tool `get_outreach_research` (status, spend, summary, lessons; outreach access checked; this business only).
+
+Tests: research **82 passed**, setup **86 passed**; `./check.sh full` is green; Postgres passes. The installed OpenAI SDK (3.9.0) supports `max_tool_calls` and `search_context_size`.

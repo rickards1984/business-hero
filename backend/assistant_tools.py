@@ -557,6 +557,10 @@ def _outreach_definition(name, parent, paginated):
     }}
 
 
+TOOL_DEFINITIONS.append({"type": "function", "function": {
+    "name": "get_outreach_research",
+    "description": "Aria's outreach research for this business: whether it is on, this month's spend against the budget, the latest research summary, and the lessons learned from the business's own results.",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}})
 TOOL_DEFINITIONS.extend(_outreach_definition(name, *inputs)
                         for name, inputs in OUTREACH_READ_TOOLS.items())
 
@@ -615,6 +619,29 @@ def refusal(tool_name: str) -> Optional[dict]:
     return {"refused": True, "error": message, "tool": tool_name}
 
 
+def _outreach_research_status(business_id: str) -> dict:
+    """OUT-10: Aria reads her research status, spend and lessons — only for
+    this business, only with outreach access (history access is enough)."""
+    from fastapi import HTTPException
+    from auth import assert_feature_access
+    from db import get_session_context
+    from services import outreach_research, outreach_setup
+    with get_session_context() as session:
+        business = outreach_setup.load_business_row(session, str(business_id))
+        if business is None:
+            return {"error": "Business not found."}
+        import json as _json
+        business.feature_flags = business.feature_flags if isinstance(business.feature_flags, dict) \
+            else _json.loads(business.feature_flags or "{}")
+        try:
+            assert_feature_access(business, "outreach", retained_history=True)
+        except HTTPException as exc:
+            return {"status_code": exc.status_code, "error": exc.detail}
+        state = outreach_research.status(session, business)
+        state["lessons_from_results"] = outreach_research.lessons(session, business)
+        return state
+
+
 def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: str = "Europe/London") -> dict:
     """Execute a tool and return the result.
     
@@ -634,6 +661,8 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
     if tool_name in OUTREACH_READ_TOOLS:
         from outreach_read import execute_read_tool
         return execute_read_tool(tool_name, arguments, business_id)
+    if tool_name == "get_outreach_research":
+        return _outreach_research_status(business_id)
 
     if tool_name == "list_tasks":
         return _list_tasks(engine, business_id, arguments)

@@ -44,7 +44,7 @@ DEFAULT_CAP_PENCE = 2000                 # decision C: £20 a month, editable
 # Every search reserves its maximum possible cost before it is sent (Codex
 # OUT-10 review 1): the provider call is bounded (output tokens, tool calls)
 # so this is a real ceiling, and a search that fails keeps its reservation.
-MAX_SEARCH_PENCE = int(os.environ.get("ARIA_RESEARCH_MAX_SEARCH_PENCE", "60"))
+MAX_SEARCH_PENCE = int(os.environ.get("ARIA_RESEARCH_MAX_SEARCH_PENCE", "100"))
 MAX_OUTPUT_TOKENS, MAX_TOOL_CALLS = 8000, 8
 METER = "outreach_research_pence"
 PILOT_ENROLMENTS = 5                     # decision E: OUT-8's pilot limit for now
@@ -314,20 +314,47 @@ def _name_tokens(value: str) -> set:
 
 
 def _officer_match(name: str, officers: list) -> bool:
-    """A role is verified only when at least a first AND a last name match one
-    officer exactly (Codex OUT-10 review 1: a first name alone overclaimed)."""
-    wanted = _name_tokens(name)
-    if len(wanted) < 2:
+    """A role is verified only when the contact's SURNAME is the officer's
+    surname and their first name is among the officer's forenames (Companies
+    House writes "SURNAME, Forenames"). Codex OUT-10 reviews 1 and 2."""
+    words = [t for t in re.findall(r"[a-z]+", name.lower()) if len(t) > 1]
+    if len(words) < 2:
         return False
-    return any(len(_name_tokens(o)) >= 2 and wanted <= _name_tokens(o) for o in officers or [])
+    first, last = words[0], words[-1]
+    for officer in officers or []:
+        surname_part, _, forename_part = str(officer).partition(",")
+        if not forename_part:   # no comma: treat the last word as the surname
+            parts = surname_part.split()
+            surname_part, forename_part = (parts[-1] if parts else ""), " ".join(parts[:-1])
+        surnames, forenames = _name_tokens(surname_part), _name_tokens(forename_part)
+        if last in surnames and first in forenames:
+            return True
+    return False
 
 
 EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+'-])([A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)(?![A-Za-z0-9-])")
 
 
-def _emails_on(page: str) -> set:
-    """Complete addresses on the page; a longer address never counts as a shorter one."""
-    return {m.lower().rstrip(".") for m in EMAIL_RE.findall(page or "")}
+# Every character legal in an address's local part (RFC 5322 atext, plus '.').
+ATEXT = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+-/=?^_`{|}~.")
+
+
+def _address_on(page: str, email: str) -> bool:
+    """The COMPLETE address appears: the character before it cannot belong to
+    a longer local part, and the domain does not continue after it (Codex
+    OUT-10 reviews 1 and 2)."""
+    text_, wanted = (page or "").lower(), email.lower()
+    start = text_.find(wanted)
+    while start != -1:
+        end = start + len(wanted)
+        before = text_[start - 1] if start else ""
+        after = text_[end:end + 2]
+        continues = bool(after) and (after[0].isalnum() or after[0] == "-"
+                                     or (after[0] == "." and len(after) > 1 and (after[1].isalnum() or after[1] == "-")))
+        if before not in ATEXT and not continues:
+            return True
+        start = text_.find(wanted, start + 1)
+    return False
 
 
 def _owns(host: str, domain: str) -> bool:
@@ -371,7 +398,7 @@ def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callabl
     page, final = _page(fetch, source)
     if not _owns(urlparse(final).hostname or "", domain):
         return {"ok": False, "reason": "the source isn't the company's own website (redirected away)"}
-    if email not in _emails_on(page):
+    if not _address_on(page, email):
         return {"ok": False, "reason": "email not on the cited page"}
     if not mx(domain):
         return {"ok": False, "reason": f"no mail server for {domain}"}
@@ -385,19 +412,26 @@ def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callabl
     record = companies(number) if re.fullmatch(r"[A-Z0-9]{8}", number) else None
     if not record or _legal_name(record.get("name")) != _legal_name(company):
         record = companies(company)   # never trust a model-supplied number for a different name
-    if record and str(record.get("status", "")).lower() not in ("active", ""):
-        return {"ok": False, "reason": f"company is not active ({record.get('status')})"}
+    if record and str(record.get("status") or "").lower() != "active":
+        return {"ok": False, "reason": f"company is not active ({record.get('status') or 'no status'})"}
     if not record or str(record.get("type", "")).lower() not in CORPORATE_TYPES \
             or _legal_name(record.get("name")) != _legal_name(company):
         return review
-    # The company's own website must show its registration (Companies Act 2006
-    # trading disclosures): the number, or the exact registered name — on the
-    # cited page or its home page.
-    registered_number = str(record.get("number") or "")
+    # The company's own website must show its REGISTERED NUMBER (Companies Act
+    # 2006 trading disclosures) on the cited page or its home page. A name can
+    # be partly matched or borrowed; a number cannot (Codex OUT-10 review 2).
+    registered_number = str(record.get("number") or "").upper()
     def discloses(text_):
-        flat = re.sub(r"\s+", " ", text_ or "").lower()
-        return (registered_number and registered_number.lower() in re.sub(r"\D", " ", flat).split()) \
-            or (_legal_name(record.get("name")) and _legal_name(record.get("name")) in _legal_name(flat))
+        if not re.fullmatch(r"[A-Z0-9]{8}", registered_number):
+            return False
+        tokens = re.findall(r"[A-Za-z0-9]+", text_ or "")
+        if registered_number in (t.upper() for t in tokens):
+            return True
+        # "Company No. 1234567" for 01234567: only beside a registration word.
+        short = registered_number.lstrip("0")
+        flat = (text_ or "").lower()
+        return bool(short) and short.isdigit() and bool(re.search(
+            r"(company|registered|registration|reg\.?)\s*(number|no\.?|num\.?)?\s*[:#]?\s*" + short + r"\b", flat))
     if not discloses(page):
         home, home_final = _page(fetch, f"https://{urlparse(final).hostname}/")
         if not (_owns(urlparse(home_final).hostname or "", domain) and discloses(home)):
@@ -527,8 +561,10 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
         session.rollback()
         if counts["decision_maker"] + counts["gatekeeper"] >= DAILY_TARGET:
             break
-        # Reserve the search's maximum cost first; the cap is a real ceiling.
-        if _spent(session, bid, moment) + MAX_SEARCH_PENCE > int(cfg["monthly_cap_pence"]):
+        # Reserve the search's maximum cost first, against the CURRENT budget
+        # (re-read every time: lowering it mid-run takes effect at once).
+        cfg = _config(_doc(session, bid))
+        if not cfg["enabled"] or _spent(session, bid, moment) + MAX_SEARCH_PENCE > int(cfg["monthly_cap_pence"]):
             out["stopped"] = "This month's research budget is reached; research resumes next month"
             session.rollback()
             break
@@ -546,8 +582,18 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             break
         cost = max(0, int(result.get("cost_pence") or 0))
         _spend(session, bid, moment, cost - MAX_SEARCH_PENCE)   # settle the reservation
-        session.commit()
         out["spend_pence"] += cost
+        if cost > MAX_SEARCH_PENCE:
+            # The reservation must hold. If it ever doesn't, the full cost is
+            # kept and research pauses until the owner switches it back on.
+            paused = _config(_doc(session, bid))
+            paused["enabled"] = False
+            paused["paused_reason"] = f"A search cost {cost}p, more than its {MAX_SEARCH_PENCE}p reserve"
+            _save_config(session, bid, paused)
+            session.commit()
+            out["stopped"] = "Research paused: a search cost more than its reserved maximum. Check the budget, then switch it back on"
+            break
+        session.commit()
         domains, _ = _held(session, bid)
         keys = {r[0] for r in session.execute(text(
             "SELECT email_key FROM outreach_prospects WHERE business_id = :b AND email_key IS NOT NULL"), {"b": bid})}
@@ -626,7 +672,12 @@ def _prepare_cards(session, business, prospect_ids: list) -> list:
     for pid in prospect_ids:
         rows = send.rows(session, "outreach_enrolments", bid, "AND prospect_id = :p AND state = 'active'", {"p": pid})
         session.rollback()
+        open_for = {str((send.loads(a["payload"]) or {}).get("enrolment_id")) for a in send.rows(
+            session, "aria_actions", bid, "AND action_type = 'send_outreach' AND status IN ('proposed', 'executing')")}
+        session.rollback()
         for e in rows:
+            if str(e["id"]) in open_for:
+                continue
             step = next((s for s in send.rows(session, "outreach_sequence_steps", bid,
                                               "AND campaign_id = :c AND sequence_version = :v",
                                               {"c": str(e["campaign_id"]), "v": e["sequence_version"]})
@@ -640,6 +691,19 @@ def _prepare_cards(session, business, prospect_ids: list) -> list:
             if "proposal" in made:
                 cards.append(made["proposal"]["id"])
     return cards
+
+
+def prepare_due_cards(session, business, moment: Optional[datetime] = None) -> list:
+    """Each morning: every active enrolment whose next email is due gets its
+    card waiting for the owner — follow-ups as well as new contacts (Codex
+    OUT-10 review 2). Never sends."""
+    moment = moment or now()
+    bid = str(business.id)
+    due = [str(e["prospect_id"]) for e in send.rows(session, "outreach_enrolments", bid,
+                                                    "AND state = 'active' AND takeover_at IS NULL")
+           if _parse(e["next_due_at"]) and _parse(e["next_due_at"]) <= moment]
+    session.rollback()
+    return _prepare_cards(session, business, list(dict.fromkeys(due)))
 
 
 def summary(business, out: dict) -> str:
@@ -696,6 +760,10 @@ def run_due(session, *, moment: Optional[datetime] = None, runner: Callable = ru
                 runner(session, business, str(compliance_id), moment=moment)
             except Exception:
                 session.rollback()
+        try:
+            prepare_due_cards(session, business, moment)
+        except Exception:
+            session.rollback()
         done.append(bid)
     return done
 
@@ -806,10 +874,12 @@ def web_search(brief: str) -> dict:
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         raise RuntimeError("no model key configured")
-    client = OpenAI(api_key=key, timeout=300.0, max_retries=1)
+    # No SDK retries: a retry after a timeout could be billed twice while only
+    # one reservation was made (Codex OUT-10 review 2).
+    client = OpenAI(api_key=key, timeout=300.0, max_retries=0)
     # Bounded, so MAX_SEARCH_PENCE is a real ceiling on one search's cost.
     response = client.responses.create(model=os.environ.get("ARIA_RESEARCH_MODEL", "gpt-4.1"),
-                                       tools=[{"type": "web_search"}], input=brief,
+                                       tools=[{"type": "web_search", "search_context_size": "low"}], input=brief,
                                        max_output_tokens=MAX_OUTPUT_TOKENS, max_tool_calls=MAX_TOOL_CALLS)
     usage = getattr(response, "usage", None)
     searches = sum(1 for item in (getattr(response, "output", None) or [])
