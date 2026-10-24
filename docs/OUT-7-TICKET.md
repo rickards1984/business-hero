@@ -98,3 +98,10 @@ Independent draft review checked SQL/FK targets, counts, fixture validity and ru
 - **Re-paste:** 038 applied twice more leaves policies, columns and outreach tables unchanged (95, 1,101 local and 19). It is idempotent.
 - **Policy baseline:** Claude verified `outreach_knowledge_member_read` (member-only SELECT, the same rendering as 037's six) and added it to `audits/BH-003-rls-policies-post-july.csv`; the count goes from 94 to **95**. `outreach_reply_slots` has no policy (backend only), as designed.
 - **Still to do before 038 goes to production:** the staging rehearsal (037 style), and Mike's runbook run (`audits/038-PROD-RUNBOOK.md`).
+
+## Mike's approval — 24 October 2026
+- **Approved:** the tests, all five decisions as recommended, and the one-answer-per-prospect rule (one Aria-drafted answer per prospect; every later question goes to the owner).
+- **Build split** (as for OUT-6):
+  - **Codex:** `outreach_replies.py`, the `outreach_send.py` integration, the storage-completion → scan wiring in `app/email/*` and `background_sync.py`, and the `outreach_read.py`/`assistant_tools.py` projections.
+  - **Claude:** the `reply_outreach` registration and owner hook in `aria_actions.py`, and any `chase_replies._store` boundary change. Codex does not edit those two files.
+- **Order to production:** Codex builds → Claude reviews → 038 is rehearsed on staging → Mike runs 038 on production → only then is OUT-7 merged.
