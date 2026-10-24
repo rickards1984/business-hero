@@ -391,3 +391,7 @@ It passes alongside the OUT-6 races and the schema and isolation suites (76).
 2. The default storage notification calls no classifier, so every reply hands over until router-backed classification is activated (a stated gate).
 
 **Push blocked on purpose:** `test_schema_conformance` refuses writes to `outreach_knowledge`/`outreach_reply_slots` until 038 is live and the schema dump is regenerated.
+
+**Codex review of Claude's parts: APPROVE, no P1** (`audits/OUT-7-CODEX-REVIEW-CLAUDE-PARTS.md`).
+- Done from its backlog: a missing 038 or an unrecorded reply now fails rather than skips, and the lost-claim test checks the daily usage counters.
+- Still backlog: prove real lock contention in the race helper, and a cross-mailbox race where both replies are eligible.

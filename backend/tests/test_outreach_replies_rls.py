@@ -26,8 +26,9 @@ pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="RLS_LOCAL_DATABASE_URL
 @pytest.fixture
 def pr(pg, monkeypatch):
     with pg.engine.connect() as c:
-        if not c.execute(text("SELECT to_regclass('public.outreach_reply_slots')")).scalar():
-            pytest.skip("038 is not replayed in the local harness")
+        # A supplied harness without 038 is a failure, not a skip (review).
+        assert c.execute(text("SELECT to_regclass('public.outreach_reply_slots')")).scalar(), \
+            "038 is not replayed in the local harness: rebuild with scripts/rls-local.sh up"
     with Session(pg.engine) as s:
         # The accepted initial email the prospect is replying to, and the owner's
         # approved card that sent it (037: a live acceptance names its action).
@@ -149,8 +150,7 @@ def test_two_replies_from_one_prospect_in_two_mailboxes_at_once_one_answer(pr):
     _incoming(pr, "second", mailbox=DEFAULT, thread="other-thread")
     _scan(pr)
     rids = _reply_ids(pr)
-    if len(rids) < 2:
-        pytest.skip("the second mailbox's reply was not matched to an outreach thread")
+    assert len(rids) == 2, "both inbound messages must be recorded as outreach replies"
     results, errors = _together(lambda: _propose(pr, rids[0]), lambda: _propose(pr, rids[1]))
     # Never two answers. Two replies on different threads are ambiguous
     # (decision 3), so both may go to the owner and no answer is drafted.
@@ -209,6 +209,8 @@ def test_a_lost_reply_claim_rolls_everything_back(pr, monkeypatch):
     assert not pr.p.sends
     assert _count(pr, "SELECT count(*) FROM outreach_usage_events WHERE business_id = :b") == 0
     assert _count(pr, "SELECT count(*) FROM outreach_dispatch_jobs WHERE business_id = :b") == 0
+    assert (_count(pr, "SELECT coalesce(sum(reserved + accepted + unknown), 0) FROM outreach_daily_usage "
+                       "WHERE business_id = :b") or 0) == 0, "no leaked daily reservation"
     assert _count(pr, "SELECT count(*) FROM outreach_messages WHERE business_id = :b "
                       "AND direction = 'outbound' AND state <> 'accepted'") == 0
     assert _count(pr, "SELECT message_id FROM outreach_reply_slots WHERE business_id = :b") is None
