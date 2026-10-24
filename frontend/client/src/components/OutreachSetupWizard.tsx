@@ -314,7 +314,8 @@ function CampaignStep({ api, accounts, brandId, setBrandId, complianceId, setCom
     queryKey: ['outreach', useBusinessKey(), 'setup-campaigns'],
     queryFn: async () => (await apiRequest('GET', '/v1/outreach/campaigns?limit=50')).json(), retry: false,
   });
-  const created = createdNow || (drafts.data?.items || []).find(c => c.status === 'draft')?.id || '';
+  // Saving wording pauses a campaign, so a paused one is also still in setup.
+  const created = createdNow || (drafts.data?.items || []).find(c => c.status === 'draft' || c.status === 'paused')?.id || '';
   const compliance = useQuery<{ items?: { id: string; brand_id: string; version: number; decision: string; reviewed_at?: string }[] }>({
     queryKey: ['outreach', useBusinessKey(), 'setup-compliance'], queryFn: async () => (await apiRequest('GET', '/v1/outreach/compliance?limit=50')).json(), retry: false,
   });
@@ -442,5 +443,49 @@ function CampaignTemplates({ campaignId }: { campaignId: string }) {
         }>Approve these templates</Button>
       </Stack>
     </Stack>
+  );
+}
+
+// ------------------------- after setup: mailboxes and campaign copy (review 3) ---
+
+// Mailbox registration and "Check again" stay available once outreach has
+// started, so a paused mailbox can be rechecked and a replacement prepared.
+export function OutreachMailboxes({ businessId }: { businessId: string }) {
+  const accounts = useAccounts(businessId);
+  const api = useCall(businessId);
+  return (
+    <BusinessKey.Provider value={businessId}>
+      <Paper variant="outlined" sx={{ p: 2 }}>
+        <Stack spacing={1.5}>
+          <Typography variant="h6">Sending mailboxes</Typography>
+          {api.error && <Alert severity="error">{api.error}</Alert>}
+          <MailboxStep api={api} accounts={accounts.data || []} />
+        </Stack>
+      </Paper>
+    </BusinessKey.Provider>
+  );
+}
+
+export function CopyCampaign({ businessId, campaignId }: { businessId: string; campaignId: string }) {
+  const accounts = useAccounts(businessId);
+  const api = useCall(businessId);
+  const [mailbox, setMailbox] = useState('');
+  const [done, setDone] = useState('');
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Stack spacing={1.5}>
+        <Typography variant="subtitle1" fontWeight={600}>Copy to another mailbox</Typography>
+        <Typography variant="body2">Same audience and wording, sent from a different mailbox. You'll approve the wording once more.</Typography>
+        <TextField select label="Send from" value={mailbox} onChange={e => setMailbox(e.target.value)}>
+          {(accounts.data || []).map(a => <MenuItem key={a.id} value={a.id}>{a.email_address}</MenuItem>)}
+        </TextField>
+        <Button variant="outlined" sx={{ alignSelf: 'flex-start' }} disabled={api.busy || !mailbox} onClick={async () => {
+          const out = await api.call<{ id: string }>('POST', `campaigns/${campaignId}/copy`, { mailbox_id: mailbox });
+          if (out) setDone(out.id);
+        }}>Copy campaign</Button>
+        {done && <Alert severity="success">Copied. Open it from Campaigns to approve its wording.</Alert>}
+        {api.error && <Alert severity="error">{api.error}</Alert>}
+      </Stack>
+    </Paper>
   );
 }

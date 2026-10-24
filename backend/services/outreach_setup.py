@@ -196,31 +196,49 @@ def dns_txt(name: str) -> list:
     return [b"".join(r.strings).decode("utf-8", "replace") for r in answer]
 
 
-def _tags(record: str) -> dict:
-    out = {}
+def _tag_list(record: str) -> list:
+    """Tag=value pairs in order (DKIM RFC 6376 / DMARC RFC 7489 syntax)."""
+    out = []
     for part in record.split(";"):
-        if "=" in part:
-            k, v = part.split("=", 1)
-            out[k.strip().lower()] = "".join(v.split())
+        if not part.strip():
+            continue
+        if "=" not in part:
+            return []          # malformed: no usable record
+        k, v = part.split("=", 1)
+        out.append((k.strip(), "".join(v.split())))
     return out
 
 
 def _usable_dkim(record: str) -> bool:
-    """A published, non-revoked public key that really IS a key: p= decodes
-    to an RSA key of at least 1024 bits, or a 32-byte Ed25519 key (an empty
-    p= means revoked) — Codex OUT-15 reviews 1 and 2."""
+    """RFC 6376: v (if present, first) is exactly DKIM1; k is rsa or ed25519;
+    not in testing mode (t=y); usable for email (s absent, * or email); and p
+    decodes to a real key — RSA of at least 1024 bits or 32-byte Ed25519 (an
+    empty p= is a revoked key). Codex OUT-15 reviews 1–3."""
     import base64
     import binascii
-    tags = _tags(record)
-    if tags.get("v", "dkim1").lower() != "dkim1":
+    tags = _tag_list(record)
+    if not tags:
+        return False
+    names = [k.lower() for k, _ in tags]
+    if len(set(names)) != len(names):
+        return False                                   # duplicate tags are invalid
+    t = {k.lower(): v for k, v in tags}
+    if "v" in t and (names[0] != "v" or t["v"] != "DKIM1"):
+        return False
+    key_type = t.get("k", "rsa").lower()
+    if key_type not in ("rsa", "ed25519"):
+        return False
+    if "y" in [f.lower() for f in t.get("t", "").split(":")]:
+        return False
+    if "s" in t and not {x.lower() for x in t["s"].split(":")} & {"*", "email"}:
         return False
     try:
-        raw = base64.b64decode(tags.get("p", ""), validate=True)
+        raw = base64.b64decode(t.get("p", ""), validate=True)
     except (binascii.Error, ValueError):
         return False
     if not raw:
         return False
-    if tags.get("k", "rsa").lower() == "ed25519":
+    if key_type == "ed25519":
         return len(raw) == 32
     try:
         from cryptography.hazmat.primitives.asymmetric import rsa
@@ -231,21 +249,33 @@ def _usable_dkim(record: str) -> bool:
     return isinstance(key, rsa.RSAPublicKey) and key.key_size >= 1024
 
 
-def _spf_includes(record: str, provider: str) -> bool:
-    """Read SPF in order: the provider's include must come before any `all`,
-    and carry a pass qualifier (none or +)."""
-    for term in record.split()[1:]:
+def _spf_passes_provider(record: str, provider: str) -> bool:
+    """RFC 7208, read left to right: the FIRST mechanism that can match the
+    provider decides. The provider's include passes only with a pass
+    qualifier (none or +); any include of it with -, ~ or ? fails, and an
+    `all` before it ends evaluation. A redirect without the include fails."""
+    terms = record.split()
+    if not terms or terms[0] != "v=spf1":
+        return False
+    for term in terms[1:]:
         t = term.lower()
-        if t.lstrip("+-~?") == "all":
+        qualifier = t[0] if t[0] in "+-~?" else "+"
+        mechanism = t[1:] if t[0] in "+-~?" else t
+        if mechanism == "all":
             return False
-        if t in (f"include:{provider}", f"+include:{provider}"):
-            return True
+        if mechanism == f"include:{provider}":
+            return qualifier == "+"
     return False
 
 
 def _usable_dmarc(record: str) -> bool:
-    tags = _tags(record)
-    return record.strip().lower().startswith("v=dmarc1") and tags.get("p", "").lower() in ("none", "quarantine", "reject")
+    """RFC 7489: the first tag is exactly v=DMARC1, and p is none,
+    quarantine or reject."""
+    tags = _tag_list(record)
+    if not tags or tags[0] != ("v", "DMARC1"):
+        return False
+    policy = {k.lower(): v for k, v in tags}.get("p", "").lower()
+    return policy in ("none", "quarantine", "reject")
 
 
 def _evaluate(account: dict, resolve: Callable) -> dict:
@@ -270,10 +300,10 @@ def _evaluate(account: dict, resolve: Callable) -> dict:
         except Exception:  # a resolver failure is a missing record, never a pass
             return []
     advice = []
-    spf = [t for t in txt(domain) if t.strip().lower().split(" ")[0] == "v=spf1"]
+    spf = [t for t in txt(domain) if t.strip().split(" ")[0].lower() == "v=spf1"]
     # Exactly one SPF record (two is a permanent error), naming the provider
     # as a whole mechanism — never a substring (Codex OUT-15 review 1).
-    if len(spf) == 1 and _spf_includes(spf[0], provider["spf"]):
+    if len(spf) == 1 and _spf_passes_provider(spf[0].strip(), provider["spf"]):
         evidence["spf"] = "pass"
     else:
         advice.append(f"SPF: your domain's SPF record must include {provider['name']}. Add or edit the TXT "
@@ -284,7 +314,7 @@ def _evaluate(account: dict, resolve: Callable) -> dict:
             evidence["selectors"].append(selector)
     if evidence["dkim"] != "pass":
         advice.append("DKIM: " + provider["dkim_help"])
-    dmarc = [t for t in txt(f"_dmarc.{domain}") if t.strip().lower().startswith("v=dmarc1")]
+    dmarc = [t for t in txt(f"_dmarc.{domain}") if t.strip().lower().startswith("v=dmarc1")]   # candidates
     if len(dmarc) == 1 and _usable_dmarc(dmarc[0]):   # more than one is invalid
         evidence["dmarc"] = "pass"
     else:
@@ -354,7 +384,8 @@ def recheck_health(session, *, resolve: Callable = dns_txt, moment: Optional[dat
     out = {"checked": [], "failed": []}
     rows = session.execute(text(
         "SELECT m.id, m.business_id, m.mailbox_id, m.pause_reason, m.health_checked_at "
-        "FROM outreach_mailboxes m WHERE m.enabled = :t"), {"t": True}).mappings().all()
+        "FROM outreach_mailboxes m WHERE m.enabled = :t OR m.pause_reason LIKE :dns"),
+        {"t": True, "dns": DNS_PAUSE + "%"}).mappings().all()
     if checked_before is not None:
         rows = [r for r in rows if not _parse(r["health_checked_at"])
                 or _parse(r["health_checked_at"]) < checked_before]
@@ -373,7 +404,8 @@ def recheck_health(session, *, resolve: Callable = dns_txt, moment: Optional[dat
             send.lock_business(session, bid)
             current = send.rows(session, "outreach_mailboxes", bid, "AND id = :id", {"id": str(row["id"])}, True)
             already = checked_before is not None and _parse(current[0]["health_checked_at"] if current else None)
-            if not current or not current[0]["enabled"] or (already and already >= checked_before):
+            dns_paused = bool(current) and str(current[0]["pause_reason"] or "").startswith(DNS_PAUSE)
+            if not current or not (current[0]["enabled"] or dns_paused) or (already and already >= checked_before):
                 session.rollback()   # retired meanwhile, or another run checked it today
                 continue
             _apply_health(session, bid, current[0], result, moment, daily=True)

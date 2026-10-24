@@ -119,3 +119,21 @@ From the backlog, also done:
 - overlapping daily checks skip a mailbox already checked that day once they hold the lock.
 
 Tests: setup **51 passed**; `./check.sh full` is green; the Postgres wizard passes.
+
+## Codex review 3: REQUEST-CHANGES, two P1s (repair cycle 3 of 3, the last before escalating to Mike)
+Preserved verbatim in `audits/OUT-15-CODEX-REVIEW-3.md`. The pause P1 is closed.
+1. **DNS records are evaluated by their RFC rules, not checked against examples:**
+   - **SPF** (RFC 7208): read left to right. The first `include` of the provider decides, and passes only with a + or no qualifier; an `all` before it fails; so does `redirect` without it.
+   - **DKIM** (RFC 6376): `v`, if present, is first and exactly `DKIM1`; `k` is rsa or ed25519; testing mode (`t=y`) fails; `s` must allow email; no duplicate tags; `p` decodes to a real key.
+   - **DMARC** (RFC 7489): the first tag is exactly `v=DMARC1`, and there must be a valid `p`.
+
+   23 parametrised cases cover pass and fail on each.
+2. **Mailbox checks after setup:**
+   - a DNS-paused mailbox stays in the daily check, so repaired records re-enable it (safety holds still never lift);
+   - Outreach settings has a **Sending mailboxes** panel (register, check, check again) at any time, so a replacement can be prepared and **Change sending mailbox** can use it.
+
+From the backlog, also done:
+- edited (paused) drafts are picked up after a reload;
+- **Copy to another mailbox** is on each campaign.
+
+Tests: setup **77 passed**; `./check.sh full` is green; the Postgres wizard passes.
