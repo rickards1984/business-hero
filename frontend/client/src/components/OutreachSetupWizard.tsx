@@ -501,7 +501,8 @@ export function CopyCampaign({ businessId, campaignId }: { businessId: string; c
 
 // ---------------------------------------------------- OUT-10: research ---
 
-interface ResearchStatus { enabled: boolean; monthly_cap_pence: number; spent_pence: number; lessons: string[]; last_run?: string | null; summary?: string | null }
+interface BrandResearch { brand_id: string; name: string; enabled: boolean; monthly_cap_pence: number; spent_pence: number; paused_reason?: string | null; lessons: string[] }
+interface ResearchStatus { brands: BrandResearch[]; enabled: boolean; daily_target_per_brand: number; min_cap_pence: number; last_run?: string | null; summary?: string | null }
 
 export function useResearchStatus(businessId: string) {
   return useQuery<ResearchStatus>({
@@ -519,43 +520,60 @@ export function ResearchSummary({ businessId }: { businessId: string }) {
 
 export function ResearchPanel({ businessId }: { businessId: string }) {
   const research = useResearchStatus(businessId);
-  const client = useQueryClient();
-  const api = useCall(businessId);
-  const [budget, setBudget] = useState<string>('');
-  const [notes, setNotes] = useState<string | null>(null);
   const data = research.data;
-  async function save(path: string, body: unknown) {
-    if (await api.call('POST', path, body)) client.invalidateQueries({ queryKey: ['outreach-research', businessId] });
-  }
   if (!data) return null;
-  const pounds = (p: number) => `£${(p / 100).toFixed(2)}`;
   return (
     <Paper variant="outlined" sx={{ p: 2 }}>
       <Stack spacing={1.5}>
         <Typography variant="h6">Research</Typography>
         <Typography variant="body2">
-          Each weekday morning Aria looks for up to 20 new contacts per business, at least 10 of them named
-          decision-makers, and checks every one before it's kept: the email is on their website, the domain receives
-          mail, the company is registered at Companies House, and they haven't been contacted or opted out.
+          Each weekday morning Aria looks for up to {data.daily_target_per_brand} new contacts for each brand, at least
+          10 of them named decision-makers, and checks every one before it's kept: the email is on their website, the
+          domain receives mail, the company is registered at Companies House, and they haven't been contacted or opted out.
         </Typography>
         {data.summary && <Alert severity="info" icon={false}><strong>Latest:</strong> {data.summary}</Alert>}
-        <FormControlLabel control={<Checkbox checked={data.enabled} disabled={api.busy}
-          onChange={(_, v) => save('research', { enabled: v })} />} label="Aria researches new contacts each weekday" />
-        <Typography variant="body2">This month: {pounds(data.spent_pence)} of {pounds(data.monthly_cap_pence)}. Research pauses when the budget is reached.</Typography>
-        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-          <TextField size="small" type="number" label="Monthly budget (£)" value={budget}
-            placeholder={(data.monthly_cap_pence / 100).toFixed(0)} onChange={e => setBudget(e.target.value)} />
-          <Button variant="outlined" disabled={api.busy || budget === '' || Number(budget) < 0}
-            onClick={() => save('research', { monthly_cap_pence: Math.round(Number(budget) * 100) })}>Save budget</Button>
+        {data.brands.length === 0 && <Typography variant="body2">Add a brand in setup to start research.</Typography>}
+        {data.brands.map(b => <BrandResearchCard key={b.brand_id} businessId={businessId} brand={b} minCap={data.min_cap_pence} />)}
+      </Stack>
+    </Paper>
+  );
+}
+
+function BrandResearchCard({ businessId, brand, minCap }: { businessId: string; brand: BrandResearch; minCap: number }) {
+  const client = useQueryClient();
+  const api = useCall(businessId);
+  const [budget, setBudget] = useState('');
+  const [notes, setNotes] = useState<string | null>(null);
+  const pounds = (p: number) => `£${(p / 100).toFixed(2)}`;
+  const min = minCap / 100;
+  async function save(path: string, body: Record<string, unknown>) {
+    const ok = await api.call('POST', path, { brand_id: brand.brand_id, ...body });
+    if (ok) client.invalidateQueries({ queryKey: ['outreach-research', businessId] });
+    return ok;
+  }
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Stack spacing={1.25}>
+        <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{brand.name}</Typography>
+        {brand.paused_reason && <Alert severity="warning">Paused: {brand.paused_reason}</Alert>}
+        <FormControlLabel control={<Checkbox checked={brand.enabled} disabled={api.busy}
+          onChange={(_, v) => save('research', { enabled: v })} />} label={`Aria researches new contacts for ${brand.name} each weekday`} />
+        <Typography variant="body2">This month: {pounds(brand.spent_pence)} of {pounds(brand.monthly_cap_pence)}. Research for {brand.name} pauses when its budget is reached.</Typography>
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          <TextField size="small" type="number" label="Monthly budget (£)" value={budget} inputProps={{ min }}
+            placeholder={(brand.monthly_cap_pence / 100).toFixed(0)} onChange={e => setBudget(e.target.value)}
+            helperText={`At least £${min.toFixed(0)}`} />
+          <Button variant="outlined" disabled={api.busy || budget === '' || Number(budget) < min || Number(budget) > 1000}
+            onClick={async () => { if (await save('research', { monthly_cap_pence: Math.round(Number(budget) * 100) })) setBudget(''); }}>Save budget</Button>
         </Stack>
-        <Typography variant="subtitle2">What Aria has learned</Typography>
+        <Typography variant="subtitle2">What Aria has learned for {brand.name}</Typography>
         <Typography variant="body2" color="text.secondary">
-          Aria learns from your own results: which sectors, areas and roles reply. Add your own notes too, one per line.
+          Aria learns from this brand's own results: which sectors, areas and roles reply. Add your own notes too, one per line.
         </Typography>
-        <TextField multiline minRows={3} value={notes ?? data.lessons.join('\n')} onChange={e => setNotes(e.target.value)}
+        <TextField multiline minRows={3} value={notes ?? brand.lessons.join('\n')} onChange={e => setNotes(e.target.value)}
           placeholder="e.g. Independent studios reply far more than chains." />
         <Button variant="outlined" disabled={api.busy || notes === null} sx={{ alignSelf: 'flex-start' }}
-          onClick={async () => { await save('research/lessons', { lessons: (notes || '').split('\n').map(s => s.trim()).filter(Boolean) }); setNotes(null); }}>
+          onClick={async () => { if (await save('research/lessons', { lessons: (notes || '').split('\n').map(s => s.trim()).filter(Boolean) })) setNotes(null); }}>
           Save notes
         </Button>
         {api.error && <Alert severity="error">{api.error}</Alert>}

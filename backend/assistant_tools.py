@@ -559,7 +559,7 @@ def _outreach_definition(name, parent, paginated):
 
 TOOL_DEFINITIONS.append({"type": "function", "function": {
     "name": "get_outreach_research",
-    "description": "Aria's outreach research for this business: whether it is on, this month's spend against the budget, the latest research summary, and the lessons learned from the business's own results.",
+    "description": "Aria's outreach research for this business, per brand (each brand has its own daily target of 20 contacts, monthly budget and switch): each brand's spend against its budget, the latest research summary, and the lessons learned from the business's own results.",
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}})
 TOOL_DEFINITIONS.extend(_outreach_definition(name, *inputs)
                         for name, inputs in OUTREACH_READ_TOOLS.items())

@@ -116,7 +116,7 @@ def started(db):
         c = s.execute(text("SELECT version, sequence_version FROM outreach_campaigns")).one()
         outreach_manage.approve_templates(s, biz, OWNER, campaign["id"], {"version": int(c[0]), "sequence_version": int(c[1])})
         m.finish(s, biz, OWNER)
-        research().configure(s, biz, OWNER, {"enabled": True, "monthly_cap_pence": 2000})
+        research().configure(s, biz, OWNER, {"brand_id": brand["id"], "enabled": True, "monthly_cap_pence": 2000})
     return biz, brand, lia, campaign
 
 
@@ -302,8 +302,8 @@ def test_lesson_notes_are_owner_only_and_reach_the_brief(db):
     r = research()
     with Session(db) as s:
         with pytest.raises(Exception):
-            r.save_lessons(s, biz, STAFF, ["Avoid chains"])
-        r.save_lessons(s, biz, OWNER, ["Avoid national chains; independents reply."])
+            r.save_lessons(s, biz, STAFF, ["Avoid chains"], brand_id=brand["id"])
+        r.save_lessons(s, biz, OWNER, ["Avoid national chains; independents reply."], brand_id=brand["id"])
         assert "Avoid national chains" in r.plan(s, biz, lia["id"], moment=NOW)["brief"]
 
 
@@ -313,7 +313,7 @@ def test_the_monthly_cap_stops_research_before_it_spends(db):
     biz, brand, lia, campaign = started(db)
     with db.begin() as c:
         c.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) VALUES "
-                       "(:b, 'outreach_research_pence', '2026-10', 1995, :at)"), {"b": A, "at": NOW.isoformat()})
+                       "(:b, :m, '2026-10', 1995, :at)"), {"b": A, "m": f"outreach_research_pence:{brand['id']}", "at": NOW.isoformat()})
     world = World([[person(1)]], cost=10)
     out = run(db, biz, lia, world)
     assert out["stopped"] and "budget" in out["stopped"] and world.briefs == []
@@ -323,7 +323,7 @@ def test_spend_is_recorded_per_month(db):
     biz, brand, lia, campaign = started(db)
     run(db, biz, lia, World([[person(i) for i in range(20)]], cost=37))
     assert int(float(count(db, "SELECT value FROM usage_meters WHERE business_id = :b "
-                               "AND meter = 'outreach_research_pence' AND period = '2026-10'"))) == 37
+                               "AND meter = :m AND period = '2026-10'", m=f"outreach_research_pence:{brand['id']}"))) == 37
 
 
 def test_without_a_companies_house_key_nothing_is_marked_eligible(db, monkeypatch):
@@ -357,7 +357,7 @@ def test_research_switched_off_or_outreach_paused_never_runs(db):
     biz, brand, lia, campaign = started(db)
     r = research()
     with Session(db) as s:
-        r.configure(s, biz, OWNER, {"enabled": False})
+        r.configure(s, biz, OWNER, {"brand_id": brand["id"], "enabled": False})
         assert r.run_due(s, moment=NOW, runner=lambda *a, **k: pytest.fail("ran while switched off")) == []
 
 
@@ -482,7 +482,7 @@ def test_spend_is_reserved_before_each_search_so_the_cap_holds(db):
     biz, brand, lia, campaign = started(db)
     with db.begin() as c:
         c.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) VALUES "
-                       "(:b, 'outreach_research_pence', '2026-10', 1990, :at)"), {"b": A, "at": NOW.isoformat()})
+                       "(:b, :m, '2026-10', 1990, :at)"), {"b": A, "m": f"outreach_research_pence:{brand['id']}", "at": NOW.isoformat()})
     world = World([[person(1)]], cost=37)
     out = run(db, biz, lia, world)
     assert world.briefs == [] and "budget" in out["stopped"]
@@ -495,7 +495,7 @@ def test_a_failed_search_keeps_its_reserved_spend_and_never_retries(db):
     world.search_error = TimeoutError("provider timeout")
     out = run(db, biz, lia, world)
     assert len(world.briefs) == 1 and out["stopped"]
-    held = int(float(count(db, "SELECT value FROM usage_meters WHERE business_id = :b AND meter = 'outreach_research_pence'")))
+    held = int(float(count(db, "SELECT value FROM usage_meters WHERE business_id = :b AND meter = :m", m=f"outreach_research_pence:{brand['id']}")))
     assert held == research().MAX_SEARCH_PENCE
 
 
@@ -629,9 +629,9 @@ def test_a_search_costing_more_than_its_reservation_pauses_research(db):
     out = run(db, biz, lia, world)
     assert "paused" in out["stopped"]
     assert int(float(count(db, "SELECT value FROM usage_meters WHERE business_id = :b "
-                               "AND meter = 'outreach_research_pence'"))) == r.MAX_SEARCH_PENCE + 9
+                               "AND meter = :m", m=f"outreach_research_pence:{brand['id']}"))) == r.MAX_SEARCH_PENCE + 9
     with Session(db) as s:
-        assert r.status(s, biz)["enabled"] is False
+        assert r.status(s, biz)["brands"][0]["enabled"] is False
 
 
 def test_lowering_the_budget_mid_run_stops_the_next_search(db):
@@ -644,7 +644,7 @@ def test_lowering_the_budget_mid_run_stops_the_next_search(db):
         with db.begin() as c:
             doc = json.loads(c.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"),
                                        {"b": A}).scalar())
-            doc["outreach_research"]["monthly_cap_pence"] = 0
+            doc["outreach_research"]["brands"][brand["id"]]["monthly_cap_pence"] = 0
             c.execute(text("UPDATE business_settings SET settings = :s WHERE business_id = :b"),
                       {"s": json.dumps(doc), "b": A})
         return out

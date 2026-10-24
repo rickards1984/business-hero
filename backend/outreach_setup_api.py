@@ -164,11 +164,13 @@ def copy(campaign_id: UUID, body: Copy, context=Depends(get_user_business_contex
 
 
 class ResearchConfig(Body):
+    brand_id: UUID                     # OUT-18: research is set per brand
     enabled: Optional[bool] = None
-    monthly_cap_pence: Optional[int] = Field(default=None, ge=0, le=100000, strict=True)
+    monthly_cap_pence: Optional[int] = Field(default=None, ge=2000, le=100000, strict=True)
 
 
 class Lessons(Body):
+    brand_id: UUID
     lessons: list[str] = Field(default_factory=list, max_length=30)
 
 
@@ -185,7 +187,7 @@ def research_configure(body: ResearchConfig, context=Depends(get_user_business_c
 
 @router.post("/research/lessons")
 def research_lessons(body: Lessons, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
-    return _run(research.save_lessons, session, context, body.lessons)
+    return _run(research.save_lessons, session, context, body.lessons, brand_id=str(body.brand_id))
 
 
 @public_router.get("/p/outreach-privacy/{brand_id}", response_class=HTMLResponse)
