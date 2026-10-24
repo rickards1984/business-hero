@@ -123,6 +123,7 @@ def configure(session, business, user, data: dict) -> dict:
     bid = str(business.id)
     send.require(data.get("brand_id"), "Choose the brand this research is for", 422)
     brand = send.one(session, "outreach_brands", bid, data["brand_id"])
+    _lock(session, bid)   # read-modify-write of the shared config, serialised with research's own saves
     cfg = _config(_doc(session, bid))
     b = _brand_config(cfg, brand["id"])
     if "enabled" in data:
@@ -146,6 +147,7 @@ def save_lessons(session, business, user, notes: list, *, brand_id) -> dict:
     bid = str(business.id)
     brand = send.one(session, "outreach_brands", bid, brand_id)
     cleaned = [str(n).strip()[:300] for n in (notes or []) if str(n).strip()][:30]
+    _lock(session, bid)
     cfg = _config(_doc(session, bid))
     b = _brand_config(cfg, brand["id"])
     b["lessons"] = cleaned
@@ -164,7 +166,8 @@ def status(session, business) -> dict:
         b = _brand_config(cfg, brand["id"])
         brands.append({"brand_id": str(brand["id"]), "name": brand["name"], "enabled": b["enabled"],
                        "monthly_cap_pence": b["monthly_cap_pence"], "spent_pence": _spent(session, bid, moment, brand["id"]),
-                       "paused_reason": b.get("paused_reason"), "lessons": b["lessons"]})
+                       "paused_reason": b.get("paused_reason"), "lessons": b["lessons"],
+                       "lessons_from_results": lessons(session, business, brand["id"])[:10]})
     session.rollback()
     return {"brands": brands, "enabled": any(b["enabled"] for b in brands),
             "daily_target_per_brand": DAILY_TARGET, "min_cap_pence": MIN_CAP_PENCE,
@@ -597,7 +600,8 @@ def _suppressed(session, bid: str, key: str, domain: str) -> bool:
 
 
 def _today_counts(session, bid: str, moment: datetime, brand_id) -> dict:
-    """Eligible contacts research added this UK day for one brand, by type —
+    """Contacts research kept this UK day for one brand (eligible or held for
+    review: both are personal data collected), by type —
     shared by every audience of that brand (OUT-18: 20 a day per brand), read
     from the database (Codex OUT-10 review 1)."""
     local = moment.astimezone(LONDON)
@@ -607,7 +611,8 @@ def _today_counts(session, bid: str, moment: datetime, brand_id) -> dict:
             "SELECT e.fact_value FROM outreach_prospects p JOIN outreach_evidence e "
             "ON e.business_id = p.business_id AND e.prospect_id = p.id AND e.fact_type = 'contact_type' "
             "JOIN outreach_compliance c ON c.business_id = p.business_id AND c.id = p.lia_id "
-            "WHERE p.business_id = :b AND c.brand_id = :br AND p.eligibility = 'eligible' AND p.captured_at >= :start"),
+            "WHERE p.business_id = :b AND c.brand_id = :br AND p.eligibility IN ('eligible', 'review') "
+            "AND p.captured_at >= :start"),
             {"b": bid, "br": str(brand_id), "start": _parse(start)}):
         if kind in counts:
             counts[kind] += 1
@@ -713,7 +718,16 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
         if counts["decision_maker"] + counts["gatekeeper"] >= DAILY_TARGET:
             break
         # Reserve the search's maximum cost first, against the CURRENT budget
-        # (re-read every time: lowering it mid-run takes effect at once).
+        # (re-read every time: lowering it mid-run takes effect at once). The
+        # check and the reservation are one step under the business lock, so
+        # two runs or an owner's change can never both pass on one balance
+        # (Codex OUT-18 review 1).
+        _lock(session, bid)
+        why = _still_allowed(session, bid, compliance_id, moment)
+        if why:
+            session.rollback()
+            out["stopped"] = why
+            break
         b = _brand_config(_config(_doc(session, bid)), brand_id)
         if not b["enabled"] or _spent(session, bid, moment, brand_id) + MAX_SEARCH_PENCE > int(b["monthly_cap_pence"]):
             out["stopped"] = "This brand's research budget for the month is reached; research resumes next month"
@@ -737,6 +751,7 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
         if cost > MAX_SEARCH_PENCE:
             # The reservation must hold. If it ever doesn't, the full cost is
             # kept and research pauses until the owner switches it back on.
+            _lock(session, bid)
             cfg = _config(_doc(session, bid))
             paused = _brand_config(cfg, brand_id)
             paused["enabled"] = False
@@ -773,10 +788,6 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
         counts = _today_counts(session, bid, moment, brand_id)
         stored_domains, stored_keys = _held(session, bid)[0], {r[0] for r in session.execute(text(
             "SELECT email_key FROM outreach_prospects WHERE business_id = :b AND email_key IS NOT NULL"), {"b": bid})}
-        for c, v in reviews:
-            if v["email_key"] not in stored_keys and not _suppressed(session, bid, v["email_key"], v["domain"]):
-                _store(session, bid, str(lia["id"]), c, v, moment, review=True)
-                stored_keys.add(v["email_key"])
         # Decision-makers first; gatekeepers only fill, never more than 10.
         verified.sort(key=lambda cv: cv[1]["contact_type"] != "decision_maker")
         for c, v in verified:
@@ -797,6 +808,19 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             out["accepted"].append(ident)
             out["decision_makers" if v["contact_type"] == "decision_maker" else "gatekeepers"] += 1
             found_new = True
+        # Contacts kept only for the owner's review are personal data too: they
+        # count toward the brand's daily limits and come after eligible ones.
+        for c, v in reviews:
+            if v["email_key"] in stored_keys or _suppressed(session, bid, v["email_key"], v["domain"]):
+                continue
+            kind = v["contact_type"] if v["contact_type"] in counts else "decision_maker"
+            if counts["decision_maker"] + counts["gatekeeper"] >= DAILY_TARGET or (
+                    kind == "gatekeeper" and counts["gatekeeper"] >= MAX_GATEKEEPERS):
+                out["rejected"].append({"company": v["company"], "reason": "today's quota is full"})
+                continue
+            _store(session, bid, str(lia["id"]), c, v, moment, review=True)
+            stored_keys.add(v["email_key"])
+            counts[kind] += 1
         session.commit()
     if out["accepted"]:
         _lock(session, bid)
@@ -804,13 +828,15 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             out["enrolled"] = _enrol(session, bid, lia, out["accepted"], moment)
         session.commit()
         out["cards"] = _prepare_cards(session, business, out["enrolled"])
+    note = summary(business, out)   # composed before the lock: nothing slow is done holding it
+    _lock(session, bid)
     cfg = _config(_doc(session, bid))
     if found_new and out["stopped"] != "Research was unavailable":
         # Advance the area only after a run that found something new (Byron;
         # Codex OUT-10 review 1).
         rotation = cfg["rotation"]
         rotation[str(lia["id"])] = int(rotation.get(str(lia["id"]), 0)) + 1
-    cfg["summary"] = summary(business, out)
+    cfg["summary"] = note
     cfg["last_summary_at"] = moment.isoformat()
     _save_config(session, bid, cfg)
     session.commit()

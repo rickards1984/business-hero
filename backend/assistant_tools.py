@@ -637,9 +637,8 @@ def _outreach_research_status(business_id: str) -> dict:
             assert_feature_access(business, "outreach", retained_history=True)
         except HTTPException as exc:
             return {"status_code": exc.status_code, "error": exc.detail}
-        state = outreach_research.status(session, business)
-        state["lessons_from_results"] = outreach_research.lessons(session, business)
-        return state
+        # Lessons from results are per brand, inside each brand's entry (OUT-18).
+        return outreach_research.status(session, business)
 
 
 def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: str = "Europe/London") -> dict:

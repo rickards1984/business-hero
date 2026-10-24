@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import text
 from sqlmodel import Session
 
-from test_outreach_setup import A, OWNER, STAFF, db, draft_lia, setup_module_or_missing  # noqa: F401
+from test_outreach_setup import A, B, OTHER_OWNER, OWNER, STAFF, db, draft_lia, grant, setup_module_or_missing  # noqa: F401
 from test_outreach_research import NOW, World, count, gatekeeper, person, research, run, started
 
 
@@ -117,13 +117,24 @@ def test_a_brand_budget_is_never_below_twenty_pounds_or_above_a_thousand(db, cap
 
 def test_budget_and_switch_are_owner_only_and_for_this_business_brands_only(db):
     biz, brand, lia, campaign = started(db)
+    m = setup_module_or_missing()
+    other = grant(db, bid=B)
+    with Session(db) as s:
+        m.begin(s, other, OTHER_OWNER)
+        theirs = m.save_brand(s, other, OTHER_OWNER, {"name": "MSC", "sender_identity": "MSC Ltd"})
     r = research()
     with Session(db) as s:
         with pytest.raises(Exception):
             r.configure(s, biz, STAFF, {"brand_id": brand["id"], "monthly_cap_pence": 5000})
-        with pytest.raises(Exception) as caught:
-            r.configure(s, biz, OWNER, {"brand_id": "00000000-0000-0000-0000-000000000000", "enabled": True})
-    assert getattr(caught.value, "status_code", None) == 404
+        for target in (theirs["id"], "00000000-0000-0000-0000-000000000000"):   # another business's real brand
+            with pytest.raises(Exception) as caught:
+                r.configure(s, biz, OWNER, {"brand_id": target, "enabled": True})
+            assert getattr(caught.value, "status_code", None) == 404
+            s.rollback()
+            with pytest.raises(Exception) as caught:
+                r.save_lessons(s, biz, OWNER, ["x"], brand_id=target)
+            assert getattr(caught.value, "status_code", None) == 404
+            s.rollback()
 
 
 def test_an_overspend_pauses_only_that_brand(db):
@@ -179,6 +190,18 @@ def test_a_legacy_business_setting_becomes_each_brand_starting_value_never_below
     with Session(db) as s:
         row = next(b for b in research().status(s, biz)["brands"] if b["brand_id"] == brand["id"])
     assert row["enabled"] is True and row["monthly_cap_pence"] == 2000
+
+
+def test_a_legacy_budget_above_twenty_and_legacy_notes_carry_over_to_each_brand(db):
+    biz, brand, lia, campaign = started(db)
+    with db.begin() as c:
+        doc = json.loads(c.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"), {"b": A}).scalar())
+        doc["outreach_research"] = {"enabled": False, "monthly_cap_pence": 5000, "rotation": {},
+                                    "lessons": ["Independents reply."]}
+        c.execute(text("UPDATE business_settings SET settings = :s WHERE business_id = :b"), {"s": json.dumps(doc), "b": A})
+    with Session(db) as s:
+        row = next(b for b in research().status(s, biz)["brands"] if b["brand_id"] == brand["id"])
+    assert row["enabled"] is False and row["monthly_cap_pence"] == 5000 and row["lessons"] == ["Independents reply."]
 
 
 # ------------------------------------------------------------ switch per brand ---
@@ -275,3 +298,99 @@ def test_the_research_api_needs_a_brand_and_at_least_twenty_pounds(body, ok):
             ResearchConfig(**body)
     with pytest.raises(ValidationError):
         Lessons(lessons=["x"])
+
+
+# ------------------------------------------------- Codex OUT-18 review 1 (P1s) ---
+
+def test_a_research_run_never_undoes_the_owners_change_to_another_brand(db, monkeypatch):
+    """P1 1: research saved the whole config from an earlier read, restoring
+    another brand's old switch. The owner switches FitFutures off while the
+    gym's run is finishing; FitFutures must stay off."""
+    biz, brand, lia, campaign = started(db)
+    fit, fit_lia = second_brand(db, biz)
+    r = research()
+    real = r.summary
+
+    def owner_changes_fitfutures_meanwhile(business, out):
+        with Session(db) as other:
+            r.configure(other, biz, OWNER, {"brand_id": fit["id"], "enabled": False, "monthly_cap_pence": 3000})
+        return real(business, out)
+    monkeypatch.setattr(r, "summary", owner_changes_fitfutures_meanwhile)
+    run(db, biz, lia, World([batch(0)]))
+    with Session(db) as s:
+        row = next(b for b in r.status(s, biz)["brands"] if b["brand_id"] == fit["id"])
+    assert row["enabled"] is False and row["monthly_cap_pence"] == 3000
+
+
+def sole_trader(i):
+    c = person(i, company=f"Sole {i} Fitness")
+    return c
+
+
+def test_contacts_kept_for_review_count_toward_the_brands_daily_limit(db):
+    """P1 2: 25 sole traders in one batch never store more than 20, and a
+    later run that day stores nothing more."""
+    biz, brand, lia, campaign = started(db)
+    world = World([[sole_trader(i) for i in range(25)]])
+    world.not_companies.update(f"Sole {i} Fitness" for i in range(25))
+    run(db, biz, lia, world)
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'") == 20
+    again = World([[sole_trader(100 + i) for i in range(5)]])
+    again.not_companies.update(f"Sole {100 + i} Fitness" for i in range(5))
+    run(db, biz, lia, again)
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b") == 20
+
+
+def test_eligible_contacts_are_kept_before_review_ones(db):
+    biz, brand, lia, campaign = started(db)
+    world = World([[sole_trader(i) for i in range(10)] + [person(500 + i) for i in range(15)]])
+    world.not_companies.update(f"Sole {i} Fitness" for i in range(10))
+    out = run(db, biz, lia, world)
+    assert len(out["accepted"]) == 15
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'") == 5
+
+
+def test_two_runs_at_once_can_never_both_reserve_the_last_of_a_budget(db, monkeypatch):
+    """P1 3: with room for exactly one search, two simultaneous runs make one
+    search between them and the meter never passes the budget."""
+    from threading import Barrier, BrokenBarrierError
+    from concurrent.futures import ThreadPoolExecutor
+    biz, brand, lia, campaign = started(db)
+    r = research()
+    with db.begin() as c:
+        c.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) VALUES "
+                       "(:b, :m, '2026-10', :v, :at)"),
+                  {"b": A, "m": meter(brand), "v": 2000 - r.MAX_SEARCH_PENCE, "at": NOW.isoformat()})
+    barrier, real = Barrier(2), r._spent
+
+    def both_read_the_balance(*args, **kwargs):
+        try:
+            barrier.wait(timeout=1)      # meets the other run only if nothing serialises them
+        except BrokenBarrierError:
+            pass
+        return real(*args, **kwargs)
+    monkeypatch.setattr(r, "_spent", both_read_the_balance)
+    worlds = [World([batch(0)], cost=r.MAX_SEARCH_PENCE), World([batch(1000)], cost=r.MAX_SEARCH_PENCE)]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda w: run(db, biz, lia, w), worlds))
+    assert sum(len(w.briefs) for w in worlds) == 1
+    assert spent(db, brand) <= 2000
+
+
+def test_aria_sees_each_brands_lessons_from_its_own_results(db):
+    """P2 4: no pooled, unlabelled lessons."""
+    biz, brand, lia, campaign = started(db)
+    fit, fit_lia = second_brand(db, biz)
+    run(db, biz, fit_lia, World([[person(i, segment="gym", region="Kent") for i in range(6)]]))
+    with db.begin() as c:
+        for (pid,) in c.execute(text("SELECT id FROM outreach_prospects WHERE business_id = :b"), {"b": A}).fetchall():
+            c.execute(text("INSERT INTO outreach_messages (id, business_id, prospect_id, direction, state) "
+                           "VALUES (:id, :b, :p, 'outbound', 'accepted')"), {"id": f"m-{pid}", "b": A, "p": pid})
+    import assistant_tools
+    with Session(db) as s:
+        state = research().status(s, biz)
+    rows = {b["brand_id"]: b for b in state["brands"]}
+    assert any("gym in Kent" in line for line in rows[fit["id"]]["lessons_from_results"])
+    assert not any("gym in Kent" in line for line in rows[brand["id"]]["lessons_from_results"])
+    assert "lessons_from_results" not in state
+    assert "lessons(session, business)" not in open(assistant_tools.__file__).read()
