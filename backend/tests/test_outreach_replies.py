@@ -185,13 +185,90 @@ def test_concurrent_sync_and_proposals_create_exactly_one_card(r):
             worker = SimpleNamespace(**{**vars(r), 's': session})
             barrier.wait(timeout=5)
             scan(worker)
-            return answer(worker)['id']
+            return answer(worker)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        ids = list(pool.map(sync, range(2)))
-    assert ids[0] == ids[1]
+        results = list(pool.map(sync, range(2)))
+    # A worker that answers while the other is still classifying is told to
+    # wait (never a handover); the classifying worker then proposes the card.
+    assert {c['status'] for c in results} <= {'proposed', 'awaiting_classification'}
+    ids = {c['id'] for c in results if c['status'] == 'proposed'}
+    assert len(ids) == 1
+    assert answer(r)['id'] in ids
     assert r.s.execute(text('SELECT count(*) FROM outreach_replies WHERE business_id=:b'), {'b': A}).scalar_one() == 1
     assert r.s.execute(text('SELECT count(*) FROM outreach_reply_slots')).scalar_one() == 1
     assert r.s.execute(text("SELECT count(*) FROM aria_actions WHERE action_type='reply_outreach'")).scalar_one() == 1
+
+
+
+def test_answer_while_reply_is_being_classified_waits_without_handing_over(r):
+    """OUT-7 race (the flaky concurrent test): a second sync can ask for an
+    answer while the first is still classifying the reply. Handing over then
+    made the classification lose and the owner got a reply Aria could answer."""
+    fact(r)
+    incoming(r)
+    seen = []
+    def classify(_):
+        with Session(r.engine) as other:
+            worker = SimpleNamespace(**{**vars(r), 's': other})
+            seen.append(answer(worker, rid=other.execute(text('SELECT id FROM outreach_replies')).scalar_one()))
+        return {'category': 'question', 'confidence': 100, 'classification_version': 1}
+    scan(r, classify=classify)
+    assert seen[0]['status'] == 'awaiting_classification'
+    assert r.s.execute(text('SELECT resolution, category FROM outreach_replies')).one() == ('pending', 'question')
+    assert r.s.execute(text('SELECT count(*) FROM outreach_reply_slots')).scalar_one() == 0
+    assert answer(r)['status'] == 'proposed'
+
+
+def _stored(r, session):
+    from services.chase_replies import _parse
+    return _parse(session.execute(text('SELECT updated_at FROM outreach_replies')).scalar_one())
+
+
+def test_an_unclassified_reply_waits_at_most_fifteen_minutes(r, monkeypatch):
+    """The wait is measured from the stored reply: just under 15 minutes it
+    still waits; at 15 minutes the owner gets the reply."""
+    from datetime import timedelta
+    fact(r)
+    incoming(r)
+    seen = []
+    def stalled(_):
+        # Results are checked after scan: scan's classifier guard swallows exceptions.
+        with Session(r.engine) as other:
+            worker = SimpleNamespace(**{**vars(r), 's': other})
+            stored = _stored(r, other)
+            monkeypatch.setattr(r.replies, 'now', lambda: stored + timedelta(minutes=15) - timedelta(seconds=1))
+            seen.append(answer(worker)['status'])
+            monkeypatch.setattr(r.replies, 'now', lambda: stored + timedelta(minutes=15))
+            seen.append(answer(worker)['status'])
+        return {'category': 'question', 'confidence': 100, 'classification_version': 1}
+    scan(r, classify=stalled)
+    assert seen == ['awaiting_classification', 'handed_over']
+    assert r.s.execute(text('SELECT resolution, category FROM outreach_replies')).one() == ('handed_over', 'unknown')
+    assert r.s.execute(text('SELECT count(*) FROM outreach_reply_slots')).scalar_one() == 0
+
+
+class WorkerDied(BaseException):
+    """Not an Exception: scan's classifier guard must not catch it."""
+
+
+def test_a_reply_whose_classifier_died_reaches_the_owner_on_a_later_scan(r, monkeypatch):
+    from datetime import timedelta
+    fact(r)
+    incoming(r)
+    def dies(_):
+        raise WorkerDied()
+    with pytest.raises(WorkerDied):
+        scan(r, classify=dies)
+    r.s.rollback()
+    stored = _stored(r, r.s)
+    assert r.s.execute(text('SELECT resolution, category FROM outreach_replies')).one() == ('pending', 'unknown')
+    monkeypatch.setattr(r.replies, 'now', lambda: stored + timedelta(minutes=14))
+    scan(r)
+    assert r.s.execute(text('SELECT resolution FROM outreach_replies')).scalar_one() == 'pending'
+    monkeypatch.setattr(r.replies, 'now', lambda: stored + timedelta(minutes=15))
+    scan(r)
+    assert r.s.execute(text('SELECT resolution FROM outreach_replies')).scalar_one() == 'handed_over'
+    assert r.s.execute(text('SELECT count(*) FROM outreach_reply_slots')).scalar_one() == 0
 
 
 @pytest.mark.parametrize('changes', [{'status': 'draft'}, {'status': 'retired', 'retired_at': STAMP},
