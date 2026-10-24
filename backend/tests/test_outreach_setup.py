@@ -871,3 +871,28 @@ def test_a_held_mailbox_is_reported_as_held_not_ready(db):
     with Session(db) as s:
         out = m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(GOOD_GOOGLE))
     assert out["status"] == "pass" and out["enabled"] is False and out["hold"] == "Complaint received: paused"
+
+
+# ------------------------------------------- Codex OUT-15 review 5 (P1) ---
+
+def test_pyspfs_own_safeguards_stay_in_force(db):
+    """Overriding the lookup must not bypass pyspf's void-lookup limit
+    (RFC 7208 4.6.4: more than two empty lookups is a permanent error)."""
+    spf = ("v=spf1 exists:missing1.example exists:missing2.example exists:missing3.example "
+           "include:_spf.google.com ~all")
+    assert _health(db, {**GOOD_GOOGLE, SPF_NAME: [spf]}) == "fail"
+
+
+def test_a_failed_check_again_still_recovers_by_itself(db):
+    """Review 5 backlog: a manual check during an outage marks a DNS pause, so
+    the daily check re-enables the mailbox once records are back."""
+    m = setup_module_or_missing()
+    biz = grant(db)
+    ready(m, db, biz)
+    broken = {k: v for k, v in GOOD_GOOGLE.items() if not k.startswith("_dmarc")}
+    with Session(db) as s:
+        m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(broken))
+        m.daily_health(s, resolve=dns(GOOD_GOOGLE), moment=datetime(2026, 10, 28, 8, tzinfo=timezone.utc))
+    with db.connect() as c:
+        assert bool(c.execute(text("SELECT enabled FROM outreach_mailboxes WHERE mailbox_id = :m"),
+                              {"m": WORKSPACE}).scalar())
