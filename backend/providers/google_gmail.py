@@ -76,6 +76,43 @@ class GoogleGmailProvider(BaseEmailProvider):
         data = response.json()
         return ProviderSendResult(provider_message_id=data.get("id"))
 
+    def send_outreach(self, *, account, operation_key, to_emails, cc_emails, subject, body_text, body_html=None,
+                      rfc_message_id, in_reply_to=None, references=None, provider_thread_id=None, headers=None,
+                      reply_provider_message_id=None) -> dict:
+        """OUT-16: one outreach email through the Gmail API, with an honest outcome.
+        Never retried here: a timeout may still have been sent, so it is unknown."""
+        from . import outreach_mime
+        evidence = {"provider": "google", "mailbox_id": str(account.id), "rfc_message_id": rfc_message_id}
+        try:
+            message = outreach_mime.build(account=account, to_emails=to_emails, cc_emails=cc_emails, subject=subject,
+                                          body_text=body_text, rfc_message_id=rfc_message_id, in_reply_to=in_reply_to,
+                                          references=references, headers=headers)
+        except outreach_mime.UnsafeMessage as exc:
+            return {**evidence, "outcome": "definitely_not_accepted", "reason": str(exc)}
+        try:
+            access_token = get_valid_access_token(account)
+        except Exception as exc:   # no usable token: nothing was sent
+            return {**evidence, "outcome": "definitely_not_accepted", "reason": f"token: {type(exc).__name__}"}
+        payload = {"raw": base64.urlsafe_b64encode(message.as_bytes()).decode("ascii").rstrip("=")}
+        if provider_thread_id:
+            payload["threadId"] = provider_thread_id
+        try:
+            with httpx.Client(timeout=30) as client:
+                response = client.post("https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                                       headers={"Authorization": f"Bearer {access_token}"}, json=payload)
+        except Exception as exc:
+            return {**evidence, "outcome": "unknown", "reason": type(exc).__name__}
+        outcome = outreach_mime.outcome_for_status(response.status_code)
+        if outcome != "accepted":
+            return {**evidence, "outcome": outcome, "reason": f"HTTP {response.status_code}"}
+        try:
+            data = response.json() or {}
+        except Exception:
+            data = {}
+        return {"outcome": "accepted", "provider": "google", "mailbox_id": str(account.id),
+                "provider_message_id": data.get("id"), "provider_thread_id": data.get("threadId"),
+                "rfc_message_id": rfc_message_id}
+
     def sync_inbox_changes(
         self,
         *,

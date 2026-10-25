@@ -166,7 +166,7 @@ def build_payload(session, business, args, owner_name=None, timezone=None):
     cc = [_safe_header(settings['owner_cc_address'])] if settings['owner_cc_default'] else []
     source = rows(session, 'outreach_evidence', business.id, 'AND prospect_id=:p AND source_url IS NOT NULL ORDER BY fetched_at DESC', {'p': str(p['id'])})
     require(source and urlparse(b['privacy_url']).scheme == 'https')
-    base = os.environ.get('OUTREACH_UNSUBSCRIBE_BASE_URL', '')
+    base = unsubscribe_base()
     require(urlparse(base).scheme == 'https' and urlparse(base).netloc and not urlparse(base).query,
             'Outreach unsubscribe URL is not configured')
     token = secrets.token_urlsafe(32)
@@ -477,6 +477,16 @@ def _settle(session, business, action_id, payload, job, evidence, result):
     expr = 'CAST(:r AS jsonb)' if pg(session) else ':r'
     session.execute(text(f'UPDATE aria_actions SET status=:s,result={expr},updated_at=:at WHERE business_id=:b AND id=:id'),
                     {'s': result['status'], 'r': json.dumps(result), 'at': now(), 'b': bid, 'id': str(action_id)})
+
+
+def unsubscribe_base():
+    """Where unsubscribe links point (OUT-16): OUTREACH_UNSUBSCRIBE_BASE_URL, or
+    the app's own public address with /u, which serves the unsubscribe page."""
+    explicit = os.environ.get('OUTREACH_UNSUBSCRIBE_BASE_URL', '').strip()
+    if explicit:
+        return explicit.rstrip('/')
+    public = os.environ.get('PUBLIC_BASE_URL', '').strip().rstrip('/')
+    return f'{public}/u' if public else ''
 
 
 def unsubscribe(session, *, token, method):

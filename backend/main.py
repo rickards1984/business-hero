@@ -466,7 +466,9 @@ app.include_router(outreach_router)
 from outreach_manage import router as outreach_manage_router
 app.include_router(outreach_manage_router)
 from outreach_setup_api import router as outreach_setup_router, public_router as outreach_public_router
+from outreach_unsubscribe_api import router as outreach_unsubscribe_router  # noqa: E402
 app.include_router(outreach_setup_router)
+app.include_router(outreach_unsubscribe_router)
 app.include_router(outreach_public_router)
 
 

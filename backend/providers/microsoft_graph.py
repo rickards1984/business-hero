@@ -1,3 +1,5 @@
+import base64
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -106,6 +108,54 @@ class MicrosoftGraphProvider(BaseEmailProvider):
             raise RuntimeError(f"Microsoft Graph send failed: {response.status_code} {response.text}")
 
         return ProviderSendResult(provider_message_id=None)
+
+    def send_outreach(self, *, account, operation_key, to_emails, cc_emails, subject, body_text, body_html=None,
+                      rfc_message_id, in_reply_to=None, references=None, provider_thread_id=None, headers=None,
+                      reply_provider_message_id=None) -> dict:
+        """OUT-16: one outreach email through Microsoft Graph, sent as a full MIME
+        message so our Message-ID and unsubscribe headers survive (Graph's JSON
+        form only allows x- headers). Graph returns no ids on send, so the sent
+        message is found again by its Message-ID."""
+        from . import outreach_mime
+        evidence = {"provider": "microsoft", "mailbox_id": str(account.id), "rfc_message_id": rfc_message_id}
+        try:
+            message = outreach_mime.build(account=account, to_emails=to_emails, cc_emails=cc_emails, subject=subject,
+                                          body_text=body_text, rfc_message_id=rfc_message_id, in_reply_to=in_reply_to,
+                                          references=references, headers=headers)
+        except outreach_mime.UnsafeMessage as exc:
+            return {**evidence, "outcome": "definitely_not_accepted", "reason": str(exc)}
+        try:
+            access_token = get_valid_access_token(account)
+        except Exception as exc:
+            return {**evidence, "outcome": "definitely_not_accepted", "reason": f"token: {type(exc).__name__}"}
+        auth = {"Authorization": f"Bearer {access_token}"}
+        try:
+            with httpx.Client(timeout=30) as client:
+                response = client.post(f"{GRAPH_BASE_URL}/me/sendMail", headers={**auth, "Content-Type": "text/plain"},
+                                       content=base64.b64encode(message.as_bytes()))
+        except Exception as exc:
+            return {**evidence, "outcome": "unknown", "reason": type(exc).__name__}
+        outcome = outreach_mime.outcome_for_status(response.status_code)
+        if outcome != "accepted":
+            return {**evidence, "outcome": outcome, "reason": f"HTTP {response.status_code}"}
+        found = {}
+        escaped = rfc_message_id.replace("'", "''")
+        for attempt in range(3):   # the sent copy takes a moment to appear
+            try:
+                with httpx.Client(timeout=15) as client:
+                    lookup = client.get(f"{GRAPH_BASE_URL}/me/messages", headers=auth,
+                                        params={"$filter": f"internetMessageId eq '{escaped}'",
+                                                "$select": "id,conversationId", "$top": "1"})
+                items = (lookup.json() or {}).get("value") or [] if lookup.status_code == 200 else []
+            except Exception:
+                items = []
+            if items:
+                found = items[0]
+                break
+            time.sleep(1.5)
+        return {"outcome": "accepted", "provider": "microsoft", "mailbox_id": str(account.id),
+                "provider_message_id": found.get("id"), "provider_thread_id": found.get("conversationId"),
+                "rfc_message_id": rfc_message_id}
 
     def sync_inbox_changes(
         self,
