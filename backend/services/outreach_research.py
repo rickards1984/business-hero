@@ -784,7 +784,7 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
         ai_costs.record(session, bid, purpose="research", brand_id=brand_id, moment=moment, pence=cost,
                         provider=str(result.get("provider") or "openai"), model=str(result.get("model") or model),
                         input_tokens=int(usage.get("input_tokens") or 0), output_tokens=int(usage.get("output_tokens") or 0),
-                        tool_calls=int(usage.get("tool_calls") or 0))
+                        tool_calls=int(usage.get("tool_calls") or 0), estimated=bool(result.get("estimated")))
         out["spend_pence"] += cost
         if cost > reserve:
             # The reservation must hold. If it ever doesn't, the full cost is
@@ -1098,13 +1098,19 @@ def web_search(brief: str) -> dict:
     usage = getattr(response, "usage", None)
     searches = sum(1 for item in (getattr(response, "output", None) or [])
                    if getattr(item, "type", "") == "web_search_call")
-    tokens_in, tokens_out = getattr(usage, "input_tokens", 0) or 0, getattr(usage, "output_tokens", 0) or 0
-    cost = ai_costs.cost("openai", model, tokens_in, tokens_out, searches)
+    reported = ai_costs.usage_tokens(usage)
+    if reported is None:
+        # Usage not reported: charge the search's true maximum, marked as an
+        # estimate, never as free (Codex OUT-19 review 2).
+        tokens_in, tokens_out, cost, estimated = 0, 0, max_search_pence(model), True
+    else:
+        (tokens_in, tokens_out), estimated = reported, False
+        cost = ai_costs.cost("openai", model, tokens_in, tokens_out, searches)
     textout = getattr(response, "output_text", "") or ""
     match = re.search(r"\{.*\}", textout, re.S)
     try:
         candidates = json.loads(match.group(0)).get("candidates", []) if match else []
     except (ValueError, AttributeError):
         candidates = []
-    return {"candidates": candidates, "cost_pence": max(1, round(cost)), "provider": "openai", "model": model,
-            "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out, "tool_calls": searches}}
+    return {"candidates": candidates, "cost_pence": max(1, int(-(-cost // 1))), "provider": "openai", "model": model,
+            "estimated": estimated, "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out, "tool_calls": searches}}

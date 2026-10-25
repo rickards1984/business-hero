@@ -61,7 +61,7 @@
   - Revenue is projected from the current plan and the brands existing that month; invoices come with part F.
   - A Business plan's included brand has £0 outreach revenue.
 - **A platform-wide monthly AI spend alarm and kill switch, set by Mike** (AI_MONTHLY_ALARM_PENCE / AI_MONTHLY_KILL_PENCE).
-  - Ledger writes are serialised platform-wide, so the alarm is raised once, after commit.
+  - Ledger writes are serialised platform-wide (the ledger lock comes after any business lock, followed only by meter-row writes), so the alarm is raised once, after commit; a rolled-back transaction's alarm is discarded.
   - The kill switch checks RECORDED spend before each call. A call already running when the limit is reached completes and is recorded, so the limit can be exceeded by at most the calls in flight.
 
 ### B — Hidden cost ceiling per brand

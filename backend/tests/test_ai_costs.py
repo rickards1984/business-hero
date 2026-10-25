@@ -238,10 +238,16 @@ def test_crossing_the_alarm_is_logged_once_a_month_and_only_after_commit(engine,
             s.rollback()                                   # never committed: no alarm
         assert "AI spend alarm" not in caplog.text
         with Session(engine) as s:
+            c.record(s, "biz-a", purpose="research", provider="openai", model="gpt-4.1", pence=60, moment=NOW)
+            s.rollback()                                   # rolled back on THIS session ...
+            s.commit()                                     # ... and a later empty commit raises nothing
+        assert "AI spend alarm" not in caplog.text
+        with Session(engine) as s:
             for _ in range(3):
                 c.record(s, "biz-a", purpose="research", provider="openai", model="gpt-4.1", pence=30, moment=NOW)
             assert "AI spend alarm" not in caplog.text     # not before the commit
             s.commit()
+            s.commit()                                     # a second commit never repeats it
     assert caplog.text.count("AI spend alarm") == 1
 
 
@@ -273,8 +279,9 @@ def report_db(engine):
         c.execute(text("CREATE TABLE outreach_brands (id TEXT PRIMARY KEY, business_id TEXT, name TEXT, created_at TEXT)"))
         c.execute(text("INSERT INTO businesses VALUES ('nb', 'New Body', 'business', '{}'), "
                        "('msc', 'MSC', 'pro', '{\"outreach\": true}'), ('gym2', 'Other', 'starter', '{}')"))
-        c.execute(text("INSERT INTO outreach_brands VALUES ('fit', 'nb', 'FitFutures', '1'), ('gym', 'nb', 'New Body Gym', '2'), "
-                       "('msc-b', 'msc', 'MSC', '1')"))
+        c.execute(text("INSERT INTO outreach_brands VALUES ('fit', 'nb', 'FitFutures', '2026-09-01T09:00:00+00:00'), "
+                       "('gym', 'nb', 'New Body Gym', '2026-09-02T09:00:00+00:00'), "
+                       "('msc-b', 'msc', 'MSC', '2026-09-01T09:00:00+00:00')"))
     return engine
 
 
@@ -436,7 +443,7 @@ def test_a_past_month_counts_only_brands_that_existed_then(report_db):
     """Review 1 P2 7: a brand made in November never adds £79 to October."""
     from services import outreach_pricing
     with report_db.begin() as c:
-        c.execute(text("INSERT INTO outreach_brands VALUES ('late', 'nb', 'Later Brand', '2026-11-05')"))
+        c.execute(text("INSERT INTO outreach_brands VALUES ('late', 'nb', 'Later Brand', '2026-11-05T10:00:00+00:00')"))
     with Session(report_db) as s:
         oct_ = next(r for r in outreach_pricing.report(s, period="2026-10")["businesses"] if r["business_id"] == "nb")
         nov = next(r for r in outreach_pricing.report(s, period="2026-11")["businesses"] if r["business_id"] == "nb")
@@ -444,3 +451,73 @@ def test_a_past_month_counts_only_brands_that_existed_then(report_db):
     assert [b["id"] for b in oct_["brands"]] == ["fit", "gym"] and oct_["revenue_pence"] == 7900
     assert nov["revenue_pence"] == 2 * 7900
     assert "Projected" in out["revenue_basis"] and "Incremental" in out["margin_basis"]
+
+
+
+# ------------------------------------------------ Codex OUT-19 review 2 ---
+
+@pytest.mark.parametrize("usage", [None, SimpleNamespace(prompt_tokens=100), SimpleNamespace(completion_tokens=5)])
+def test_a_successful_draft_without_reported_usage_is_charged_at_its_most_and_marked(db, monkeypatch, usage):
+    from test_outreach_setup import A, OWNER
+    from services import outreach_setup
+    m, biz, brand = _setup_brand(db)
+    chat = FakeChat(json.dumps({k: "x" for k in ("purpose", "necessity", "balancing_test", "safeguards")}), 1, 1)
+    chat.usage = usage
+    fake_openai(monkeypatch, chat)
+    with Session(db) as s:
+        m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Gyms"})
+    period = datetime.now(timezone.utc).strftime("%Y-%m")
+    key = f"draft:{brand['id']}:openai/gpt-4o"
+    assert _draft_cost(db, brand) >= costs().cost("openai", "gpt-4o", 0, outreach_setup.DRAFT_MAX_TOKENS)
+    assert meter(db, A, f"ai_estimated:{key}", period) == 1
+
+
+def test_a_search_without_reported_usage_is_charged_its_full_reserve(monkeypatch):
+    import openai
+    from test_outreach_research import research
+    r = research()
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    response = SimpleNamespace(usage=None, output=[], output_text='{"candidates": []}')
+    monkeypatch.setattr(openai, "OpenAI", lambda **kw: SimpleNamespace(responses=SimpleNamespace(create=lambda **k: response)))
+    out = r.web_search("brief")
+    assert out["cost_pence"] == r.max_search_pence() and out["estimated"] is True
+
+
+def test_a_brand_made_just_after_midnight_bst_belongs_to_its_new_month(report_db):
+    """00:30 BST on 1 October is 23:30 UTC on 30 September."""
+    from services import outreach_pricing
+    with report_db.begin() as c:
+        c.execute(text("INSERT INTO outreach_brands VALUES ('oct', 'nb', 'October Brand', '2026-09-30T23:30:00+00:00')"))
+    with Session(report_db) as s:
+        sep = next(r for r in outreach_pricing.report(s, period="2026-09")["businesses"] if r["business_id"] == "nb")
+        oct_ = next(r for r in outreach_pricing.report(s, period="2026-10")["businesses"] if r["business_id"] == "nb")
+    assert "oct" not in [b["id"] for b in sep["brands"]]
+    assert "oct" in [b["id"] for b in oct_["brands"]]
+
+
+def test_a_huge_number_in_the_price_setting_is_rejected_not_a_crash(monkeypatch):
+    monkeypatch.setenv("AI_PRICES_JSON", '{"openai/gpt-4o": [' + "9" * 400 + ', 1, 1]}')
+    assert costs().price("openai", "gpt-4o") == costs().DEFAULT_PRICES["openai/gpt-4o"]
+
+
+def test_a_failure_to_record_a_successful_draft_never_hands_the_draft_out(db, monkeypatch):
+    from test_outreach_setup import OWNER
+    m, biz, brand = _setup_brand(db)
+    fake_openai(monkeypatch, FakeChat(json.dumps({k: "x" for k in ("purpose", "necessity", "balancing_test",
+                                                                     "safeguards")}), 10, 10))
+    def broken(*a, **k):
+        raise RuntimeError("ledger unavailable")
+    monkeypatch.setattr(costs(), "save", broken)
+    with Session(db) as s:
+        with pytest.raises(RuntimeError):
+            m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Gyms"})
+
+
+def test_a_failed_draft_keeps_its_own_error_when_recording_also_fails(db, monkeypatch):
+    from test_outreach_setup import OWNER
+    m, biz, brand = _setup_brand(db)
+    fake_openai(monkeypatch, FakeChat("not json", 10, 10))
+    monkeypatch.setattr(costs(), "save", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ledger unavailable")))
+    with Session(db) as s:
+        with pytest.raises(ValueError):          # the model's bad JSON, not the ledger
+            m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Gyms"})

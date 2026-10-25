@@ -16,8 +16,11 @@ Two honest limits, stated on the report itself (Codex OUT-19 review 1):
     brand carries £0 of outreach revenue, so any of its AI cost shows as a
     loss there; that is not the whole account's profitability.
 """
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
+
+from services.chase_replies import _parse
 from services.metering import month_bounds
-from datetime import date
 import json
 
 from sqlalchemy import text
@@ -48,21 +51,38 @@ def _outreach_on(plan_tier, flags) -> bool:
     return bool(_plan_feature_defaults(plan_tier).get("outreach", False))
 
 
+def _before(created, end: datetime) -> bool:
+    try:
+        moment = _parse(created)
+    except ValueError:
+        moment = None
+    if moment is None:
+        return False   # unknown creation time: no revenue is projected for it
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment < end
+
+
 def report(session, *, period: str) -> dict:
     """Each business with outreach or AI cost this period: its brands' cost and
     price, revenue, cost, margin, and whether it is losing money."""
     ledger = ai_costs.economics(session, period=period)
     spend = ledger["businesses"]
     rows = []
-    end = month_bounds(date.fromisoformat(period + "-01"))[1].isoformat()   # brands existing by the period's end
+    # Brands existing by the end of the UK month: midnight London time, compared
+    # as instants, so a brand made at 00:30 BST on the 1st belongs to that
+    # month, whatever the database's timezone (Codex OUT-19 review 2).
+    following = month_bounds(date.fromisoformat(period + "-01"))[1]
+    end = datetime(following.year, following.month, 1, tzinfo=ZoneInfo("Europe/London"))
     for bid, name, plan_tier, flags in session.execute(text(
             "SELECT id, name, plan_tier, feature_flags FROM businesses ORDER BY name")).fetchall():
         bid = str(bid)
         on, cost = _outreach_on(plan_tier, flags), spend.get(bid)
         if not on and not cost:
             continue
-        brands = session.execute(text("SELECT id, name FROM outreach_brands WHERE business_id = :b "
-                                      "AND created_at < :end ORDER BY created_at, id"), {"b": bid, "end": end}).fetchall()
+        brands = [(b_id, b_name) for b_id, b_name, created in session.execute(text(
+            "SELECT id, name, created_at FROM outreach_brands WHERE business_id = :b ORDER BY created_at, id"),
+            {"b": bid}).fetchall() if _before(created, end)]
         prices = brand_prices(plan_tier, [str(b[0]) for b in brands]) if on else {}
         by_brand = (cost or {}).get("by_brand", {})
         brand_rows = [{"id": str(b_id), "name": b_name, "cost_pence": round(by_brand.get(str(b_id), 0), 2),

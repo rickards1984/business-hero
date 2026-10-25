@@ -32,6 +32,7 @@ def together(pg, *jobs):
         t.start()
     for t in threads:
         t.join(30)
+    assert not any(t.is_alive() for t in threads), "a ledger write never finished"
     assert not errors, errors
 
 
@@ -58,6 +59,6 @@ def test_two_calls_crossing_the_alarm_together_raise_it_once(pg, monkeypatch, ca
                        "VALUES (:b, 'ai_pence', '2026-10', 40, now())"), {"b": B})
     with caplog.at_level(logging.ERROR):
         together(pg, *(lambda s, bid=bid: ai_costs.record(s, bid, purpose="research", provider="openai",
-                                                           model="gpt-4.1", pence=6, moment=NOW) for bid in (A, A)))
+                                                           model="gpt-4.1", pence=6, moment=NOW) for bid in (A, B)))
     assert caplog.text.count("AI spend alarm") == 1
-    assert value(pg, A, "ai_pence") + value(pg, B, "ai_pence") == 52
+    assert value(pg, A, "ai_pence") + value(pg, B, "ai_pence") == 52   # 40 seeded on B, then 6 each

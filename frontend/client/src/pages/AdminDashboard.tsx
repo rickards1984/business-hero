@@ -244,13 +244,14 @@ function OutreachEconomicsPanel() {
   useEffect(() => {
     let mounted = true;
     setFailed(false);
+    setReport(null);   // never show one month's figures under another month's label
     apiRequest('GET', `/v1/admin/outreach/economics?period=${period}`).then(r => r.json()).then(d => { if (mounted) setReport(d); })
       .catch(() => { if (mounted) setFailed(true); });
     return () => { mounted = false; };
   }, [period]);
   const gbp = (p: number) => `£${(p / 100).toFixed(2)}`;
   if (failed) return <Alert severity="warning" variant="outlined" sx={{ mb: 3, borderRadius: 2 }}>Outreach economics unavailable.</Alert>;
-  if (!report) return null;
+  if (!report) return <Alert severity="info" variant="outlined" sx={{ mb: 3, borderRadius: 2 }}>Loading outreach economics for {period}…</Alert>;
   const losing = report.losing_money.length;
   return (
     <Alert severity={losing ? 'error' : 'info'} variant="outlined" icon={false}
@@ -264,7 +265,7 @@ function OutreachEconomicsPanel() {
         <Chip size="small" variant="outlined" label={`AI cost ${gbp(report.platform_cost_pence)} · outreach revenue ${gbp(report.platform_revenue_pence)}`} />
       </Box>
       <Typography variant="body2" sx={{ mt: 0.5 }}>
-        {losing ? `${losing} business${losing === 1 ? '' : 'es'} cost more in AI than outreach earns this month.` : 'Every business earns more from outreach than its AI costs this month.'}
+        {losing ? `${losing} business${losing === 1 ? '' : 'es'} cost more in AI than projected outreach revenue in ${report.period}.` : `Every business's projected outreach revenue covers its AI cost in ${report.period}.`}
         {report.kill_pence ? ` AI spending stops for the platform at ${gbp(Number(report.kill_pence))}.` : ' No platform AI spending limit is set.'}
       </Typography>
       <Box sx={{ overflowX: 'auto', mt: 1.5 }}>
@@ -274,7 +275,7 @@ function OutreachEconomicsPanel() {
             {report.businesses.map(b => (
               <tr key={b.business_id}>
                 <td>{b.name} <Typography component="span" variant="caption" color="text.secondary">({b.plan_tier})</Typography></td>
-                <td>{b.brands.map(br => `${br.name}: cost ${gbp(br.cost_pence)}${br.included ? ' (included in plan)' : `, price ${gbp(br.price_pence)}, margin ${gbp(br.price_pence - br.cost_pence)}`}`).join(' · ') || '—'}</td>
+                <td>{b.brands.map(br => `${br.name}: cost ${gbp(br.cost_pence)}, ${br.included ? 'included in plan (£0 outreach revenue)' : `price ${gbp(br.price_pence)}`}, margin ${gbp(br.price_pence - br.cost_pence)}`).join(' · ') || '—'}</td>
                 <td>{gbp(b.revenue_pence)}</td><td>{gbp(b.cost_pence)}</td>
                 <td style={{ color: b.losing_money ? '#B42318' : undefined, fontWeight: b.losing_money ? 700 : undefined }}>{gbp(b.margin_pence)}</td>
               </tr>

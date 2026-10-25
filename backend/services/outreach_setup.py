@@ -21,6 +21,8 @@ from typing import Callable, Optional
 from fastapi import HTTPException
 from sqlalchemy import text
 
+import logging
+
 from services import ai_costs, aria_actions
 from services import outreach_send as send
 from services.chase_replies import _address, _parse
@@ -51,6 +53,9 @@ PROVIDERS = {
 PRIVACY_KEY, AUDIENCE_KEY = "outreach_privacy", "outreach_audiences"
 DNS_PAUSE = "Daily check failed:"
 SETUP_KEY = "outreach_setup"   # the only pause a DNS pass may lift
+
+
+logger = logging.getLogger(__name__)
 
 
 def now() -> datetime:
@@ -507,16 +512,16 @@ def _model_json(instructions: str, context: dict) -> dict:
     # (Codex OUT-19 review 1). Output is bounded so a failed call's cost can
     # be estimated conservatively.
     client = OpenAI(api_key=key, timeout=60.0, max_retries=0)
+    worst = (len(json.dumps(messages)), DRAFT_MAX_TOKENS)   # every character a token, the full output
     try:
         response = client.chat.completions.create(model=model, response_format={"type": "json_object"},
                                                   max_tokens=DRAFT_MAX_TOKENS, messages=messages)
     except Exception:
         # The provider may still bill a call that failed or timed out: count
         # it at its most (every character a token, the full output).
-        ai_costs.note("openai", model, SimpleNamespace(prompt_tokens=len(json.dumps(messages)),
-                                                       completion_tokens=DRAFT_MAX_TOKENS), estimated=True)
+        ai_costs.note("openai", model, None, fallback=worst, estimated=True)
         raise
-    ai_costs.note("openai", model, getattr(response, "usage", None))
+    ai_costs.note("openai", model, getattr(response, "usage", None), fallback=worst)
     return json.loads(response.choices[0].message.content or "{}")
 
 
@@ -534,13 +539,24 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
         refuse(503, "Aria's drafting is paused for now. Write this yourself, or try again later.")
     session.rollback()   # no lock is held while Aria drafts
     with ai_costs.collect() as spent:
+        failure = None
         try:
             return draft(context)
+        except BaseException as exc:
+            failure = exc
+            raise
         finally:
             if spent:
-                session.rollback()
-                ai_costs.save(session, str(business.id), spent, purpose="draft", brand_id=brand_id)
-                session.commit()
+                try:
+                    session.rollback()
+                    ai_costs.save(session, str(business.id), spent, purpose="draft", brand_id=brand_id)
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    logger.exception("Could not record an Aria draft's AI cost for business %s", business.id)
+                    if failure is None:
+                        raise   # never hand out a draft whose cost wasn't recorded
+                    # otherwise the draft's own error propagates
 
 
 def model_draft_audience(context: dict) -> dict:

@@ -64,7 +64,7 @@ def _valid(value) -> Optional[tuple]:
         return None
     try:
         out = tuple(float(v) for v in value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return out if all(math.isfinite(v) and v >= 0 for v in out) else None
 
@@ -125,17 +125,33 @@ def _serialise(session) -> None:
         session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": LEDGER_LOCK})
 
 
-def _alarm_after_commit(session, period: str, total: float, alarm: str) -> None:
-    def fire(_session):
+def _fire_alarms(session) -> None:
+    for period, total, alarm in session.info.pop("ai_alarms", []):
         logger.error("AI spend alarm: the platform's AI spend for %s has reached %.0fp (alarm %sp)", period, total, alarm)
-    event.listen(session, "after_commit", fire, once=True)
+
+
+def _drop_alarms(session, *_args) -> None:
+    session.info.pop("ai_alarms", None)
+
+
+def _alarm_after_commit(session, period: str, total: float, alarm: str) -> None:
+    """Pending alarms belong to the transaction: raised after its commit,
+    discarded if it rolls back (Codex OUT-19 review 2)."""
+    if not session.info.get("ai_alarm_hooks"):
+        event.listen(session, "after_commit", _fire_alarms)
+        event.listen(session, "after_rollback", _drop_alarms)
+        event.listen(session, "after_soft_rollback", _drop_alarms)
+        session.info["ai_alarm_hooks"] = True
+    session.info.setdefault("ai_alarms", []).append((period, total, alarm))
 
 
 def record(session, business_id, *, purpose: str, provider: str, model: str, brand_id=None,
            input_tokens: int = 0, output_tokens: int = 0, tool_calls: int = 0,
            pence: Optional[float] = None, estimated: bool = False, moment: Optional[datetime] = None) -> float:
     """Add one call's cost to the ledger in the caller's transaction (no commit).
-    Always the last lock a transaction takes, so it cannot deadlock."""
+    The platform ledger lock is taken after any business lock the caller holds
+    and is followed only by this function's own meter-row writes, so no
+    business lock is ever requested while holding it."""
     moment = moment or datetime.now(timezone.utc)
     amount = float(pence) if pence is not None else cost(provider, model, input_tokens, output_tokens, tool_calls)
     period, bid = period_for(moment), str(business_id)
@@ -174,14 +190,29 @@ def collect():
         _collecting.reset(token)
 
 
-def note(provider: str, model: str, usage, *, estimated: bool = False, tool_calls: int = 0) -> None:
-    """Called by a model adapter after every attempt; kept only inside collect()."""
+def usage_tokens(usage) -> Optional[tuple]:
+    """(input, output) tokens a provider reported, or None when either is missing."""
+    tokens_in = getattr(usage, "prompt_tokens", None)
+    tokens_in = getattr(usage, "input_tokens", None) if tokens_in is None else tokens_in
+    tokens_out = getattr(usage, "completion_tokens", None)
+    tokens_out = getattr(usage, "output_tokens", None) if tokens_out is None else tokens_out
+    if not isinstance(tokens_in, int) or not isinstance(tokens_out, int):
+        return None
+    return tokens_in, tokens_out
+
+
+def note(provider: str, model: str, usage, *, fallback: tuple, estimated: bool = False, tool_calls: int = 0) -> None:
+    """Called by a model adapter after every attempt; kept only inside collect().
+    `fallback` is the call's conservative (input, output) maximum, used — and
+    marked estimated — whenever the provider did not report usage (Codex
+    OUT-19 review 2: unknown usage is never recorded as free)."""
     spent = _collecting.get()
     if spent is None:
         return
-    spent.append({"provider": provider, "model": model, "estimated": estimated, "tool_calls": tool_calls,
-                  "input_tokens": int(getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", 0) or 0),
-                  "output_tokens": int(getattr(usage, "completion_tokens", None) or getattr(usage, "output_tokens", 0) or 0)})
+    reported = None if estimated else usage_tokens(usage)
+    tokens = reported or fallback
+    spent.append({"provider": provider, "model": model, "estimated": reported is None, "tool_calls": tool_calls,
+                  "input_tokens": int(tokens[0]), "output_tokens": int(tokens[1])})
 
 
 def save(session, business_id, spent: list, *, purpose: str, brand_id=None, moment: Optional[datetime] = None) -> float:
