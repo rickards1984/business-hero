@@ -43,12 +43,19 @@ CONTEXT_TOKENS = {"openai/gpt-4.1": 1_047_576, "openai/gpt-4o": 128_000, "openai
                   "xai/grok-4": 256_000, "anthropic/claude-sonnet-4-5": 200_000}
 SEARCH_MAX_OUTPUT_TOKENS, SEARCH_MAX_TOOL_CALLS = 8000, 8
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+RETRYABLE_SEARCH_ERRORS = {"too_many_requests", "unavailable"}
 
 _down: dict = {}
 
 
 class ProviderError(Exception):
-    """The provider failed (outage, rate limit, credit, timeout): fail over."""
+    """The provider failed (outage, rate limit, credit, timeout, a malformed
+    reply): fail over. `usage`/`searches` carry what the provider reported, if
+    anything, so a billed failure is charged at its real cost."""
+
+    def __init__(self, message: str, *, usage=None, searches: int = 0):
+        super().__init__(message)
+        self.usage, self.searches = usage, searches
 
 
 class AllProvidersFailed(Exception):
@@ -153,7 +160,12 @@ def _openai_compatible_chat(provider, model, system, user, max_tokens):
                                                             {"role": "user", "content": user}])
     except Exception as exc:
         raise ProviderError(f"{provider}: {type(exc).__name__}") from exc
-    return response.choices[0].message.content or "", getattr(response, "usage", None)
+    usage = getattr(response, "usage", None)
+    try:
+        text = response.choices[0].message.content or ""
+    except (AttributeError, IndexError, TypeError) as exc:
+        raise ProviderError(f"{provider}: malformed reply", usage=usage) from exc   # billed, but no answer
+    return text, usage
 
 
 def _anthropic_chat(provider, model, system, user, max_tokens):
@@ -167,10 +179,18 @@ def _anthropic_chat(provider, model, system, user, max_tokens):
         raise ProviderError(f"{provider}: {type(exc).__name__}") from exc
     if response.status_code != 200:
         raise ProviderError(f"{provider}: HTTP {response.status_code}")
-    body = response.json()
-    text = "".join(b.get("text", "") for b in body.get("content", []) if b.get("type") == "text")
+    try:
+        body = response.json()
+        usage = _anthropic_usage(body)
+        text = "".join(b.get("text", "") for b in body.get("content", []) if b.get("type") == "text")
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ProviderError(f"{provider}: malformed reply") from exc
+    return text, usage
+
+
+def _anthropic_usage(body: dict):
     usage = body.get("usage") or {}
-    return text, SimpleNamespace(input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"))
+    return SimpleNamespace(input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"))
 
 
 def json_chat(system: str, context: dict, *, purpose: str, max_tokens: int) -> dict:
@@ -183,7 +203,9 @@ def json_chat(system: str, context: dict, *, purpose: str, max_tokens: int) -> d
         try:
             text, usage = call(provider, model, system, user, max_tokens)
         except ProviderError as exc:
-            ai_costs.note(provider, model, None, fallback=worst, estimated=True)
+            # A failure the provider reported usage for is charged at that; one
+            # without, at its conservative maximum, marked estimated.
+            ai_costs.note(provider, model, exc.usage, fallback=worst, estimated=exc.usage is None)
             _trip(provider)
             tried.append(f"{provider}/{model}")
             logger.warning("AI failover: %s/%s failed (%s); trying the next provider", provider, model, exc)
@@ -206,7 +228,9 @@ def max_search_pence(provider: str, model: str) -> int:
 def reserve_pence() -> int:
     """Enough for every provider a search might try: each failed attempt is
     charged its own maximum, so the reservation covers the whole chain."""
-    pairs = chain("research")
+    # Every keyed, priced provider, INCLUDING ones cooling down: a cooldown can
+    # end mid-search and that provider may then be tried (Codex OUT-19 H review 1).
+    pairs = chain("research", include_down=True)
     return sum(max_search_pence(p, m) for p, m in pairs)
 
 
@@ -219,8 +243,14 @@ def _openai_compatible_search(provider, model, brief):
                                            max_tool_calls=SEARCH_MAX_TOOL_CALLS)
     except Exception as exc:
         raise ProviderError(f"{provider}: {type(exc).__name__}") from exc
-    searches = sum(1 for item in (getattr(response, "output", None) or []) if getattr(item, "type", "") == "web_search_call")
-    return getattr(response, "output_text", "") or "", getattr(response, "usage", None), searches
+    usage = getattr(response, "usage", None)
+    try:
+        searches = sum(1 for item in (getattr(response, "output", None) or [])
+                       if getattr(item, "type", "") == "web_search_call")
+        text = getattr(response, "output_text", "") or ""
+    except (AttributeError, TypeError) as exc:
+        raise ProviderError(f"{provider}: malformed reply", usage=usage) from exc
+    return text, usage, searches
 
 
 def _anthropic_search(provider, model, brief):
@@ -234,11 +264,23 @@ def _anthropic_search(provider, model, brief):
         raise ProviderError(f"{provider}: {type(exc).__name__}") from exc
     if response.status_code != 200:
         raise ProviderError(f"{provider}: HTTP {response.status_code}")
-    body = response.json()
-    text = "".join(b.get("text", "") for b in body.get("content", []) if b.get("type") == "text")
-    usage = body.get("usage") or {}
-    searches = int((usage.get("server_tool_use") or {}).get("web_search_requests") or 0)
-    return text, SimpleNamespace(input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens")), searches
+    try:
+        body = response.json()
+        usage = _anthropic_usage(body)
+        searches = int(((body.get("usage") or {}).get("server_tool_use") or {}).get("web_search_requests") or 0)
+        blocks = body.get("content", [])
+        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        # Anthropic reports search outages INSIDE a 200 reply (Codex OUT-19 H
+        # review 1): a rate limit or unavailable search is a provider failure;
+        # running out of allowed searches is not.
+        tool_errors = {(b.get("content") or {}).get("error_code") for b in blocks
+                       if b.get("type") == "web_search_tool_result" and isinstance(b.get("content"), dict)
+                       and b["content"].get("type") == "web_search_tool_result_error"}
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ProviderError(f"{provider}: malformed reply") from exc
+    if tool_errors & RETRYABLE_SEARCH_ERRORS:
+        raise ProviderError(f"{provider}: web search {', '.join(sorted(tool_errors))}", usage=usage, searches=searches)
+    return text, usage, searches
 
 
 def web_search(brief: str) -> dict:
@@ -250,8 +292,15 @@ def web_search(brief: str) -> dict:
         try:
             text, usage, searches = search(provider, model, brief)
         except ProviderError as exc:
-            calls.append({"provider": provider, "model": model, "pence": max_search_pence(provider, model),
-                          "estimated": True, "usage": {}})
+            reported = ai_costs.usage_tokens(exc.usage)
+            if reported is None:
+                calls.append({"provider": provider, "model": model, "pence": max_search_pence(provider, model),
+                              "estimated": True, "usage": {}})
+            else:
+                pence = int(-(-ai_costs.cost(provider, model, reported[0], reported[1], exc.searches) // 1))
+                calls.append({"provider": provider, "model": model, "pence": max(1, pence), "estimated": False,
+                              "usage": {"input_tokens": reported[0], "output_tokens": reported[1],
+                                        "tool_calls": exc.searches}})
             _trip(provider)
             logger.warning("AI failover: research on %s/%s failed (%s); trying the next provider", provider, model, exc)
             continue

@@ -747,10 +747,16 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
         try:
             # Enough for every provider the search might fail over to (OUT-19 H);
             # with none configured, the primary model's maximum.
-            reserve = ai_router.reserve_pence() or max_search_pence(model)
+            reserve = ai_router.reserve_pence() if search is web_search else max_search_pence(model)
         except ai_costs.Unpriced:
             session.rollback()
             out["stopped"] = f"Research is paused: no price is set for the research model {model}"
+            break
+        if not reserve:
+            # No provider is configured: nothing can be called, so nothing is
+            # reserved or spent (Codex OUT-19 H review 1).
+            session.rollback()
+            out["stopped"] = "Research is paused: no AI provider is available"
             break
         b = _brand_config(_config(_doc(session, bid)), brand_id)
         if not b["enabled"] or _spent(session, bid, moment, brand_id) + reserve > int(b["monthly_cap_pence"]):
@@ -773,14 +779,24 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             _lock(session, bid)
             attempts = getattr(exc, "calls", None)
             if attempts:
+                # Settle against the attempts actually made; release the rest.
+                charged = sum(c["pence"] for c in attempts)
                 for c in attempts:
+                    usage = c.get("usage") or {}
                     ai_costs.record(session, bid, purpose="research", brand_id=brand_id, moment=moment,
-                                    pence=c["pence"], estimated=True, provider=c["provider"], model=c["model"])
-            elif not isinstance(exc, ai_router.AllProvidersFailed):
+                                    pence=c["pence"], estimated=bool(c.get("estimated")), provider=c["provider"],
+                                    model=c["model"], input_tokens=int(usage.get("input_tokens") or 0),
+                                    output_tokens=int(usage.get("output_tokens") or 0),
+                                    tool_calls=int(usage.get("tool_calls") or 0))
+            elif isinstance(exc, ai_router.AllProvidersFailed):
+                charged = 0          # no provider was reached: nothing was billed
+            else:
+                charged = reserve    # an unknown failure: keep the whole reserve, as an estimate
                 ai_costs.record(session, bid, purpose="research", brand_id=brand_id, moment=moment, pence=reserve,
                                 estimated=True, provider="openai", model=model)
+            _spend(session, bid, moment, charged - reserve, brand_id)
             session.commit()
-            out["spend_pence"] += reserve
+            out["spend_pence"] += charged
             out["stopped"] = "Research was unavailable"
             break
         cost = max(0, int(result.get("cost_pence") or 0))

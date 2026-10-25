@@ -251,3 +251,104 @@ def test_a_research_run_records_each_attempt_in_the_ledger(db):
     assert float(got[f"ai_pence:{key}:openai/gpt-4.1"]) == 40 and float(got[f"ai_estimated:{key}:openai/gpt-4.1"]) == 1
     assert float(got[f"ai_pence:{key}:anthropic/claude-sonnet-4-5"]) == 25
     assert float(got["ai_pence"]) == 65
+
+
+# ------------------------------------------- Codex OUT-19 H review 1 ---
+
+def test_the_research_reservation_includes_providers_still_cooling_down(monkeypatch):
+    """P1 1: a cooldown can end mid-search; that provider must already be reserved."""
+    keys(monkeypatch, "openai", "anthropic")
+    r = router()
+    r._trip("anthropic")
+    assert r.chain("research") == [("openai", "gpt-4.1")]
+    assert r.reserve_pence() == r.max_search_pence("openai", "gpt-4.1") + r.max_search_pence("anthropic", "claude-sonnet-4-5")
+
+
+def test_with_no_research_provider_nothing_is_reserved_or_spent(db):
+    """P2 3: missing keys must never use up a brand's research budget."""
+    from sqlalchemy import text
+    from sqlmodel import Session
+    from test_outreach_research import NOW, research, started
+    from test_outreach_setup import A
+    biz, brand, lia, campaign = started(db)
+    with Session(db) as s:
+        out = research().run(s, biz, lia["id"], fetch=lambda u: "", mx=lambda d: True,
+                             companies=lambda q: None, moment=NOW)     # the real search, no keys set
+    assert "no AI provider" in out["stopped"]
+    with db.connect() as c:
+        assert not c.execute(text("SELECT count(*) FROM usage_meters WHERE business_id = :b AND meter LIKE 'outreach_research_pence%'"),
+                             {"b": A}).scalar()
+
+
+@pytest.mark.parametrize("calls,charged", [(None, 0), ([{"provider": "openai", "model": "gpt-4.1", "pence": 70,
+                                                        "estimated": True, "usage": {}}], 70)])
+def test_a_search_where_every_provider_failed_is_settled_against_its_attempts(db, calls, charged):
+    from sqlalchemy import text
+    from test_outreach_research import World, person, run, started
+    from test_outreach_setup import A
+    r = router()
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    world.search_error = r._AllFailedWithCost(calls) if calls else r.AllProvidersFailed("none")
+    out = run(db, biz, lia, world)
+    with db.connect() as c:
+        spent = float(c.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND meter = :m"),
+                                {"b": A, "m": f"outreach_research_pence:{brand['id']}"}).scalar())
+    assert spent == charged and out["spend_pence"] == charged
+
+
+def _anthropic_reply(monkeypatch, blocks, usage=None):
+    import httpx
+    body = {"content": blocks, "usage": usage or {"input_tokens": 900, "output_tokens": 100,
+                                                  "server_tool_use": {"web_search_requests": 2}}}
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: SimpleNamespace(status_code=200, json=lambda: body))
+
+
+@pytest.mark.parametrize("code", ["too_many_requests", "unavailable"])
+def test_a_claude_search_outage_inside_a_200_reply_fails_over_and_is_charged_as_reported(monkeypatch, code):
+    """P2 4."""
+    keys(monkeypatch, "anthropic")
+    _anthropic_reply(monkeypatch, [{"type": "web_search_tool_result",
+                                    "content": {"type": "web_search_tool_result_error", "error_code": code}}])
+    with pytest.raises(router().ProviderError) as caught:
+        router()._anthropic_search("anthropic", "claude-sonnet-4-5", "brief")
+    assert caught.value.usage.input_tokens == 900 and caught.value.searches == 2
+
+
+def test_running_out_of_allowed_searches_is_an_answer_not_an_outage(monkeypatch):
+    keys(monkeypatch, "anthropic")
+    _anthropic_reply(monkeypatch, [{"type": "web_search_tool_result",
+                                    "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}},
+                                   {"type": "text", "text": '{"candidates": []}'}])
+    text, usage, searches = router()._anthropic_search("anthropic", "claude-sonnet-4-5", "brief")
+    assert '"candidates"' in text and searches == 2
+
+
+def test_a_malformed_reply_fails_over_and_its_reported_usage_is_charged(monkeypatch):
+    """P2 5: an empty choices envelope was an IndexError with nothing recorded."""
+    import openai
+    keys(monkeypatch, "openai", "xai")
+
+    def client(**kw):
+        if kw.get("base_url"):                          # xAI answers properly
+            reply = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok": 1}'))],
+                                    usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5))
+        else:                                           # OpenAI returns a broken envelope
+            reply = SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=400, completion_tokens=0))
+        return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **k: reply)))
+    monkeypatch.setattr(openai, "OpenAI", client)
+    from services import ai_costs
+    with ai_costs.collect() as spent:
+        assert router().json_chat("s", {}, purpose="draft", max_tokens=50) == {"ok": 1}
+    assert [(c["provider"], c["estimated"], c["input_tokens"]) for c in spent] == [("openai", False, 400), ("xai", False, 10)]
+
+
+def test_a_malformed_claude_body_is_a_provider_failure(monkeypatch):
+    keys(monkeypatch, "anthropic")
+    import httpx
+
+    def bad_json():
+        raise ValueError("not json")
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: SimpleNamespace(status_code=200, json=bad_json))
+    with pytest.raises(router().ProviderError):
+        router()._anthropic_chat("anthropic", "claude-sonnet-4-5", "s", "u", 10)
