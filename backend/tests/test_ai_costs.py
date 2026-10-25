@@ -54,8 +54,8 @@ def test_a_call_is_recorded_for_the_business_its_purpose_its_brand_and_its_model
                        pence=37, moment=NOW)
         s.commit()
     assert meter(engine, "biz-a", "ai_pence") == 37
-    assert meter(engine, "biz-a", "ai_pence:research:brand-1") == 37
-    assert meter(engine, "biz-a", "ai_calls:openai/gpt-4.1") == 1
+    assert meter(engine, "biz-a", "ai_pence:research:brand-1:openai/gpt-4.1") == 37
+    assert meter(engine, "biz-a", "ai_calls:research:brand-1:openai/gpt-4.1") == 1
 
 
 def test_costs_add_up_across_calls_and_stay_in_their_month(engine):
@@ -66,7 +66,7 @@ def test_costs_add_up_across_calls_and_stay_in_their_month(engine):
                        moment=datetime(2026, 11, 2, 9, tzinfo=timezone.utc))
         s.commit()
     assert meter(engine, "biz-a", "ai_pence") == 25
-    assert meter(engine, "biz-a", "ai_pence:draft:-") == 25
+    assert meter(engine, "biz-a", "ai_pence:draft:-:openai/gpt-4o") == 25
     assert meter(engine, "biz-a", "ai_pence", period="2026-11") == 99
 
 
@@ -82,17 +82,37 @@ def test_cost_is_priced_from_tokens_when_not_given(engine):
     assert meter(engine, "biz-a", "ai_pence") == pytest.approx(p_in + p_out)
 
 
-def test_an_unpriced_model_is_charged_at_the_dearest_known_rate_never_free(engine, caplog):
-    """Fail closed: a cost the ledger can't price is never recorded as zero."""
+def test_an_unpriced_model_is_refused_never_recorded_as_free(engine):
     c = costs()
-    dearest = max(c.price(p, m)[0] + c.price(p, m)[1] for p, m in c.known_models())
-    with caplog.at_level(logging.WARNING):
-        with Session(engine) as s:
-            got = c.record(s, "biz-a", purpose="draft", provider="mystery", model="x-1",
-                           input_tokens=1_000_000, output_tokens=1_000_000, moment=NOW)
-            s.commit()
-    assert got == pytest.approx(dearest)
-    assert "unpriced" in caplog.text.lower()
+    with pytest.raises(c.Unpriced):
+        c.require_priced("mystery", "x-1")
+    with Session(engine) as s:
+        with pytest.raises(c.Unpriced):
+            c.record(s, "biz-a", purpose="draft", provider="mystery", model="x-1", input_tokens=10, moment=NOW)
+
+
+@pytest.mark.parametrize("bad", [
+    {"openai/gpt-4o": [-1, 400, 0]}, {"openai/gpt-4o": [float("nan"), 1, 1]}, {"openai/gpt-4o": [1, 2]},
+    {"openai/gpt-4o": "cheap"}, {"no-slash": [1, 1, 1]},
+    {"openai/gpt-4o": [100, 400, 0], "openai/gpt-4.1": [1, -2, 0]},     # one bad entry spoils the lot
+])
+def test_an_invalid_price_setting_is_ignored_as_a_whole(monkeypatch, bad, caplog):
+    monkeypatch.setenv("AI_PRICES_JSON", json.dumps(bad).replace("NaN", "NaN"))
+    with caplog.at_level(logging.ERROR):
+        assert costs().price("openai", "gpt-4o") == costs().DEFAULT_PRICES["openai/gpt-4o"]
+    assert "ignored" in caplog.text
+
+
+def test_usage_is_kept_per_purpose_brand_and_model(engine):
+    with Session(engine) as s:
+        costs().record(s, "biz-a", purpose="research", brand_id="b1", provider="openai", model="gpt-4.1",
+                       input_tokens=1200, output_tokens=300, tool_calls=4, moment=NOW)
+        costs().record(s, "biz-a", purpose="research", brand_id="b1", provider="openai", model="gpt-4.1",
+                       pence=189, estimated=True, moment=NOW)
+        s.commit()
+        out = costs().economics(s, period="2026-10")
+    m = out["businesses"]["biz-a"]["models"]["openai/gpt-4.1"]
+    assert (m["calls"], m["estimated_calls"], m["tokens_in"], m["tokens_out"], m["tool_calls"]) == (2, 1, 1200, 300, 4)
 
 
 def test_prices_can_be_changed_by_setting_without_a_deploy(engine, monkeypatch):
@@ -144,7 +164,7 @@ def test_aria_drafting_a_legal_basis_is_recorded_against_the_business_and_brand(
                                          "regions": ["Kent"]})
     expected = costs().cost("openai", chat.kwargs["model"], 3000, 800)
     period = datetime.now(timezone.utc).strftime("%Y-%m")
-    assert meter(db, A, f"ai_pence:draft:{brand['id']}", period) == pytest.approx(expected, abs=0.01)
+    assert meter(db, A, f"ai_pence:draft:{brand['id']}:openai/{chat.kwargs['model']}", period) == pytest.approx(expected, abs=0.01)
     assert meter(db, A, "ai_pence", period) == pytest.approx(expected, abs=0.01)
 
 
@@ -153,7 +173,7 @@ def test_a_research_search_is_recorded_against_its_brand(db):
     biz, brand, lia, campaign = started(db)
     run(db, biz, lia, World([[person(i) for i in range(20)]], cost=37))
     from test_outreach_setup import A
-    assert meter(db, A, f"ai_pence:research:{brand['id']}") == 37
+    assert meter(db, A, f"ai_pence:research:{brand['id']}:openai/gpt-4.1") == 37
     assert meter(db, A, "ai_pence") == 37
 
 
@@ -209,13 +229,18 @@ def test_without_a_kill_setting_spend_is_never_blocked_by_the_platform_check(eng
         assert costs().allowed(s, moment=NOW) is True
 
 
-def test_crossing_the_alarm_is_logged_once_a_month(engine, monkeypatch, caplog):
+def test_crossing_the_alarm_is_logged_once_a_month_and_only_after_commit(engine, monkeypatch, caplog):
     monkeypatch.setenv("AI_MONTHLY_ALARM_PENCE", "50")
     c = costs()
     with caplog.at_level(logging.ERROR):
         with Session(engine) as s:
+            c.record(s, "biz-a", purpose="research", provider="openai", model="gpt-4.1", pence=60, moment=NOW)
+            s.rollback()                                   # never committed: no alarm
+        assert "AI spend alarm" not in caplog.text
+        with Session(engine) as s:
             for _ in range(3):
                 c.record(s, "biz-a", purpose="research", provider="openai", model="gpt-4.1", pence=30, moment=NOW)
+            assert "AI spend alarm" not in caplog.text     # not before the commit
             s.commit()
     assert caplog.text.count("AI spend alarm") == 1
 
@@ -235,7 +260,7 @@ def test_economics_shows_each_business_cost_by_purpose_and_brand(engine):
     assert a["total_pence"] == 200
     assert a["by_purpose"] == {"research": 170, "draft": 30}
     assert a["by_brand"] == {"b1": 150, "b2": 50}
-    assert a["calls"] == {"openai/gpt-4.1": 2, "openai/gpt-4o": 1}
+    assert {k: v["calls"] for k, v in a["models"].items()} == {"openai/gpt-4.1": 2, "openai/gpt-4o": 1}
     assert out["platform_pence"] == 207
 
 
@@ -290,3 +315,132 @@ def test_the_economics_route_is_platform_admin_only():
     route = next(r for r in admin_outreach_api.router.routes if r.path.endswith("/economics"))
     deps = [d.call for d in route.dependant.dependencies]
     assert get_platform_admin_context in deps
+
+
+
+# ------------------------------------------------ Codex OUT-19 review 1 ---
+
+def _setup_brand(db):
+    from test_outreach_setup import OWNER, grant, setup_module_or_missing
+    m = setup_module_or_missing()
+    biz = grant(db)
+    with Session(db) as s:
+        m.begin(s, biz, OWNER)
+        brand = m.save_brand(s, biz, OWNER, {"name": "FitFutures", "sender_identity": "FitFutures"})
+    return m, biz, brand
+
+
+def _draft_cost(db, brand):
+    from test_outreach_setup import A
+    period = datetime.now(timezone.utc).strftime("%Y-%m")
+    return meter(db, A, f"ai_pence:draft:{brand['id']}:openai/gpt-4o", period)
+
+
+@pytest.mark.parametrize("content", ["not json at all", json.dumps({"purpose": ""})])
+def test_a_paid_draft_that_is_then_rejected_is_still_recorded(db, monkeypatch, content):
+    """P1 1: invalid model output, or output the step refuses, was paid for."""
+    from test_outreach_setup import OWNER
+    m, biz, brand = _setup_brand(db)
+    fake_openai(monkeypatch, FakeChat(content, prompt_tokens=1000, completion_tokens=200))
+    with Session(db) as s:
+        with pytest.raises(Exception):
+            m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Gyms"})
+    assert _draft_cost(db, brand) == pytest.approx(costs().cost("openai", "gpt-4o", 1000, 200), abs=0.01)
+
+
+def test_a_model_call_that_fails_is_recorded_at_an_estimate(db, monkeypatch):
+    from test_outreach_setup import OWNER
+    m, biz, brand = _setup_brand(db)
+    class Broken:
+        def create(self, **kwargs):
+            raise TimeoutError("timed out after the provider started work")
+    fake_openai(monkeypatch, Broken())
+    with Session(db) as s:
+        with pytest.raises(Exception):
+            m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Gyms"})
+    from services import outreach_setup
+    assert _draft_cost(db, brand) >= costs().cost("openai", "gpt-4o", 0, outreach_setup.DRAFT_MAX_TOKENS)
+
+
+def test_a_campaign_whose_drafted_emails_are_refused_is_still_recorded(db, monkeypatch):
+    from test_outreach_setup import OWNER, ready, setup_module_or_missing, WORKSPACE
+    m = setup_module_or_missing()
+    from test_outreach_setup import grant
+    biz = grant(db)
+    brand, lia, _ = ready(m, db, biz)
+    fake_openai(monkeypatch, FakeChat(json.dumps({"emails": [{"subject": "only one", "body": "b"}]}),
+                                      prompt_tokens=500, completion_tokens=100))
+    with Session(db) as s:
+        with pytest.raises(Exception):
+            m.create_first_campaign(s, biz, OWNER, {"name": "Two", "brand_id": brand["id"], "mailbox_id": WORKSPACE,
+                                                    "compliance_id": lia["id"], "daily_cap": 5})
+    assert _draft_cost(db, brand) > 0
+
+
+def test_the_drafting_client_never_retries_on_its_own(db, monkeypatch):
+    import openai
+    seen = {}
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    def client(**kw):
+        seen.update(kw)
+        return SimpleNamespace(chat=SimpleNamespace(completions=FakeChat("{}", 1, 1)))
+    monkeypatch.setattr(openai, "OpenAI", client)
+    from services import outreach_setup
+    outreach_setup._model_json("x", {})
+    assert seen["max_retries"] == 0
+
+
+def test_an_unpriced_draft_model_is_refused_before_the_model_runs(db, monkeypatch):
+    from test_outreach_setup import OWNER
+    m, biz, brand = _setup_brand(db)
+    monkeypatch.setenv("ARIA_DRAFT_MODEL", "brand-new-model")
+    with Session(db) as s:
+        with pytest.raises(Exception) as caught:
+            m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Gyms"},
+                             draft=lambda ctx: pytest.fail("ran an unpriced model"))
+    assert getattr(caught.value, "status_code", None) == 503
+
+
+def test_a_failed_search_is_recorded_at_its_reserve_as_an_estimate(db):
+    """P1 2: billable timeouts were invisible to the platform limit."""
+    from test_outreach_research import World, person, research, run, started
+    from test_outreach_setup import A
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(1)]])
+    world.search_error = TimeoutError("provider timeout")
+    run(db, biz, lia, world)
+    key = f"research:{brand['id']}:openai/gpt-4.1"
+    assert meter(db, A, f"ai_pence:{key}") == research().MAX_SEARCH_PENCE
+    assert meter(db, A, f"ai_estimated:{key}") == 1
+
+
+def test_an_unpriced_research_model_stops_before_reserving(db, monkeypatch):
+    from test_outreach_research import World, person, run, started
+    from test_outreach_setup import A
+    biz, brand, lia, campaign = started(db)
+    monkeypatch.setenv("ARIA_RESEARCH_MODEL", "unknown-model")
+    world = World([[person(1)]])
+    out = run(db, biz, lia, world)
+    assert world.briefs == [] and "no price" in out["stopped"]
+    assert meter(db, A, f"outreach_research_pence:{brand['id']}") == 0
+
+
+def test_research_reserves_from_the_one_price_table(monkeypatch):
+    from test_outreach_research import research
+    r = research()
+    monkeypatch.setenv("AI_PRICES_JSON", json.dumps({"openai/gpt-4.1": [320, 1280, 4]}))
+    assert r.max_search_pence() > r.MAX_SEARCH_PENCE * 1.9
+
+
+def test_a_past_month_counts_only_brands_that_existed_then(report_db):
+    """Review 1 P2 7: a brand made in November never adds £79 to October."""
+    from services import outreach_pricing
+    with report_db.begin() as c:
+        c.execute(text("INSERT INTO outreach_brands VALUES ('late', 'nb', 'Later Brand', '2026-11-05')"))
+    with Session(report_db) as s:
+        oct_ = next(r for r in outreach_pricing.report(s, period="2026-10")["businesses"] if r["business_id"] == "nb")
+        nov = next(r for r in outreach_pricing.report(s, period="2026-11")["businesses"] if r["business_id"] == "nb")
+        out = outreach_pricing.report(s, period="2026-10")
+    assert [b["id"] for b in oct_["brands"]] == ["fit", "gym"] and oct_["revenue_pence"] == 7900
+    assert nov["revenue_pence"] == 2 * 7900
+    assert "Projected" in out["revenue_basis"] and "Incremental" in out["margin_basis"]

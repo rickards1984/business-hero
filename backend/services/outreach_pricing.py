@@ -7,7 +7,17 @@ month as a customer and adjusted from that evidence:
   * on Pro (and Starter with the add-on) the first brand is £99 a month.
 A brand's AI cost is set against that price; a business whose outreach AI
 costs more than its outreach revenue is flagged as losing money.
+
+Two honest limits, stated on the report itself (Codex OUT-19 review 1):
+  * revenue is PROJECTED from each business's current plan and the brands it
+    had by the end of the period — not invoices (Stripe billing for brands is
+    OUT-19 part F);
+  * the margin is the INCREMENTAL outreach margin. A Business plan's included
+    brand carries £0 of outreach revenue, so any of its AI cost shows as a
+    loss there; that is not the whole account's profitability.
 """
+from services.metering import month_bounds
+from datetime import date
 import json
 
 from sqlalchemy import text
@@ -44,6 +54,7 @@ def report(session, *, period: str) -> dict:
     ledger = ai_costs.economics(session, period=period)
     spend = ledger["businesses"]
     rows = []
+    end = month_bounds(date.fromisoformat(period + "-01"))[1].isoformat()   # brands existing by the period's end
     for bid, name, plan_tier, flags in session.execute(text(
             "SELECT id, name, plan_tier, feature_flags FROM businesses ORDER BY name")).fetchall():
         bid = str(bid)
@@ -51,7 +62,7 @@ def report(session, *, period: str) -> dict:
         if not on and not cost:
             continue
         brands = session.execute(text("SELECT id, name FROM outreach_brands WHERE business_id = :b "
-                                      "ORDER BY created_at, id"), {"b": bid}).fetchall()
+                                      "AND created_at < :end ORDER BY created_at, id"), {"b": bid, "end": end}).fetchall()
         prices = brand_prices(plan_tier, [str(b[0]) for b in brands]) if on else {}
         by_brand = (cost or {}).get("by_brand", {})
         brand_rows = [{"id": str(b_id), "name": b_name, "cost_pence": round(by_brand.get(str(b_id), 0), 2),
@@ -62,8 +73,10 @@ def report(session, *, period: str) -> dict:
         rows.append({"business_id": bid, "name": name, "plan_tier": plan_tier, "outreach": on, "brands": brand_rows,
                      "revenue_pence": revenue, "cost_pence": total, "margin_pence": round(revenue - total, 2),
                      "losing_money": total > revenue, "by_purpose": (cost or {}).get("by_purpose", {}),
-                     "calls": (cost or {}).get("calls", {})})
+                     "models": (cost or {}).get("models", {})})
     return {"period": period, "businesses": rows,
+            "revenue_basis": "Projected from each business's current plan and the brands it had by the end of the month; not invoices.",
+            "margin_basis": "Incremental outreach margin: a Business plan's included brand has £0 outreach revenue.",
             "losing_money": [r["business_id"] for r in rows if r["losing_money"]],
             "platform_cost_pence": round(sum(r["cost_pence"] for r in rows), 2),
             "platform_revenue_pence": sum(r["revenue_pence"] for r in rows),

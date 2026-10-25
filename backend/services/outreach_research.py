@@ -47,16 +47,27 @@ MIN_CAP_PENCE, MAX_CAP_PENCE = 2000, 100000   # OUT-18 (Mike): per brand, never 
 # OUT-10 review 1): the provider call is bounded (output tokens, tool calls)
 # so this is a real ceiling, and a search that fails keeps its reservation.
 MAX_OUTPUT_TOKENS, MAX_TOOL_CALLS = 8000, 8
-# Conservative pence prices (GBP), overridable without a deploy.
-PRICE_IN_PER_M = float(os.environ.get("ARIA_RESEARCH_PRICE_IN_PENCE_PER_M", "160"))
-PRICE_OUT_PER_M = float(os.environ.get("ARIA_RESEARCH_PRICE_OUT_PENCE_PER_M", "640"))
-PRICE_PER_SEARCH = float(os.environ.get("ARIA_RESEARCH_PRICE_PER_SEARCH_PENCE", "2"))
 # The model's whole context window: the provider cannot bill more input than
 # this in one call, so the reserve below is a TRUE maximum (Codex OUT-10
 # review 3: "low" search context is guidance, not a ceiling).
 MODEL_CONTEXT_TOKENS = int(os.environ.get("ARIA_RESEARCH_MODEL_CONTEXT_TOKENS", "1047576"))
-MAX_SEARCH_PENCE = int(-(-((MODEL_CONTEXT_TOKENS * PRICE_IN_PER_M + MAX_OUTPUT_TOKENS * PRICE_OUT_PER_M) / 1_000_000
-                           + MAX_TOOL_CALLS * PRICE_PER_SEARCH) // 1))
+
+
+def research_model() -> str:
+    return os.environ.get("ARIA_RESEARCH_MODEL", "gpt-4.1")
+
+
+def max_search_pence(model: Optional[str] = None) -> int:
+    """A search's true maximum cost from the ONE price table (ai_costs), so the
+    reservation, the settlement and the ledger all use the same prices (Codex
+    OUT-19 review 1). Raises ai_costs.Unpriced for a model with no price."""
+    p_in, p_out, p_tool = ai_costs.price("openai", model or research_model())
+    return int(-(-((MODEL_CONTEXT_TOKENS * p_in + MAX_OUTPUT_TOKENS * p_out) / 1_000_000 + MAX_TOOL_CALLS * p_tool) // 1))
+
+
+# The default model's prices and reserve, for readers and tests.
+PRICE_IN_PER_M, PRICE_OUT_PER_M, PRICE_PER_SEARCH = ai_costs.DEFAULT_PRICES["openai/gpt-4.1"]
+MAX_SEARCH_PENCE = max_search_pence("gpt-4.1")
 METER = "outreach_research_pence"
 PILOT_ENROLMENTS = 5                     # decision E: OUT-8's pilot limit for now
 EXCLUSION_CAP = 400                      # steers the model; code checks guarantee
@@ -733,12 +744,19 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             session.rollback()
             out["stopped"] = "Research is paused: the platform's AI spending limit for the month is reached"
             break
+        model = research_model()
+        try:
+            reserve = max_search_pence(model)
+        except ai_costs.Unpriced:
+            session.rollback()
+            out["stopped"] = f"Research is paused: no price is set for the research model {model}"
+            break
         b = _brand_config(_config(_doc(session, bid)), brand_id)
-        if not b["enabled"] or _spent(session, bid, moment, brand_id) + MAX_SEARCH_PENCE > int(b["monthly_cap_pence"]):
+        if not b["enabled"] or _spent(session, bid, moment, brand_id) + reserve > int(b["monthly_cap_pence"]):
             out["stopped"] = "This brand's research budget for the month is reached; research resumes next month"
             session.rollback()
             break
-        _spend(session, bid, moment, MAX_SEARCH_PENCE, brand_id)
+        _spend(session, bid, moment, reserve, brand_id)
         session.commit()
         brief = plan(session, business, compliance_id, moment=moment, attempt=attempt)["brief"]
         out["attempts"] = attempt
@@ -746,8 +764,14 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             result = search(brief) or {}
         except Exception:
             # Billable work may have happened: the reservation stays counted,
-            # and nothing is retried. An outage never skips an area.
-            out["spend_pence"] += MAX_SEARCH_PENCE
+            # and nothing is retried. An outage never skips an area. The
+            # ledger records the reserve as an ESTIMATED charge, so the
+            # platform limit sees it too (Codex OUT-19 review 1).
+            _lock(session, bid)
+            ai_costs.record(session, bid, purpose="research", brand_id=brand_id, moment=moment, pence=reserve,
+                            estimated=True, provider="openai", model=model)
+            session.commit()
+            out["spend_pence"] += reserve
             out["stopped"] = "Research was unavailable"
             break
         cost = max(0, int(result.get("cost_pence") or 0))
@@ -755,18 +779,20 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
         # commit: every meter write takes the business lock first, so the
         # lock order is the same everywhere (Codex OUT-18 review 2).
         _lock(session, bid)
-        _spend(session, bid, moment, cost - MAX_SEARCH_PENCE, brand_id)   # settle the reservation
+        _spend(session, bid, moment, cost - reserve, brand_id)   # settle the reservation
+        usage = result.get("usage") or {}
         ai_costs.record(session, bid, purpose="research", brand_id=brand_id, moment=moment, pence=cost,
-                        provider=str(result.get("provider") or "openai"),
-                        model=str(result.get("model") or os.environ.get("ARIA_RESEARCH_MODEL", "gpt-4.1")))
+                        provider=str(result.get("provider") or "openai"), model=str(result.get("model") or model),
+                        input_tokens=int(usage.get("input_tokens") or 0), output_tokens=int(usage.get("output_tokens") or 0),
+                        tool_calls=int(usage.get("tool_calls") or 0))
         out["spend_pence"] += cost
-        if cost > MAX_SEARCH_PENCE:
+        if cost > reserve:
             # The reservation must hold. If it ever doesn't, the full cost is
             # kept and research pauses until the owner switches it back on.
             cfg = _config(_doc(session, bid))     # still under the settlement's lock
             paused = _brand_config(cfg, brand_id)
             paused["enabled"] = False
-            paused["paused_reason"] = f"A search cost {cost}p, more than its {MAX_SEARCH_PENCE}p reserve"
+            paused["paused_reason"] = f"A search cost {cost}p, more than its {reserve}p reserve"
             _put_brand(cfg, brand_id, paused)
             _save_config(session, bid, cfg)
             session.commit()
@@ -1065,19 +1091,20 @@ def web_search(brief: str) -> dict:
     # one reservation was made (Codex OUT-10 review 2).
     client = OpenAI(api_key=key, timeout=300.0, max_retries=0)
     # Bounded, so MAX_SEARCH_PENCE is a real ceiling on one search's cost.
-    response = client.responses.create(model=os.environ.get("ARIA_RESEARCH_MODEL", "gpt-4.1"),
+    model = research_model()
+    response = client.responses.create(model=model,
                                        tools=[{"type": "web_search", "search_context_size": "low"}], input=brief,
                                        max_output_tokens=MAX_OUTPUT_TOKENS, max_tool_calls=MAX_TOOL_CALLS)
     usage = getattr(response, "usage", None)
     searches = sum(1 for item in (getattr(response, "output", None) or [])
                    if getattr(item, "type", "") == "web_search_call")
-    cost = ((getattr(usage, "input_tokens", 0) or 0) * PRICE_IN_PER_M
-            + (getattr(usage, "output_tokens", 0) or 0) * PRICE_OUT_PER_M) / 1_000_000 + searches * PRICE_PER_SEARCH
+    tokens_in, tokens_out = getattr(usage, "input_tokens", 0) or 0, getattr(usage, "output_tokens", 0) or 0
+    cost = ai_costs.cost("openai", model, tokens_in, tokens_out, searches)
     textout = getattr(response, "output_text", "") or ""
     match = re.search(r"\{.*\}", textout, re.S)
     try:
         candidates = json.loads(match.group(0)).get("candidates", []) if match else []
     except (ValueError, AttributeError):
         candidates = []
-    return {"candidates": candidates, "cost_pence": max(1, round(cost)), "provider": "openai",
-            "model": os.environ.get("ARIA_RESEARCH_MODEL", "gpt-4.1")}
+    return {"candidates": candidates, "cost_pence": max(1, round(cost)), "provider": "openai", "model": model,
+            "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out, "tool_calls": searches}}

@@ -47,9 +47,22 @@
 ## What gets built
 
 ### A — Cost ledger (first: it measures everything else)
-- Every outreach AI call records: provider, model, tokens, tool calls, cost in pence, brand and business.
-- The admin panel shows per business and per brand: revenue, AI cost and margin, this month and last.
-- **A platform-wide monthly AI spend alarm and kill switch,** set by Mike.
+- Every outreach AI call records its cost. This includes calls whose output is then refused, and calls that fail or time out.
+  - A call with unknown usage is recorded at a conservative estimate and counted as estimated, never as free.
+- The cost is kept per UK month for each business × purpose × brand × provider/model, with:
+  - calls, estimated calls, input and output tokens, tool calls and pence;
+  - in `usage_meters`, so no migration.
+- Monthly aggregates at that grain are the audit record; individual calls are not stored one by one.
+- Prices:
+  - There is one price table for research reservations, settlement and drafts. AI_PRICES_JSON overrides it, and a configuration with any invalid entry is ignored as a whole.
+  - A model with no price is refused before any spend.
+  - The default prices must be checked against the providers' current pages.
+- The admin panel shows each business and brand for this month and last: projected outreach revenue, AI cost and incremental outreach margin.
+  - Revenue is projected from the current plan and the brands existing that month; invoices come with part F.
+  - A Business plan's included brand has £0 outreach revenue.
+- **A platform-wide monthly AI spend alarm and kill switch, set by Mike** (AI_MONTHLY_ALARM_PENCE / AI_MONTHLY_KILL_PENCE).
+  - Ledger writes are serialised platform-wide, so the alarm is raised once, after commit.
+  - The kill switch checks RECORDED spend before each call. A call already running when the limit is reached completes and is recorded, so the limit can be exceeded by at most the calls in flight.
 
 ### B — Hidden cost ceiling per brand
 - Each brand's AI spend is capped at a share of what it pays: 25–30%, e.g. £79 → about £20/month.
