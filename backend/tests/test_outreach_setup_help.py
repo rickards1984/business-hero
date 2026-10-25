@@ -236,3 +236,78 @@ def test_the_check_result_carries_the_guide(db):
         m.register_mailbox(s, biz, OWNER, {"mailbox_id": WORKSPACE, "daily_cap": 5})
         out = m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns({"newbody.example": ["v=spf1 ~all"]}))
     assert out["status"] == "fail" and out["guide"]["records"]
+
+
+# ------------------------------------------------------ Codex OUT-20 review 1 ---
+
+def failing_dns(records, fail):
+    def resolve(name):
+        name = name.lower().rstrip(".")
+        if name in fail:
+            raise TimeoutError("DNS timeout")
+        return list(records.get(name, []))
+    return resolve
+
+
+def guide_for(resolve, other=ns()):
+    m = setup_module_or_missing()
+    account = {"email_address": "partners-ukfi@newbody.example", "provider": "google", "token_ciphertext": "x"}
+    return m._evaluate(account, resolve, other)["guide"]
+
+
+def test_a_failed_lookup_never_tells_anyone_to_add_a_record():
+    """P1 1: a timeout cannot prove a record is missing."""
+    guide = guide_for(failing_dns(NAMESCO, {"newbody.example", "_dmarc.newbody.example"}))
+    spf = next(r for r in guide["records"] if r["what"] == "spf")
+    dmarc = next(r for r in guide["records"] if r["what"] == "dmarc")
+    assert (spf["action"], spf["value"]) == ("unknown", None) and (dmarc["action"], dmarc["value"]) == ("unknown", None)
+    assert "v=spf1" not in guide["email_to_helper"]["body"]
+
+
+def test_nameservers_are_read_by_the_production_resolver(monkeypatch):
+    """P2 2: NS records through dns_other, not only injected."""
+    import dns.resolver as resolver
+    from types import SimpleNamespace
+    m = setup_module_or_missing()
+    monkeypatch.setattr(resolver, "resolve", lambda name, qtype, lifetime=5: [
+        SimpleNamespace(target=SimpleNamespace(to_text=lambda omit=True: "ns0.phase8.net"))] if qtype == "NS" else [])
+    assert m.dns_other("newbody.example", "NS") == ["ns0.phase8.net"]
+    assert guide_for(dns(NAMESCO), m.dns_other)["dns_host"]["name"] == "names.co.uk"
+
+
+@pytest.mark.parametrize("record,expected", [
+    ("v=spf1 include:_spf.google.com.evil.test ~all",
+     "v=spf1 include:_spf.google.com include:_spf.google.com.evil.test ~all"),
+    ("v=spf1 -include:_spf.google.com ~all", "v=spf1 include:_spf.google.com ~all"),
+    ("v=spf1 ~include:_spf.google.com mx ~all", "v=spf1 include:_spf.google.com mx ~all"),
+])
+def test_spf_mechanisms_are_matched_whole_and_a_failing_include_is_fixed(record, expected):
+    """P2 3."""
+    guide = guide_for(dns(dict(NAMESCO, **{"newbody.example": [record]})))
+    assert next(r for r in guide["records"] if r["what"] == "spf")["value"] == expected
+
+
+def test_the_email_for_two_spf_records_says_to_include_the_provider():
+    records = dict(NAMESCO, **{"newbody.example": ["v=spf1 include:a.example ~all", "v=spf1 include:b.example ~all"]})
+    assert "include:_spf.google.com" in guide_for(dns(records))["email_to_helper"]["body"]
+
+
+def test_two_dmarc_records_are_merged_never_joined_by_a_third():
+    """P2 4."""
+    records = dict(NAMESCO, **{"_dmarc.newbody.example": ["v=DMARC1; p=none;", "v=DMARC1; p=reject;"]})
+    dmarc = next(r for r in guide_for(dns(records))["records"] if r["what"] == "dmarc")
+    assert dmarc["action"] == "merge" and dmarc["value"] is None
+
+
+@pytest.mark.parametrize("record,expected", [
+    ("V=dmarc1; p=quarantine; rua=mailto:dmarc@newbody.example",      # invalid (tag case) but a valid policy
+     "v=DMARC1; p=quarantine; rua=mailto:dmarc@newbody.example"),
+    ("v=DMARC1; p=sometimes", "v=DMARC1; p=none; rua=mailto:partners-ukfi@newbody.example"),
+    ("v=DMARC1", "v=DMARC1; p=none; rua=mailto:partners-ukfi@newbody.example"),
+])
+def test_an_invalid_dmarc_record_is_repaired_keeping_a_valid_policy(record, expected):
+    m = setup_module_or_missing()
+    assert not m._usable_dmarc(record)
+    guide = guide_for(dns(dict(NAMESCO, **{"_dmarc.newbody.example": [record]})))
+    dmarc = next(r for r in guide["records"] if r["what"] == "dmarc")
+    assert (dmarc["action"], dmarc["value"], dmarc["current"]) == ("edit", expected, record)

@@ -425,6 +425,8 @@ def dns_other(name: str, qtype: str) -> list:
         return [(r.preference, r.exchange.to_text(True)) for r in answer]
     if qtype == "PTR":
         return [r.target.to_text(True) for r in answer]
+    if qtype == "NS":   # OUT-20: who runs the domain's DNS (Codex OUT-20 review 1)
+        return [r.target.to_text(True) for r in answer]
     return []
 
 
@@ -472,7 +474,13 @@ def _evaluate(account: dict, resolve: Callable, other_records: Optional[Callable
     evidence["domain_control"] = bool(account.get("token_ciphertext"))   # connected by OAuth
     evidence["from_aligned"] = evidence["spf"] == "pass" and evidence["dkim"] == "pass"
     ok = all(evidence[k] == "pass" for k in ("spf", "dkim", "dmarc")) and evidence["domain_control"]
-    guide = _guide(domain, address, provider, evidence, txt, other_records)
+    def txt_or_none(name):
+        """None when the lookup failed: a failure never means "no record"."""
+        try:
+            return [str(t) for t in (resolve(name) or [])]
+        except Exception:
+            return None
+    guide = _guide(domain, address, provider, evidence, txt_or_none, other_records)
     return {"status": "pass" if ok else "fail", "evidence": evidence, "advice": advice, "guide": guide}
 
 
@@ -481,7 +489,7 @@ def _dns_host(domain: str, txt: Callable, other_records: Callable) -> dict:
         servers = [str(n).lower().rstrip(".") for n in (other_records(domain, "NS") or [])]
     except Exception:
         servers = []
-    supported = any(str(t).strip() for t in txt(f"_domainconnect.{domain}"))
+    supported = any(str(t).strip() for t in (txt(f"_domainconnect.{domain}") or []))
     connect = {"supported": supported, "available": supported and os.environ.get("DOMAIN_CONNECT_ENABLED") == "1"}
     for marks, key, name, url in DNS_HOSTS:
         if any(m in server for server in servers for m in marks):
@@ -493,38 +501,93 @@ def _guide(domain: str, address: str, provider: dict, evidence: dict, txt: Calla
     """OUT-20: a plain fix guide built from the domain's real records — what to
     change, exact values, and a ready-written email for whoever runs the DNS."""
     records = []
+    unknown = "We couldn't read your domain's records just now, so we can't yet say exactly what to change. We'll check again shortly."
     if evidence["spf"] != "pass":
-        current = [t for t in txt(domain) if t.strip().lower().startswith("v=spf1")]
+        found = txt(domain)
         include = f"include:{provider['spf']}"
-        if len(current) > 1:
-            records.append({"what": "spf", "type": "TXT", "host": "@", "action": "merge", "current": current,
-                            "value": None,
-                            "why": "Your domain has more than one SPF record, and receivers ignore them all: "
-                                   f"there must be only one. Combine them into a single record that includes {include}."})
-        elif current:
-            head, _, rest = current[0].strip().partition(" ")
-            value = current[0].strip() if include in current[0] else f"{head} {include} {rest}".strip()
-            records.append({"what": "spf", "type": "TXT", "host": "@", "action": "edit", "current": current[0].strip(),
-                            "value": value,
-                            "why": f"Your SPF record doesn't yet list {provider['name']}, so mail you send through it "
-                                   "isn't proven to come from you. Edit the existing record (don't add a second one)."})
+        if found is None:
+            records.append({"what": "spf", "type": "TXT", "host": "@", "action": "unknown", "current": None,
+                            "value": None, "why": unknown})
         else:
-            records.append({"what": "spf", "type": "TXT", "host": "@", "action": "add", "current": None,
-                            "value": f"v=spf1 {include} ~all",
-                            "why": f"Your domain has no SPF record yet. This one says {provider['name']} may send "
-                                   "email for you."})
+            current = [t.strip() for t in found if t.strip().lower().split(" ")[0] == "v=spf1"]
+            if len(current) > 1:
+                records.append({"what": "spf", "type": "TXT", "host": "@", "action": "merge", "current": current,
+                                "value": None, "include": include,
+                                "why": "Your domain has more than one SPF record, and receivers ignore them all: "
+                                       f"there must be only one. Combine them into a single record that includes {include}."})
+            elif current:
+                records.append({"what": "spf", "type": "TXT", "host": "@", "action": "edit", "current": current[0],
+                                "value": _spf_with(current[0], include),
+                                "why": f"Your SPF record doesn't yet list {provider['name']}, so mail you send through it "
+                                       "isn't proven to come from you. Edit the existing record (don't add a second one)."})
+            else:
+                records.append({"what": "spf", "type": "TXT", "host": "@", "action": "add", "current": None,
+                                "value": f"v=spf1 {include} ~all",
+                                "why": f"Your domain has no SPF record yet. This one says {provider['name']} may send "
+                                       "email for you."})
     if evidence["dkim"] != "pass":
         records.append({"what": "dkim", "type": "TXT" if provider["name"] == "Google Workspace" else "CNAME",
                         "host": provider["dkim_host"], "action": "add", "current": None, "value": None,
                         "why": "A signature key proves each email really came from you and wasn't altered.",
                         "steps": list(provider["dkim_steps"]), "help_url": provider["dkim_url"]})
     if evidence["dmarc"] != "pass":
-        records.append({"what": "dmarc", "type": "TXT", "host": "_dmarc", "action": "add", "current": None,
-                        "value": f"v=DMARC1; p=none; rua=mailto:{address}",
-                        "why": "This tells receivers your domain checks its email, and sends you reports."})
+        found = txt(f"_dmarc.{domain}")
+        fresh = f"v=DMARC1; p=none; rua=mailto:{address}"
+        if found is None:
+            records.append({"what": "dmarc", "type": "TXT", "host": "_dmarc", "action": "unknown", "current": None,
+                            "value": None, "why": unknown})
+        else:
+            current = [t.strip() for t in found if t.strip().lower().startswith("v=dmarc1")]
+            if not current:
+                records.append({"what": "dmarc", "type": "TXT", "host": "_dmarc", "action": "add", "current": None,
+                                "value": fresh,
+                                "why": "This tells receivers your domain checks its email, and sends you reports."})
+            elif len(current) > 1:
+                records.append({"what": "dmarc", "type": "TXT", "host": "_dmarc", "action": "merge", "current": current,
+                                "value": None,
+                                "why": "Your domain has more than one DMARC record, so receivers ignore them: keep just one."})
+            else:
+                records.append({"what": "dmarc", "type": "TXT", "host": "_dmarc", "action": "edit", "current": current[0],
+                                "value": _dmarc_repaired(current[0], fresh),
+                                "why": "Your DMARC record isn't written in a way receivers accept. Replace it with this "
+                                       "(your existing policy is kept where it was valid)."})
     host = _dns_host(domain, txt, other_records)
     return {"domain": domain, "mail_provider": provider["name"], "dns_host": host, "records": records,
             "email_to_helper": _helper_email(domain, host, records)}
+
+
+def _spf_with(record: str, include: str) -> str:
+    """The record with the provider's include as a passing mechanism, every
+    other mechanism kept. Matches whole mechanisms, never substrings, and
+    turns a qualified (failing) include into a passing one."""
+    terms = record.split()
+    target = include.lower()
+    for i, term in enumerate(terms[1:], 1):
+        bare = term.lstrip("+-~?").lower()
+        if bare == target:
+            if term[0] in "-~?":
+                terms[i] = include
+            return " ".join(terms)
+    return " ".join([terms[0], include] + terms[1:])
+
+
+def _dmarc_repaired(record: str, fresh: str) -> str:
+    """A valid DMARC record keeping the owner's policy and report address when
+    they were valid; otherwise the fresh starter record."""
+    tags = {}
+    for part in record.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key:
+            tags[key.strip().lower()] = value.strip()
+    policy = tags.get("p", "").lower()
+    if policy not in ("none", "quarantine", "reject"):
+        return fresh
+    out = f"v=DMARC1; p={policy}"
+    if tags.get("rua", "").lower().startswith("mailto:"):
+        out += f"; rua={tags['rua']}"
+    else:
+        out += "; " + fresh.split("; ", 2)[2]
+    return out
 
 
 def _helper_email(domain: str, host: dict, records: list) -> dict:
@@ -537,7 +600,16 @@ def _helper_email(domain: str, host: dict, records: list) -> dict:
             lines += [f"{n}. Edit the existing TXT record on {domain} (host @) that starts v=spf1, so it reads:",
                       f"   {r['value']}", f"   (it currently reads: {r['current']})"]
         elif r["what"] == "spf" and r["action"] == "merge":
-            lines += [f"{n}. {domain} has more than one TXT record starting v=spf1. Please combine them into one."]
+            lines += [f"{n}. {domain} has more than one TXT record starting v=spf1. Please combine them into one "
+                      f"record that also includes {r['include']}."]
+        elif r["action"] == "unknown":
+            lines += [f"{n}. We couldn't read {domain}'s {r['what'].upper()} record when this was written; please check "
+                      "it exists and is valid."]
+        elif r["what"] == "dmarc" and r["action"] == "merge":
+            lines += [f"{n}. {domain} has more than one DMARC record (_dmarc). Please keep just one."]
+        elif r["what"] == "dmarc" and r["action"] == "edit":
+            lines += [f"{n}. Replace the TXT record named _dmarc.{domain} with:", f"   {r['value']}",
+                      f"   (it currently reads: {r['current']})"]
         elif r["what"] == "spf":
             lines += [f"{n}. Add a TXT record on {domain} (host @) with the value:", f"   {r['value']}"]
         elif r["what"] == "dkim":

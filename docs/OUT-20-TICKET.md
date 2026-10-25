@@ -29,10 +29,12 @@
    The owner chooses between:
    - I'll do it myself (Copy buttons);
    - Send this to my web person (a ready email);
-   - Connect my domain now (only where the provider supports Domain Connect and `DOMAIN_CONNECT_ENABLED=1`);
+   - Connect my domain now: hidden until a provider accepts our Domain Connect template. Support is detected already;
    - Set it up for me (paid; it opens and escalates a support conversation).
 
-   The page re-checks every 3 minutes while open; the daily check continues as before.
+   The page re-checks every 3 minutes while open, never overlapping, and refreshes readiness when a mailbox passes. The daily check continues as before.
+
+   A failed DNS lookup never produces add or replace instructions; the guide says it couldn't read the records. Duplicate or invalid DMARC records are merged or repaired, never joined by a new one.
 
 ## Not yet
 

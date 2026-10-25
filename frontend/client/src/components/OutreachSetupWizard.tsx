@@ -88,7 +88,7 @@ function useCall(businessId: string) {
       const result = await (await apiRequest(method, setupPath(path), body)).json();
       // Refresh only what the change affects (refreshing every outreach view made each step slower).
       client.invalidateQueries({ queryKey: ['outreach-setup', businessId] });
-      if (/^(campaign|campaigns\/|mailboxes)/.test(path)) client.invalidateQueries({ queryKey: ['outreach', businessId] });
+      if (/^(campaign|campaigns\/|mailboxes|finish)/.test(path)) client.invalidateQueries({ queryKey: ['outreach', businessId] });
       return result as T;
     } catch (e) {
       const text = e instanceof Error ? e.message : '';
@@ -414,6 +414,8 @@ function BrandInbox({ api, brand, accounts }: { api: Api; brand: BrandSetup; acc
 }
 
 function MailboxStep({ api, accounts }: { api: Api; accounts: Account[] }) {
+  const businessId = useBusinessKey();
+  const client = useQueryClient();
   const [results, setResults] = useState<Record<string, Health>>({});
   async function addAndCheck(id: string) {
     // No cap on a check: a new mailbox starts at 5 and an existing limit is kept.
@@ -425,18 +427,30 @@ function MailboxStep({ api, accounts }: { api: Api; accounts: Account[] }) {
   // again every few minutes, so nobody has to keep pressing "Check again".
   const failing = Object.entries(results).filter(([, h]) => h.status !== 'pass').map(([id]) => id);
   const rounds = useRef(0);
+  const running = useRef(false);
   useEffect(() => {
     if (!failing.length) { rounds.current = 0; return; }
+    let live = true;
     const t = window.setInterval(async () => {
-      if (rounds.current++ >= 20) return window.clearInterval(t);
-      for (const id of failing) {
-        try {
-          const health = await (await apiRequest('POST', setupPath(`mailboxes/${id}/check`))).json();
-          setResults(r => ({ ...r, [id]: health }));
-        } catch { /* the next round tries again */ }
-      }
+      if (rounds.current >= 20) return window.clearInterval(t);
+      if (running.current) return;                       // never overlap a slow round
+      running.current = true; rounds.current += 1;
+      try {
+        for (const id of failing) {
+          if (!live) return;
+          try {
+            const health = await (await apiRequest('POST', setupPath(`mailboxes/${id}/check`))).json();
+            if (!live) return;
+            setResults(r => ({ ...r, [id]: health }));
+            if (health?.status === 'pass') {                // readiness and mailbox lists change with it
+              client.invalidateQueries({ queryKey: ['outreach-setup', businessId] });
+              client.invalidateQueries({ queryKey: ['outreach', businessId] });
+            }
+          } catch { /* the next round tries again */ }
+        }
+      } finally { running.current = false; }
     }, 180000);
-    return () => window.clearInterval(t);
+    return () => { live = false; window.clearInterval(t); };
   }, [failing.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <Stack spacing={1.5}>
@@ -479,6 +493,8 @@ function DnsHelp({ guide }: { guide: Guide }) {
   const host = guide.dns_host;
   const where = host.name ? `at ${host.name}` : 'wherever your domain is managed';
   const [asked, setAsked] = useState('');
+  const [asking, setAsking] = useState(false);
+  const [askError, setAskError] = useState('');
   return (
     <Stack spacing={1}>
       <Alert severity="warning" icon={false}>
@@ -538,14 +554,7 @@ function DnsHelp({ guide }: { guide: Guide }) {
           </Stack>
         </AccordionDetails>
       </Accordion>
-      {host.domain_connect.available && (
-        <Accordion disableGutters>
-          <AccordionSummary expandIcon={<ExpandMore />}><Typography sx={{ fontWeight: 600 }}>Connect my domain now</Typography></AccordionSummary>
-          <AccordionDetails>
-            <Typography variant="body2">{host.name} can add these settings for you after you log in and approve them.</Typography>
-          </AccordionDetails>
-        </Accordion>
-      )}
+      {/* "Connect my domain now" (Domain Connect) appears here once a provider has accepted our template. */}
       <Accordion disableGutters>
         <AccordionSummary expandIcon={<ExpandMore />}><Typography sx={{ fontWeight: 600 }}>Set it up for me (paid)</Typography></AccordionSummary>
         <AccordionDetails>
@@ -554,16 +563,20 @@ function DnsHelp({ guide }: { guide: Guide }) {
               Our team can make these changes with you for a one-off fee. We'll confirm the price before doing anything.
             </Typography>
             {asked ? <Alert severity="success">{asked}</Alert> : (
-              <Button variant="outlined" sx={{ alignSelf: 'flex-start' }} onClick={async () => {
+              <Button variant="outlined" sx={{ alignSelf: 'flex-start' }} disabled={asking} onClick={async () => {
+                setAsking(true); setAskError('');
                 try {
                   const chat = await (await apiRequest('POST', '/v1/support/chat', {
                     content: `Please help me set up email authentication (SPF/DKIM/DMARC) for ${guide.domain} so outreach can send. `
                       + `DNS is managed ${where}. I'd like the paid set-up service.` })).json();
-                  if (chat?.conversation_id) await apiRequest('POST', '/v1/support/escalate', { conversation_id: chat.conversation_id });
+                  if (!chat?.conversation_id) throw new Error('no conversation');
+                  if (!chat.escalated) await apiRequest('POST', '/v1/support/escalate', { conversation_id: chat.conversation_id });
                   setAsked("Thanks. Our team will be in touch with the price, usually within one working day. You'll see the conversation in Help & Support.");
-                } catch { setAsked('We could not send that just now. Please use Help & Support to ask our team.'); }
-              }}>Ask our team</Button>
+                } catch { setAskError("We couldn't send that just now. Please try again, or use Help & Support."); }
+                finally { setAsking(false); }
+              }}>{asking ? 'Sending…' : 'Ask our team'}</Button>
             )}
+            {askError && <Alert severity="error">{askError}</Alert>}
           </Stack>
         </AccordionDetails>
       </Accordion>
@@ -830,8 +843,8 @@ function CampaignTemplates({ campaignId }: { campaignId: string }) {
           <Paper key={step.ordinal} variant="outlined" sx={{ p: 1.5 }}>
             <Stack spacing={1}>
               <Typography variant="subtitle2">{labels[step.ordinal]}</Typography>
-              <TextField label="Subject" value={value.subject} onChange={e => setEdits({ ...edits, [step.ordinal]: { ...value, subject: e.target.value } })} />
-              <TextField label="Email" multiline minRows={4} value={value.body} onChange={e => setEdits({ ...edits, [step.ordinal]: { ...value, body: e.target.value } })} />
+              <TextField label="Subject" value={value.subject} disabled={rewriting} onChange={e => setEdits({ ...edits, [step.ordinal]: { ...value, subject: e.target.value } })} />
+              <TextField label="Email" multiline minRows={4} value={value.body} disabled={rewriting} onChange={e => setEdits({ ...edits, [step.ordinal]: { ...value, body: e.target.value } })} />
             </Stack>
           </Paper>
         );
@@ -858,17 +871,18 @@ function CampaignTemplates({ campaignId }: { campaignId: string }) {
               } catch (e) { setError(outreachError(e)); } finally { setRewriting(false); }
             }}>Redraft with my notes</Button>
           </Stack>
-          {rewriting && <Working label="Aria is rewriting the emails with your notes…" />}
+          {rewriting && <Working label="Aria is rewriting the emails with your notes… (editing is paused until she's done)" />}
           {rewritten && <Alert severity="success">Aria's new version is above. Edit anything, then Save wording and approve.</Alert>}
         </Stack>
       </Paper>
+      {busy && <Working label="Saving your emails…" />}
       {error && <Alert severity="error">{error}</Alert>}
       <Stack direction="row" spacing={1} flexWrap="wrap">
-        <Button variant="outlined" disabled={busy || !changed} onClick={async () => {
+        <Button variant="outlined" disabled={busy || rewriting || !changed} onClick={async () => {
           const body = { version: campaign.data!.item!.version, steps: steps.map(s => ({ ordinal: s.ordinal, delay_business_days: s.delay_business_days, ...(edits[s.ordinal] || { subject: s.subject, body: s.body }) })) };
           if (await send('PUT', `/v1/outreach/campaigns/${campaignId}/sequence`, body)) setEdits({});
         }}>Save wording</Button>
-        <Button variant="contained" disabled={busy || changed || approved} onClick={() =>
+        <Button variant="contained" disabled={busy || rewriting || changed || approved} onClick={() =>
           send('POST', `/v1/outreach/campaigns/${campaignId}/approve-templates`, { version: campaign.data!.item!.version, sequence_version: campaign.data!.item!.sequence_version })
         }>Approve these templates</Button>
       </Stack>
@@ -888,6 +902,7 @@ export function OutreachMailboxes({ businessId }: { businessId: string }) {
       <Paper variant="outlined" sx={{ p: 2 }}>
         <Stack spacing={1.5}>
           <Typography variant="h6">Sending mailboxes</Typography>
+          <Working label={api.doing} />
           {api.error && <Alert severity="error">{api.error}</Alert>}
           <MailboxStep api={api} accounts={accounts.data || []} />
         </Stack>
