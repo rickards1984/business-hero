@@ -123,7 +123,7 @@ def test_research_writes_verified_prospects_and_enrols_on_postgres(pg, biz, monk
                         {"c": campaign["id"]}).one()
         outreach_manage.approve_templates(s, biz, OWNER, campaign["id"], {"version": row[0], "sequence_version": row[1]})
         m.finish(s, biz, OWNER)
-        outreach_research.configure(s, biz, OWNER, {"enabled": True})
+        outreach_research.configure(s, biz, OWNER, {"brand_id": brand["id"], "enabled": True})
         world = World([[person(i) for i in range(12)] + [person(99, company="Sole Trader Gym")]], cost=25)
         world.not_companies.add("Sole Trader Gym")
         kw = world.kwargs()
@@ -137,5 +137,5 @@ def test_research_writes_verified_prospects_and_enrols_on_postgres(pg, biz, monk
         assert c.execute(text("SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'"),
                          {"b": B}).scalar() == 1
         assert c.execute(text("SELECT count(*) FROM outreach_enrolments WHERE business_id = :b"), {"b": B}).scalar() == 5
-        assert c.execute(text("SELECT value FROM usage_meters WHERE business_id = :b AND meter = 'outreach_research_pence'"),
-                         {"b": B}).scalar() == 75, "each of the three searches is charged"
+        assert c.execute(text("SELECT value FROM usage_meters WHERE business_id = :b AND meter = :m"),
+                         {"b": B, "m": f"outreach_research_pence:{brand['id']}"}).scalar() == 75, "each of the three searches is charged"

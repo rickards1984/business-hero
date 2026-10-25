@@ -559,7 +559,7 @@ def _outreach_definition(name, parent, paginated):
 
 TOOL_DEFINITIONS.append({"type": "function", "function": {
     "name": "get_outreach_research",
-    "description": "Aria's outreach research for this business: whether it is on, this month's spend against the budget, the latest research summary, and the lessons learned from the business's own results.",
+    "description": "Aria's outreach research for this business, per brand (each brand has its own daily target of 20 contacts, monthly budget and switch): each brand's spend against its budget, the latest research summary, and the lessons learned from the business's own results.",
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}})
 TOOL_DEFINITIONS.extend(_outreach_definition(name, *inputs)
                         for name, inputs in OUTREACH_READ_TOOLS.items())
@@ -637,9 +637,8 @@ def _outreach_research_status(business_id: str) -> dict:
             assert_feature_access(business, "outreach", retained_history=True)
         except HTTPException as exc:
             return {"status_code": exc.status_code, "error": exc.detail}
-        state = outreach_research.status(session, business)
-        state["lessons_from_results"] = outreach_research.lessons(session, business)
-        return state
+        # Lessons from results are per brand, inside each brand's entry (OUT-18).
+        return outreach_research.status(session, business)
 
 
 def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: str = "Europe/London") -> dict:
