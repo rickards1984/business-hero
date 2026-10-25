@@ -735,8 +735,17 @@ def capacity(session, bid: str, brand_id, moment: datetime, audience_hash: Optio
         if free:
             out["places"].append([c, free])
     out["inbox_left"] = sum(inbox_left.values())
-    out["room"] = max(0, min(DAILY_TARGET - found["decision_maker"] - found["gatekeeper"], brand_left,
-                             sum(f for _, f in out["places"])))
+    # Contacts kept today that hold no place (held for the owner's review)
+    # still use today's room, durably, so later attempts and runs see them
+    # (Codex OUT-19 D review 2).
+    unplaced = session.execute(text(
+        "SELECT count(*) FROM outreach_prospects p JOIN outreach_compliance l ON l.business_id = p.business_id "
+        "AND l.id = p.lia_id WHERE p.business_id = :b AND l.brand_id = :br AND p.captured_at >= :start "
+        "AND p.eligibility IN ('eligible', 'review') AND NOT EXISTS (SELECT 1 FROM outreach_enrolments e "
+        "WHERE e.business_id = p.business_id AND e.prospect_id = p.id)"), {"b": bid, "br": br, "start": start}).scalar() or 0
+    out["unplaced_today"] = int(unplaced)
+    out["room"] = max(0, min(DAILY_TARGET - found["decision_maker"] - found["gatekeeper"], brand_left - unplaced,
+                             sum(f for _, f in out["places"]) - unplaced))
     return out
 
 
@@ -767,19 +776,32 @@ def _take_place(session, bid: str, room: dict, prospect_id: str, moment: datetim
     return None
 
 
+def _unstore(session, bid: str, prospect_id: str) -> None:
+    """Undo _store in the same transaction (nothing was committed)."""
+    session.execute(text("DELETE FROM outreach_evidence WHERE business_id = :b AND prospect_id = :p"),
+                    {"b": bid, "p": prospect_id})
+    session.execute(text("DELETE FROM outreach_prospects WHERE business_id = :b AND id = :p"), {"b": bid, "p": prospect_id})
+
+
 SEARCH_KEY = "outreach_research_search"     # one paid search per business at a time
-SEARCH_CLAIM = timedelta(minutes=10)
+SEARCH_CLAIM = timedelta(minutes=15)
 
 
-def _claim_search(session, bid: str, moment: datetime, mine: Optional[str] = None) -> Optional[str]:
+def _claim_search(session, bid: str, mine: Optional[str] = None) -> Optional[str]:
     """Under the business lock: another run's search in progress means this
     one waits, so two runs never pay for the same places (Codex OUT-19 D
-    review 1). The claim expires on its own if a run dies."""
+    review 1). Taken, and renewed by its owner before each paid search and
+    before storing, on the real clock (never a run's fixed moment), and lost
+    only if its owner went quiet for 15 minutes (Codex OUT-19 D review 2)."""
     import uuid as _uuid
+    moment = now()
     doc = _doc(session, bid)
     held = doc.get(SEARCH_KEY) or {}
     until = _parse(held.get("until"))
-    if until and moment < until and held.get("token") and held.get("token") != mine:
+    if mine is not None:
+        if held.get("token") != mine:
+            return None              # lost: another run took it (and may have finished); never taken back
+    elif until and moment < until and held.get("token"):
         return None
     token = mine or _uuid.uuid4().hex
     doc[SEARCH_KEY] = {"token": token, "until": (moment + SEARCH_CLAIM).isoformat()}
@@ -853,6 +875,27 @@ def _pause_impossible(session, bid: str, brand_id: str, cost, impossible: int, o
 def run(session, business, compliance_id, *, search: Optional[Callable] = None, fetch: Optional[Callable] = None,
         mx: Optional[Callable] = None, companies: Optional[Callable] = None,
         moment: Optional[datetime] = None) -> dict:
+    """See _run. Whatever fails, a search claim this run holds is given back
+    (Codex OUT-19 D review 2)."""
+    holder = {"claim": None}
+    try:
+        return _run(session, business, compliance_id, holder, search=search, fetch=fetch, mx=mx,
+                    companies=companies, moment=moment)
+    except BaseException:
+        session.rollback()
+        if holder["claim"]:
+            try:
+                _lock(session, str(business.id))
+                _release_search(session, str(business.id), holder["claim"])
+                session.commit()
+            except Exception:
+                session.rollback()
+        raise
+
+
+def _run(session, business, compliance_id, holder: dict, *, search: Optional[Callable] = None,
+         fetch: Optional[Callable] = None, mx: Optional[Callable] = None, companies: Optional[Callable] = None,
+         moment: Optional[datetime] = None) -> dict:
     """One research run for one approved audience. Commits its own work.
 
     Authority is re-read fresh before any spend and again, under the shared
@@ -898,7 +941,8 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             if attempt == 1 and room["found_today"]["decision_maker"] + room["found_today"]["gatekeeper"] < DAILY_TARGET:
                 out["stopped"] = _no_room_reason(room)
             break
-        claim = _claim_search(session, bid, moment, claim)
+        claim = _claim_search(session, bid, claim)
+        holder["claim"] = claim
         if claim is None:
             session.rollback()
             out["stopped"] = "Another search for this business is running; research carries on in a few minutes"
@@ -1017,6 +1061,10 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             session.rollback()
             out["stopped"] = why
             break
+        if _claim_search(session, bid, claim) != claim:
+            session.rollback()
+            out["stopped"] = "Another search for this business took over; research carries on in a few minutes"
+            break
         counts = _today_counts(session, bid, moment, brand_id)
         # Re-read under the lock: another audience or brand may have filled the
         # inbox meanwhile. Each contact kept takes its campaign place here.
@@ -1039,9 +1087,14 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
                 out["rejected"].append({"company": v["company"], "reason": "today's quota is full"})
                 continue
             ident = _store(session, bid, str(lia["id"]), c, v, moment)
+            if not _take_place(session, bid, room, ident, moment):
+                # Kept only with a place: a contact that cannot join a campaign
+                # is not collected (Codex OUT-19 D review 2).
+                _unstore(session, bid, ident)
+                out["rejected"].append({"company": v["company"], "reason": "could not join a campaign"})
+                continue
             left -= 1
-            if _take_place(session, bid, room, ident, moment):
-                out["enrolled"].append(ident)
+            out["enrolled"].append(ident)
             stored_keys.add(v["email_key"])
             stored_domains.add(v["domain"])
             counts[v["contact_type"]] += 1

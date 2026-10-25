@@ -93,6 +93,11 @@ Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/tes
   - The room is checked under the same lock as the spend reservation.
   - Only one paid search runs per business at a time; a second run waits and pays nothing. The claim expires after 10 minutes if a run dies.
   - Manual enrolment reads the same pilot setting.
+- **Codex review 2 (`audits/OUT-19-D-CODEX-REVIEW-2.md`, 2 × P1).**
+  - A contact is kept only with a campaign place; one that cannot join is not collected.
+  - Contacts held for review use today's room, counted from the database, so later attempts and runs see them.
+  - The search claim runs on the real clock. Its owner renews it before each paid search and before storing; a run that lost it stops and never takes it back.
+  - Whatever fails, the claim is released.
 - **Pilot limit (OUT-10 decision E).** It stays at 5 active contacts per campaign for the first week of the restart, so research also keeps no more than can join a campaign. `OUTREACH_PILOT_ENROLMENTS` raises it without a deploy; `0` lifts it, leaving the inbox's capacity to decide. Before lifting it, index `prepare`'s scan of open cards (OUT-8 ticket, note 2).
 
 ### E — Replies outside the cold cap, with the over-ceiling choices (decision 2)

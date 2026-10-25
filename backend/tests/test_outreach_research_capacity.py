@@ -309,3 +309,142 @@ def sends_today(db, campaign_id, n):
                     local_send_date=NOW.date().isoformat(), state="committed",
                     created_at=NOW.isoformat(), updated_at=NOW.isoformat())
         s.commit()
+
+
+# ------------------------------------------ Codex OUT-19 D review 2 findings ---
+
+def test_contacts_held_for_review_use_the_room_on_later_attempts(db):
+    """P1 1: reviews hold no campaign place but still use today's room, so a
+    5-a-day inbox gets one search, not three."""
+    biz, brand, lia, campaign = started(db, full=False)
+    batches = [[person(10 * b + i, company=f"Sole {b}{i}") for i in range(5)] for b in range(3)]
+    world = World(batches)
+    for batch in batches:
+        world.not_companies.update(c["company"] for c in batch)
+    run(db, biz, lia, world)
+    assert len(world.briefs) == 1
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'") == 5
+    assert room(db, biz, brand)["room"] == 0
+
+
+def test_a_contact_that_cannot_join_a_campaign_is_not_kept(db, monkeypatch):
+    """P1 1: kept only with a place."""
+    from services import outreach_manage
+    biz, brand, lia, campaign = started(db)
+
+    def refuse(*args, **kwargs):
+        raise outreach_manage.send.ActionRefused(409, "Prospect is not eligible")
+    monkeypatch.setattr(outreach_manage, "qualified", refuse)
+    out = run(db, biz, lia, World([[person(i) for i in range(5)]]))
+    assert kept(out) == 0 and {r["reason"] for r in out["rejected"]} == {"could not join a campaign"}
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b") == 0
+    assert count(db, "SELECT count(*) FROM outreach_evidence WHERE business_id = :b") == 0
+
+
+def test_a_search_that_outlives_its_claim_stores_nothing_once_another_took_over(db, monkeypatch):
+    """P1 2: the claim runs on the real clock; a run that went quiet for more
+    than 15 minutes loses it, and checks before storing."""
+    biz, brand, lia, campaign = started(db)
+    fit, fit_lia = second_brand(db, biz)
+    r = research()
+    clock = [NOW]
+    monkeypatch.setattr(r, "now", lambda: clock[0])
+    first = World([[person(i) for i in range(5)]])
+    real_search, seen = first.search, {}
+
+    def slow_search(brief):
+        clock[0] = NOW + timedelta(minutes=16)
+        seen["second"] = run(db, biz, fit_lia, World([[person(100 + i) for i in range(5)]]))
+        return real_search(brief)
+    first.search = slow_search
+    out = run(db, biz, lia, first)
+    assert kept(seen["second"]) == 5, "the claim had lapsed, so the second run searched"
+    assert kept(out) == 0 and "took over" in out["stopped"]
+    assert len(first.briefs) == 1, "and the first run never takes the claim back"
+
+
+def test_a_claim_is_renewed_while_its_owner_works(db, monkeypatch):
+    biz, brand, lia, campaign = started(db)
+    r = research()
+    clock = [NOW]
+    monkeypatch.setattr(r, "now", lambda: clock[0])
+    with Session(db) as s:
+        r._lock(s, A)
+        token = r._claim_search(s, A)
+        s.commit()
+        clock[0] = NOW + timedelta(minutes=10)
+        r._lock(s, A)
+        assert r._claim_search(s, A, token) == token          # renewed by its owner
+        s.commit()
+        clock[0] = NOW + timedelta(minutes=20)                 # 10 after the renewal: still held
+        r._lock(s, A)
+        assert r._claim_search(s, A) is None
+        s.rollback()
+
+
+def test_a_run_that_fails_gives_its_claim_back(db):
+    """P2: whatever fails, the claim is released."""
+    biz, brand, lia, campaign = started(db)
+    world = World([[person(i) for i in range(5)]])
+
+    def broken(url):
+        raise RuntimeError("verification crashed")
+    world.fetch = broken
+    with pytest.raises(RuntimeError):
+        run(db, biz, lia, world)
+    with Session(db) as s:
+        assert research().SEARCH_KEY not in research()._doc(s, A)
+    assert kept(run(db, biz, lia, World([[person(50 + i) for i in range(5)]]))) == 5
+
+
+def test_a_campaign_over_its_cap_takes_nothing_from_another(db):
+    """P2: one campaign's overrun never lowers another's places."""
+    biz, brand, lia, campaign = started(db)
+    from test_outreach_research import own_inbox
+    box = own_inbox(db, brand, lia, address="second@newbody.example")
+    with Session(db) as s:
+        s.execute(text("UPDATE outreach_campaigns SET daily_cap = 5 WHERE id = :c"), {"c": campaign["id"]})
+        s.execute(text("UPDATE outreach_mailboxes SET warmup_stage = 5, daily_cap = 5, sending_days = 0 "
+                       "WHERE mailbox_id = :m"), {"m": box})
+        s.commit()
+    queue(db, campaign["id"], 8, step=0)                       # 3 over its cap of 5
+    assert room(db, biz, brand)["room"] == 5                   # the second inbox's 5, untouched
+
+
+@pytest.mark.parametrize("limit,allowed", [("0", True), ("7", True), ("6", False)])
+def test_manual_enrolment_follows_the_pilot_setting(db, monkeypatch, limit, allowed):
+    """P2, behaviourally: the owner's own enrolment obeys the same setting."""
+    from services import outreach_manage
+    from services.aria_actions import ActionRefused
+    biz, brand, lia, campaign = started(db)
+    out = run(db, biz, lia, World([[person(i) for i in range(7)]]))
+    with Session(db) as s:
+        s.execute(text("DELETE FROM outreach_enrolments WHERE business_id = :b"), {"b": A})
+        s.commit()
+    monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", limit)
+    with Session(db) as s:
+        if allowed:
+            assert len(outreach_manage.enrol(s, biz, OWNER, campaign["id"], {"prospect_ids": out["accepted"]})["items"]) == 7
+        else:
+            with pytest.raises(ActionRefused) as exc:
+                outreach_manage.enrol(s, biz, OWNER, campaign["id"], {"prospect_ids": out["accepted"]})
+            assert "6" in exc.value.detail
+
+
+def test_an_email_of_unknown_outcome_counts_once(db):
+    biz, brand, lia, campaign = started(db)
+    queue(db, campaign["id"], 1, step=1, due=NOW)
+    with Session(db) as s:
+        e = s.execute(text("SELECT id, prospect_id FROM outreach_enrolments WHERE campaign_id = :c"), {"c": campaign["id"]}).one()
+        message = str(uuid.uuid4())
+        _insert(s, "outreach_messages", id=message, business_id=A, prospect_id=e[1], campaign_id=campaign["id"],
+                enrolment_id=e[0], mailbox_id=WORKSPACE, kind="followup", origin="live", direction="outbound",
+                to_emails="[]", cc_emails="[]", subject="s", body="b", payload_hash="h", payload_version=1,
+                state="unknown", idempotency_key="k", authority_snapshot="{}", created_at=NOW.isoformat(),
+                updated_at=NOW.isoformat())
+        _insert(s, "outreach_usage_events", id=str(uuid.uuid4()), business_id=A, operation_key="op", kind="outreach_emails_sent",
+                quantity=1, period_start=NOW.isoformat(), period_end=(NOW + timedelta(days=30)).isoformat(),
+                mailbox_id=WORKSPACE, message_id=message, local_send_date=NOW.date().isoformat(), state="unknown",
+                created_at=NOW.isoformat(), updated_at=NOW.isoformat())
+        s.commit()
+    assert room(db, biz, brand)["room"] == 19
