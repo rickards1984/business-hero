@@ -1,7 +1,7 @@
 # OUT-19 part A — Codex review 2
 
 - Commit reviewed: 4d2c6a3
-- Model: gpt-6-astra · session (see log) · tokens used: 71,261
+- Model: gpt-6-astra · tokens used: 71,261
 - Verdict: REQUEST CHANGES
 
 ## Prompt
