@@ -167,8 +167,10 @@ def build_payload(session, business, args, owner_name=None, timezone=None):
     source = rows(session, 'outreach_evidence', business.id, 'AND prospect_id=:p AND source_url IS NOT NULL ORDER BY fetched_at DESC', {'p': str(p['id'])})
     require(source and urlparse(b['privacy_url']).scheme == 'https')
     base = unsubscribe_base()
-    require(urlparse(base).scheme == 'https' and urlparse(base).netloc and not urlparse(base).query,
-            'Outreach unsubscribe URL is not configured')
+    parsed = urlparse(base)
+    # A fragment never reaches the server, so the token after it would be lost (Codex OUT-16 review 1).
+    require(parsed.scheme == 'https' and parsed.netloc and not parsed.query and not parsed.fragment
+            and '#' not in base and '?' not in base, 'Outreach unsubscribe URL is not configured')
     token = secrets.token_urlsafe(32)
     link = base.rstrip('/') + '/' + token
     insert(session, 'outreach_unsubscribe_tokens', business.id,
@@ -187,7 +189,12 @@ def build_payload(session, business, args, owner_name=None, timezone=None):
         prev = _previous(session, business.id, c, p)
         require(prev and prev['provider_message_id'] and prev['provider_thread_id'] and prev['rfc_message_id'] and str(prev['mailbox_id']) == str(a['id']),
                 'Previous acceptance needs mailbox/thread correlation')
-        payload.update(in_reply_to=prev['rfc_message_id'], references=[prev['rfc_message_id']],
+        # Gmail threads a follow-up only when its subject matches the conversation's,
+        # and recipients' clients group by it too: a follow-up is "Re:" the email it
+        # follows, whatever subject the step's template carries (Codex OUT-16 review 1).
+        earlier = prev['subject'] or ''
+        payload.update(subject=_safe_header(earlier if earlier[:3].lower() == 're:' else 'Re: ' + earlier[:990]),
+                       in_reply_to=prev['rfc_message_id'], references=[prev['rfc_message_id']],
                        provider_thread_id=prev['provider_thread_id'])
     return payload
 
@@ -424,6 +431,8 @@ def dispatch(session, business, *, action_id, payload):
     outcome = evidence['outcome']
     result = {'status': {'accepted': 'done', 'definitely_not_accepted': 'failed', 'unknown': 'executing'}[outcome],
               'outcome': outcome, 'search_at': permit[1].isoformat(), 'dispatch_at': at.isoformat()}
+    if outcome == 'accepted' and isinstance(evidence.get('thread_note'), str):
+        result['thread_note'] = evidence['thread_note'][:200]
     try:
         _settle(session, business, action_id, payload, job[0], evidence, result)
         session.commit()

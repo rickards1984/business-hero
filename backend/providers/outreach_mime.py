@@ -48,11 +48,16 @@ def build(*, account, to_emails, cc_emails, subject, body_text, rfc_message_id, 
     return message
 
 
-def outcome_for_status(status: int) -> str:
-    """2xx accepted; a definite refusal (4xx, including rate limits) was not
-    sent; a server error may still have been delivered, so it is unknown."""
-    if 200 <= status < 300:
+def outcome_for_status(status: int, accepted: int) -> str:
+    """Only the provider's documented success status is accepted (Gmail 200,
+    Graph sendMail 202); any other 2xx or 3xx is unexplained, so unknown. A
+    definite refusal (4xx, including rate limits) was not sent; a server error
+    may still have been delivered, so it is unknown. Accepted means the
+    provider took it, not that it was delivered."""
+    if status == accepted:
         return "accepted"
+    if 200 <= status < 400:
+        return "unknown"
     if 400 <= status < 500:
         return "definitely_not_accepted"
     return "unknown"

@@ -112,7 +112,9 @@ def test_a_gmail_follow_up_stays_in_its_thread(monkeypatch):
 
 @pytest.mark.parametrize("status,outcome", [(400, "definitely_not_accepted"), (401, "definitely_not_accepted"),
                                             (403, "definitely_not_accepted"), (429, "definitely_not_accepted"),
-                                            (500, "unknown"), (503, "unknown")])
+                                            (500, "unknown"), (503, "unknown"),
+                                            # Only Gmail's documented 200 is acceptance; any other 2xx/3xx is unexplained.
+                                            (201, "unknown"), (202, "unknown"), (204, "unknown"), (302, "unknown")])
 def test_gmail_failures_are_reported_honestly(monkeypatch, status, outcome):
     provider, fake = gmail(monkeypatch, [(status, {"error": "x"})])
     out = provider.send_outreach(account=ACCOUNT, **MESSAGE)
@@ -157,10 +159,38 @@ def test_graph_accepted_but_not_yet_findable_is_still_accepted(monkeypatch):
 
 
 @pytest.mark.parametrize("status,outcome", [(400, "definitely_not_accepted"), (401, "definitely_not_accepted"),
-                                            (429, "definitely_not_accepted"), (500, "unknown")])
+                                            (429, "definitely_not_accepted"), (500, "unknown"),
+                                            # Graph documents 202 for sendMail; a 200 or 204 is not that contract.
+                                            (200, "unknown"), (204, "unknown"), (302, "unknown")])
 def test_graph_failures_are_reported_honestly(monkeypatch, status, outcome):
     provider, fake = graph(monkeypatch, [(status, {"error": "x"})])
     assert provider.send_outreach(account=MS_ACCOUNT, **MESSAGE)["outcome"] == outcome
+
+
+def test_a_graph_follow_up_carries_thread_headers_and_confirms_its_conversation(monkeypatch):
+    """Graph's MIME /reply would address our own mailbox (the original sender),
+    so a follow-up is a sendMail carrying the thread headers and "Re:" subject;
+    the conversation Outlook filed it in is then reported, not assumed."""
+    follow = dict(MESSAGE, rfc_message_id="<def-456@newbody.example>", in_reply_to="<abc-123@newbody.example>",
+                  references=["<abc-123@newbody.example>"], provider_thread_id="c-1", subject="Re: A free intern")
+    provider, fake = graph(monkeypatch, [(202, {}), (200, {"value": [{"id": "m-2", "conversationId": "c-1"}]})])
+    out = provider.send_outreach(account=MS_ACCOUNT, **follow)
+    assert fake.requests[0][1].endswith("/me/sendMail")
+    msg = sent_mime(fake)
+    assert msg["In-Reply-To"] == "<abc-123@newbody.example>" and msg["References"] == "<abc-123@newbody.example>"
+    assert msg["To"] == "sam@studio1.example" and msg["Subject"] == "Re: A free intern"
+    assert out["provider_thread_id"] == "c-1" and "thread_note" not in out
+
+
+def test_a_graph_follow_up_in_another_conversation_is_named_not_hidden(monkeypatch):
+    follow = dict(MESSAGE, in_reply_to="<abc-123@newbody.example>", references=["<abc-123@newbody.example>"],
+                  provider_thread_id="c-1", subject="Re: A free intern")
+    provider, fake = graph(monkeypatch, [(202, {}), (200, {"value": [{"id": "m-2", "conversationId": "c-9"}]})])
+    out = provider.send_outreach(account=MS_ACCOUNT, **follow)
+    assert out["outcome"] == "accepted" and out["provider_thread_id"] == "c-9"
+    assert "different Outlook conversation" in out["thread_note"]
+    provider, fake = graph(monkeypatch, [(202, {})] + [(200, {"value": []})] * 3)
+    assert "unconfirmed" in provider.send_outreach(account=MS_ACCOUNT, **follow)["thread_note"]
 
 
 # ------------------------------------------------------------ unsubscribe ---
@@ -172,6 +202,46 @@ def test_the_unsubscribe_link_defaults_to_the_apps_own_address(monkeypatch):
     assert outreach_send.unsubscribe_base() == "https://api.businesshero.example/u"
     monkeypatch.setenv("OUTREACH_UNSUBSCRIBE_BASE_URL", "https://unsub.example/x")
     assert outreach_send.unsubscribe_base() == "https://unsub.example/x"
+
+
+@pytest.mark.parametrize("variable", ["OUTREACH_UNSUBSCRIBE_BASE_URL", "PUBLIC_BASE_URL"])
+@pytest.mark.parametrize("value", ["https://api.example.com/#fragment", "https://api.example.com/x#", "https://api.example.com/?a=1"])
+def test_an_unsubscribe_address_with_a_fragment_or_query_is_refused(h, variable, value, monkeypatch):
+    """A fragment never reaches the server, so the token after it would be
+    lost (Codex OUT-16 review 1); both configuration paths are refused."""
+    from test_outreach_send import CAMPAIGN, ENROLMENT, OWNER, STEP
+    monkeypatch.delenv("OUTREACH_UNSUBSCRIBE_BASE_URL", raising=False)
+    monkeypatch.setenv(variable, value)
+    result = h.a.propose(h.s, h.b, OWNER, "send_outreach", dict(campaign_id=CAMPAIGN, enrolment_id=ENROLMENT, step_id=STEP))
+    assert "proposal" not in result and not h.p.sends
+
+
+def test_the_unsubscribe_rate_limit_ignores_unverified_bearer_tokens(monkeypatch):
+    """The page is public: a forged bearer token must not buy a fresh bucket."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from slowapi.errors import RateLimitExceeded
+    from slowapi import _rate_limit_exceeded_handler
+    import outreach_unsubscribe_api as api
+    from rate_limiting import limiter
+    from services import outreach_send
+    monkeypatch.setattr(outreach_send, "unsubscribe", lambda session, *, token, method: {"confirmation_required": True})
+    limiter.reset()
+    app = FastAPI()
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.include_router(api.router)
+    app.dependency_overrides[api.get_session] = lambda: iter([None])
+    client = TestClient(app)
+
+    def forged(sub):
+        body = base64.urlsafe_b64encode(f'{{"sub":"{sub}"}}'.encode()).decode().rstrip("=")
+        return {"Authorization": f"Bearer e30.{body}.sig"}
+    try:
+        codes = [client.get("/u/" + "t" * 43, headers=forged(f"user-{i}")).status_code for i in range(61)]
+    finally:
+        limiter.reset()
+    assert codes[:60] == [200] * 60 and codes[60] == 429
 
 
 def test_the_unsubscribe_page_confirms_on_get_and_unsubscribes_on_post(monkeypatch):

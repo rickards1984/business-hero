@@ -4,7 +4,8 @@ GET shows a confirmation with a button and never changes anything (mail
 scanners and link previews open links). POST unsubscribes: it is what the
 button posts, and what Gmail, Yahoo and Apple Mail send for one-click
 unsubscribe (RFC 8058: `List-Unsubscribe=One-Click`). Unauthenticated and
-rate limited; an unknown or revoked token is a plain 404.
+rate limited by IP alone (a public route: an unverified bearer token must not
+buy a fresh bucket); an unknown or revoked token is a plain 404.
 """
 import html
 
@@ -13,7 +14,7 @@ from fastapi.responses import HTMLResponse
 from sqlmodel import Session
 
 from db import get_session
-from rate_limiting import limiter
+from rate_limiting import ip_key, limiter
 from services import outreach_send
 from services.aria_actions import ActionRefused
 
@@ -41,7 +42,7 @@ def _invalid() -> HTMLResponse:
 
 
 @router.get("/u/{token}", response_class=HTMLResponse)
-@limiter.limit("60/minute")
+@limiter.limit("60/minute", key_func=ip_key)
 def confirm(request: Request, token: str, session: Session = Depends(get_session)):
     try:
         outreach_send.unsubscribe(session, token=token, method="GET")
@@ -52,7 +53,7 @@ def confirm(request: Request, token: str, session: Session = Depends(get_session
 
 
 @router.post("/u/{token}", response_class=HTMLResponse)
-@limiter.limit("60/minute")
+@limiter.limit("60/minute", key_func=ip_key)
 def unsubscribe(request: Request, token: str, session: Session = Depends(get_session)):
     try:
         outreach_send.unsubscribe(session, token=token, method="POST")

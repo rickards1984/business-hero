@@ -102,7 +102,7 @@ class GoogleGmailProvider(BaseEmailProvider):
                                        headers={"Authorization": f"Bearer {access_token}"}, json=payload)
         except Exception as exc:
             return {**evidence, "outcome": "unknown", "reason": type(exc).__name__}
-        outcome = outreach_mime.outcome_for_status(response.status_code)
+        outcome = outreach_mime.outcome_for_status(response.status_code, 200)
         if outcome != "accepted":
             return {**evidence, "outcome": outcome, "reason": f"HTTP {response.status_code}"}
         try:

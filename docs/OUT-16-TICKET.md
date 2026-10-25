@@ -44,3 +44,10 @@ The definitive deliverability check: each mailbox sends a test email to the owne
 
 ## Known limit
 A Microsoft follow-up needs the first email's provider ids. If Graph didn't show the sent copy within the lookup window, that prospect's follow-up waits until the ids are known.
+
+## Codex review 1 (`audits/OUT-16-CODEX-REVIEW-1.md`) — what changed
+- **Follow-up subjects.** Gmail threads a follow-up only when its subject matches the conversation's, and recipients' mail clients group on it too. A follow-up's subject is now "Re:" plus the subject of the email it follows (no "Re: Re:"), whatever subject the step's template carries. The approval card shows the subject that will actually be sent.
+- **Microsoft threading.** Graph's MIME `/reply` always addresses the original message's sender, and for a follow-up that sender is our own mailbox. So follow-ups and replies go through `sendMail` with In-Reply-To, References and the "Re:" subject, which is what the recipient's client threads on. Graph's own grouping is then checked, not assumed: the conversation the sent copy actually landed in is the one recorded, and any mismatch, or a copy not found yet, is named in `thread_note` on the result.
+- **Outcomes.** Only each provider's documented success status counts as accepted: Gmail 200, Graph `sendMail` 202. Any other 2xx or 3xx is "unknown". Accepted means the provider took the message, not that it was delivered.
+- **Unsubscribe page.** The rate limit is keyed on IP alone. The shared key trusts an unverified bearer token's `sub`, so on a public page a forged token could buy a fresh bucket. Unsubscribe addresses with a fragment or query are refused, on both configuration paths.
+- **Not provable here.** Whether each provider preserves our Message-ID, and whether its DKIM signature covers both unsubscribe headers (needed for full RFC 8058 compliance), can only be checked on a real sent message. Part C's test email covers this. Mike's first live send should be checked by viewing the original message.

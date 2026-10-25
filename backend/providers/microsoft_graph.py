@@ -115,7 +115,15 @@ class MicrosoftGraphProvider(BaseEmailProvider):
         """OUT-16: one outreach email through Microsoft Graph, sent as a full MIME
         message so our Message-ID and unsubscribe headers survive (Graph's JSON
         form only allows x- headers). Graph returns no ids on send, so the sent
-        message is found again by its Message-ID."""
+        message is found again by its Message-ID.
+
+        Threading (Codex OUT-16 review 1): Graph's MIME /reply always addresses
+        the original message's sender, which for a follow-up is our own mailbox,
+        so follow-ups and replies go through sendMail carrying In-Reply-To,
+        References and a "Re:" subject — what the recipient's mail client threads
+        on. Graph's own grouping is then checked, not assumed: the conversation
+        the sent copy landed in is reported, and a mismatch with the expected
+        thread is named in `thread_note` rather than hidden."""
         from . import outreach_mime
         evidence = {"provider": "microsoft", "mailbox_id": str(account.id), "rfc_message_id": rfc_message_id}
         try:
@@ -135,7 +143,7 @@ class MicrosoftGraphProvider(BaseEmailProvider):
                                        content=base64.b64encode(message.as_bytes()))
         except Exception as exc:
             return {**evidence, "outcome": "unknown", "reason": type(exc).__name__}
-        outcome = outreach_mime.outcome_for_status(response.status_code)
+        outcome = outreach_mime.outcome_for_status(response.status_code, 202)
         if outcome != "accepted":
             return {**evidence, "outcome": outcome, "reason": f"HTTP {response.status_code}"}
         found = {}
@@ -153,9 +161,14 @@ class MicrosoftGraphProvider(BaseEmailProvider):
                 found = items[0]
                 break
             time.sleep(1.5)
-        return {"outcome": "accepted", "provider": "microsoft", "mailbox_id": str(account.id),
-                "provider_message_id": found.get("id"), "provider_thread_id": found.get("conversationId"),
-                "rfc_message_id": rfc_message_id}
+        result = {"outcome": "accepted", "provider": "microsoft", "mailbox_id": str(account.id),
+                  "provider_message_id": found.get("id"), "provider_thread_id": found.get("conversationId"),
+                  "rfc_message_id": rfc_message_id}
+        if provider_thread_id and found and found.get("conversationId") != provider_thread_id:
+            result["thread_note"] = "sent copy is in a different Outlook conversation from the email it follows"
+        elif provider_thread_id and not found:
+            result["thread_note"] = "sent copy not found yet, so its Outlook conversation is unconfirmed"
+        return result
 
     def sync_inbox_changes(
         self,

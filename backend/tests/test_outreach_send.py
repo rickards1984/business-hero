@@ -735,6 +735,16 @@ def test_followup_searches_since_actual_predecessor_and_preserves_thread(h):
     assert sent['provider_thread_id'] == 'previous-thread'
     assert sent['in_reply_to'] == '<previous@example.invalid>'
     assert '<previous@example.invalid>' in sent['references']
+    # Gmail threads only on a matching subject (Codex OUT-16 review 1): the
+    # follow-up is "Re:" the email it follows, not the step template's subject.
+    assert sent['subject'] == 'Re: Previous' and card['preview']['subject'] == 'Re: Previous'
+
+
+def test_a_followup_to_a_re_subject_does_not_stack_re(h):
+    predecessor(h)
+    change(h, 'outreach_messages', subject='RE: Previous')
+    approve(h, propose(h))
+    assert h.p.sends[0][1]['subject'] == 'RE: Previous'
 
 
 def test_uncorrelated_acceptance_blocks_thread_dependent_followup(h):
