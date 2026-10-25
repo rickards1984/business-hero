@@ -117,9 +117,10 @@ class MicrosoftGraphProvider(BaseEmailProvider):
         form only allows x- headers). Graph returns no ids on send, so the sent
         message is found again by its Message-ID.
 
-        Threading (Codex OUT-16 review 1): Graph's MIME /reply always addresses
-        the original message's sender, which for a follow-up is our own mailbox,
-        so follow-ups and replies go through sendMail carrying In-Reply-To,
+        Threading (Codex OUT-16 reviews 1-2): Graph's MIME /reply addresses the
+        original message's sender, which for a follow-up is our own mailbox. An
+        answer to a prospect's reply could use it, but one path keeps the
+        recipient exactly as approved; so both go through sendMail carrying In-Reply-To,
         References and a "Re:" subject — what the recipient's mail client threads
         on. Graph's own grouping is then checked, not assumed: the conversation
         the sent copy landed in is reported, and a mismatch with the expected

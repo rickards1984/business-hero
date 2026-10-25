@@ -27,7 +27,8 @@ No other extra header is allowed. A line break in any header value refuses the m
 
 | Result | Outcome |
 |---|---|
-| 2xx | accepted |
+| the provider's documented success (Gmail 200, Graph `sendMail` 202) | accepted |
+| any other 2xx or 3xx | unknown |
 | 4xx, including rate limits, an invalid token or an unsafe message | definitely not accepted |
 | 5xx, timeout or network error | unknown (it may still have been delivered); the existing reconciliation handles it |
 
@@ -51,3 +52,7 @@ A Microsoft follow-up needs the first email's provider ids. If Graph didn't show
 - **Outcomes.** Only each provider's documented success status counts as accepted: Gmail 200, Graph `sendMail` 202. Any other 2xx or 3xx is "unknown". Accepted means the provider took the message, not that it was delivered.
 - **Unsubscribe page.** The rate limit is keyed on IP alone. The shared key trusts an unverified bearer token's `sub`, so on a public page a forged token could buy a fresh bucket. Unsubscribe addresses with a fragment or query are refused, on both configuration paths.
 - **Not provable here.** Whether each provider preserves our Message-ID, and whether its DKIM signature covers both unsubscribe headers (needed for full RFC 8058 compliance), can only be checked on a real sent message. Part C's test email covers this. Mike's first live send should be checked by viewing the original message.
+
+## Codex review 2 (`audits/OUT-16-CODEX-REVIEW-2.md`)
+- A follow-up keeps the whole of the previous subject, even at the sequence API's 998-character limit. The MIME writer folds the long Subject line; it is never cut.
+- Backlog done: the POST unsubscribe rate limit is tested; a `thread_note` is shown to reach the stored action result; the outcome table above is corrected.

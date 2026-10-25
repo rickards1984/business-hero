@@ -239,9 +239,22 @@ def test_the_unsubscribe_rate_limit_ignores_unverified_bearer_tokens(monkeypatch
         return {"Authorization": f"Bearer e30.{body}.sig"}
     try:
         codes = [client.get("/u/" + "t" * 43, headers=forged(f"user-{i}")).status_code for i in range(61)]
+        limiter.reset()
+        posts = [client.post("/u/" + "t" * 43, headers=forged(f"user-{i}")).status_code for i in range(61)]
     finally:
         limiter.reset()
     assert codes[:60] == [200] * 60 and codes[60] == 429
+    assert posts[:60] == [200] * 60 and posts[60] == 429
+
+
+def test_a_long_follow_up_subject_is_folded_not_cut(monkeypatch):
+    provider, fake = gmail(monkeypatch, [(200, {"id": "g", "threadId": "t"})])
+    subject = "Re: Fitness intern offer " + "word " * 195
+    provider.send_outreach(account=ACCOUNT, **dict(MESSAGE, subject=subject))
+    assert sent_mime(fake)["Subject"] == subject
+    raw = fake.requests[0][2]["json"]["raw"]
+    sent = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+    assert all(len(line) <= 998 for line in sent.split(b"\r\n"))
 
 
 def test_the_unsubscribe_page_confirms_on_get_and_unsubscribes_on_post(monkeypatch):

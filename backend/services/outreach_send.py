@@ -191,9 +191,10 @@ def build_payload(session, business, args, owner_name=None, timezone=None):
                 'Previous acceptance needs mailbox/thread correlation')
         # Gmail threads a follow-up only when its subject matches the conversation's,
         # and recipients' clients group by it too: a follow-up is "Re:" the email it
-        # follows, whatever subject the step's template carries (Codex OUT-16 review 1).
+        # follows, whatever subject the step's template carries (Codex OUT-16 review 1),
+        # never shortened: the MIME writer folds a long Subject line (review 2).
         earlier = prev['subject'] or ''
-        payload.update(subject=_safe_header(earlier if earlier[:3].lower() == 're:' else 'Re: ' + earlier[:990]),
+        payload.update(subject=_safe_header(earlier if earlier[:3].lower() == 're:' else 'Re: ' + earlier),
                        in_reply_to=prev['rfc_message_id'], references=[prev['rfc_message_id']],
                        provider_thread_id=prev['provider_thread_id'])
     return payload
