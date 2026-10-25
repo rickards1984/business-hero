@@ -14,8 +14,8 @@
 import pytest
 from sqlmodel import Session
 
-from test_outreach_setup import (A, B, GOOD_GOOGLE, OTHER_OWNER, OWNER, STAFF, WORKSPACE, db, dns,  # noqa: F401
-                                 draft_emails, grant, ready, setup_module_or_missing)
+from test_outreach_setup import (A, B, GOOD_GOOGLE, GOOGLE_SPF_CHAIN, OTHER_OWNER, OWNER, STAFF, WORKSPACE, db,  # noqa: F401
+                                 dns, draft_emails, grant, ready, setup_module_or_missing)
 
 PROFILE = {"offer": "Free 12-week Level 3 fitness interns for your gym", "audience": "Independent gyms and health clubs",
            "proof": "120 interns placed since 2019; Ofsted-rated provider", "tone": "Friendly and direct",
@@ -152,7 +152,7 @@ def test_a_redraft_must_return_three_emails(db):
 
 # ------------------------------------------------------ the DNS fix guide ---
 
-NAMESCO = {"newbody.example": ["v=spf1 +a +mx include:spf.protection.outlook.com ~all"],
+NAMESCO = {**GOOGLE_SPF_CHAIN, "newbody.example": ["v=spf1 +a +mx include:spf.protection.outlook.com ~all"],
            "_dmarc.newbody.example": ["v=DMARC1; p=none;"]}
 
 
@@ -325,3 +325,30 @@ def test_repairing_dmarc_keeps_every_valid_setting():
     guide = guide_for(dns(dict(NAMESCO, **{"_dmarc.newbody.example": [record]})))
     dmarc = next(r for r in guide["records"] if r["what"] == "dmarc")
     assert dmarc["value"] == "v=DMARC1; p=none; sp=reject; rua=mailto:reports@newbody.example; adkim=s; aspf=s"
+
+
+
+# ------------------------------------------------------ Codex OUT-20 review 3 ---
+
+def test_a_record_that_would_still_fail_is_never_offered_as_the_fix():
+    guide = guide_for(dns(dict(NAMESCO, **{"newbody.example": ["v=spf1 ip4:garbage ~all"]})))
+    spf = next(r for r in guide["records"] if r["what"] == "spf")
+    assert spf["action"] == "manual" and spf["value"] is None
+    assert "ip4:garbage" in guide["email_to_helper"]["body"] and "include:_spf.google.com" in guide["email_to_helper"]["body"]
+
+
+def test_every_offered_spf_value_passes_the_evaluator():
+    m = setup_module_or_missing()
+    for record in ("v=spf1 +a +mx include:spf.protection.outlook.com ~all", "v=spf1 -all include:_spf.google.com",
+                   "v=spf1 ~include:_spf.google.com mx ~all"):
+        records = dict(NAMESCO, **{"newbody.example": [record]})
+        spf = next(r for r in guide_for(dns(records))["records"] if r["what"] == "spf")
+        offered = dict(records, **{"newbody.example": [spf["value"]]})
+        assert m._spf_authorises("newbody.example", "209.85.220.41", dns(offered), lambda n, q: [])
+
+
+def test_dmarc_repair_drops_invalid_reporting_settings():
+    record = "V=DMARC1; p=none; fo=bogus; rf=???; rua=mailto:"
+    guide = guide_for(dns(dict(NAMESCO, **{"_dmarc.newbody.example": [record]})))
+    dmarc = next(r for r in guide["records"] if r["what"] == "dmarc")
+    assert dmarc["value"] == "v=DMARC1; p=none; rua=mailto:partners-ukfi@newbody.example"

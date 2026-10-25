@@ -516,10 +516,23 @@ def _guide(domain: str, address: str, provider: dict, evidence: dict, txt: Calla
                                 "why": "Your domain has more than one SPF record, and receivers ignore them all: "
                                        f"there must be only one. Combine them into a single record that includes {include}."})
             elif current:
-                records.append({"what": "spf", "type": "TXT", "host": "@", "action": "edit", "current": current[0],
-                                "value": _spf_with(current[0], include),
-                                "why": f"Your SPF record doesn't yet list {provider['name']}, so mail you send through it "
-                                       "isn't proven to come from you. Edit the existing record (don't add a second one)."})
+                proposed = _spf_with(current[0], include)
+                # Only offer a value that the SPF evaluator itself would pass for
+                # the provider (Codex OUT-20 review 3: a malformed term kept from
+                # the old record would still fail).
+                if _spf_authorises(domain, provider["sender_ip"],
+                                   lambda n: [proposed] if n.lower().rstrip(".") == domain else (txt(n) or []),
+                                   other_records):
+                    records.append({"what": "spf", "type": "TXT", "host": "@", "action": "edit", "current": current[0],
+                                    "value": proposed,
+                                    "why": f"Your SPF record doesn't yet list {provider['name']}, so mail you send through "
+                                           "it isn't proven to come from you. Edit the existing record (don't add a second one)."})
+                else:
+                    records.append({"what": "spf", "type": "TXT", "host": "@", "action": "manual", "current": current[0],
+                                    "value": None, "include": include,
+                                    "why": "Your SPF record has a problem we can't safely fix for you (for example an entry "
+                                           f"that isn't written correctly). It needs correcting by hand so that it includes "
+                                           f"{include}: the email to your web person below explains this."})
             else:
                 records.append({"what": "spf", "type": "TXT", "host": "@", "action": "add", "current": None,
                                 "value": f"v=spf1 {include} ~all",
@@ -567,15 +580,19 @@ def _spf_with(record: str, include: str) -> str:
     return " ".join([terms[0], include] + kept)
 
 
+_DMARC_URI = __import__("re").compile(r"^mailto:[^@\s,;!]+@[^@\s,;!]+\.[^@\s,;!]+(![0-9]+[kmgt]?)?$", __import__("re").I)
+_DMARC_FO = __import__("re").compile(r"^[01ds](:[01ds])*$", __import__("re").I)
+_DMARC_RF = __import__("re").compile(r"^[a-z0-9]+(:[a-z0-9]+)*$", __import__("re").I)
+# RFC 7489 §6.4 grammar for the optional tags kept on repair (Codex OUT-20 review 3).
 DMARC_TAGS = {
     "sp": lambda v: v.lower() in ("none", "quarantine", "reject"),
-    "rua": lambda v: all(u.strip().lower().startswith("mailto:") for u in v.split(",")),
-    "ruf": lambda v: all(u.strip().lower().startswith("mailto:") for u in v.split(",")),
+    "rua": lambda v: bool(v) and all(_DMARC_URI.match(u.strip()) for u in v.split(",")),
+    "ruf": lambda v: bool(v) and all(_DMARC_URI.match(u.strip()) for u in v.split(",")),
     "adkim": lambda v: v.lower() in ("r", "s"),
     "aspf": lambda v: v.lower() in ("r", "s"),
     "pct": lambda v: v.isdigit() and 0 <= int(v) <= 100,
-    "fo": lambda v: bool(v),
-    "rf": lambda v: bool(v),
+    "fo": lambda v: bool(_DMARC_FO.match(v)),
+    "rf": lambda v: bool(_DMARC_RF.match(v)),
     "ri": lambda v: v.isdigit(),
 }
 
@@ -610,6 +627,9 @@ def _helper_email(domain: str, host: dict, records: list) -> dict:
         elif r["what"] == "spf" and r["action"] == "merge":
             lines += [f"{n}. {domain} has more than one TXT record starting v=spf1. Please combine them into one "
                       f"record that also includes {r['include']}."]
+        elif r["what"] == "spf" and r["action"] == "manual":
+            lines += [f"{n}. The TXT record on {domain} that starts v=spf1 currently reads:", f"   {r['current']}",
+                      f"   It has an entry that isn't written correctly. Please correct it so it's valid and includes {r['include']}."]
         elif r["action"] == "unknown":
             lines += [f"{n}. We couldn't read {domain}'s {r['what'].upper()} record when this was written; please check "
                       "it exists and is valid."]
