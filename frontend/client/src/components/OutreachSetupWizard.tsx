@@ -495,6 +495,7 @@ function DnsHelp({ guide }: { guide: Guide }) {
   const [asked, setAsked] = useState('');
   const [asking, setAsking] = useState(false);
   const [askError, setAskError] = useState('');
+  const conversation = useRef('');   // kept if escalation fails, so a retry never opens a second conversation
   return (
     <Stack spacing={1}>
       <Alert severity="warning" icon={false}>
@@ -566,11 +567,15 @@ function DnsHelp({ guide }: { guide: Guide }) {
               <Button variant="outlined" sx={{ alignSelf: 'flex-start' }} disabled={asking} onClick={async () => {
                 setAsking(true); setAskError('');
                 try {
-                  const chat = await (await apiRequest('POST', '/v1/support/chat', {
-                    content: `Please help me set up email authentication (SPF/DKIM/DMARC) for ${guide.domain} so outreach can send. `
-                      + `DNS is managed ${where}. I'd like the paid set-up service.` })).json();
-                  if (!chat?.conversation_id) throw new Error('no conversation');
-                  if (!chat.escalated) await apiRequest('POST', '/v1/support/escalate', { conversation_id: chat.conversation_id });
+                  if (!conversation.current) {
+                    const chat = await (await apiRequest('POST', '/v1/support/chat', {
+                      content: `Please help me set up email authentication (SPF/DKIM/DMARC) for ${guide.domain} so outreach can send. `
+                        + `DNS is managed ${where}. I'd like the paid set-up service.` })).json();
+                    if (!chat?.conversation_id) throw new Error('no conversation');
+                    conversation.current = chat.conversation_id;
+                    if (chat.escalated) { setAsked("Thanks. Our team will be in touch with the price, usually within one working day. You'll see the conversation in Help & Support."); return; }
+                  }
+                  await apiRequest('POST', '/v1/support/escalate', { conversation_id: conversation.current });
                   setAsked("Thanks. Our team will be in touch with the price, usually within one working day. You'll see the conversation in Help & Support.");
                 } catch { setAskError("We couldn't send that just now. Please try again, or use Help & Support."); }
                 finally { setAsking(false); }

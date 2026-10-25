@@ -311,3 +311,17 @@ def test_an_invalid_dmarc_record_is_repaired_keeping_a_valid_policy(record, expe
     guide = guide_for(dns(dict(NAMESCO, **{"_dmarc.newbody.example": [record]})))
     dmarc = next(r for r in guide["records"] if r["what"] == "dmarc")
     assert (dmarc["action"], dmarc["value"], dmarc["current"]) == ("edit", expected, record)
+
+
+# ------------------------------------------------------ Codex OUT-20 review 2 ---
+
+def test_an_include_stranded_after_all_is_moved_where_it_counts():
+    guide = guide_for(dns(dict(NAMESCO, **{"newbody.example": ["v=spf1 -all include:_spf.google.com"]})))
+    assert next(r for r in guide["records"] if r["what"] == "spf")["value"] == "v=spf1 include:_spf.google.com -all"
+
+
+def test_repairing_dmarc_keeps_every_valid_setting():
+    record = "V=DMARC1; p=none; sp=reject; rua=mailto:reports@newbody.example; adkim=s; aspf=s; pct=bogus"
+    guide = guide_for(dns(dict(NAMESCO, **{"_dmarc.newbody.example": [record]})))
+    dmarc = next(r for r in guide["records"] if r["what"] == "dmarc")
+    assert dmarc["value"] == "v=DMARC1; p=none; sp=reject; rua=mailto:reports@newbody.example; adkim=s; aspf=s"

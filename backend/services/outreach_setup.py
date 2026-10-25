@@ -557,37 +557,45 @@ def _guide(domain: str, address: str, provider: dict, evidence: dict, txt: Calla
 
 
 def _spf_with(record: str, include: str) -> str:
-    """The record with the provider's include as a passing mechanism, every
-    other mechanism kept. Matches whole mechanisms, never substrings, and
-    turns a qualified (failing) include into a passing one."""
+    """The record with the provider's include as a passing mechanism placed
+    first, so nothing (such as an earlier "all") can stop it being reached.
+    Any other copy of that include — qualified or not — is removed; every
+    other mechanism is kept in order. Whole mechanisms only, never substrings."""
     terms = record.split()
     target = include.lower()
-    for i, term in enumerate(terms[1:], 1):
-        bare = term.lstrip("+-~?").lower()
-        if bare == target:
-            if term[0] in "-~?":
-                terms[i] = include
-            return " ".join(terms)
-    return " ".join([terms[0], include] + terms[1:])
+    kept = [t for t in terms[1:] if t.lstrip("+-~?").lower() != target]
+    return " ".join([terms[0], include] + kept)
+
+
+DMARC_TAGS = {
+    "sp": lambda v: v.lower() in ("none", "quarantine", "reject"),
+    "rua": lambda v: all(u.strip().lower().startswith("mailto:") for u in v.split(",")),
+    "ruf": lambda v: all(u.strip().lower().startswith("mailto:") for u in v.split(",")),
+    "adkim": lambda v: v.lower() in ("r", "s"),
+    "aspf": lambda v: v.lower() in ("r", "s"),
+    "pct": lambda v: v.isdigit() and 0 <= int(v) <= 100,
+    "fo": lambda v: bool(v),
+    "rf": lambda v: bool(v),
+    "ri": lambda v: v.isdigit(),
+}
 
 
 def _dmarc_repaired(record: str, fresh: str) -> str:
-    """A valid DMARC record keeping the owner's policy and report address when
-    they were valid; otherwise the fresh starter record."""
-    tags = {}
+    """A valid DMARC record that keeps the owner's policy and every valid
+    optional setting (subdomain policy, reports, alignment...) in order; an
+    invalid tag is dropped. Without a valid policy, the fresh starter record."""
+    tags = []
     for part in record.split(";"):
         key, _, value = part.strip().partition("=")
-        if key:
-            tags[key.strip().lower()] = value.strip()
-    policy = tags.get("p", "").lower()
+        if key.strip():
+            tags.append((key.strip().lower(), value.strip()))
+    policy = next((v.lower() for k, v in tags if k == "p"), "")
     if policy not in ("none", "quarantine", "reject"):
         return fresh
-    out = f"v=DMARC1; p={policy}"
-    if tags.get("rua", "").lower().startswith("mailto:"):
-        out += f"; rua={tags['rua']}"
-    else:
-        out += "; " + fresh.split("; ", 2)[2]
-    return out
+    kept = [(k, v) for k, v in tags if k in DMARC_TAGS and DMARC_TAGS[k](v)]
+    if not any(k == "rua" for k, _ in kept):
+        kept.append(("rua", fresh.split("rua=", 1)[1]))
+    return "; ".join(["v=DMARC1", f"p={policy}"] + [f"{k}={v}" for k, v in kept])
 
 
 def _helper_email(domain: str, host: dict, records: list) -> dict:
