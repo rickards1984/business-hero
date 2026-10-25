@@ -914,3 +914,37 @@ def test_a_failing_outreach_notification_never_breaks_chasing(db, sent, monkeypa
         replies()._store(s, business(), ACCT_A, [_provider_message()])
     with db.connect() as c:
         assert c.execute(text("SELECT COUNT(*) FROM email_messages")).scalar() == 1
+
+
+# ------------------------------------------- OUT-19: reply reading is costed ---
+
+def test_reading_a_reply_records_every_ai_attempt_in_the_cost_ledger(db, sent, monkeypatch):
+    """Codex OUT-19 H review 3: the production reader (GPT-6 Luna through the
+    router, failing over to Grok) records each attempt against the business."""
+    import openai
+    from types import SimpleNamespace
+    for k in ("AI_PROVIDER_ORDER", "AI_MODELS_JSON", "ARIA_REPLY_MODEL", "AI_PRICES_JSON", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "a")
+    monkeypatch.setenv("XAI_API_KEY", "b")
+
+    def client(**kw):
+        def create(**k):
+            if not kw.get("base_url"):
+                raise TimeoutError("OpenAI down")
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content='{"category": "paid", "summary": "Paid"}'))],
+                usage=SimpleNamespace(prompt_tokens=300, completion_tokens=20))
+        return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(openai, "OpenAI", client)
+    iid = invoice(db)
+    chased(db, iid)
+    inbound(db)
+    new = scan(db, classify=replies().classify_with_model)
+    assert new[0]["category"] == "paid"
+    with db.connect() as c:
+        got = dict(c.execute(text("SELECT meter, value FROM usage_meters WHERE business_id = :b AND meter LIKE 'ai_%'"),
+                             {"b": A}).fetchall())
+    assert float(got["ai_estimated:classify:-:openai/gpt-6-luna"]) == 1          # the failed attempt, estimated
+    assert float(got["ai_tokens_in:classify:-:xai/grok-4.20-0309-non-reasoning"]) == 300
+    assert float(got["ai_pence"]) > 0

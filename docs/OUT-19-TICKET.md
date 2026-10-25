@@ -88,8 +88,8 @@ Built in `services/ai_router.py`. Research and Aria's setup drafts go through it
 **Settings (Railway):**
 - `AI_PROVIDER_ORDER`: default `openai,xai,anthropic`.
 - `AI_MODELS_JSON`: per purpose. Defaults (Mike, 25 Oct 2026, from the providers' pricing pages):
-  - research and drafts: **gpt-6.1-sol** ($2/$10 per M: near-top capability at about GPT-4.1's price), then **grok-4.20-0309-reasoning** ($1.25/$2.50, doubling above 200k tokens, about 40% cheaper), then claude-sonnet-4-5 (price still an estimate);
-  - reply sorting: **gpt-6-luna** ($0.10/$0.50);
+  - research and drafts: **gpt-6.1-sol** ($2/$10 per M: near-top capability at about GPT-4.1's price), then **grok-4.7**, then claude-sonnet-4-5 (price still an estimate). Grok 4.7 ($2/$6, doubling above 200k tokens) is xAI's most capable model. Mike chose it over the cheaper Grok 4.20 after an earlier Grok failed at research on his own platform. `scripts/compare-research-models.py` puts both through our verification on a real brief;
+  - reply sorting: **gpt-6-luna** ($0.10/$0.50), then grok-4.20-0309-non-reasoning. Every reading is recorded in the ledger (chase replies and outreach replies);
   - at most 4 web searches per call.
 - `ARIA_DRAFT_MODEL` and `ARIA_RESEARCH_MODEL` still choose OpenAI's model.
 - `AI_FAILOVER_COOLDOWN_SECONDS`: default 300.

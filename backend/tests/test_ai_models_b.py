@@ -26,12 +26,14 @@ def clean(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
-def test_the_default_models_are_gpt_6_1_sol_then_grok_4_20_reasoning(monkeypatch):
+def test_the_default_models_are_gpt_6_1_sol_then_grok_4_7(monkeypatch):
+    """Mike, 25 Oct 2026: Grok 4.7, xAI's most capable model, is the research
+    and drafting fallback (an earlier Grok failed at research for him)."""
     from services import ai_router
     monkeypatch.setenv("OPENAI_API_KEY", "a")
     monkeypatch.setenv("XAI_API_KEY", "b")
     for purpose in ("research", "draft"):
-        assert ai_router.chain(purpose) == [("openai", "gpt-6.1-sol"), ("xai", "grok-4.20-0309-reasoning")]
+        assert ai_router.chain(purpose) == [("openai", "gpt-6.1-sol"), ("xai", "grok-4.7")]
     assert ai_router.chain("classify")[0] == ("openai", "gpt-6-luna")
 
 

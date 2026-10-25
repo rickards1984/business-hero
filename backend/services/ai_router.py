@@ -38,8 +38,12 @@ BASE_URLS = {"xai": "https://api.x.ai/v1"}
 # price) for research and drafts, Grok 4.20 reasoning (about 40% cheaper) as
 # the background fallback, GPT-6 Luna for sorting replies.
 DEFAULT_MODELS = {
-    "draft": {"openai": "gpt-6.1-sol", "xai": "grok-4.20-0309-reasoning", "anthropic": "claude-sonnet-4-5"},
-    "research": {"openai": "gpt-6.1-sol", "xai": "grok-4.20-0309-reasoning", "anthropic": "claude-sonnet-4-5"},
+    # Grok 4.7: xAI's most capable model ($2/$6). Mike (25 Oct 2026) chose it
+    # over the cheaper 4.20 as the research and drafting fallback, after an
+    # earlier Grok failed at research on his own platform; the side-by-side
+    # comparison (scripts/compare_research_models.py) checks it on real briefs.
+    "draft": {"openai": "gpt-6.1-sol", "xai": "grok-4.7", "anthropic": "claude-sonnet-4-5"},
+    "research": {"openai": "gpt-6.1-sol", "xai": "grok-4.7", "anthropic": "claude-sonnet-4-5"},
     "classify": {"openai": "gpt-6-luna", "xai": "grok-4.20-0309-non-reasoning"},
 }
 # The most input a single call can be billed for: each model's context window.

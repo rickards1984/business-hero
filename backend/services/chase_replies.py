@@ -291,14 +291,19 @@ def _which_invoices(chases: list, thread, words: str) -> list:
 
 
 def _read(classify: Callable, text_: str) -> tuple:
-    try:
-        verdict = classify(text_) or {}
-        category = str(verdict.get("category") or "").strip().lower()
-        summary = str(verdict.get("summary") or "").strip()[:300] or None
-    except Exception as exc:  # the reply is still flagged; it still pauses
-        logger.warning("[ChaseReplies] could not read a reply: %s", exc)
-        return "unknown", None
-    return (category if category in CATEGORIES else "unknown"), summary
+    """(category, summary, the AI usage of reading it). The usage of every
+    attempt — failed ones and unreadable answers included — is collected for
+    the cost ledger (OUT-19)."""
+    from services import ai_costs
+    with ai_costs.collect() as spent:
+        try:
+            verdict = classify(text_) or {}
+            category = str(verdict.get("category") or "").strip().lower()
+            summary = str(verdict.get("summary") or "").strip()[:300] or None
+        except Exception as exc:  # the reply is still flagged; it still pauses
+            logger.warning("[ChaseReplies] could not read a reply: %s", exc)
+            return "unknown", None, spent
+    return (category if category in CATEGORIES else "unknown"), summary, spent
 
 
 def scan(session, business, *, classify: Callable) -> list:
@@ -334,7 +339,7 @@ def scan(session, business, *, classify: Callable) -> list:
             continue
         words = " ".join(x for x in (subject, snippet) if x)
         invoices = _which_invoices(before, thread, words)
-        category, summary = _read(classify, "\n".join(x for x in (subject, snippet, body) if x))
+        category, summary, spent = _read(classify, "\n".join(x for x in (subject, snippet, body) if x))
         rid = str(uuid.uuid4())
         jsonb = "CAST(:inv AS jsonb)" if _is_postgres(session) else ":inv"
         inserted = session.execute(text(
@@ -345,6 +350,10 @@ def scan(session, business, *, classify: Callable) -> list:
             {"id": rid, "b": str(business.id), "m": str(mid), "c": who,
              "inv": json.dumps(invoices), "cat": category, "sum": summary,
              "now": moment}).fetchone()
+        if spent:
+            # Recorded with the reply, whether or not it was new: the reading was paid for.
+            from services import ai_costs
+            ai_costs.save(session, str(business.id), spent, purpose="classify", moment=moment)
         session.commit()
         if inserted is not None:
             new.append(_get(session, business, rid))
