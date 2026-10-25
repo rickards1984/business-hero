@@ -87,6 +87,12 @@ Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/tes
   - Never above 20 and never below 0. Once follow-ups run, this settles at about a third of the inbox's limit.
 - **No room, no search.** A brand with no ready campaign on a healthy inbox, or a full inbox, makes no paid search, and the summary says why.
 - **The brief** asks for some spare (up to twice the room, at most 5 extra), since verification turns some candidates away. Only the room is kept, and the "at least N named decision-makers" requirement scales with it.
+- **Codex review 1 (`audits/OUT-19-D-CODEX-REVIEW-1.md`, 5 × P1) → redesigned.**
+  - Each contact kept takes a place in a campaign **for its audience**, enrolled in the same locked transaction that stores it, so retries, other audiences and other brands always see the places already taken.
+  - Today's use is counted whatever the campaign's state now. An email already being sent counts once, as a send.
+  - The room is checked under the same lock as the spend reservation.
+  - Only one paid search runs per business at a time; a second run waits and pays nothing. The claim expires after 10 minutes if a run dies.
+  - Manual enrolment reads the same pilot setting.
 - **Pilot limit (OUT-10 decision E).** It stays at 5 active contacts per campaign for the first week of the restart, so research also keeps no more than can join a campaign. `OUTREACH_PILOT_ENROLMENTS` raises it without a deploy; `0` lifts it, leaving the inbox's capacity to decide. Before lifting it, index `prepare`'s scan of open cards (OUT-8 ticket, note 2).
 
 ### E — Replies outside the cold cap, with the over-ceiling choices (decision 2)

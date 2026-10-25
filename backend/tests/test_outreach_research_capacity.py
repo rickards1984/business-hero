@@ -176,3 +176,136 @@ def test_research_plans_with_the_send_paths_own_warm_up_limit(db):
     with Session(db) as s:
         box = s.execute(text("SELECT * FROM outreach_mailboxes WHERE mailbox_id = :m"), {"m": WORKSPACE}).mappings().one()
         assert metering.mailbox_daily_cap(box) == 20
+
+
+# ------------------------------------------ Codex OUT-19 D review 1 findings ---
+
+def test_retries_never_keep_more_than_the_pilot_places(db, monkeypatch):
+    """P1 1: each kept contact takes its place at once, so later attempts in
+    the same run see the places already taken."""
+    monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", "5")
+    biz, brand, lia, campaign = started(db)
+    out = run(db, biz, lia, World([[person(i) for i in range(3)], [person(10 + i) for i in range(5)],
+                                   [person(20 + i) for i in range(5)]]))
+    assert kept(out) == 5 and sorted(out["enrolled"]) == sorted(out["accepted"])
+    assert count(db, "SELECT count(*) FROM outreach_enrolments WHERE business_id = :b") == 5
+
+
+def test_another_audiences_campaign_gives_this_audience_no_room(db):
+    """P1 2: only campaigns for this audience count."""
+    from test_outreach_setup import draft_lia, setup_module_or_missing
+    m = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+    with Session(db) as s:
+        other = m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Schools in Kent",
+                                                "segments": ["school"], "regions": ["Kent"]}, draft=draft_lia)
+        m.approve_audience(s, biz, OWNER, other["id"], {})
+    world = World([[person(i) for i in range(10)]])
+    out = run(db, biz, other, world)
+    assert world.briefs == [] and kept(out) == 0 and "no ready campaign" in out["stopped"]
+
+
+def test_sends_from_a_paused_campaign_still_use_today_up(db):
+    """P1 3: what was sent today counts whatever the campaign's state now."""
+    biz, brand, lia, campaign = started(db)
+    sends_today(db, campaign["id"], 5)
+    with Session(db) as s:
+        row = dict(s.execute(text("SELECT * FROM outreach_campaigns WHERE id = :c"), {"c": campaign["id"]}).mappings().one())
+        s.execute(text("UPDATE outreach_campaigns SET status = 'paused' WHERE id = :c"), {"c": campaign["id"]})
+        _insert(s, "outreach_campaigns", **{**row, "id": str(uuid.uuid4()), "name": "Winter"})
+        s.commit()
+    assert room(db, biz, brand)["room"] == 15
+
+
+def test_a_second_run_during_a_search_waits_and_pays_nothing(db):
+    """P1 4/5: one paid search per business at a time, so two runs (another
+    audience, or another brand on the same inbox) never pay for the same places."""
+    biz, brand, lia, campaign = started(db)
+    fit, fit_lia = second_brand(db, biz)
+    seen = {}
+    first = World([[person(i) for i in range(5)]])
+    real_search = first.search
+
+    def search_while_another_runs(brief):
+        second = World([[person(100 + i) for i in range(5)]])
+        seen["out"] = run(db, biz, fit_lia, second)
+        seen["briefs"] = second.briefs
+        return real_search(brief)
+    first.search = search_while_another_runs
+    assert kept(run(db, biz, lia, first)) == 5
+    assert seen["briefs"] == [] and "Another search" in seen["out"]["stopped"] and seen["out"]["spend_pence"] == 0
+    assert kept(run(db, biz, fit_lia, World([[person(200 + i) for i in range(5)]]))) == 5, "free again afterwards"
+
+
+def test_room_is_checked_under_the_lock_before_paying(db, monkeypatch):
+    """P1 5: the inbox filling just before the reservation stops the search."""
+    biz, brand, lia, campaign = started(db)
+    r = research()
+    real = r._lock
+    calls = []
+
+    def lock(session, bid):
+        if not calls:
+            queue(db, campaign["id"], 20, step=1)     # another run fills today first
+        calls.append(1)
+        return real(session, bid)
+    monkeypatch.setattr(r, "_lock", lock)
+    world = World([[person(i) for i in range(10)]])
+    out = run(db, biz, lia, world)
+    assert world.briefs == [] and out["spend_pence"] == 0 and kept(out) == 0
+
+
+def test_an_email_being_sent_counts_once(db):
+    """P2: a held send counts as a send, not also as a contact waiting."""
+    biz, brand, lia, campaign = started(db)
+    queue(db, campaign["id"], 1, step=0)
+    with Session(db) as s:
+        e = s.execute(text("SELECT id, prospect_id FROM outreach_enrolments WHERE campaign_id = :c"), {"c": campaign["id"]}).one()
+        message = str(uuid.uuid4())
+        _insert(s, "outreach_messages", id=message, business_id=A, prospect_id=e[1], campaign_id=campaign["id"],
+                enrolment_id=e[0], mailbox_id=WORKSPACE, kind="initial", origin="live", direction="outbound",
+                to_emails="[]", cc_emails="[]", subject="s", body="b", payload_hash="h", payload_version=1,
+                state="claimed", idempotency_key="k", authority_snapshot="{}", created_at=NOW.isoformat(),
+                updated_at=NOW.isoformat())
+        _insert(s, "outreach_usage_events", id=str(uuid.uuid4()), business_id=A, operation_key="op", kind="outreach_emails_sent",
+                quantity=1, period_start=NOW.isoformat(), period_end=(NOW + timedelta(days=30)).isoformat(),
+                mailbox_id=WORKSPACE, message_id=message, local_send_date=NOW.date().isoformat(), state="reserved",
+                created_at=NOW.isoformat(), updated_at=NOW.isoformat())
+        s.commit()
+    assert room(db, biz, brand)["room"] == 19
+
+
+def test_follow_ups_count_by_the_uk_day(db):
+    """Due before UK midnight tonight counts; due just after does not."""
+    from zoneinfo import ZoneInfo
+    biz, brand, lia, campaign = started(db)
+    uk = NOW.astimezone(ZoneInfo("Europe/London"))
+    tonight = uk.replace(hour=23, minute=59)
+    queue(db, campaign["id"], 3, step=1, due=tonight)
+    queue(db, campaign["id"], 4, step=1, due=tonight + timedelta(minutes=2))
+    assert room(db, biz, brand)["followups_due"] == 3 and room(db, biz, brand)["room"] == 17
+
+
+def test_manual_enrolment_follows_the_same_pilot_setting():
+    """P2: one setting for every enrolment path."""
+    import inspect
+    from services import outreach_manage
+    assert "pilot_enrolments()" in inspect.getsource(outreach_manage.enrol)
+    assert "<= 5" not in inspect.getsource(outreach_manage.enrol)
+
+
+def sends_today(db, campaign_id, n):
+    with Session(db) as s:
+        for i in range(n):
+            message = str(uuid.uuid4())
+            _insert(s, "outreach_messages", id=message, business_id=A, prospect_id=str(uuid.uuid4()),
+                    campaign_id=campaign_id, mailbox_id=WORKSPACE, kind="initial", origin="live",
+                    direction="outbound", to_emails="[]", cc_emails="[]", subject="s", body="b",
+                    payload_hash=f"h{i}", payload_version=1, state="accepted", idempotency_key=f"k{i}",
+                    authority_snapshot="{}", created_at=NOW.isoformat(), updated_at=NOW.isoformat())
+            _insert(s, "outreach_usage_events", id=str(uuid.uuid4()), business_id=A, operation_key=f"op{i}",
+                    kind="outreach_emails_sent", quantity=1, period_start=NOW.isoformat(),
+                    period_end=(NOW + timedelta(days=30)).isoformat(), mailbox_id=WORKSPACE, message_id=message,
+                    local_send_date=NOW.date().isoformat(), state="committed",
+                    created_at=NOW.isoformat(), updated_at=NOW.isoformat())
+        s.commit()

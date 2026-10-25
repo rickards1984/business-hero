@@ -657,78 +657,144 @@ def _today_counts(session, bid: str, moment: datetime, brand_id) -> dict:
 
 def capacity(session, bid: str, brand_id, moment: datetime, audience_hash: Optional[str] = None) -> dict:
     """OUT-19 D (Mike's decision 1): research finds only as many new contacts
-    as the brand's inboxes can email for the first time today.
+    as can be emailed for the first time today, and each one it keeps takes a
+    place in a campaign for its audience at once (Codex OUT-19 D review 1).
 
-    What can be sent today follows the send path's own limits: the brand's 20
-    (or the owner's lower cap), each campaign's cap, and each campaign
-    mailbox's warm-up limit, which is shared by every brand using that inbox.
-    From that comes off what is already spoken for: sends made or held today,
-    follow-ups due by the end of today, and contacts waiting for their first
-    email (enrolled and not yet sent, or found today and not enrolled). Once
-    follow-ups run, the room settles at about a third of the inbox's limit.
-    `room` is never above the daily target, never below 0. A brand with no
-    ready campaign on a healthy inbox has no room: nothing it found could be
-    emailed. With `audience_hash`, room is also limited to the places left
-    under the pilot enrolment limit in that audience's campaigns, so nothing
-    is found that could not join one."""
+    Everything already spoken for today is counted first, whatever the state
+    of its campaign now: cold emails sent or held today, follow-ups due by the
+    end of today and contacts waiting for their first email (an email already
+    being sent is counted once, as a send). Then, for each ready campaign of
+    this brand and audience, its free places are the smallest of:
+    its own cap less its use; the pilot enrolment limit less its contacts;
+    and what its inbox has left (an inbox is shared by every campaign and
+    brand on it). `room` is the sum, never above the brand's 20 (or the
+    owner's lower cap) less the brand's use, nor above the daily target less
+    the contacts found today. Replies are outside all of this (OUT-19 E).
+    Read-only; the caller holds the business lock when it must not change."""
     from services import metering
     local = moment.astimezone(LONDON)
     start = local.replace(hour=0, minute=0, second=0, microsecond=0)
     tomorrow = start + timedelta(days=1)
     br = str(brand_id)
+    found = _today_counts(session, bid, moment, brand_id)
+    out = {"room": 0, "places": [], "campaigns": 0, "found_today": found, "sent_today": 0,
+           "followups_due": 0, "waiting": 0, "inbox_left": 0}
     settings = send.one(session, "outreach_settings", bid)
-    brand_limit = min(20, int(settings["business_daily_cap"])) if settings else 0
-    campaigns = send.rows(session, "outreach_campaigns", bid, "AND status IN ('ready', 'running')")
-    sent = {str(k): int(v or 0) for k, v in session.execute(text(
-        "SELECT m.campaign_id, count(*) FROM outreach_usage_events u JOIN outreach_messages m "
-        "ON m.business_id = u.business_id AND m.id = u.message_id WHERE u.business_id = :b "
-        "AND u.kind = 'outreach_emails_sent' AND u.local_send_date = :d "
-        "AND u.state IN ('reserved', 'committed', 'unknown') GROUP BY m.campaign_id"),
-        {"b": bid, "d": local.date().isoformat()})}
-    queued = {}
-    for cid, step, due in session.execute(text(
-            "SELECT campaign_id, next_step, next_due_at FROM outreach_enrolments WHERE business_id = :b "
-            "AND state IN ('pending', 'active') AND next_step IS NOT NULL"), {"b": bid}):
+    if not settings or settings["pause_all"]:
+        return out
+    campaigns = send.rows(session, "outreach_campaigns", bid, "ORDER BY created_at, id")
+    by_id = {str(c["id"]): c for c in campaigns}
+    sent, sent_on_box = {}, {}
+    for cid, mailbox_id, n in session.execute(text(
+            "SELECT m.campaign_id, u.mailbox_id, count(*) FROM outreach_usage_events u JOIN outreach_messages m "
+            "ON m.business_id = u.business_id AND m.id = u.message_id WHERE u.business_id = :b "
+            "AND u.kind = 'outreach_emails_sent' AND (m.kind IS NULL OR m.kind <> 'bespoke') AND u.local_send_date = :d "
+            "AND u.state IN ('reserved', 'committed', 'unknown') GROUP BY m.campaign_id, u.mailbox_id"),
+            {"b": bid, "d": local.date().isoformat()}):
+        sent[str(cid)] = sent.get(str(cid), 0) + int(n)
+        sent_on_box[str(mailbox_id)] = sent_on_box.get(str(mailbox_id), 0) + int(n)
+    queued, members = {}, {}
+    for eid, cid, step, due, busy in session.execute(text(
+            "SELECT e.id, e.campaign_id, e.next_step, e.next_due_at, EXISTS (SELECT 1 FROM outreach_messages m "
+            "WHERE m.business_id = e.business_id AND m.enrolment_id = e.id AND m.direction = 'outbound' "
+            "AND m.state IN ('claimed', 'unknown')) FROM outreach_enrolments e WHERE e.business_id = :b "
+            "AND e.state IN ('pending', 'active')"), {"b": bid}):
+        members[str(cid)] = members.get(str(cid), 0) + 1
+        if busy or step is None:
+            continue                      # being sent now: already counted as a send
         q = queued.setdefault(str(cid), [0, 0])
         if int(step) == 0:
             q[1] += 1
         elif due is not None and _parse(due) < tomorrow:
             q[0] += 1
-    # Per campaign: (sent or held today, follow-ups due today, waiting for a first email).
-    use = {str(c["id"]): (sent.get(str(c["id"]), 0), *queued.get(str(c["id"]), [0, 0])) for c in campaigns}
+    def used(cid):
+        due, waiting = queued.get(cid, [0, 0])
+        return sent.get(cid, 0) + due + waiting
     mine = [c for c in campaigns if str(c["brand_id"]) == br]
-    brand_used = sum(sum(use[str(c["id"])]) for c in mine)
-    inbox_room = 0
-    for mailbox_id in {str(c["mailbox_id"]) for c in mine}:
+    out.update(sent_today=sum(sent.get(str(c["id"]), 0) for c in mine),
+               followups_due=sum(queued.get(str(c["id"]), [0, 0])[0] for c in mine),
+               waiting=sum(queued.get(str(c["id"]), [0, 0])[1] for c in mine))
+    brand_left = min(20, int(settings["business_daily_cap"])) - sum(used(str(c["id"])) for c in mine)
+    inbox_left = {}
+    for mailbox_id in {str(c["mailbox_id"]) for c in campaigns}:
         boxes = send.rows(session, "outreach_mailboxes", bid, "AND mailbox_id = :m", {"m": mailbox_id})
         cap = metering.mailbox_daily_cap(boxes[0]) if len(boxes) == 1 else 0
-        on_box = [c for c in campaigns if str(c["mailbox_id"]) == mailbox_id]
-        ours = [c for c in on_box if str(c["brand_id"]) == br]
-        inbox_room += max(0, min(sum(int(c["daily_cap"]) - sum(use[str(c["id"])]) for c in ours),
-                                 cap - sum(sum(use[str(c["id"])]) for c in on_box)))
-    unenrolled = session.execute(text(
-        "SELECT count(*) FROM outreach_prospects p JOIN outreach_compliance l ON l.business_id = p.business_id "
-        "AND l.id = p.lia_id WHERE p.business_id = :b AND l.brand_id = :br AND p.captured_at >= :start "
-        "AND p.eligibility IN ('eligible', 'review') AND p.first_contact_at IS NULL AND NOT EXISTS ("
-        "SELECT 1 FROM outreach_enrolments e WHERE e.business_id = p.business_id AND e.prospect_id = p.id)"),
-        {"b": bid, "br": br, "start": start}).scalar() or 0
-    found = _today_counts(session, bid, moment, brand_id)
-    room = min(DAILY_TARGET - found["decision_maker"] - found["gatekeeper"],
-               brand_limit - brand_used - unenrolled, inbox_room - unenrolled)
+        queued_here = sum(sum(queued.get(cid, [0, 0])) for cid, c in by_id.items() if str(c["mailbox_id"]) == mailbox_id)
+        inbox_left[mailbox_id] = max(0, cap - sent_on_box.get(mailbox_id, 0) - queued_here)
     limit = pilot_enrolments()
-    if audience_hash is not None and limit:
-        places = 0
-        for c in mine:
-            if c["target_hash"] == audience_hash:
-                active = session.execute(text(
-                    "SELECT count(*) FROM outreach_enrolments WHERE business_id = :b AND campaign_id = :c "
-                    "AND state IN ('pending', 'active')"), {"b": bid, "c": str(c["id"])}).scalar() or 0
-                places += max(0, limit - int(active))
-        room = min(room, places)
-    return {"room": max(0, room), "campaigns": len(mine), "inbox_room": inbox_room,
-            "sent_today": sum(use[str(c["id"])][0] for c in mine),
-            "followups_due": sum(use[str(c["id"])][1] for c in mine),
-            "waiting": sum(use[str(c["id"])][2] for c in mine) + int(unenrolled), "found_today": found}
+    matching = [c for c in mine if c["status"] in ("ready", "running")
+                and (audience_hash is None or c["target_hash"] == audience_hash)]
+    out["campaigns"] = len(matching)
+    for c in matching:
+        cid, mailbox_id = str(c["id"]), str(c["mailbox_id"])
+        free = max(0, int(c["daily_cap"]) - used(cid))
+        if limit:
+            free = min(free, max(0, limit - members.get(cid, 0)))
+        free = min(free, inbox_left[mailbox_id])
+        inbox_left[mailbox_id] -= free
+        if free:
+            out["places"].append([c, free])
+    out["inbox_left"] = sum(inbox_left.values())
+    out["room"] = max(0, min(DAILY_TARGET - found["decision_maker"] - found["gatekeeper"], brand_left,
+                             sum(f for _, f in out["places"])))
+    return out
+
+
+def _no_room_reason(room: dict) -> str:
+    if not room["campaigns"]:
+        return "No search: this audience has no ready campaign on a healthy inbox to email new contacts"
+    return "No search today: this brand's inbox is already full with follow-ups and contacts waiting for their first email"
+
+
+def _take_place(session, bid: str, room: dict, prospect_id: str, moment: datetime) -> Optional[str]:
+    """Enrol a contact just stored into a campaign with a free place, in the
+    same transaction (Codex OUT-19 D review 1: a place is taken as the contact
+    is kept, never later). Returns the campaign id, or None."""
+    from services import outreach_manage
+    p = send.one(session, "outreach_prospects", bid, prospect_id, True)
+    for place in room["places"]:
+        c, free = place
+        if free <= 0:
+            continue
+        try:
+            outreach_manage.qualified(session, bid, c, p)
+        except send.ActionRefused:
+            continue
+        send.insert(session, "outreach_enrolments", bid, prospect_id=prospect_id, campaign_id=str(c["id"]),
+                    sequence_version=c["sequence_version"], state="active", next_step=0, next_due_at=moment)
+        place[1] -= 1
+        return str(c["id"])
+    return None
+
+
+SEARCH_KEY = "outreach_research_search"     # one paid search per business at a time
+SEARCH_CLAIM = timedelta(minutes=10)
+
+
+def _claim_search(session, bid: str, moment: datetime, mine: Optional[str] = None) -> Optional[str]:
+    """Under the business lock: another run's search in progress means this
+    one waits, so two runs never pay for the same places (Codex OUT-19 D
+    review 1). The claim expires on its own if a run dies."""
+    import uuid as _uuid
+    doc = _doc(session, bid)
+    held = doc.get(SEARCH_KEY) or {}
+    until = _parse(held.get("until"))
+    if until and moment < until and held.get("token") and held.get("token") != mine:
+        return None
+    token = mine or _uuid.uuid4().hex
+    doc[SEARCH_KEY] = {"token": token, "until": (moment + SEARCH_CLAIM).isoformat()}
+    setup._save_settings_doc(session, bid, doc)
+    return token
+
+
+def _release_search(session, bid: str, token: Optional[str]) -> None:
+    """Under the business lock, in the caller's transaction."""
+    if not token:
+        return
+    doc = _doc(session, bid)
+    if (doc.get(SEARCH_KEY) or {}).get("token") == token:
+        doc.pop(SEARCH_KEY, None)
+        setup._save_settings_doc(session, bid, doc)
 
 
 def _lock(session, bid: str) -> None:
@@ -766,34 +832,6 @@ def _store(session, bid: str, lia_id: str, c: dict, v: dict, moment: datetime, *
 
 
 # -------------------------------------------------------------- enrolment ---
-
-def _enrol(session, bid: str, lia: dict, prospect_ids: list, moment: datetime) -> list:
-    """Decision E: verified contacts join the active campaign for this
-    audience, within the pilot limit. Never sends; never raises a card."""
-    from services import outreach_manage
-    settings = send.one(session, "outreach_settings", bid)
-    if settings["pause_all"]:
-        return []
-    joined, limit = [], pilot_enrolments()
-    for c in send.rows(session, "outreach_campaigns", bid,
-                       "AND target_hash = :h AND brand_id = :br AND status IN ('ready', 'running') ORDER BY created_at, id",
-                       {"h": lia["audience_hash"], "br": str(lia["brand_id"])}, True):
-        active = len(send.rows(session, "outreach_enrolments", bid, "AND campaign_id = :c AND state IN ('pending','active')",
-                               {"c": str(c["id"])}))
-        for pid in prospect_ids:
-            if (limit and active >= limit) or pid in joined:
-                continue
-            p = send.one(session, "outreach_prospects", bid, pid, True)
-            try:
-                outreach_manage.qualified(session, bid, c, p)
-            except send.ActionRefused:
-                continue
-            send.insert(session, "outreach_enrolments", bid, prospect_id=pid, campaign_id=str(c["id"]),
-                        sequence_version=c["sequence_version"], state="active", next_step=0, next_due_at=moment)
-            joined.append(pid)
-            active += 1
-    return joined
-
 
 # ------------------------------------------------------------------ the run ---
 
@@ -839,19 +877,8 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
     brand_id = str(lia["brand_id"])
     session.rollback()
     found_new = False
+    claim = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        room = capacity(session, bid, brand_id, moment, lia["audience_hash"])
-        session.rollback()
-        if room["room"] <= 0:
-            # Nothing more can be emailed today: no paid search for contacts
-            # who would only wait (OUT-19 D).
-            if attempt == 1 and room["found_today"]["decision_maker"] + room["found_today"]["gatekeeper"] < DAILY_TARGET:
-                out["stopped"] = ("No search: this brand has no ready campaign on a healthy inbox to email new contacts"
-                                  if not room["campaigns"] or not room["inbox_room"] and not room["sent_today"]
-                                  and not room["followups_due"] and not room["waiting"] else
-                                  "No search today: this brand's inbox is already full with follow-ups and "
-                                  "contacts waiting for their first email")
-            break
         # Reserve the search's maximum cost first, against the CURRENT budget
         # (re-read every time: lowering it mid-run takes effect at once). The
         # check and the reservation are one step under the business lock, so
@@ -862,6 +889,19 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
         if why:
             session.rollback()
             out["stopped"] = why
+            break
+        # OUT-19 D: is there room to email anyone new today? Checked here,
+        # under the same lock as the spend reservation (Codex OUT-19 D review 1).
+        room = capacity(session, bid, brand_id, moment, lia["audience_hash"])
+        if room["room"] <= 0:
+            session.rollback()
+            if attempt == 1 and room["found_today"]["decision_maker"] + room["found_today"]["gatekeeper"] < DAILY_TARGET:
+                out["stopped"] = _no_room_reason(room)
+            break
+        claim = _claim_search(session, bid, moment, claim)
+        if claim is None:
+            session.rollback()
+            out["stopped"] = "Another search for this business is running; research carries on in a few minutes"
             break
         if not ai_costs.allowed(session, moment=moment):
             session.rollback()
@@ -978,8 +1018,10 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             out["stopped"] = why
             break
         counts = _today_counts(session, bid, moment, brand_id)
-        # Re-read under the lock: another audience of this brand may have filled the inbox meanwhile.
-        left = capacity(session, bid, brand_id, moment, lia["audience_hash"])["room"]
+        # Re-read under the lock: another audience or brand may have filled the
+        # inbox meanwhile. Each contact kept takes its campaign place here.
+        room = capacity(session, bid, brand_id, moment, lia["audience_hash"])
+        left = room["room"]
         stored_domains, stored_keys = _held(session, bid)[0], {r[0] for r in session.execute(text(
             "SELECT email_key FROM outreach_prospects WHERE business_id = :b AND email_key IS NOT NULL"), {"b": bid})}
         # Decision-makers first; gatekeepers only fill, never more than 10.
@@ -998,6 +1040,8 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
                 continue
             ident = _store(session, bid, str(lia["id"]), c, v, moment)
             left -= 1
+            if _take_place(session, bid, room, ident, moment):
+                out["enrolled"].append(ident)
             stored_keys.add(v["email_key"])
             stored_domains.add(v["domain"])
             counts[v["contact_type"]] += 1
@@ -1019,14 +1063,11 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             stored_keys.add(v["email_key"])
             counts[kind] += 1
         session.commit()
-    if out["accepted"]:
-        _lock(session, bid)
-        if not _still_allowed(session, bid, compliance_id, moment):
-            out["enrolled"] = _enrol(session, bid, lia, out["accepted"], moment)
-        session.commit()
+    if out["enrolled"]:
         out["cards"] = _prepare_cards(session, business, out["enrolled"])
     note = summary(business, out)   # composed before the lock: nothing slow is done holding it
     _lock(session, bid)
+    _release_search(session, bid, claim)
     cfg = _config(_doc(session, bid))
     if found_new and out["stopped"] != "Research was unavailable":
         # Advance the area only after a run that found something new (Byron;
