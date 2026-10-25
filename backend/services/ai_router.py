@@ -41,7 +41,7 @@ DEFAULT_MODELS = {
     # Grok 4.7: xAI's most capable model ($2/$6). Mike (25 Oct 2026) chose it
     # over the cheaper 4.20 as the research and drafting fallback, after an
     # earlier Grok failed at research on his own platform; the side-by-side
-    # comparison (scripts/compare_research_models.py) checks it on real briefs.
+    # comparison (scripts/compare-research-ai.py) checks it on real briefs.
     "draft": {"openai": "gpt-6.1-sol", "xai": "grok-4.7", "anthropic": "claude-sonnet-4-5"},
     "research": {"openai": "gpt-6.1-sol", "xai": "grok-4.7", "anthropic": "claude-sonnet-4-5"},
     "classify": {"openai": "gpt-6-luna", "xai": "grok-4.20-0309-non-reasoning"},

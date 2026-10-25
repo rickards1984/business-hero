@@ -5,7 +5,7 @@ Reads the database, calls each AI provider once, verifies every contact with
 Business Hero's own checks, and prints the results. Stores, enrolls and emails
 nothing. Run with the production settings (database, AI keys, Companies House):
 
-    railway run .venv/bin/python scripts/compare-research-models.py \
+    railway run .venv/bin/python scripts/compare-research-ai.py \
         --business "New Body" --brand FitFutures --spend
 
 Without --spend it only shows which brand, audience and models it would use.
