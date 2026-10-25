@@ -73,6 +73,21 @@
 - A single £ figure for add-on brands and top-ups. Aria suggests a realistic amount from the brands, inboxes and warm-up stages. Nothing is charged beyond it.
 
 ### D — Research sized to sending capacity (decision 1)
+Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/test_outreach_research_capacity.py`.
+
+- **Room per search.** Before each paid search, and again under the lock before anything is stored, research works out how many new contacts the brand can email for the first time today:
+  - **what can be sent today** = the smallest of:
+    - the brand's 20 (or the owner's lower cap);
+    - each campaign's cap;
+    - each campaign mailbox's warm-up limit, the same number the send path enforces (`metering.mailbox_daily_cap`, asserted equal inside `reserve_outreach_usage`). An inbox shared by two brands is counted once.
+  - **minus what is already spoken for:**
+    - sends made or held today;
+    - follow-ups due by the end of today;
+    - contacts waiting for their first email (enrolled and not sent, or found today and not enrolled).
+  - Never above 20 and never below 0. Once follow-ups run, this settles at about a third of the inbox's limit.
+- **No room, no search.** A brand with no ready campaign on a healthy inbox, or a full inbox, makes no paid search, and the summary says why.
+- **The brief** asks for some spare (up to twice the room, at most 5 extra), since verification turns some candidates away. Only the room is kept, and the "at least N named decision-makers" requirement scales with it.
+- **Pilot limit (OUT-10 decision E).** It stays at 5 active contacts per campaign for the first week of the restart, so research also keeps no more than can join a campaign. `OUTREACH_PILOT_ENROLMENTS` raises it without a deploy; `0` lifts it, leaving the inbox's capacity to decide. Before lifting it, index `prepare`'s scan of open cards (OUT-8 ticket, note 2).
 
 ### E — Replies outside the cold cap, with the over-ceiling choices (decision 2)
 

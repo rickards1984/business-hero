@@ -17,12 +17,22 @@ from test_outreach_setup import A, B, OTHER_OWNER, OWNER, STAFF, db, draft_lia, 
 from test_outreach_research import NOW, World, count, gatekeeper, person, research, run, started
 
 
+@pytest.fixture(autouse=True)
+def no_pilot_limit(monkeypatch):
+    """These tests are about quotas, verification and spend: the pilot
+    enrolment limit (decision E) is lifted; test_outreach_research_capacity
+    tests it."""
+    monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", "0")
+
+
 def meter(brand):
     return f"outreach_research_pence:{brand['id']}"
 
 
-def second_brand(db, biz, *, name="FitFutures", enabled=True, cap=2000):
-    """A second brand with its own approved audience (no campaign needed to research)."""
+def second_brand(db, biz, *, name="FitFutures", enabled=True, cap=2000, inbox=True):
+    """A second brand with its own approved audience and, unless told
+    otherwise, its own inbox and ready campaign (OUT-19 D: research finds only
+    what an inbox can email)."""
     m = setup_module_or_missing()
     with Session(db) as s:
         brand = m.save_brand(s, biz, OWNER, {"name": name, "sender_identity": f"{name} by New Body"})
@@ -30,6 +40,9 @@ def second_brand(db, biz, *, name="FitFutures", enabled=True, cap=2000):
                                               "segments": ["gym"], "regions": ["Kent"]}, draft=draft_lia)
         m.approve_audience(s, biz, OWNER, lia["id"], {})
         research().configure(s, biz, OWNER, {"brand_id": brand["id"], "enabled": enabled, "monthly_cap_pence": cap})
+    if inbox:
+        from test_outreach_research import full_inbox, own_inbox
+        full_inbox(db, own_inbox(db, brand, lia, address=f"hello@{name.lower()}.example"))
     return brand, lia
 
 

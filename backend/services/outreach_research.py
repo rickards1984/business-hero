@@ -75,6 +75,19 @@ def impossible_search_pence() -> int:
 SEARCH_RESERVE_PENCE = search_reserve_pence()   # the default, for readers and tests
 METER = "outreach_research_pence"
 PILOT_ENROLMENTS = 5                     # decision E: OUT-8's pilot limit for now
+
+
+def pilot_enrolments() -> int:
+    """Decision E: 5 active contacts per campaign for the first week of the
+    restart, then raised to match capacity. OUTREACH_PILOT_ENROLMENTS sets it
+    without a deploy; 0 lifts it (the inbox's capacity then decides). Before
+    lifting it, index `prepare`'s scan of open cards (OUT-8 ticket, note 2)."""
+    raw = os.environ.get("OUTREACH_PILOT_ENROLMENTS", "").strip()
+    try:
+        value = int(raw) if raw else PILOT_ENROLMENTS
+    except ValueError:
+        value = PILOT_ENROLMENTS
+    return value if value >= 0 else PILOT_ENROLMENTS
 EXCLUSION_CAP = 400                      # steers the model; code checks guarantee
 NOTICE_WITHIN = timedelta(days=30)       # UK GDPR Article 14: within a month
 RETENTION = timedelta(days=365)
@@ -310,8 +323,14 @@ def _held(session, bid: str) -> tuple:
     return domains, companies
 
 
-def plan(session, business, compliance_id, *, moment: Optional[datetime] = None, attempt: int = 1) -> dict:
+def plan(session, business, compliance_id, *, moment: Optional[datetime] = None, attempt: int = 1,
+         wanted: Optional[int] = None) -> dict:
+    """`wanted`: how many new contacts the brand's inbox has room for today
+    (OUT-19 D). The brief asks for some spare, since verification turns some
+    away; only `wanted` are kept."""
     bid = str(business.id)
+    target = DAILY_TARGET if wanted is None else max(1, min(DAILY_TARGET, wanted * 2, wanted + 5))
+    named = max(1, min(MIN_DECISION_MAKERS, (target + 1) // 2))
     lia, rules = _audience(session, bid, compliance_id, moment)
     brand = send.one(session, "outreach_brands", bid, lia["brand_id"])
     cfg = _config(_doc(session, bid))
@@ -321,7 +340,7 @@ def plan(session, business, compliance_id, *, moment: Optional[datetime] = None,
     domains, companies = _held(session, bid)
     learned = lessons(session, business, lia["brand_id"])
     excluded = sorted(domains)[:EXCLUSION_CAP]
-    brief = f"""RESEARCH — find up to {DAILY_TARGET} NEW business contacts for {brand['name']} ({getattr(business, 'name', 'this business')}).
+    brief = f"""RESEARCH — find up to {target} NEW business contacts for {brand['name']} ({getattr(business, 'name', 'this business')}).
 
 Who: {rules.get('description', '')}
 Sectors: {', '.join(rules.get('segments') or []) or 'as described'}
@@ -331,7 +350,7 @@ QUALITY BAR (mandatory):
 - Real organisations only. The contact email MUST be shown on the organisation's own website; give the exact
   page URL where it appears. NEVER guess, construct or invent an email address.
 - Prefer NAMED decision-makers: owner, director, founder, managing director, practice/operations manager,
-  head of department. At least {MIN_DECISION_MAKERS} should be named decision-makers.
+  head of department. At least {named} should be named decision-makers.
 - A role address (info@, hello@, reception@) is acceptable only when the organisation is highly relevant and no
   named decision-maker is findable; mark it contact_type "gatekeeper".
 - Limited companies, LLPs and PLCs only (give the Companies House number when you can find it). Skip sole
@@ -349,7 +368,7 @@ Return ONLY a JSON object: {{"candidates": [{{"company", "company_number", "cont
 "fit_reason" (one sentence)}}]}}"""
     session.rollback()
     return {"area": area, "attempt": attempt, "exclusions": excluded, "lessons": learned, "brief": brief,
-            "target": DAILY_TARGET, "min_decision_makers": MIN_DECISION_MAKERS}
+            "target": target, "min_decision_makers": named}
 
 
 # ---------------------------------------------------------------- spending ---
@@ -636,6 +655,82 @@ def _today_counts(session, bid: str, moment: datetime, brand_id) -> dict:
     return counts
 
 
+def capacity(session, bid: str, brand_id, moment: datetime, audience_hash: Optional[str] = None) -> dict:
+    """OUT-19 D (Mike's decision 1): research finds only as many new contacts
+    as the brand's inboxes can email for the first time today.
+
+    What can be sent today follows the send path's own limits: the brand's 20
+    (or the owner's lower cap), each campaign's cap, and each campaign
+    mailbox's warm-up limit, which is shared by every brand using that inbox.
+    From that comes off what is already spoken for: sends made or held today,
+    follow-ups due by the end of today, and contacts waiting for their first
+    email (enrolled and not yet sent, or found today and not enrolled). Once
+    follow-ups run, the room settles at about a third of the inbox's limit.
+    `room` is never above the daily target, never below 0. A brand with no
+    ready campaign on a healthy inbox has no room: nothing it found could be
+    emailed. With `audience_hash`, room is also limited to the places left
+    under the pilot enrolment limit in that audience's campaigns, so nothing
+    is found that could not join one."""
+    from services import metering
+    local = moment.astimezone(LONDON)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow = start + timedelta(days=1)
+    br = str(brand_id)
+    settings = send.one(session, "outreach_settings", bid)
+    brand_limit = min(20, int(settings["business_daily_cap"])) if settings else 0
+    campaigns = send.rows(session, "outreach_campaigns", bid, "AND status IN ('ready', 'running')")
+    sent = {str(k): int(v or 0) for k, v in session.execute(text(
+        "SELECT m.campaign_id, count(*) FROM outreach_usage_events u JOIN outreach_messages m "
+        "ON m.business_id = u.business_id AND m.id = u.message_id WHERE u.business_id = :b "
+        "AND u.kind = 'outreach_emails_sent' AND u.local_send_date = :d "
+        "AND u.state IN ('reserved', 'committed', 'unknown') GROUP BY m.campaign_id"),
+        {"b": bid, "d": local.date().isoformat()})}
+    queued = {}
+    for cid, step, due in session.execute(text(
+            "SELECT campaign_id, next_step, next_due_at FROM outreach_enrolments WHERE business_id = :b "
+            "AND state IN ('pending', 'active') AND next_step IS NOT NULL"), {"b": bid}):
+        q = queued.setdefault(str(cid), [0, 0])
+        if int(step) == 0:
+            q[1] += 1
+        elif due is not None and _parse(due) < tomorrow:
+            q[0] += 1
+    # Per campaign: (sent or held today, follow-ups due today, waiting for a first email).
+    use = {str(c["id"]): (sent.get(str(c["id"]), 0), *queued.get(str(c["id"]), [0, 0])) for c in campaigns}
+    mine = [c for c in campaigns if str(c["brand_id"]) == br]
+    brand_used = sum(sum(use[str(c["id"])]) for c in mine)
+    inbox_room = 0
+    for mailbox_id in {str(c["mailbox_id"]) for c in mine}:
+        boxes = send.rows(session, "outreach_mailboxes", bid, "AND mailbox_id = :m", {"m": mailbox_id})
+        cap = metering.mailbox_daily_cap(boxes[0]) if len(boxes) == 1 else 0
+        on_box = [c for c in campaigns if str(c["mailbox_id"]) == mailbox_id]
+        ours = [c for c in on_box if str(c["brand_id"]) == br]
+        inbox_room += max(0, min(sum(int(c["daily_cap"]) - sum(use[str(c["id"])]) for c in ours),
+                                 cap - sum(sum(use[str(c["id"])]) for c in on_box)))
+    unenrolled = session.execute(text(
+        "SELECT count(*) FROM outreach_prospects p JOIN outreach_compliance l ON l.business_id = p.business_id "
+        "AND l.id = p.lia_id WHERE p.business_id = :b AND l.brand_id = :br AND p.captured_at >= :start "
+        "AND p.eligibility IN ('eligible', 'review') AND p.first_contact_at IS NULL AND NOT EXISTS ("
+        "SELECT 1 FROM outreach_enrolments e WHERE e.business_id = p.business_id AND e.prospect_id = p.id)"),
+        {"b": bid, "br": br, "start": start}).scalar() or 0
+    found = _today_counts(session, bid, moment, brand_id)
+    room = min(DAILY_TARGET - found["decision_maker"] - found["gatekeeper"],
+               brand_limit - brand_used - unenrolled, inbox_room - unenrolled)
+    limit = pilot_enrolments()
+    if audience_hash is not None and limit:
+        places = 0
+        for c in mine:
+            if c["target_hash"] == audience_hash:
+                active = session.execute(text(
+                    "SELECT count(*) FROM outreach_enrolments WHERE business_id = :b AND campaign_id = :c "
+                    "AND state IN ('pending', 'active')"), {"b": bid, "c": str(c["id"])}).scalar() or 0
+                places += max(0, limit - int(active))
+        room = min(room, places)
+    return {"room": max(0, room), "campaigns": len(mine), "inbox_room": inbox_room,
+            "sent_today": sum(use[str(c["id"])][0] for c in mine),
+            "followups_due": sum(use[str(c["id"])][1] for c in mine),
+            "waiting": sum(use[str(c["id"])][2] for c in mine) + int(unenrolled), "found_today": found}
+
+
 def _lock(session, bid: str) -> None:
     """The shared business lock (OUT-6's order) for the store step."""
     if not send.pg(session):
@@ -679,14 +774,14 @@ def _enrol(session, bid: str, lia: dict, prospect_ids: list, moment: datetime) -
     settings = send.one(session, "outreach_settings", bid)
     if settings["pause_all"]:
         return []
-    joined = []
+    joined, limit = [], pilot_enrolments()
     for c in send.rows(session, "outreach_campaigns", bid,
                        "AND target_hash = :h AND brand_id = :br AND status IN ('ready', 'running') ORDER BY created_at, id",
                        {"h": lia["audience_hash"], "br": str(lia["brand_id"])}, True):
         active = len(send.rows(session, "outreach_enrolments", bid, "AND campaign_id = :c AND state IN ('pending','active')",
                                {"c": str(c["id"])}))
         for pid in prospect_ids:
-            if active >= PILOT_ENROLMENTS or pid in joined:
+            if (limit and active >= limit) or pid in joined:
                 continue
             p = send.one(session, "outreach_prospects", bid, pid, True)
             try:
@@ -745,9 +840,17 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
     session.rollback()
     found_new = False
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        counts = _today_counts(session, bid, moment, brand_id)
+        room = capacity(session, bid, brand_id, moment, lia["audience_hash"])
         session.rollback()
-        if counts["decision_maker"] + counts["gatekeeper"] >= DAILY_TARGET:
+        if room["room"] <= 0:
+            # Nothing more can be emailed today: no paid search for contacts
+            # who would only wait (OUT-19 D).
+            if attempt == 1 and room["found_today"]["decision_maker"] + room["found_today"]["gatekeeper"] < DAILY_TARGET:
+                out["stopped"] = ("No search: this brand has no ready campaign on a healthy inbox to email new contacts"
+                                  if not room["campaigns"] or not room["inbox_room"] and not room["sent_today"]
+                                  and not room["followups_due"] and not room["waiting"] else
+                                  "No search today: this brand's inbox is already full with follow-ups and "
+                                  "contacts waiting for their first email")
             break
         # Reserve the search's maximum cost first, against the CURRENT budget
         # (re-read every time: lowering it mid-run takes effect at once). The
@@ -787,7 +890,7 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             break
         _spend(session, bid, moment, reserve, brand_id)
         session.commit()
-        brief = plan(session, business, compliance_id, moment=moment, attempt=attempt)["brief"]
+        brief = plan(session, business, compliance_id, moment=moment, attempt=attempt, wanted=room["room"])["brief"]
         out["attempts"] = attempt
         try:
             result = search(brief) or {}
@@ -875,6 +978,8 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             out["stopped"] = why
             break
         counts = _today_counts(session, bid, moment, brand_id)
+        # Re-read under the lock: another audience of this brand may have filled the inbox meanwhile.
+        left = capacity(session, bid, brand_id, moment, lia["audience_hash"])["room"]
         stored_domains, stored_keys = _held(session, bid)[0], {r[0] for r in session.execute(text(
             "SELECT email_key FROM outreach_prospects WHERE business_id = :b AND email_key IS NOT NULL"), {"b": bid})}
         # Decision-makers first; gatekeepers only fill, never more than 10.
@@ -887,10 +992,12 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             if _suppressed(session, bid, v["email_key"], v["domain"]):
                 out["rejected"].append({"company": v["company"], "reason": "opted out"})
                 continue
-            if total >= DAILY_TARGET or (v["contact_type"] == "gatekeeper" and counts["gatekeeper"] >= MAX_GATEKEEPERS):
+            if total >= DAILY_TARGET or left <= 0 or (
+                    v["contact_type"] == "gatekeeper" and counts["gatekeeper"] >= MAX_GATEKEEPERS):
                 out["rejected"].append({"company": v["company"], "reason": "today's quota is full"})
                 continue
             ident = _store(session, bid, str(lia["id"]), c, v, moment)
+            left -= 1
             stored_keys.add(v["email_key"])
             stored_domains.add(v["domain"])
             counts[v["contact_type"]] += 1
@@ -903,11 +1010,12 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             if v["email_key"] in stored_keys or _suppressed(session, bid, v["email_key"], v["domain"]):
                 continue
             kind = v["contact_type"] if v["contact_type"] in counts else "decision_maker"
-            if counts["decision_maker"] + counts["gatekeeper"] >= DAILY_TARGET or (
+            if counts["decision_maker"] + counts["gatekeeper"] >= DAILY_TARGET or left <= 0 or (
                     kind == "gatekeeper" and counts["gatekeeper"] >= MAX_GATEKEEPERS):
                 out["rejected"].append({"company": v["company"], "reason": "today's quota is full"})
                 continue
             _store(session, bid, str(lia["id"]), c, v, moment, review=True)
+            left -= 1
             stored_keys.add(v["email_key"])
             counts[kind] += 1
         session.commit()

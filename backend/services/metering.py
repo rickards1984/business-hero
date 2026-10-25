@@ -607,6 +607,28 @@ def month_bounds(day):
     return first, following, weekdays
 
 
+def mailbox_daily_cap(box, health=None) -> int:
+    """A campaign mailbox's warm-up limit for a day: the one the send path
+    enforces below, as a number (0 when it may not send at all) so research can
+    size itself to it (OUT-19 D). Health freshness is the send path's check."""
+    from services.outreach_send import loads
+    health = loads(box['health_evidence']) or {} if health is None else health
+    if not box['enabled'] or box['pause_reason'] or box['health_status'] != 'pass':
+        return 0
+    if not (health.get('domain_control') is True and health.get('from_aligned') is True and
+            all(health.get(k) == 'pass' for k in ('spf', 'dkim', 'dmarc'))):
+        return 0
+    days = box['sending_days'] or 0
+    stage = 5 if days < 5 else 10
+    if box['warmup_stage'] == 20:
+        if not (days >= 10 and box['health_reviewed_by'] and box['health_reviewed_at']):
+            return 0
+        stage = 20
+    if box['warmup_stage'] > stage:
+        return 0
+    return max(0, min(stage, box['warmup_stage'], box['daily_cap'], int(health.get('provider_daily_cap', 20))))
+
+
 def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, prospect_id, message_id, moment):
     """Reserve once; caller owns transaction, rollback and action claim."""
     from services.outreach_send import rows, one, require, insert, loads, _parse
@@ -632,6 +654,7 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
         stage = 20
     require(box['warmup_stage'] <= stage)
     cap = min(stage, box['warmup_stage'], box['daily_cap'], int(health.get('provider_daily_cap', 20)))
+    require(cap == mailbox_daily_cap(box, health))   # research plans with the same number (OUT-19 D)
     message = one(session, 'outreach_messages', bid, message_id)
     campaign = one(session, 'outreach_campaigns', bid, message['campaign_id'])
     # Campaign cap also includes every held/accepted message for this UK day.

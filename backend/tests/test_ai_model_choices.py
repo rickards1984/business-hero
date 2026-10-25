@@ -20,6 +20,14 @@ from test_outreach_setup import db  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
+def no_pilot_limit(monkeypatch):
+    """Research here is about cost and routing: OUT-10's pilot enrolment
+    limit is lifted (test_outreach_research_capacity tests it)."""
+    monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", "0")
+
+
+
+@pytest.fixture(autouse=True)
 def clean(monkeypatch):
     for k in ("AI_PROVIDER_ORDER", "AI_MODELS_JSON", "ARIA_DRAFT_MODEL", "ARIA_RESEARCH_MODEL", "AI_PRICES_JSON",
               "OPENAI_API_KEY", "XAI_API_KEY", "ANTHROPIC_API_KEY", "RESEARCH_SEARCH_RESERVE_PENCE", "ARIA_REPLY_MODEL"):
