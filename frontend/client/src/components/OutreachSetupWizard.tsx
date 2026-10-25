@@ -131,7 +131,7 @@ export default function OutreachSetupWizard({ businessId, adding = false, onClos
           Steps save as you go. Aria drafts the wording; you edit and approve everything. Nothing is sent until you
           approve it.
         </Typography>
-        {api.error && <Alert severity="error">{api.error}</Alert>}
+        {api.error && (current !== 'brand' || showReady) && <Alert severity="error">{api.error}</Alert>}
         {!begun && (
           <Button variant="contained" disabled={api.busy} onClick={() => api.call('POST', 'begin')}>
             Start setting up outreach
@@ -158,7 +158,7 @@ export default function OutreachSetupWizard({ businessId, adding = false, onClos
                 </StepLabel>
                 <StepContent>
                   {step.key === 'brand' && <BrandsStep api={api} brands={brands} current={brand}
-                    onSaved={id => { choose(id); setActive('mailboxes'); }} onChoose={choose} />}
+                    onSaved={choose} onNext={() => setActive('mailboxes')} onChoose={choose} />}
                   {step.key === 'mailboxes' && <><MailboxStep api={api} accounts={accounts.data || []} />
                     {brand && <BrandInbox api={api} brand={brand} accounts={accounts.data || []} />}</>}
                   {step.key === 'audience' && (brand ? <AudiencesStep key={brand.id} api={api} brand={brand} /> : <NeedBrand />)}
@@ -223,11 +223,16 @@ function BrandReady({ brand, started, busy, onAnother, onStart, onClose, onRevie
   );
 }
 
-function BrandsStep({ api, brands, current, onSaved, onChoose }: {
-  api: Api; brands: BrandSetup[]; current?: BrandSetup; onSaved: (id: string) => void; onChoose: (id: string) => void;
+function BrandsStep({ api, brands, current, onSaved, onNext, onChoose }: {
+  api: Api; brands: BrandSetup[]; current?: BrandSetup; onSaved: (id: string) => void; onNext: () => void;
+  onChoose: (id: string) => void;
 }) {
   const blank = { name: '', sender: '' };
   const [rows, setRows] = useState([blank]);
+  // Mike's click test (25 Oct 2026): saving gave no sign it had worked, and the
+  // step moved on by itself. Now it says what was saved and stays here, so
+  // another brand can be added; "Next" moves on when the owner is ready.
+  const [saved, setSaved] = useState<string[]>([]);
   const filled = rows.filter(r => r.name.trim() && r.sender.trim());
   return (
     <Stack spacing={1.5}>
@@ -265,15 +270,26 @@ function BrandsStep({ api, brands, current, onSaved, onChoose }: {
         <Button variant="text" onClick={() => setRows([...rows, blank])}>+ Add another brand, product or service</Button>
         <Button variant="contained" disabled={api.busy || filled.length === 0} onClick={async () => {
           let first = '';
+          const names: string[] = [];
+          setSaved([]);
           for (const r of filled) {
             const out = await api.call<{ id: string }>('POST', 'brands', { name: r.name.trim(), sender_identity: r.sender.trim() });
-            if (!out) return;
+            if (!out) {
+              setSaved(names);
+              setRows(rows.filter(x => !names.includes(x.name.trim())));   // keep what didn't save, to try again
+              return;
+            }
+            names.push(r.name.trim());
             first = first || out.id;
           }
+          setSaved(names);
           setRows([blank]);
           if (first) onSaved(first);
-        }}>Save</Button>
+        }}>{api.busy ? 'Saving…' : 'Save'}</Button>
+        {brands.length > 0 && <Button variant="outlined" onClick={onNext}>Next: sending inbox</Button>}
       </Stack>
+      {saved.length > 0 && <Alert severity="success">Saved: {saved.join(', ')}. Add another below, or go on to the sending inbox.</Alert>}
+      {api.error && <Alert severity="error">Not saved: {api.error}</Alert>}
     </Stack>
   );
 }
