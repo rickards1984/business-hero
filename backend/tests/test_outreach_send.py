@@ -575,6 +575,16 @@ def test_the_last_day_of_the_month_counts_and_the_next_month_does_not(h):
                        ).scalar() == 20 * OCT_2026_WEEKDAYS
 
 
+def test_a_brand_whose_month_filled_on_its_last_day_is_refused(h):
+    """Codex C review 4: the 31st is inside the month."""
+    card = propose(h)
+    sent_today(h, 20 * OCT_2026_WEEKDAYS, BRAND, day='2026-10-31')
+    with pytest.raises(h.a.ActionRefused) as exc:
+        approve(h, card)
+    assert "Monthly outreach allowance for this brand" in str(exc.value.detail)
+    assert not h.p.sends
+
+
 def test_the_owners_lower_daily_limit_lowers_the_monthly_allowance_too(h):
     card = propose(h)
     change(h, 'outreach_settings', business_daily_cap=5)
