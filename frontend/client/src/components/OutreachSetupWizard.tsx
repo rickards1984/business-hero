@@ -158,8 +158,9 @@ export default function OutreachSetupWizard({ businessId, adding = false, onClos
                 </StepLabel>
                 <StepContent>
                   {step.key === 'brand' && <BrandsStep api={api} brands={brands} current={brand}
-                    onSaved={id => { setBrandId(id); setNewBrand(false); setRevisiting(false); setActive('brand'); }}
-                    onNext={() => setActive('mailboxes')} onChoose={choose} />}
+                    onStart={() => { setActive('brand'); setRevisiting(true); }}
+                    onSaved={id => { setBrandId(id); setNewBrand(false); }}
+                    onNext={() => { setActive('mailboxes'); setRevisiting(false); }} onChoose={choose} />}
                   {step.key === 'mailboxes' && <><MailboxStep api={api} accounts={accounts.data || []} />
                     {brand && <BrandInbox api={api} brand={brand} accounts={accounts.data || []} />}</>}
                   {step.key === 'audience' && (brand ? <AudiencesStep key={brand.id} api={api} brand={brand} /> : <NeedBrand />)}
@@ -224,9 +225,9 @@ function BrandReady({ brand, started, busy, onAnother, onStart, onClose, onRevie
   );
 }
 
-function BrandsStep({ api, brands, current, onSaved, onNext, onChoose }: {
-  api: Api; brands: BrandSetup[]; current?: BrandSetup; onSaved: (id: string) => void; onNext: () => void;
-  onChoose: (id: string) => void;
+function BrandsStep({ api, brands, current, onStart, onSaved, onNext, onChoose }: {
+  api: Api; brands: BrandSetup[]; current?: BrandSetup; onStart: () => void; onSaved: (id: string) => void;
+  onNext: () => void; onChoose: (id: string) => void;
 }) {
   const blank = { name: '', sender: '' };
   const [rows, setRows] = useState([blank]);
@@ -273,6 +274,10 @@ function BrandsStep({ api, brands, current, onSaved, onNext, onChoose }: {
           let first = '';
           const names: string[] = [];
           const done = new Set<number>();          // rows saved, by position: every other row is kept
+          // Hold this step open from the first request: a status refresh between
+          // saves, or saving a brand that is already ready, must not move the
+          // wizard on (Codex scan-fix review 2). Only "Next" moves on.
+          onStart();
           setSaved([]);
           for (const [i, r] of rows.entries()) {
             if (!r.name.trim() || !r.sender.trim()) continue;
