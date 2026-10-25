@@ -224,6 +224,56 @@ function StripeReconciliationBanner() {
   );
 }
 
+
+// OUT-19: what outreach costs (every AI call, recorded) against what it earns,
+// per business and brand, so a money-losing account is seen the same day.
+interface EconomicsBrand { id: string; name: string; cost_pence: number; price_pence: number; included: boolean }
+interface EconomicsRow { business_id: string; name: string; plan_tier: string; revenue_pence: number; cost_pence: number; margin_pence: number; losing_money: boolean; brands: EconomicsBrand[]; by_purpose: Record<string, number> }
+interface EconomicsReport { period: string; businesses: EconomicsRow[]; losing_money: string[]; platform_cost_pence: number; platform_revenue_pence: number; alarm_pence?: string | null; kill_pence?: string | null }
+
+function OutreachEconomicsPanel() {
+  const [report, setReport] = useState<EconomicsReport | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let mounted = true;
+    apiRequest('GET', '/v1/admin/outreach/economics').then(r => r.json()).then(d => { if (mounted) setReport(d); })
+      .catch(() => { if (mounted) setFailed(true); });
+    return () => { mounted = false; };
+  }, []);
+  const gbp = (p: number) => `£${(p / 100).toFixed(2)}`;
+  if (failed) return <Alert severity="warning" variant="outlined" sx={{ mb: 3, borderRadius: 2 }}>Outreach economics unavailable.</Alert>;
+  if (!report) return null;
+  const losing = report.losing_money.length;
+  return (
+    <Alert severity={losing ? 'error' : 'info'} variant="outlined" icon={false}
+      sx={{ mb: 3, borderRadius: 2, '& .MuiAlert-message': { width: '100%', minWidth: 0 } }} data-testid="outreach-economics">
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+        <Typography variant="subtitle2">Outreach economics · {report.period}</Typography>
+        <Chip size="small" variant="outlined" label={`AI cost ${gbp(report.platform_cost_pence)} · outreach revenue ${gbp(report.platform_revenue_pence)}`} />
+      </Box>
+      <Typography variant="body2" sx={{ mt: 0.5 }}>
+        {losing ? `${losing} business${losing === 1 ? '' : 'es'} cost more in AI than outreach earns this month.` : 'Every business earns more from outreach than its AI costs this month.'}
+        {report.kill_pence ? ` AI spending stops for the platform at ${gbp(Number(report.kill_pence))}.` : ' No platform AI spending limit is set.'}
+      </Typography>
+      <Box sx={{ overflowX: 'auto', mt: 1.5 }}>
+        <Box component="table" sx={{ borderCollapse: 'collapse', width: '100%', fontSize: 13, '& td, & th': { py: 0.5, pr: 2, textAlign: 'left', whiteSpace: 'nowrap' } }}>
+          <thead><tr><th>Business</th><th>Brands</th><th>Revenue</th><th>AI cost</th><th>Margin</th></tr></thead>
+          <tbody>
+            {report.businesses.map(b => (
+              <tr key={b.business_id}>
+                <td>{b.name} <Typography component="span" variant="caption" color="text.secondary">({b.plan_tier})</Typography></td>
+                <td>{b.brands.map(br => `${br.name} ${gbp(br.cost_pence)}${br.included ? ' (included)' : ` / ${gbp(br.price_pence)}`}`).join(' · ') || '—'}</td>
+                <td>{gbp(b.revenue_pence)}</td><td>{gbp(b.cost_pence)}</td>
+                <td style={{ color: b.losing_money ? '#B42318' : undefined, fontWeight: b.losing_money ? 700 : undefined }}>{gbp(b.margin_pence)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </Box>
+      </Box>
+    </Alert>
+  );
+}
+
 export default function AdminDashboard() {
   const navigate = useNavigate();
   const { user, signOut, isAdmin, loading: authLoading, adminLoading } = useAuth();
@@ -665,6 +715,7 @@ export default function AdminDashboard() {
       <Box component="main" sx={{ flexGrow: 1, minWidth: 0, p: 3, mt: 8, ml: isMobile ? 0 : '240px', overflowX: 'auto' }}>
         <Container maxWidth="xl" sx={{ px: { xs: 1, sm: 2, md: 3 } }}>
           {user && isAdmin && <StripeReconciliationBanner />}
+          {user && isAdmin && <OutreachEconomicsPanel />}
           {error && (
             <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')} data-testid="alert-error">
               {error}

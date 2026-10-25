@@ -34,6 +34,7 @@ from sqlalchemy import text
 from services import outreach_send as send
 from services import outreach_setup as setup
 from services.chase_replies import _address, _parse
+from services import ai_costs
 from services.metering import period_for
 
 LONDON = ZoneInfo("Europe/London")
@@ -728,6 +729,10 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             session.rollback()
             out["stopped"] = why
             break
+        if not ai_costs.allowed(session, moment=moment):
+            session.rollback()
+            out["stopped"] = "Research is paused: the platform's AI spending limit for the month is reached"
+            break
         b = _brand_config(_config(_doc(session, bid)), brand_id)
         if not b["enabled"] or _spent(session, bid, moment, brand_id) + MAX_SEARCH_PENCE > int(b["monthly_cap_pence"]):
             out["stopped"] = "This brand's research budget for the month is reached; research resumes next month"
@@ -751,6 +756,9 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
         # lock order is the same everywhere (Codex OUT-18 review 2).
         _lock(session, bid)
         _spend(session, bid, moment, cost - MAX_SEARCH_PENCE, brand_id)   # settle the reservation
+        ai_costs.record(session, bid, purpose="research", brand_id=brand_id, moment=moment, pence=cost,
+                        provider=str(result.get("provider") or "openai"),
+                        model=str(result.get("model") or os.environ.get("ARIA_RESEARCH_MODEL", "gpt-4.1")))
         out["spend_pence"] += cost
         if cost > MAX_SEARCH_PENCE:
             # The reservation must hold. If it ever doesn't, the full cost is
@@ -1071,4 +1079,5 @@ def web_search(brief: str) -> dict:
         candidates = json.loads(match.group(0)).get("candidates", []) if match else []
     except (ValueError, AttributeError):
         candidates = []
-    return {"candidates": candidates, "cost_pence": max(1, round(cost))}
+    return {"candidates": candidates, "cost_pence": max(1, round(cost)), "provider": "openai",
+            "model": os.environ.get("ARIA_RESEARCH_MODEL", "gpt-4.1")}

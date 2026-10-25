@@ -21,7 +21,7 @@ from typing import Callable, Optional
 from fastapi import HTTPException
 from sqlalchemy import text
 
-from services import aria_actions
+from services import ai_costs, aria_actions
 from services import outreach_send as send
 from services.chase_replies import _address, _parse
 
@@ -494,11 +494,26 @@ def _model_json(instructions: str, context: dict) -> dict:
     if not key:
         refuse(503, "Aria can't draft this right now; write it yourself or try again later.")
     client = OpenAI(api_key=key, timeout=60.0, max_retries=1)
+    response_model = os.getenv("ARIA_DRAFT_MODEL", "gpt-4o")
     response = client.chat.completions.create(
-        model=os.getenv("ARIA_DRAFT_MODEL", "gpt-4o"), response_format={"type": "json_object"},
+        model=response_model, response_format={"type": "json_object"},
         messages=[{"role": "system", "content": instructions},
                   {"role": "user", "content": json.dumps(context, default=str)}])
+    ai_costs.note("openai", response_model, getattr(response, "usage", None))
     return json.loads(response.choices[0].message.content or "{}")
+
+
+
+def _ai_draft(session, draft: Callable, context: dict):
+    """Run one Aria draft, refusing while the platform's AI spend is paused
+    (OUT-19). Returns the draft and the usage to record."""
+    if not ai_costs.allowed(session):
+        session.rollback()
+        refuse(503, "Aria's drafting is paused for now. Write this yourself, or try again later.")
+    session.rollback()   # no lock is held while Aria drafts
+    with ai_costs.collect() as spent:
+        out = draft(context)
+    return out, spent
 
 
 def model_draft_audience(context: dict) -> dict:
@@ -536,11 +551,11 @@ def draft_audience(session, business, user, data: dict, *, draft: Callable = mod
              "segments": [str(s)[:80] for s in (data.get("segments") or [])][:20],
              "regions": [str(r)[:80] for r in (data.get("regions") or [])][:20]}
     audience_hash = hashlib.sha256(_canonical(rules).encode()).hexdigest()
-    session.rollback()   # no lock is held while Aria drafts
-    drafted = draft({"business": getattr(business, "name", None), "brand": brand["name"], **rules})
+    drafted, spent = _ai_draft(session, draft, {"business": getattr(business, "name", None), "brand": brand["name"], **rules})
     fields = {k: _clean(drafted.get(k), k.replace("_", " ").capitalize(), 4000, one_line=False)
               for k in ("purpose", "necessity", "balancing_test", "safeguards")}
     _authority(session, business, user)
+    ai_costs.save(session, bid, spent, purpose="draft", brand_id=str(brand["id"]))
     versions = send.rows(session, "outreach_compliance", bid, "AND brand_id = :br AND audience_hash = :h",
                          {"br": str(brand["id"]), "h": audience_hash}, True)
     ident = send.insert(session, "outreach_compliance", bid, brand_id=str(brand["id"]), audience_hash=audience_hash,
@@ -572,9 +587,12 @@ def approve_audience(session, business, user, compliance_id, edits: dict) -> dic
 def draft_privacy_notice(session, business, user, brand_id, *, draft: Callable = model_draft_notice) -> dict:
     _authority(session, business, user)
     brand = send.one(session, "outreach_brands", str(business.id), brand_id)
-    session.rollback()
-    return {"text": draft({"business": getattr(business, "name", None), "brand": brand["name"],
-                           "sender_identity": brand["sender_identity"]})}
+    drafted, spent = _ai_draft(session, draft, {"business": getattr(business, "name", None), "brand": brand["name"],
+                                                "sender_identity": brand["sender_identity"]})
+    if spent:
+        ai_costs.save(session, str(business.id), spent, purpose="draft", brand_id=str(brand["id"]))
+        session.commit()
+    return {"text": drafted}
 
 
 def approve_privacy_notice(session, business, user, brand_id, data: dict) -> dict:
@@ -651,10 +669,10 @@ def create_first_campaign(session, business, user, data: dict, *, draft: Callabl
     name = _clean(data.get("name"), "Campaign name", 120)
     cap = int(data.get("daily_cap") or 5)
     send.require(1 <= cap <= 20, "A daily cap is 1–20", 422)
-    session.rollback()   # no lock is held while Aria drafts
-    emails = draft({"business": getattr(business, "name", None), "brand": brand["name"],
-                    "audience": rules, "purpose": lia["purpose"], "campaign": name})
+    emails, spent = _ai_draft(session, draft, {"business": getattr(business, "name", None), "brand": brand["name"],
+                                               "audience": rules, "purpose": lia["purpose"], "campaign": name})
     _authority(session, business, user)
+    ai_costs.save(session, bid, spent, purpose="draft", brand_id=str(brand["id"]))
     ident = send.insert(session, "outreach_campaigns", bid, name=name, brand_id=str(brand["id"]),
                         mailbox_id=str(box["mailbox_id"]), daily_cap=cap, status="draft", version=1,
                         sequence_version=1, timezone="Europe/London", target_rules=rules,
