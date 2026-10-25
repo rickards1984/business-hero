@@ -616,7 +616,8 @@ def test_part_of_a_longer_address_is_never_proof(db, prefix):
 def test_the_research_call_never_retries_by_itself_and_bounds_its_search_context():
     """P1 3: an SDK retry after a timeout would double uncertain spend."""
     import inspect
-    source = inspect.getsource(research().web_search)
+    from services import ai_router   # OUT-19 H: research's provider calls live in the router
+    source = inspect.getsource(ai_router._openai_compatible_search)
     assert "max_retries=0" in source and '"search_context_size": "low"' in source
 
 

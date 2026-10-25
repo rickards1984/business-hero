@@ -401,10 +401,12 @@ def test_an_unpriced_draft_model_is_refused_before_the_model_runs(db, monkeypatc
     from test_outreach_setup import OWNER
     m, biz, brand = _setup_brand(db)
     monkeypatch.setenv("ARIA_DRAFT_MODEL", "brand-new-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "k")          # a key, but no price for its model: no provider qualifies
+    import openai
+    monkeypatch.setattr(openai, "OpenAI", lambda **kw: pytest.fail("ran an unpriced model"))
     with Session(db) as s:
         with pytest.raises(Exception) as caught:
-            m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Gyms"},
-                             draft=lambda ctx: pytest.fail("ran an unpriced model"))
+            m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Gyms"})
     assert getattr(caught.value, "status_code", None) == 503
 
 
@@ -480,7 +482,7 @@ def test_a_search_without_reported_usage_is_charged_its_full_reserve(monkeypatch
     response = SimpleNamespace(usage=None, output=[], output_text='{"candidates": []}')
     monkeypatch.setattr(openai, "OpenAI", lambda **kw: SimpleNamespace(responses=SimpleNamespace(create=lambda **k: response)))
     out = r.web_search("brief")
-    assert out["cost_pence"] == r.max_search_pence() and out["estimated"] is True
+    assert out["cost_pence"] == r.max_search_pence() and out["calls"][0]["estimated"] is True
 
 
 def test_a_brand_made_just_after_midnight_bst_belongs_to_its_new_month(report_db):

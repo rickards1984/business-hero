@@ -83,6 +83,31 @@
 
 ### H — AI routing and failover (decision 6)
 
+Built in `services/ai_router.py`. Research and Aria's setup drafts go through it.
+
+**Settings (Railway):**
+- `AI_PROVIDER_ORDER`: default `openai,xai,anthropic`.
+- `AI_MODELS_JSON`: per purpose. Defaults:
+  - drafts: gpt-4o / grok-4 / claude-sonnet-4-5;
+  - research: gpt-4.1 / grok-4 / claude-sonnet-4-5.
+- `ARIA_DRAFT_MODEL` and `ARIA_RESEARCH_MODEL` still choose OpenAI's model.
+- `AI_FAILOVER_COOLDOWN_SECONDS`: default 300.
+- Keys: `OPENAI_API_KEY`, `XAI_API_KEY`, `ANTHROPIC_API_KEY`.
+
+**Which provider is used:**
+- A provider is used only with its key set and its model priced.
+- A provider error hands over to the next, and the failed provider is skipped for the cooldown.
+- An invalid answer is not retried elsewhere, so no second provider is charged.
+
+**Costs:**
+- Every attempt is recorded in the ledger; a failed attempt at its conservative maximum, marked estimated.
+- Research reserves the sum of every available provider's maximum, so a failed-over search stays within its reservation.
+
+**How each provider is reached:**
+- Grok through the OpenAI library pointed at `https://api.x.ai/v1`.
+- Claude through the Messages API directly, with its web-search tool for research.
+- Both need checking with real keys once Mike adds them (a smoke test per provider).
+
 ## Order
 
 1. **A** (ledger), then **H** (routing). The ledger makes every later number real; routing protects Mike from a single provider failing.

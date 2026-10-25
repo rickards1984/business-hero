@@ -23,7 +23,7 @@ from sqlalchemy import text
 
 import logging
 
-from services import ai_costs, aria_actions
+from services import ai_costs, ai_router, aria_actions
 from services import outreach_send as send
 from services.chase_replies import _address, _parse
 
@@ -501,39 +501,23 @@ def draft_model() -> str:
 
 
 def _model_json(instructions: str, context: dict) -> dict:
-    from openai import OpenAI
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
-        refuse(503, "Aria can't draft this right now; write it yourself or try again later.")
-    model = draft_model()
-    messages = [{"role": "system", "content": instructions},
-                {"role": "user", "content": json.dumps(context, default=str)}]
-    # No SDK retries: a retried attempt could be billed without being counted
-    # (Codex OUT-19 review 1). Output is bounded so a failed call's cost can
-    # be estimated conservatively.
-    client = OpenAI(api_key=key, timeout=60.0, max_retries=0)
-    worst = (len(json.dumps(messages)), DRAFT_MAX_TOKENS)   # every character a token, the full output
+    """One JSON draft from the first AI provider that can serve it (OUT-19 H:
+    failover across providers; every attempt is noted for the cost ledger)."""
     try:
-        response = client.chat.completions.create(model=model, response_format={"type": "json_object"},
-                                                  max_tokens=DRAFT_MAX_TOKENS, messages=messages)
-    except Exception:
-        # The provider may still bill a call that failed or timed out: count
-        # it at its most (every character a token, the full output).
-        ai_costs.note("openai", model, None, fallback=worst, estimated=True)
-        raise
-    ai_costs.note("openai", model, getattr(response, "usage", None), fallback=worst)
-    return json.loads(response.choices[0].message.content or "{}")
+        return ai_router.json_chat(instructions, context, purpose="draft", max_tokens=DRAFT_MAX_TOKENS)
+    except ai_router.AllProvidersFailed:
+        refuse(503, "Aria can't draft this right now; write it yourself or try again later.")
 
 
 def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
     """Run one Aria draft (OUT-19): refused while the platform's AI spend is
     paused or the model has no price; its cost is recorded and committed as
     soon as the model returns, whether or not the draft is then accepted."""
-    try:
-        ai_costs.require_priced("openai", draft_model())
-    except ai_costs.Unpriced:
+    if draft in (model_draft_audience, model_draft_notice, model_draft_emails) and \
+            not ai_router.chain("draft", include_down=True):
         session.rollback()
-        refuse(503, "Aria's drafting is unavailable: no price is set for its model. Write this yourself for now.")
+        refuse(503, "Aria's drafting is unavailable: no AI provider with a priced model is configured. "
+                    "Write this yourself for now.")
     if not ai_costs.allowed(session):
         session.rollback()
         refuse(503, "Aria's drafting is paused for now. Write this yourself, or try again later.")

@@ -20,7 +20,6 @@ than 10. Spend is capped per month (default £20). Nothing here sends.
 """
 
 import ipaddress
-import json
 import os
 import re
 import socket
@@ -34,7 +33,7 @@ from sqlalchemy import text
 from services import outreach_send as send
 from services import outreach_setup as setup
 from services.chase_replies import _address, _parse
-from services import ai_costs
+from services import ai_costs, ai_router
 from services.metering import period_for
 
 LONDON = ZoneInfo("Europe/London")
@@ -746,7 +745,9 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             break
         model = research_model()
         try:
-            reserve = max_search_pence(model)
+            # Enough for every provider the search might fail over to (OUT-19 H);
+            # with none configured, the primary model's maximum.
+            reserve = ai_router.reserve_pence() or max_search_pence(model)
         except ai_costs.Unpriced:
             session.rollback()
             out["stopped"] = f"Research is paused: no price is set for the research model {model}"
@@ -762,14 +763,22 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
         out["attempts"] = attempt
         try:
             result = search(brief) or {}
-        except Exception:
+        except Exception as exc:
             # Billable work may have happened: the reservation stays counted,
-            # and nothing is retried. An outage never skips an area. The
-            # ledger records the reserve as an ESTIMATED charge, so the
-            # platform limit sees it too (Codex OUT-19 review 1).
+            # and nothing is retried. An outage never skips an area. Each
+            # attempt that reached a provider is recorded at its maximum as an
+            # ESTIMATED charge, so the platform limit sees it too (Codex
+            # OUT-19 review 1); a search that failed in an unknown way records
+            # the reserve; one that found no provider at all records nothing.
             _lock(session, bid)
-            ai_costs.record(session, bid, purpose="research", brand_id=brand_id, moment=moment, pence=reserve,
-                            estimated=True, provider="openai", model=model)
+            attempts = getattr(exc, "calls", None)
+            if attempts:
+                for c in attempts:
+                    ai_costs.record(session, bid, purpose="research", brand_id=brand_id, moment=moment,
+                                    pence=c["pence"], estimated=True, provider=c["provider"], model=c["model"])
+            elif not isinstance(exc, ai_router.AllProvidersFailed):
+                ai_costs.record(session, bid, purpose="research", brand_id=brand_id, moment=moment, pence=reserve,
+                                estimated=True, provider="openai", model=model)
             session.commit()
             out["spend_pence"] += reserve
             out["stopped"] = "Research was unavailable"
@@ -780,11 +789,18 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
         # lock order is the same everywhere (Codex OUT-18 review 2).
         _lock(session, bid)
         _spend(session, bid, moment, cost - reserve, brand_id)   # settle the reservation
-        usage = result.get("usage") or {}
-        ai_costs.record(session, bid, purpose="research", brand_id=brand_id, moment=moment, pence=cost,
-                        provider=str(result.get("provider") or "openai"), model=str(result.get("model") or model),
-                        input_tokens=int(usage.get("input_tokens") or 0), output_tokens=int(usage.get("output_tokens") or 0),
-                        tool_calls=int(usage.get("tool_calls") or 0), estimated=bool(result.get("estimated")))
+        # Every attempt the search made (OUT-19 H: a failed-over search has
+        # more than one), each against its own provider and model.
+        attempts = result.get("calls") or [{"provider": result.get("provider") or "openai",
+                                            "model": result.get("model") or model, "pence": cost,
+                                            "estimated": bool(result.get("estimated")), "usage": result.get("usage") or {}}]
+        for c in attempts:
+            usage = c.get("usage") or {}
+            ai_costs.record(session, bid, purpose="research", brand_id=brand_id, moment=moment, pence=c["pence"],
+                            provider=str(c["provider"]), model=str(c["model"]), estimated=bool(c.get("estimated")),
+                            input_tokens=int(usage.get("input_tokens") or 0),
+                            output_tokens=int(usage.get("output_tokens") or 0),
+                            tool_calls=int(usage.get("tool_calls") or 0))
         out["spend_pence"] += cost
         if cost > reserve:
             # The reservation must hold. If it ever doesn't, the full cost is
@@ -1083,34 +1099,7 @@ def companies_house(query: str) -> Optional[dict]:
 
 
 def web_search(brief: str) -> dict:
-    from openai import OpenAI
-    key = os.environ.get("OPENAI_API_KEY")
-    if not key:
-        raise RuntimeError("no model key configured")
-    # No SDK retries: a retry after a timeout could be billed twice while only
-    # one reservation was made (Codex OUT-10 review 2).
-    client = OpenAI(api_key=key, timeout=300.0, max_retries=0)
-    # Bounded, so MAX_SEARCH_PENCE is a real ceiling on one search's cost.
-    model = research_model()
-    response = client.responses.create(model=model,
-                                       tools=[{"type": "web_search", "search_context_size": "low"}], input=brief,
-                                       max_output_tokens=MAX_OUTPUT_TOKENS, max_tool_calls=MAX_TOOL_CALLS)
-    usage = getattr(response, "usage", None)
-    searches = sum(1 for item in (getattr(response, "output", None) or [])
-                   if getattr(item, "type", "") == "web_search_call")
-    reported = ai_costs.usage_tokens(usage)
-    if reported is None:
-        # Usage not reported: charge the search's true maximum, marked as an
-        # estimate, never as free (Codex OUT-19 review 2).
-        tokens_in, tokens_out, cost, estimated = 0, 0, max_search_pence(model), True
-    else:
-        (tokens_in, tokens_out), estimated = reported, False
-        cost = ai_costs.cost("openai", model, tokens_in, tokens_out, searches)
-    textout = getattr(response, "output_text", "") or ""
-    match = re.search(r"\{.*\}", textout, re.S)
-    try:
-        candidates = json.loads(match.group(0)).get("candidates", []) if match else []
-    except (ValueError, AttributeError):
-        candidates = []
-    return {"candidates": candidates, "cost_pence": max(1, int(-(-cost // 1))), "provider": "openai", "model": model,
-            "estimated": estimated, "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out, "tool_calls": searches}}
+    """Research's web search through the AI provider chain, with failover
+    (OUT-19 H). No SDK retries anywhere: a retry could be billed twice while
+    only one reservation was made (Codex OUT-10 review 2)."""
+    return ai_router.web_search(brief)
