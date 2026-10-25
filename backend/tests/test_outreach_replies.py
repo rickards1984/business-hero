@@ -775,3 +775,67 @@ def test_reading_an_outreach_reply_is_costed_against_its_brand(r):
     key = f"classify:{BRAND}:openai/gpt-6-luna"
     got = dict(r.s.execute(text("SELECT meter, value FROM usage_meters WHERE meter LIKE 'ai_%'")).fetchall())
     assert float(got[f"ai_tokens_in:{key}"]) == 500 and float(got[f"ai_calls:{key}"]) == 1
+
+
+# ------------------------------- the business lock is held briefly (Mike's click test) ---
+# 25 Oct 2026: saving a brand timed out waiting for the business lock. Every
+# email sync ran this scan, which took the lock first and then read the WHOLE
+# inbox (bodies included) and queried prospects per message, every time.
+
+def _watch_the_lock(r, monkeypatch):
+    held = {'now': False}
+    reads = []
+    real_lock, real_rows = r.replies.send.lock_business, r.replies.send.rows
+
+    def lock(session, bid):
+        held['now'] = True
+        return real_lock(session, bid)
+
+    def rows(session, table, bid, where='', params=None, lock=False):
+        reads.append((table, where, held['now']))
+        return real_rows(session, table, bid, where, params, lock)
+    monkeypatch.setattr(r.replies.send, 'lock_business', lock)
+    monkeypatch.setattr(r.replies.send, 'rows', rows)
+    real_rollback, real_commit = r.s.rollback, r.s.commit
+
+    def released(fn):
+        def inner(*a, **k):
+            held['now'] = False
+            return fn(*a, **k)
+        return inner
+    monkeypatch.setattr(r.s, 'rollback', released(real_rollback))
+    monkeypatch.setattr(r.s, 'commit', released(real_commit))
+    return held, reads
+
+
+def test_with_no_outreach_sent_the_scan_never_takes_the_business_lock(r, monkeypatch):
+    r.s.execute(text('DELETE FROM outreach_messages'))
+    r.s.commit()
+    incoming(r)
+    for i in range(50):
+        incoming(r, ident=f'ordinary-{i}', sender=f'someone{i}@elsewhere.example')
+    monkeypatch.setattr(r.replies.send, 'lock_business', lambda *a: pytest.fail('locked with nothing to scan'))
+    scan(r)
+    assert r.s.execute(text('SELECT count(*) FROM outreach_replies')).scalar_one() == 0
+
+
+def test_ordinary_mail_is_never_read_while_the_business_is_locked(r, monkeypatch):
+    for i in range(200):
+        incoming(r, ident=f'ordinary-{i}', sender=f'someone{i}@elsewhere.example')
+    incoming(r)                                        # the one real reply, from the contacted prospect
+    held, reads = _watch_the_lock(r, monkeypatch)
+    scan(r)
+    assert r.s.execute(text('SELECT count(*) FROM outreach_replies')).scalar_one() == 1
+    locked_mail = [w for t, w, locked in reads if t == 'email_messages' and locked]
+    assert locked_mail and all('id=' in w for w in locked_mail), 'under the lock, mail is read only by id'
+    # The per-message prospect lookup runs only for the one real candidate, not the other 200 emails.
+    assert len([1 for t, w, locked in reads if t == 'outreach_prospects' and locked and 'LIKE' in w]) == 1
+
+
+def test_a_reply_already_recorded_is_not_read_again(r, monkeypatch):
+    incoming(r)
+    scan(r)
+    held, reads = _watch_the_lock(r, monkeypatch)
+    scan(r)
+    assert not [1 for t, w, locked in reads if t == 'email_messages' and locked]
+    assert r.s.execute(text('SELECT count(*) FROM outreach_replies')).scalar_one() == 1
