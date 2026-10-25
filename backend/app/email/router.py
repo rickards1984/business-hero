@@ -1732,6 +1732,29 @@ def handover_outreach_reply(reply_id: UUID, context=Depends(get_user_business_co
         raise HTTPException(exc.status_code, exc.detail) from None
 
 
+@outreach_router.get('/replies/{reply_id}/brief')
+def outreach_reply_brief(reply_id: UUID, context=Depends(get_user_business_context),
+                         session: Session = Depends(get_session)):
+    """OUT-19 E: Aria's briefing for a reply the owner answers themselves."""
+    from services import outreach_replies
+    from services.aria_actions import ActionRefused
+    business = get_business_by_id(session, context['business_id'])
+    try:
+        return outreach_replies.brief(session, business, reply_id=str(reply_id),
+                                      user_id=context['user_id'], moment=outreach_replies.now())
+    except ActionRefused as exc:
+        session.rollback()
+        raise HTTPException(exc.status_code, exc.detail) from None
+
+
+@outreach_router.get('/inboxes/headroom')
+def outreach_inbox_headroom(context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    """OUT-19 E: how close each campaign inbox is to today's safety ceiling."""
+    from services import outreach_replies
+    business = get_business_by_id(session, context['business_id'])
+    return outreach_replies.headroom(session, business, moment=outreach_replies.now())
+
+
 @outreach_router.post('/knowledge')
 def approve_outreach_knowledge(body: OutreachKnowledgeWrite, context=Depends(get_user_business_context),
                                session: Session = Depends(get_session)):

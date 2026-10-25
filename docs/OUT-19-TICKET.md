@@ -101,6 +101,19 @@ Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/tes
 - **Pilot limit (OUT-10 decision E).** It stays at 5 active contacts per campaign for the first week of the restart, so research also keeps no more than can join a campaign. `OUTREACH_PILOT_ENROLMENTS` raises it without a deploy; `0` lifts it, leaving the inbox's capacity to decide. Before lifting it, index `prepare`'s scan of open cards (OUT-8 ticket, note 2).
 
 ### E — Replies outside the cold cap, with the over-ceiling choices (decision 2)
+Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are in `backend/tests/test_outreach_replies_ceiling.py`.
+
+- **Sending (`metering.reserve_outreach_usage`).**
+  - A reply (a `bespoke` message) skips every cold limit: the campaign's cap, the brand's 20, the monthly allowance and the inbox's warm-up limit.
+  - Replies count only against the inbox's safety ceiling, `reply_ceiling(cap)` = the warm-up limit + 20, never above 70. The ceiling also binds cold emails, so an inbox never sends more than it in a day.
+  - Cold limits are counted from the usage events without replies. An email whose kind is unknown counts as cold.
+- **Research (D).** Replies never reduce the room for new contacts.
+- **The owner's three choices.**
+  - `GET /v1/outreach/inboxes/headroom` lists each campaign inbox's room today. The inbox is flagged near the ceiling at 5 or fewer left.
+  - The banner on the home page and the Outreach replies page offers:
+    1. **I'll reply myself.** Each reply card shows **Aria's briefing** (`GET /v1/outreach/replies/{id}/brief`, owner only): who wrote, what they asked, her suggested answer and the approved facts behind it, with copy buttons. "I'll handle this" then stops her following up.
+    2. **Add a second inbox**, through setup.
+    3. **Boost this inbox**, shown but disabled until part G exists.
 
 ### F — Stripe: extra brands as subscription items, top-ups and boosts as one-off payments (decisions 3–4)
 - Entitlement checks follow the existing webhook rules (BH-006).

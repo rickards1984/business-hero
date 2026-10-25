@@ -434,11 +434,19 @@ def test_entitlement_revoked_after_proposal(h):
 
 
 def test_daily_cap_includes_accepted_reserved_and_unknown(h):
+    """The inbox's warm-up limit (5 here) counts cold emails sent, held or of
+    unknown outcome; OUT-19 E counts them from the usage events, because the
+    mailbox row now also carries replies, which have their own ceiling."""
     card = propose(h)
+    for i, state in enumerate(('committed', 'committed', 'committed', 'reserved', 'unknown')):
+        message = add(h.s, 'messages', campaign_id=CAMPAIGN, mailbox_id=BOX, direction='outbound', state='accepted',
+                      kind='initial')
+        add(h.s, 'usage_events', operation_key=f'cold:{i}', kind='outreach_emails_sent', quantity=1, state=state,
+            mailbox_id=BOX, local_send_date='2026-10-23', message_id=message, period_start=STAMP, period_end=STAMP)
     add(h.s, 'daily_usage', scope_type='mailbox', scope_id=BOX,
         local_date='2026-10-23', accepted=3, reserved=1, unknown=1)
     h.s.commit()
-    refused(h, card)
+    refused_today(h, card, 5)
 
 
 # OUT-18 (Mike, Option A): 20 new emails a day PER BRAND, not per business.

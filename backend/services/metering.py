@@ -629,6 +629,34 @@ def mailbox_daily_cap(box, health=None) -> int:
     return max(0, min(stage, box['warmup_stage'], box['daily_cap'], int(health.get('provider_daily_cap', 20))))
 
 
+REPLY_HEADROOM, REPLY_CEILING_MAX = 20, 70     # OUT-19 decision 2
+
+
+def reply_ceiling(cap: int) -> int:
+    """An inbox's safety ceiling for a day, replies included: its warm-up
+    limit plus 20, never above 70 (OUT-19 decision 2). 0 when it may not send."""
+    return min(REPLY_CEILING_MAX, cap + REPLY_HEADROOM) if cap > 0 else 0
+
+
+def reply_headroom(session, bid: str, mailbox_id: str, moment) -> dict:
+    """How many more emails this inbox may send today, replies included, and
+    whether replies are close to its ceiling (OUT-19 E: the owner is then
+    offered a boost, a second inbox, or replying themselves)."""
+    from services.outreach_send import rows
+    boxes = rows(session, 'outreach_mailboxes', bid, 'AND mailbox_id=:m', {'m': str(mailbox_id)})
+    cap = mailbox_daily_cap(boxes[0]) if len(boxes) == 1 else 0
+    ceiling = reply_ceiling(cap)
+    usage = rows(session, 'outreach_daily_usage', bid, 'AND scope_type=:s AND scope_id=:i AND local_date=:d',
+                 {'s': 'mailbox', 'i': str(mailbox_id), 'd': moment.astimezone(LONDON).date().isoformat()})
+    used = sum(usage[0][k] or 0 for k in ('reserved', 'accepted', 'unknown')) if usage else 0
+    left = max(0, ceiling - used)
+    return {'cap': cap, 'ceiling': ceiling, 'used': int(used), 'left': left,
+            'near_ceiling': ceiling > 0 and left <= REPLY_NEAR}
+
+
+REPLY_NEAR = 5     # replies left today at which the owner is shown the choices
+
+
 def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, prospect_id, message_id, moment):
     """Reserve once; caller owns transaction, rollback and action claim."""
     from services.outreach_send import rows, one, require, insert, loads, _parse
@@ -657,11 +685,44 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
     require(cap == mailbox_daily_cap(box, health))   # research plans with the same number (OUT-19 D)
     message = one(session, 'outreach_messages', bid, message_id)
     campaign = one(session, 'outreach_campaigns', bid, message['campaign_id'])
-    # Campaign cap also includes every held/accepted message for this UK day.
     start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    # OUT-19 decision 2: answering someone who wrote back is conversation, not
+    # cold outreach. A reply skips every cold limit below (campaign, brand,
+    # month, the inbox's warm-up limit) and counts only against the inbox's
+    # safety ceiling; cold emails are counted without replies.
+    reply = message['kind'] == 'bespoke'
+    cold = "AND (m.kind IS NULL OR m.kind <> 'bespoke') "   # anything not known to be a reply is cold
+    if not reply:
+        _cold_limits(session, bid, campaign, settings, mailbox_id, cap, local, cold)
+    for scope, scope_id, limit in (('business', bid, None), ('mailbox', mailbox_id, reply_ceiling(cap))):
+        usage = rows(session, 'outreach_daily_usage', bid, 'AND scope_type=:s AND scope_id=:i AND local_date=:d',
+                     {'s': scope, 'i': scope_id, 'd': local.date().isoformat()}, True)
+        if not usage:
+            ident = insert(session, 'outreach_daily_usage', bid, scope_type=scope, scope_id=scope_id,
+                           local_date=local.date().isoformat(), reserved=0, accepted=0, unknown=0)
+            usage = [one(session, 'outreach_daily_usage', bid, ident)]
+        u = usage[0]
+        if limit is not None:
+            require(sum(u[k] or 0 for k in ('reserved', 'accepted', 'unknown')) < limit,
+                    "This inbox has reached today's safety ceiling" if reply else 'Daily outreach capacity exhausted')
+        session.execute(text('UPDATE outreach_daily_usage SET reserved=reserved+1 WHERE business_id=:b AND id=:id'), {'b': bid, 'id': u['id']})
+    month_start = start.replace(day=1)
+    month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    insert(session, 'outreach_usage_events', bid, operation_key=operation_key, kind=OUTREACH_SENT,
+           quantity=1, state='reserved', period_start=month_start.astimezone(ZoneInfo('UTC')),
+           period_end=month_end.astimezone(ZoneInfo('UTC')), mailbox_id=mailbox_id,
+           local_send_date=local.date().isoformat(), message_id=message_id)
+    _outreach_delta(session, bid, OUTREACH_HELD, period, 1)
+
+
+def _cold_limits(session, bid, campaign, settings, mailbox_id, cap, local, cold):
+    """The limits on cold emails (initial and follow-ups), each counted from
+    this UK day's held and sent cold emails, under the business lock."""
+    from services.outreach_send import require
+    # Campaign cap also includes every held/accepted message for this UK day.
     count = session.execute(text(
         "SELECT count(*) FROM outreach_usage_events u JOIN outreach_messages m ON m.business_id=u.business_id AND m.id=u.message_id "
-        "WHERE u.business_id=:b AND m.campaign_id=:c AND u.local_send_date=:d AND u.state IN ('reserved','committed','unknown')"),
+        "WHERE u.business_id=:b AND m.campaign_id=:c AND u.local_send_date=:d AND u.state IN ('reserved','committed','unknown') " + cold),
         {'b': bid, 'c': campaign['id'], 'd': local.date().isoformat()}).scalar()
     require(count < campaign['daily_cap'], 'Campaign daily capacity exhausted')
     # OUT-18 (Mike, Option A): the daily limit of new emails is PER BRAND —
@@ -670,7 +731,7 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
     brand_count = session.execute(text(
         "SELECT count(*) FROM outreach_usage_events u JOIN outreach_messages m ON m.business_id=u.business_id AND m.id=u.message_id "
         "JOIN outreach_campaigns c ON c.business_id=m.business_id AND c.id=m.campaign_id "
-        "WHERE u.business_id=:b AND c.brand_id=:br AND u.local_send_date=:d AND u.state IN ('reserved','committed','unknown')"),
+        "WHERE u.business_id=:b AND c.brand_id=:br AND u.local_send_date=:d AND u.state IN ('reserved','committed','unknown') " + cold),
         {'b': bid, 'br': str(campaign['brand_id']), 'd': local.date().isoformat()}).scalar()
     daily_limit = min(20, settings['business_daily_cap'])
     require(brand_count < daily_limit, 'Daily outreach capacity for this brand exhausted')
@@ -682,29 +743,15 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
         "SELECT count(*) FROM outreach_usage_events u JOIN outreach_messages m ON m.business_id=u.business_id AND m.id=u.message_id "
         "JOIN outreach_campaigns c ON c.business_id=m.business_id AND c.id=m.campaign_id "
         "WHERE u.business_id=:b AND c.brand_id=:br AND u.local_send_date>=:first AND u.local_send_date<:following "
-        "AND u.state IN ('reserved','committed','unknown')"),
+        "AND u.state IN ('reserved','committed','unknown') " + cold),
         {'b': bid, 'br': str(campaign['brand_id']), 'first': first.isoformat(), 'following': following.isoformat()}).scalar()
     require(month_count < daily_limit * weekdays, 'Monthly outreach allowance for this brand exhausted')
-    # The business row is still counted (reporting and settlement); the
-    # mailbox row enforces each mailbox's warm-up limit.
-    for scope, scope_id, limit in (('business', bid, None), ('mailbox', mailbox_id, cap)):
-        usage = rows(session, 'outreach_daily_usage', bid, 'AND scope_type=:s AND scope_id=:i AND local_date=:d',
-                     {'s': scope, 'i': scope_id, 'd': local.date().isoformat()}, True)
-        if not usage:
-            ident = insert(session, 'outreach_daily_usage', bid, scope_type=scope, scope_id=scope_id,
-                           local_date=local.date().isoformat(), reserved=0, accepted=0, unknown=0)
-            usage = [one(session, 'outreach_daily_usage', bid, ident)]
-        u = usage[0]
-        if limit is not None:
-            require(sum(u[k] or 0 for k in ('reserved', 'accepted', 'unknown')) < limit, 'Daily outreach capacity exhausted')
-        session.execute(text('UPDATE outreach_daily_usage SET reserved=reserved+1 WHERE business_id=:b AND id=:id'), {'b': bid, 'id': u['id']})
-    month_start = start.replace(day=1)
-    month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
-    insert(session, 'outreach_usage_events', bid, operation_key=operation_key, kind=OUTREACH_SENT,
-           quantity=1, state='reserved', period_start=month_start.astimezone(ZoneInfo('UTC')),
-           period_end=month_end.astimezone(ZoneInfo('UTC')), mailbox_id=mailbox_id,
-           local_send_date=local.date().isoformat(), message_id=message_id)
-    _outreach_delta(session, bid, OUTREACH_HELD, period, 1)
+    # The inbox's warm-up limit is for cold emails; replies have the ceiling.
+    on_box = session.execute(text(
+        "SELECT count(*) FROM outreach_usage_events u JOIN outreach_messages m ON m.business_id=u.business_id AND m.id=u.message_id "
+        "WHERE u.business_id=:b AND u.mailbox_id=:mb AND u.local_send_date=:d AND u.state IN ('reserved','committed','unknown') " + cold),
+        {'b': bid, 'mb': str(mailbox_id), 'd': local.date().isoformat()}).scalar()
+    require(on_box < cap, 'Daily outreach capacity exhausted')
 
 
 def settle_outreach_usage(session, business, *, operation_key, outcome, evidence):

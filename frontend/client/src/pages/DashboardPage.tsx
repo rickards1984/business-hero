@@ -9,6 +9,7 @@ import { apiRequest } from '@/lib/queryClient';
 import TasksPanel from '@/components/TasksPanel';
 import ApprovalCard from '@/components/ApprovalCard';
 import OutreachReplyCard from '@/components/OutreachReplyCard';
+import ReplyCeilingBanner from '@/components/ReplyCeilingBanner';
 import ReplyCard, { type ChaseReply } from '@/components/ReplyCard';
 import AriaHero from '@/components/AriaHero';
 import OutreachIntro from '@/components/OutreachIntro';
@@ -120,6 +121,7 @@ function DashboardContent() {
           <span>Aria drafts. You approve. She acts once, signed as your AI assistant.</span>
         </div>
         {outreachOn && (d.outreachPending.isError || d.outreachHandedOver.isError) && <Alert severity="info">Outreach replies unavailable. Outreach history access is required.</Alert>}
+        {outreachOn && <ReplyCeilingBanner businessId={businessId} />}
         {outreachReplies.map(r => <OutreachReplyCard key={`${businessId}:${r.id}`} businessId={businessId} reply={r} />)}
         {outreachOn && !!d.outreach.data?.totals?.unresolved_replies && <button className="home-link" onClick={() => navigate('/app/outreach/replies')}>View all {d.outreach.data.totals.unresolved_replies} unresolved outreach replies</button>}
         {replies.length > 0 && (
