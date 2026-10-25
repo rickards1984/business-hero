@@ -702,6 +702,21 @@ def _enrol(session, bid: str, lia: dict, prospect_ids: list, moment: datetime) -
 
 # ------------------------------------------------------------------ the run ---
 
+def _pause_impossible(session, bid: str, brand_id: str, cost, impossible: int, out: dict) -> None:
+    """More than any search could cost — a bug or a price change — on either
+    settlement path: the full cost is kept and the brand pauses until the owner
+    looks. Runs under the settlement's business lock and commits."""
+    cfg = _config(_doc(session, bid))
+    paused = _brand_config(cfg, brand_id)
+    paused["enabled"] = False
+    paused["paused_reason"] = f"A search cost {cost}p, more than any search should ({impossible}p)"
+    _put_brand(cfg, brand_id, paused)
+    _save_config(session, bid, cfg)
+    session.commit()
+    out["stopped"] = ("Research paused for this brand: a search cost more than any search should. "
+                      "Check the prices and the budget, then switch it back on")
+
+
 def run(session, business, compliance_id, *, search: Optional[Callable] = None, fetch: Optional[Callable] = None,
         mx: Optional[Callable] = None, companies: Optional[Callable] = None,
         moment: Optional[datetime] = None) -> dict:
@@ -802,8 +817,11 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
                 ai_costs.record(session, bid, purpose="research", brand_id=brand_id, moment=moment, pence=reserve,
                                 estimated=True, provider="openai", model=model)
             _spend(session, bid, moment, charged - reserve, brand_id)
-            session.commit()
             out["spend_pence"] += charged
+            if charged > impossible:
+                _pause_impossible(session, bid, brand_id, charged, impossible, out)   # commits
+                break
+            session.commit()
             out["stopped"] = "Research was unavailable"
             break
         cost = max(0, int(result.get("cost_pence") or 0))
@@ -826,17 +844,7 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
                             tool_calls=int(usage.get("tool_calls") or 0))
         out["spend_pence"] += cost
         if cost > impossible:
-            # More than any search could cost: a bug or a price change. The
-            # full cost is kept and research pauses until the owner looks.
-            cfg = _config(_doc(session, bid))     # still under the settlement's lock
-            paused = _brand_config(cfg, brand_id)
-            paused["enabled"] = False
-            paused["paused_reason"] = f"A search cost {cost}p, more than any search should ({impossible}p)"
-            _put_brand(cfg, brand_id, paused)
-            _save_config(session, bid, cfg)
-            session.commit()
-            out["stopped"] = ("Research paused for this brand: a search cost more than any search should. "
-                              "Check the prices and the budget, then switch it back on")
+            _pause_impossible(session, bid, brand_id, cost, impossible, out)   # commits
             break
         if cost > reserve:
             # Option B: an overrun is recorded (above) and the brand stops

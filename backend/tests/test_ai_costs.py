@@ -438,7 +438,7 @@ def test_research_reserves_from_the_one_price_table(monkeypatch):
     from test_outreach_research import research
     r = research()
     before = r.max_search_pence()
-    monkeypatch.setenv("AI_PRICES_JSON", json.dumps({"openai/gpt-6.1-sol": [314, 1574, 2]}))
+    monkeypatch.setenv("AI_PRICES_JSON", json.dumps({"openai/gpt-6.1-sol": [314, 1574, 2, 272000, 628, 2362]}))
     assert r.max_search_pence() > before * 1.9
 
 

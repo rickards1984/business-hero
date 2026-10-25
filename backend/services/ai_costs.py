@@ -49,8 +49,9 @@ DEFAULT_PRICES = {
     # OpenAI (developers.openai.com/api/docs/pricing). Web search $10/1k calls
     # (reasoning models also pay search content at the model's input rate),
     # $25/1k for non-reasoning models.
-    "openai/gpt-6.1-sol": (157, 787, 1),
-    "openai/gpt-6-luna": (8, 39, 1),
+    # GPT-6.1 Sol and GPT-6 Luna: 2× input and 1.5× output above 272k input tokens.
+    "openai/gpt-6.1-sol": (157, 787, 1, 272_000, 314, 1181),
+    "openai/gpt-6-luna": (8, 39, 1, 272_000, 16, 59),
     "openai/gpt-4.1": (157, 630, 2),
     "openai/gpt-4o": (197, 787, 2),
     "openai/gpt-4o-mini": (12, 47, 2),
@@ -77,7 +78,11 @@ def _valid(value) -> Optional[tuple]:
         out = tuple(float(v) for v in value)
     except (TypeError, ValueError, OverflowError):
         return None
-    return out if all(math.isfinite(v) and v >= 0 for v in out) else None
+    if not all(math.isfinite(v) and v >= 0 for v in out):
+        return None
+    if len(out) == 6 and (out[3] <= 0 or out[4] < out[0] or out[5] < out[1]):
+        return None      # a higher tier must start somewhere and never be cheaper (Codex OUT-19 H review 2)
+    return out
 
 
 def _prices() -> dict:
@@ -116,7 +121,7 @@ def price(provider: str, model: str) -> tuple:
 def price_max(provider: str, model: str) -> tuple:
     """(input, output, per tool call) at the model's highest rate."""
     e = _entry(provider, model)
-    return (e[4], e[5], e[2]) if len(e) == 6 else e[:3]
+    return (max(e[0], e[4]), max(e[1], e[5]), e[2]) if len(e) == 6 else e[:3]
 
 
 def require_priced(provider: str, model: str) -> None:

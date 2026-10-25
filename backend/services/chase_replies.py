@@ -447,15 +447,10 @@ _PROMPT = (
 def classify_with_model(text_: str) -> dict:
     """The production reader. Any failure raises, and the reply is then
     flagged as "unknown" (it still pauses chasing)."""
-    import os
-    from openai import OpenAI
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
-        raise RuntimeError("no model key configured")
-    client = OpenAI(api_key=key, timeout=30.0, max_retries=1)
-    response = client.chat.completions.create(
-        model=os.getenv("ARIA_REPLY_MODEL", "gpt-4o-mini"),
-        messages=[{"role": "system", "content": _PROMPT},
-                  {"role": "user", "content": text_[:4000]}],
-        response_format={"type": "json_object"}, temperature=0)
-    return json.loads(response.choices[0].message.content or "{}")
+    # OUT-19 (Mike, 25 Oct 2026): replies are sorted by GPT-6 Luna through the
+    # AI router, with provider failover; ARIA_REPLY_MODEL still chooses OpenAI's.
+    from services import ai_router
+    try:
+        return ai_router.json_chat(_PROMPT, text_[:4000], purpose="classify", max_tokens=400)
+    except ai_router.AllProvidersFailed as exc:
+        raise RuntimeError(str(exc)) from exc

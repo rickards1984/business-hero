@@ -123,7 +123,7 @@ def models(purpose: str) -> dict:
             logger.error("AI_MODELS_JSON is not valid; all of it is ignored and the built-in models are used")
             table = dict(DEFAULT_MODELS.get(purpose, {}))
     # The settings from before failover still choose OpenAI's model.
-    legacy = {"draft": "ARIA_DRAFT_MODEL", "research": "ARIA_RESEARCH_MODEL"}.get(purpose)
+    legacy = {"draft": "ARIA_DRAFT_MODEL", "research": "ARIA_RESEARCH_MODEL", "classify": "ARIA_REPLY_MODEL"}.get(purpose)
     if legacy and os.environ.get(legacy):
         table["openai"] = os.environ[legacy]
     return table
@@ -188,12 +188,11 @@ def _anthropic_chat(provider, model, system, user, max_tokens):
         raise ProviderError(f"{provider}: {type(exc).__name__}") from exc
     if response.status_code != 200:
         raise ProviderError(f"{provider}: HTTP {response.status_code}")
+    body, usage, _ = _anthropic_body(provider, response)
     try:
-        body = response.json()
-        usage = _anthropic_usage(body)
         text = "".join(b.get("text", "") for b in body.get("content", []) if b.get("type") == "text")
-    except (ValueError, AttributeError, TypeError) as exc:
-        raise ProviderError(f"{provider}: malformed reply") from exc
+    except (AttributeError, TypeError) as exc:
+        raise ProviderError(f"{provider}: malformed reply", usage=usage) from exc   # billed, keep its usage
     return text, usage
 
 
@@ -202,9 +201,28 @@ def _anthropic_usage(body: dict):
     return SimpleNamespace(input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"))
 
 
-def json_chat(system: str, context: dict, *, purpose: str, max_tokens: int) -> dict:
-    """One JSON answer from the first provider that can serve it."""
-    user = json.dumps(context, default=str)
+def _anthropic_body(provider: str, response):
+    """The decoded body, its usage and its web-search count, read first and
+    separately, so a reply whose content is malformed is still charged at the
+    usage it reported (Codex OUT-19 H review 2)."""
+    try:
+        body = response.json()
+        if not isinstance(body, dict):
+            raise TypeError("not an object")
+    except (ValueError, TypeError) as exc:
+        raise ProviderError(f"{provider}: malformed reply") from exc
+    try:
+        usage = _anthropic_usage(body)
+        searches = int(((body.get("usage") or {}).get("server_tool_use") or {}).get("web_search_requests") or 0)
+    except (AttributeError, TypeError, ValueError):
+        usage, searches = None, 0
+    return body, usage, searches
+
+
+def json_chat(system: str, context, *, purpose: str, max_tokens: int) -> dict:
+    """One JSON answer from the first provider that can serve it. `context` is
+    sent as JSON, or as it is when it is already text."""
+    user = context if isinstance(context, str) else json.dumps(context, default=str)
     worst = (len(system) + len(user), max_tokens)   # every character a token, the full output
     tried = []
     for provider, model in chain(purpose):
@@ -272,12 +290,15 @@ def _openai_compatible_search(provider, model, brief):
     except Exception as exc:
         raise ProviderError(f"{provider}: {type(exc).__name__}") from exc
     usage = getattr(response, "usage", None)
+    output = getattr(response, "output", None)
+    if not isinstance(output, list):
+        # No Responses envelope: a provider failure, not an empty answer.
+        raise ProviderError(f"{provider}: malformed reply", usage=usage)
     try:
-        searches = sum(1 for item in (getattr(response, "output", None) or [])
-                       if getattr(item, "type", "") == "web_search_call")
+        searches = sum(1 for item in output if getattr(item, "type", "") == "web_search_call")
         text = getattr(response, "output_text", "") or ""
     except (AttributeError, TypeError) as exc:
-        raise ProviderError(f"{provider}: malformed reply", usage=usage) from exc
+        raise ProviderError(f"{provider}: malformed reply", usage=usage, searches=0) from exc
     return text, usage, searches
 
 
@@ -292,10 +313,8 @@ def _anthropic_search(provider, model, brief):
         raise ProviderError(f"{provider}: {type(exc).__name__}") from exc
     if response.status_code != 200:
         raise ProviderError(f"{provider}: HTTP {response.status_code}")
+    body, usage, searches = _anthropic_body(provider, response)
     try:
-        body = response.json()
-        usage = _anthropic_usage(body)
-        searches = int(((body.get("usage") or {}).get("server_tool_use") or {}).get("web_search_requests") or 0)
         blocks = body.get("content", [])
         text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
         # Anthropic reports search outages INSIDE a 200 reply (Codex OUT-19 H
@@ -305,7 +324,7 @@ def _anthropic_search(provider, model, brief):
                        if b.get("type") == "web_search_tool_result" and isinstance(b.get("content"), dict)
                        and b["content"].get("type") == "web_search_tool_result_error"}
     except (ValueError, AttributeError, TypeError) as exc:
-        raise ProviderError(f"{provider}: malformed reply") from exc
+        raise ProviderError(f"{provider}: malformed reply", usage=usage, searches=searches) from exc
     if tool_errors & RETRYABLE_SEARCH_ERRORS:
         raise ProviderError(f"{provider}: web search {', '.join(sorted(tool_errors))}", usage=usage, searches=searches)
     return text, usage, searches
