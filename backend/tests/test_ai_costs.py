@@ -173,7 +173,7 @@ def test_a_research_search_is_recorded_against_its_brand(db):
     biz, brand, lia, campaign = started(db)
     run(db, biz, lia, World([[person(i) for i in range(20)]], cost=37))
     from test_outreach_setup import A
-    assert meter(db, A, f"ai_pence:research:{brand['id']}:openai/gpt-4.1") == 37
+    assert meter(db, A, f"ai_pence:research:{brand['id']}:openai/gpt-6.1-sol") == 37
     assert meter(db, A, "ai_pence") == 37
 
 
@@ -340,7 +340,7 @@ def _setup_brand(db):
 def _draft_cost(db, brand):
     from test_outreach_setup import A
     period = datetime.now(timezone.utc).strftime("%Y-%m")
-    return meter(db, A, f"ai_pence:draft:{brand['id']}:openai/gpt-4o", period)
+    return meter(db, A, f"ai_pence:draft:{brand['id']}:openai/gpt-6.1-sol", period)
 
 
 @pytest.mark.parametrize("content", ["not json at all", json.dumps({"purpose": ""})])
@@ -352,7 +352,7 @@ def test_a_paid_draft_that_is_then_rejected_is_still_recorded(db, monkeypatch, c
     with Session(db) as s:
         with pytest.raises(Exception):
             m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Gyms"})
-    assert _draft_cost(db, brand) == pytest.approx(costs().cost("openai", "gpt-4o", 1000, 200), abs=0.01)
+    assert _draft_cost(db, brand) == pytest.approx(costs().cost("openai", "gpt-6.1-sol", 1000, 200), abs=0.01)
 
 
 def test_a_model_call_that_fails_is_recorded_at_an_estimate(db, monkeypatch):
@@ -366,7 +366,7 @@ def test_a_model_call_that_fails_is_recorded_at_an_estimate(db, monkeypatch):
         with pytest.raises(Exception):
             m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Gyms"})
     from services import outreach_setup
-    assert _draft_cost(db, brand) >= costs().cost("openai", "gpt-4o", 0, outreach_setup.DRAFT_MAX_TOKENS)
+    assert _draft_cost(db, brand) >= costs().cost("openai", "gpt-6.1-sol", 0, outreach_setup.DRAFT_MAX_TOKENS)
 
 
 def test_a_campaign_whose_drafted_emails_are_refused_is_still_recorded(db, monkeypatch):
@@ -418,8 +418,8 @@ def test_a_failed_search_is_recorded_at_its_reserve_as_an_estimate(db):
     world = World([[person(1)]])
     world.search_error = TimeoutError("provider timeout")
     run(db, biz, lia, world)
-    key = f"research:{brand['id']}:openai/gpt-4.1"
-    assert meter(db, A, f"ai_pence:{key}") == research().MAX_SEARCH_PENCE
+    key = f"research:{brand['id']}:openai/gpt-6.1-sol"
+    assert meter(db, A, f"ai_pence:{key}") == research().SEARCH_RESERVE_PENCE
     assert meter(db, A, f"ai_estimated:{key}") == 1
 
 
@@ -437,8 +437,9 @@ def test_an_unpriced_research_model_stops_before_reserving(db, monkeypatch):
 def test_research_reserves_from_the_one_price_table(monkeypatch):
     from test_outreach_research import research
     r = research()
-    monkeypatch.setenv("AI_PRICES_JSON", json.dumps({"openai/gpt-4.1": [320, 1280, 4]}))
-    assert r.max_search_pence() > r.MAX_SEARCH_PENCE * 1.9
+    before = r.max_search_pence()
+    monkeypatch.setenv("AI_PRICES_JSON", json.dumps({"openai/gpt-6.1-sol": [314, 1574, 2]}))
+    assert r.max_search_pence() > before * 1.9
 
 
 def test_a_past_month_counts_only_brands_that_existed_then(report_db):
@@ -469,8 +470,8 @@ def test_a_successful_draft_without_reported_usage_is_charged_at_its_most_and_ma
     with Session(db) as s:
         m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Gyms"})
     period = datetime.now(timezone.utc).strftime("%Y-%m")
-    key = f"draft:{brand['id']}:openai/gpt-4o"
-    assert _draft_cost(db, brand) >= costs().cost("openai", "gpt-4o", 0, outreach_setup.DRAFT_MAX_TOKENS)
+    key = f"draft:{brand['id']}:openai/gpt-6.1-sol"
+    assert _draft_cost(db, brand) >= costs().cost("openai", "gpt-6.1-sol", 0, outreach_setup.DRAFT_MAX_TOKENS)
     assert meter(db, A, f"ai_estimated:{key}", period) == 1
 
 
@@ -482,7 +483,7 @@ def test_a_search_without_reported_usage_is_charged_its_full_reserve(monkeypatch
     response = SimpleNamespace(usage=None, output=[], output_text='{"candidates": []}')
     monkeypatch.setattr(openai, "OpenAI", lambda **kw: SimpleNamespace(responses=SimpleNamespace(create=lambda **k: response)))
     out = r.web_search("brief")
-    assert out["cost_pence"] == r.max_search_pence() and out["calls"][0]["estimated"] is True
+    assert out["cost_pence"] == r.search_reserve_pence() and out["calls"][0]["estimated"] is True
 
 
 def test_a_brand_made_just_after_midnight_bst_belongs_to_its_new_month(report_db):

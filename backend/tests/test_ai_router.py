@@ -83,14 +83,14 @@ def test_the_older_draft_and_research_model_settings_still_apply(monkeypatch):
 def test_a_provider_without_a_key_or_with_an_unpriced_model_is_left_out(monkeypatch):
     keys(monkeypatch, "openai", "xai")
     monkeypatch.setenv("AI_MODELS_JSON", json.dumps({"draft": {"xai": "grok-unknown"}}))
-    assert router().chain("draft") == [("openai", "gpt-4o")]
+    assert router().chain("draft") == [("openai", "gpt-6.1-sol")]
 
 
 def test_invalid_model_configuration_is_ignored_as_a_whole(monkeypatch, caplog):
     keys(monkeypatch, "openai")
     monkeypatch.setenv("AI_MODELS_JSON", "{not json")
     with caplog.at_level(logging.ERROR):
-        assert router().chain("draft") == [("openai", "gpt-4o")]
+        assert router().chain("draft") == [("openai", "gpt-6.1-sol")]
     assert "ignored" in caplog.text
 
 
@@ -220,9 +220,8 @@ def test_research_fails_over_and_reports_every_attempt(monkeypatch):
 def test_research_reserves_enough_for_every_provider_it_might_try(monkeypatch):
     keys(monkeypatch, "openai", "anthropic")
     r = router()
-    one = r.max_search_pence("openai", "gpt-4.1")
-    both = r.reserve_pence()
-    assert both == one + r.max_search_pence("anthropic", "claude-sonnet-4-5")
+    assert r.reserve_pence() == 2 * r.search_reserve_pence()      # one realistic reserve per provider
+    assert r.impossible_pence() == r.max_search_pence("openai", "gpt-6.1-sol") + r.max_search_pence("anthropic", "claude-sonnet-4-5")
 
 
 def test_a_research_run_records_each_attempt_in_the_ledger(db):
@@ -260,8 +259,8 @@ def test_the_research_reservation_includes_providers_still_cooling_down(monkeypa
     keys(monkeypatch, "openai", "anthropic")
     r = router()
     r._trip("anthropic")
-    assert r.chain("research") == [("openai", "gpt-4.1")]
-    assert r.reserve_pence() == r.max_search_pence("openai", "gpt-4.1") + r.max_search_pence("anthropic", "claude-sonnet-4-5")
+    assert r.chain("research") == [("openai", "gpt-6.1-sol")]
+    assert r.reserve_pence() == 2 * r.search_reserve_pence()
 
 
 def test_with_no_research_provider_nothing_is_reserved_or_spent(db):

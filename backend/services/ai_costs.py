@@ -21,11 +21,13 @@ already in flight when the limit is reached still completes and is recorded,
 so the limit can be exceeded by at most the calls in flight at that moment.
 
 Prices are pence per million tokens (input, output) and pence per tool call,
-from provider list prices at about £1 = $1.27. They must be checked against
-the providers' current pages; AI_PRICES_JSON ({"provider/model": [in, out,
-per_tool_call]}) overrides them without a deploy. A configuration with any
-invalid entry is ignored as a whole. A model with no price is refused before
-any spend (`require_priced`).
+from provider list prices at about £1 = $1.27, checked on 25 Oct 2026 against
+OpenAI's and xAI's pricing pages (Anthropic's are still estimates). A model
+priced higher above a context size (xAI above 200k tokens) adds
+[threshold, input_above, output_above]. AI_PRICES_JSON ({"provider/model":
+[in, out, per_tool_call(, threshold, in_above, out_above)]}) overrides them
+without a deploy. A configuration with any invalid entry is ignored as a
+whole. A model with no price is refused before any spend (`require_priced`).
 """
 import json
 import logging
@@ -44,10 +46,19 @@ logger = logging.getLogger(__name__)
 
 TOTAL = "ai_pence"
 DEFAULT_PRICES = {
-    "openai/gpt-4.1": (160, 640, 2),
-    "openai/gpt-4o": (200, 790, 2),
+    # OpenAI (developers.openai.com/api/docs/pricing). Web search $10/1k calls
+    # (reasoning models also pay search content at the model's input rate),
+    # $25/1k for non-reasoning models.
+    "openai/gpt-6.1-sol": (157, 787, 1),
+    "openai/gpt-6-luna": (8, 39, 1),
+    "openai/gpt-4.1": (157, 630, 2),
+    "openai/gpt-4o": (197, 787, 2),
     "openai/gpt-4o-mini": (12, 47, 2),
-    "xai/grok-4": (240, 1190, 2),
+    # xAI (docs.x.ai/developers/pricing): doubles above 200k tokens; web search $5/1k.
+    "xai/grok-4.20-0309-reasoning": (98, 197, 0.4, 200_000, 197, 394),
+    "xai/grok-4.20-0309-non-reasoning": (98, 197, 0.4, 200_000, 197, 394),
+    "xai/grok-4.7": (157, 472, 0.4, 200_000, 315, 945),
+    # Anthropic: an estimate, to be checked against its pricing page.
     "anthropic/claude-sonnet-4-5": (240, 1190, 1),
 }
 LEDGER_LOCK = 0x4F555431   # one advisory lock serialises ledger writes platform-wide (PostgreSQL)
@@ -60,7 +71,7 @@ class Unpriced(Exception):
 
 
 def _valid(value) -> Optional[tuple]:
-    if not isinstance(value, (list, tuple)) or len(value) != 3:
+    if not isinstance(value, (list, tuple)) or len(value) not in (3, 6):
         return None
     try:
         out = tuple(float(v) for v in value)
@@ -90,11 +101,22 @@ def known_models() -> list:
     return [tuple(k.split("/", 1)) for k in _prices()]
 
 
-def price(provider: str, model: str) -> tuple:
+def _entry(provider: str, model: str) -> tuple:
     found = _prices().get(f"{provider}/{model}")
     if found is None:
         raise Unpriced(f"No price is set for {provider}/{model}")
     return tuple(found)
+
+
+def price(provider: str, model: str) -> tuple:
+    """(input, output, per tool call) at the ordinary rate."""
+    return _entry(provider, model)[:3]
+
+
+def price_max(provider: str, model: str) -> tuple:
+    """(input, output, per tool call) at the model's highest rate."""
+    e = _entry(provider, model)
+    return (e[4], e[5], e[2]) if len(e) == 6 else e[:3]
 
 
 def require_priced(provider: str, model: str) -> None:
@@ -103,7 +125,8 @@ def require_priced(provider: str, model: str) -> None:
 
 
 def cost(provider: str, model: str, input_tokens: int = 0, output_tokens: int = 0, tool_calls: int = 0) -> float:
-    p_in, p_out, p_tool = price(provider, model)
+    e = _entry(provider, model)
+    p_in, p_out, p_tool = (e[4], e[5], e[2]) if len(e) == 6 and input_tokens >= e[3] else e[:3]
     return (input_tokens * p_in + output_tokens * p_out) / 1_000_000 + tool_calls * p_tool
 
 

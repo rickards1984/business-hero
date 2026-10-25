@@ -141,7 +141,7 @@ def test_an_overspend_pauses_only_that_brand(db):
     biz, brand, lia, campaign = started(db)
     fit, fit_lia = second_brand(db, biz)
     r = research()
-    out = run(db, biz, lia, World([[person(1)]], cost=r.MAX_SEARCH_PENCE + 9))
+    out = run(db, biz, lia, World([[person(1)]], cost=r.impossible_search_pence() + 9))
     assert "paused" in out["stopped"]
     with Session(db) as s:
         rows = {b["brand_id"]: b for b in r.status(s, biz)["brands"]}
@@ -376,8 +376,8 @@ def meter_writes_without_the_lock(events):
     return bad
 
 
-@pytest.mark.parametrize("cost_over_reserve", [0, 9])
-def test_every_meter_write_happens_under_the_business_lock(db, monkeypatch, cost_over_reserve):
+@pytest.mark.parametrize("impossible", [False, True])
+def test_every_meter_write_happens_under_the_business_lock(db, monkeypatch, impossible):
     """Review 1 P1 3 and review 2 P1 1: the budget check and reservation are
     one locked step, and the settlement (and any overspend pause) takes the
     business lock BEFORE touching the meter, so PostgreSQL never sees the
@@ -390,14 +390,15 @@ def test_every_meter_write_happens_under_the_business_lock(db, monkeypatch, cost
     monkeypatch.setattr(r, "_lock", lambda session, bid: (events.append("lock"), real_lock(session, bid))[1])
     monkeypatch.setattr(r, "_spend", lambda session, bid, moment, pence, brand_id:
                         (events.append(("spend", pence)), real_spend(session, bid, moment, pence, brand_id))[1])
-    world = World([batch(0)], cost=r.MAX_SEARCH_PENCE + cost_over_reserve)
+    cost = r.impossible_search_pence() + 9 if impossible else r.SEARCH_RESERVE_PENCE
+    world = World([batch(0)], cost=cost)
     with Tracked(db) as s:
         out = r.run(s, biz, lia["id"], **world.kwargs())
     writes = [e for e in events if isinstance(e, tuple)]
-    assert writes[0] == ("spend", r.MAX_SEARCH_PENCE) and len(writes) == 2   # reserve, then settle
+    assert writes[0] == ("spend", r.SEARCH_RESERVE_PENCE) and len(writes) == 2   # reserve, then settle
     assert meter_writes_without_the_lock(events) == []
-    if cost_over_reserve:
-        assert "paused" in out["stopped"] and spent(db, brand) == r.MAX_SEARCH_PENCE + cost_over_reserve
+    if impossible:
+        assert "paused" in out["stopped"] and spent(db, brand) == cost
         with Session(db) as s:
             assert r.status(s, biz)["brands"][0]["enabled"] is False
 

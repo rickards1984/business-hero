@@ -496,7 +496,7 @@ def test_a_failed_search_keeps_its_reserved_spend_and_never_retries(db):
     out = run(db, biz, lia, world)
     assert len(world.briefs) == 1 and out["stopped"]
     held = int(float(count(db, "SELECT value FROM usage_meters WHERE business_id = :b AND meter = :m", m=f"outreach_research_pence:{brand['id']}")))
-    assert held == research().MAX_SEARCH_PENCE
+    assert held == research().SEARCH_RESERVE_PENCE
 
 
 def test_the_daily_quota_is_shared_across_audiences(db):
@@ -621,16 +621,17 @@ def test_the_research_call_never_retries_by_itself_and_bounds_its_search_context
     assert "max_retries=0" in source and '"search_context_size": "low"' in source
 
 
-def test_a_search_costing_more_than_its_reservation_pauses_research(db):
-    """P1 3: the reservation must hold; if it ever doesn't, research stops
-    for the business until the owner looks, and the full cost is kept."""
+def test_a_search_costing_more_than_is_possible_pauses_research(db):
+    """P1 3, revised by Mike's option B (25 Oct 2026): an ordinary overrun of
+    the realistic reserve is recorded; only a cost beyond the theoretical
+    maximum (a bug or a price change) pauses research, and the full cost is kept."""
     biz, brand, lia, campaign = started(db)
     r = research()
-    world = World([[person(1)]], cost=r.MAX_SEARCH_PENCE + 9)
+    world = World([[person(1)]], cost=r.impossible_search_pence() + 9)
     out = run(db, biz, lia, world)
     assert "paused" in out["stopped"]
     assert int(float(count(db, "SELECT value FROM usage_meters WHERE business_id = :b "
-                               "AND meter = :m", m=f"outreach_research_pence:{brand['id']}"))) == r.MAX_SEARCH_PENCE + 9
+                               "AND meter = :m", m=f"outreach_research_pence:{brand['id']}"))) == r.impossible_search_pence() + 9
     with Session(db) as s:
         assert r.status(s, biz)["brands"][0]["enabled"] is False
 
@@ -723,13 +724,17 @@ def test_a_quoted_local_part_is_never_proof(db):
     assert run(db, biz, lia, world)["accepted"] == []
 
 
-def test_the_reserve_covers_the_models_hard_maximum():
-    """P1 3: the reservation is computed from limits the provider enforces:
-    the model's whole context window, the output cap and the tool-call cap."""
+def test_the_impossible_line_covers_the_models_theoretical_maximum():
+    """P1 3, revised: the pause line is computed from limits the provider
+    enforces — every search pass over a whole context window at the highest
+    rate, the output cap and the tool-call cap."""
+    from services import ai_costs, ai_router
     r = research()
-    worst = (r.MODEL_CONTEXT_TOKENS * r.PRICE_IN_PER_M + r.MAX_OUTPUT_TOKENS * r.PRICE_OUT_PER_M) / 1_000_000 \
-        + r.MAX_TOOL_CALLS * r.PRICE_PER_SEARCH
-    assert r.MAX_SEARCH_PENCE >= worst
+    p_in, p_out, p_tool = ai_costs.price_max("openai", r.research_model())
+    window = ai_router.CONTEXT_TOKENS[f"openai/{r.research_model()}"]
+    worst = ((ai_router.SEARCH_MAX_TOOL_CALLS + 1) * window * p_in + ai_router.SEARCH_MAX_OUTPUT_TOKENS * p_out) / 1e6 \
+        + ai_router.SEARCH_MAX_TOOL_CALLS * p_tool
+    assert r.impossible_search_pence() >= worst > r.SEARCH_RESERVE_PENCE
 
 
 def test_a_compound_surname_is_not_a_match(db):

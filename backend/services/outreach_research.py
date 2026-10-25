@@ -20,6 +20,7 @@ than 10. Spend is capped per month (default £20). Nothing here sends.
 """
 
 import ipaddress
+import logging
 import os
 import re
 import socket
@@ -36,37 +37,42 @@ from services.chase_replies import _address, _parse
 from services import ai_costs, ai_router
 from services.metering import period_for
 
+logger = logging.getLogger(__name__)
 LONDON = ZoneInfo("Europe/London")
 KEY = "outreach_research"
 DAILY_TARGET, MIN_DECISION_MAKERS, MAX_GATEKEEPERS = 20, 10, 10
 MAX_ATTEMPTS = 3
 DEFAULT_CAP_PENCE = 2000                 # decision C: £20 a month, editable
 MIN_CAP_PENCE, MAX_CAP_PENCE = 2000, 100000   # OUT-18 (Mike): per brand, never below £20
-# Every search reserves its maximum possible cost before it is sent (Codex
-# OUT-10 review 1): the provider call is bounded (output tokens, tool calls)
-# so this is a real ceiling, and a search that fails keeps its reservation.
-MAX_OUTPUT_TOKENS, MAX_TOOL_CALLS = 8000, 8
-# The model's whole context window: the provider cannot bill more input than
-# this in one call, so the reserve below is a TRUE maximum (Codex OUT-10
-# review 3: "low" search context is guidance, not a ceiling).
-MODEL_CONTEXT_TOKENS = int(os.environ.get("ARIA_RESEARCH_MODEL_CONTEXT_TOKENS", "1047576"))
+# Every search attempt reserves a realistic amount before it is sent and is
+# settled to its real cost after (Mike's option B, 25 Oct 2026). Reserving the
+# THEORETICAL maximum of an agentic search (each search can trigger another
+# pass over a million-token context) would leave a brand's £20 budget unusable;
+# instead an overrun is recorded, the brand stops naturally once its budget is
+# used, and only a cost beyond the theoretical maximum (a bug or a price
+# change) pauses it. A search that fails keeps its reservation.
 
 
 def research_model() -> str:
-    return os.environ.get("ARIA_RESEARCH_MODEL", "gpt-4.1")
+    return ai_router.models("research").get("openai", "gpt-6.1-sol")
 
 
 def max_search_pence(model: Optional[str] = None) -> int:
-    """A search's true maximum cost from the ONE price table (ai_costs), so the
-    reservation, the settlement and the ledger all use the same prices (Codex
-    OUT-19 review 1). Raises ai_costs.Unpriced for a model with no price."""
-    p_in, p_out, p_tool = ai_costs.price("openai", model or research_model())
-    return int(-(-((MODEL_CONTEXT_TOKENS * p_in + MAX_OUTPUT_TOKENS * p_out) / 1_000_000 + MAX_TOOL_CALLS * p_tool) // 1))
+    """The theoretical maximum of one search on OpenAI's research model."""
+    return ai_router.max_search_pence("openai", model or research_model())
 
 
-# The default model's prices and reserve, for readers and tests.
-PRICE_IN_PER_M, PRICE_OUT_PER_M, PRICE_PER_SEARCH = ai_costs.DEFAULT_PRICES["openai/gpt-4.1"]
-MAX_SEARCH_PENCE = max_search_pence("gpt-4.1")
+def search_reserve_pence() -> int:
+    return ai_router.search_reserve_pence()
+
+
+def impossible_search_pence() -> int:
+    """More than any search could cost; with no provider configured, the
+    primary research model's theoretical maximum."""
+    return ai_router.impossible_pence() or max_search_pence()
+
+
+SEARCH_RESERVE_PENCE = search_reserve_pence()   # the default, for readers and tests
 METER = "outreach_research_pence"
 PILOT_ENROLMENTS = 5                     # decision E: OUT-8's pilot limit for now
 EXCLUSION_CAP = 400                      # steers the model; code checks guarantee
@@ -747,7 +753,8 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
         try:
             # Enough for every provider the search might fail over to (OUT-19 H);
             # with none configured, the primary model's maximum.
-            reserve = ai_router.reserve_pence() if search is web_search else max_search_pence(model)
+            reserve = ai_router.reserve_pence() if search is web_search else search_reserve_pence()
+            impossible = impossible_search_pence()
         except ai_costs.Unpriced:
             session.rollback()
             out["stopped"] = f"Research is paused: no price is set for the research model {model}"
@@ -818,18 +825,23 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
                             output_tokens=int(usage.get("output_tokens") or 0),
                             tool_calls=int(usage.get("tool_calls") or 0))
         out["spend_pence"] += cost
-        if cost > reserve:
-            # The reservation must hold. If it ever doesn't, the full cost is
-            # kept and research pauses until the owner switches it back on.
+        if cost > impossible:
+            # More than any search could cost: a bug or a price change. The
+            # full cost is kept and research pauses until the owner looks.
             cfg = _config(_doc(session, bid))     # still under the settlement's lock
             paused = _brand_config(cfg, brand_id)
             paused["enabled"] = False
-            paused["paused_reason"] = f"A search cost {cost}p, more than its {reserve}p reserve"
+            paused["paused_reason"] = f"A search cost {cost}p, more than any search should ({impossible}p)"
             _put_brand(cfg, brand_id, paused)
             _save_config(session, bid, cfg)
             session.commit()
-            out["stopped"] = "Research paused for this brand: a search cost more than its reserved maximum. Check the budget, then switch it back on"
+            out["stopped"] = ("Research paused for this brand: a search cost more than any search should. "
+                              "Check the prices and the budget, then switch it back on")
             break
+        if cost > reserve:
+            # Option B: an overrun is recorded (above) and the brand stops
+            # naturally at its next reservation once its budget is used.
+            logger.warning("Research search for business %s cost %sp, over its %sp reserve", bid, cost, reserve)
         session.commit()
         domains, _ = _held(session, bid)
         keys = {r[0] for r in session.execute(text(

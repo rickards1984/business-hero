@@ -87,9 +87,10 @@ Built in `services/ai_router.py`. Research and Aria's setup drafts go through it
 
 **Settings (Railway):**
 - `AI_PROVIDER_ORDER`: default `openai,xai,anthropic`.
-- `AI_MODELS_JSON`: per purpose. Defaults:
-  - drafts: gpt-4o / grok-4 / claude-sonnet-4-5;
-  - research: gpt-4.1 / grok-4 / claude-sonnet-4-5.
+- `AI_MODELS_JSON`: per purpose. Defaults (Mike, 25 Oct 2026, from the providers' pricing pages):
+  - research and drafts: **gpt-6.1-sol** ($2/$10 per M: near-top capability at about GPT-4.1's price), then **grok-4.20-0309-reasoning** ($1.25/$2.50, doubling above 200k tokens, about 40% cheaper), then claude-sonnet-4-5 (price still an estimate);
+  - reply sorting: **gpt-6-luna** ($0.10/$0.50);
+  - at most 4 web searches per call.
 - `ARIA_DRAFT_MODEL` and `ARIA_RESEARCH_MODEL` still choose OpenAI's model.
 - `AI_FAILOVER_COOLDOWN_SECONDS`: default 300.
 - Keys: `OPENAI_API_KEY`, `XAI_API_KEY`, `ANTHROPIC_API_KEY`.
@@ -101,7 +102,12 @@ Built in `services/ai_router.py`. Research and Aria's setup drafts go through it
 
 **Costs:**
 - Every attempt is recorded in the ledger; a failed attempt at its conservative maximum, marked estimated.
-- Research reserves the sum of every available provider's maximum, so a failed-over search stays within its reservation.
+- **Option B (Mike, 25 Oct 2026).**
+  - Each search attempt reserves a realistic amount: `RESEARCH_SEARCH_RESERVE_PENCE`, default 75p, several times a typical search's 15–30p. One reserve is taken per provider the search might try, including those cooling down.
+  - The theoretical maximum of an agentic search is not reserved: each search can trigger another pass over a million-token context, so reserving it would make a £20 budget unusable.
+  - An overrun is recorded, and the brand stops at its next reservation once its budget is used, so a budget can be exceeded by at most one search.
+  - Only a cost beyond the theoretical maximum (a bug or a price change) pauses the brand.
+  - Failed attempts without reported usage are recorded at the reserve, marked estimated.
 
 **How each provider is reached:**
 - Grok through the OpenAI library pointed at `https://api.x.ai/v1`.

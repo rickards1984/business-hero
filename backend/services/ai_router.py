@@ -34,14 +34,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_ORDER = ["openai", "xai", "anthropic"]
 KEYS = {"openai": "OPENAI_API_KEY", "xai": "XAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
 BASE_URLS = {"xai": "https://api.x.ai/v1"}
+# Mike, 25 Oct 2026: GPT-6.1 Sol (near-top capability at about GPT-4.1's
+# price) for research and drafts, Grok 4.20 reasoning (about 40% cheaper) as
+# the background fallback, GPT-6 Luna for sorting replies.
 DEFAULT_MODELS = {
-    "draft": {"openai": "gpt-4o", "xai": "grok-4", "anthropic": "claude-sonnet-4-5"},
-    "research": {"openai": "gpt-4.1", "xai": "grok-4", "anthropic": "claude-sonnet-4-5"},
+    "draft": {"openai": "gpt-6.1-sol", "xai": "grok-4.20-0309-reasoning", "anthropic": "claude-sonnet-4-5"},
+    "research": {"openai": "gpt-6.1-sol", "xai": "grok-4.20-0309-reasoning", "anthropic": "claude-sonnet-4-5"},
+    "classify": {"openai": "gpt-6-luna", "xai": "grok-4.20-0309-non-reasoning"},
 }
 # The most input a single call can be billed for: each model's context window.
-CONTEXT_TOKENS = {"openai/gpt-4.1": 1_047_576, "openai/gpt-4o": 128_000, "openai/gpt-4o-mini": 128_000,
-                  "xai/grok-4": 256_000, "anthropic/claude-sonnet-4-5": 200_000}
-SEARCH_MAX_OUTPUT_TOKENS, SEARCH_MAX_TOOL_CALLS = 8000, 8
+CONTEXT_TOKENS = {"openai/gpt-6.1-sol": 1_050_000, "openai/gpt-6-luna": 1_050_000, "openai/gpt-4.1": 1_047_576,
+                  "openai/gpt-4o": 128_000, "openai/gpt-4o-mini": 128_000,
+                  "xai/grok-4.20-0309-reasoning": 1_000_000, "xai/grok-4.20-0309-non-reasoning": 1_000_000,
+                  "xai/grok-4.7": 500_000, "anthropic/claude-sonnet-4-5": 200_000}
+# Mike, 25 Oct 2026: at most 4 web searches per call.
+SEARCH_MAX_OUTPUT_TOKENS, SEARCH_MAX_TOOL_CALLS = 8000, 4
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 RETRYABLE_SEARCH_ERRORS = {"too_many_requests", "unavailable"}
 
@@ -154,8 +161,10 @@ def _openai_compatible_chat(provider, model, system, user, max_tokens):
     from openai import OpenAI
     client = OpenAI(api_key=os.environ[KEYS[provider]], base_url=BASE_URLS.get(provider), timeout=60.0, max_retries=0)
     try:
-        response = client.chat.completions.create(model=model, response_format={"type": "json_object"},
-                                                  max_tokens=max_tokens,
+        # OpenAI's reasoning models take max_completion_tokens (they reject
+        # max_tokens); xAI's compatible API takes max_tokens.
+        limit = {"max_completion_tokens": max_tokens} if provider == "openai" else {"max_tokens": max_tokens}
+        response = client.chat.completions.create(model=model, response_format={"type": "json_object"}, **limit,
                                                   messages=[{"role": "system", "content": system},
                                                             {"role": "user", "content": user}])
     except Exception as exc:
@@ -218,20 +227,39 @@ def json_chat(system: str, context: dict, *, purpose: str, max_tokens: int) -> d
 # ------------------------------------------------------------ research ---
 
 def max_search_pence(provider: str, model: str) -> int:
-    """One search's true maximum cost on this provider: its whole context
-    window in, the bounded output out, the bounded tool calls."""
-    p_in, p_out, p_tool = ai_costs.price(provider, model)
+    """The THEORETICAL maximum of one agentic search: each of the bounded
+    searches can trigger another inference pass over a full context window
+    (providers bill input cumulatively across passes), at the model's highest
+    rate, plus the bounded output and tool calls. Real searches cost a small
+    fraction of this; it marks an impossible cost, not a reservation."""
+    p_in, p_out, p_tool = ai_costs.price_max(provider, model)
     context = CONTEXT_TOKENS.get(f"{provider}/{model}", 2_000_000)   # unknown window: assume very large
-    return int(-(-((context * p_in + SEARCH_MAX_OUTPUT_TOKENS * p_out) / 1_000_000 + SEARCH_MAX_TOOL_CALLS * p_tool) // 1))
+    passes = SEARCH_MAX_TOOL_CALLS + 1
+    return int(-(-((passes * context * p_in + SEARCH_MAX_OUTPUT_TOKENS * p_out) / 1_000_000
+                   + SEARCH_MAX_TOOL_CALLS * p_tool) // 1))
+
+
+def search_reserve_pence() -> int:
+    """Option B (Mike, 25 Oct 2026): what one search attempt reserves — a
+    realistic amount, several times a typical search's cost, not the
+    theoretical maximum (which would leave a brand's £20 budget unusable)."""
+    try:
+        return max(1, int(os.environ.get("RESEARCH_SEARCH_RESERVE_PENCE", "75")))
+    except ValueError:
+        return 75
 
 
 def reserve_pence() -> int:
-    """Enough for every provider a search might try: each failed attempt is
-    charged its own maximum, so the reservation covers the whole chain."""
-    # Every keyed, priced provider, INCLUDING ones cooling down: a cooldown can
-    # end mid-search and that provider may then be tried (Codex OUT-19 H review 1).
-    pairs = chain("research", include_down=True)
-    return sum(max_search_pence(p, m) for p, m in pairs)
+    """One realistic reserve for every provider a search might try. Every
+    keyed, priced provider counts, INCLUDING ones cooling down: a cooldown can
+    end mid-search (Codex OUT-19 H review 1)."""
+    return search_reserve_pence() * len(chain("research", include_down=True))
+
+
+def impossible_pence() -> int:
+    """More than any search over the whole chain could cost: a bug or a price
+    change. Research pauses the brand if a search ever costs more."""
+    return sum(max_search_pence(p, m) for p, m in chain("research", include_down=True))
 
 
 def _openai_compatible_search(provider, model, brief):
@@ -294,7 +322,7 @@ def web_search(brief: str) -> dict:
         except ProviderError as exc:
             reported = ai_costs.usage_tokens(exc.usage)
             if reported is None:
-                calls.append({"provider": provider, "model": model, "pence": max_search_pence(provider, model),
+                calls.append({"provider": provider, "model": model, "pence": search_reserve_pence(),
                               "estimated": True, "usage": {}})
             else:
                 pence = int(-(-ai_costs.cost(provider, model, reported[0], reported[1], exc.searches) // 1))
@@ -306,7 +334,7 @@ def web_search(brief: str) -> dict:
             continue
         reported = ai_costs.usage_tokens(usage)
         if reported is None:
-            pence, estimated, tokens = max_search_pence(provider, model), True, (0, 0)
+            pence, estimated, tokens = search_reserve_pence(), True, (0, 0)
         else:
             tokens, estimated = reported, False
             pence = int(-(-ai_costs.cost(provider, model, tokens[0], tokens[1], searches) // 1))
