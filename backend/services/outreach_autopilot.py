@@ -24,6 +24,7 @@ from services import outreach_setup as setup
 from services.chase_replies import _parse
 
 KEY, PACE_KEY = "outreach_autopilot", "outreach_autopilot_pace"
+PACE_TOKEN = "outreach_autopilot_pace_token"   # session.info: the slot this attempt reserved
 MARKER = "outreach_autopilot"
 TRUST_NEEDED = 5                                   # decision A
 MIN_GAP, RANDOM_GAP = timedelta(minutes=6), timedelta(minutes=6)   # decision C
@@ -163,7 +164,8 @@ def _reserve_pace(session, bid: str, moment: datetime, gap: timedelta):
         minutes = max(1, int((pace - moment).total_seconds() // 60) + 1)
         return None, f"Next automatic email in about {minutes} minute(s)"
     token = _uuid.uuid4().hex
-    doc[PACE_KEY] = {"next_at": (moment + gap).isoformat(), "token": token}
+    kept = {"last_claim_at": current["last_claim_at"]} if current.get("last_claim_at") else {}
+    doc[PACE_KEY] = {**kept, "next_at": (moment + gap).isoformat(), "token": token}
     setup._save_settings_doc(session, bid, doc)
     session.commit()
     return token, current
@@ -180,6 +182,29 @@ def _release_pace(session, bid: str, token: str, previous: dict) -> None:
             doc.pop(PACE_KEY, None)
         setup._save_settings_doc(session, bid, doc)
     session.commit()
+
+
+def claim_pace(session, bid: str, at: datetime) -> None:
+    """At the send boundary (Codex OUT-11 review 3 P1): called inside the
+    claim, holding its business lock, with `at` read under that lock. The
+    attempt must still own the current slot, the slot must not have expired,
+    and the last automatic claim must be at least MIN_GAP ago; the claim time
+    is then recorded in the same transaction as the claim. So a delayed or
+    superseded attempt can never send outside its slot, and two automatic
+    sends are never closer than MIN_GAP, whatever the schedulers do."""
+    token = session.info.pop(PACE_TOKEN, None)
+    doc = setup._settings_doc(session, bid)
+    pace = doc.get(PACE_KEY) or {}
+    if not token or pace.get("token") != token:
+        raise aria_actions.ActionRefused(409, "Another automatic email took this slot")
+    until = _parse(pace.get("next_at"))
+    if until is None or at >= until:
+        raise aria_actions.ActionRefused(409, "This automatic email missed its slot; it goes in a later one")
+    last = _parse(pace.get("last_claim_at"))
+    if last is not None and at < last + MIN_GAP:
+        raise aria_actions.ActionRefused(409, "Too soon after the last automatic email")
+    doc[PACE_KEY] = {**pace, "last_claim_at": at.isoformat()}
+    setup._save_settings_doc(session, bid, doc)
 
 
 def _due_enrolment(session, bid: str, campaign_id: str, moment: datetime):
@@ -242,15 +267,18 @@ def send_next(session, business, campaign_id, *, moment: Optional[datetime] = No
         _release_pace(session, bid, token, previous)
         return {"sent": None, "waiting": proposed.get("error") or "Could not prepare the email"}
     card = proposed["proposal"]
+    session.info[PACE_TOKEN] = token   # checked and consumed by claim_pace inside the claim
     try:
         result = aria_actions.approve(session, business, card["id"], None, card["version"])
     except aria_actions.ActionRefused as exc:
+        session.info.pop(PACE_TOKEN, None)
         try:
             aria_actions.dismiss(session, business, card["id"])
         except aria_actions.ActionRefused:
             pass
         _release_pace(session, bid, token, previous)
         return {"sent": None, "waiting": exc.detail}
+    session.info.pop(PACE_TOKEN, None)
     went = result.get("status") in ("done", "executing")
     if not went:
         _release_pace(session, bid, token, previous)

@@ -751,6 +751,9 @@ def _approve_outreach(session, business, action_id: str, row, user_id, version) 
             held, why = outreach_autopilot.valid_grant(session, business, str(payload.get("campaign_id")), lock=True)
             if not held:
                 raise ActionRefused(403, why or "Automatic sending is off for this campaign.")
+            # The pace, enforced here at the send boundary with the time read
+            # under the lock (Codex OUT-11 review 3).
+            outreach_autopilot.claim_pace(session, str(business.id), outreach_send.now())
             # Record the grant validated UNDER LOCK, the one that actually
             # authorises this send (Codex OUT-11 review 1).
             snap = session.execute(text(

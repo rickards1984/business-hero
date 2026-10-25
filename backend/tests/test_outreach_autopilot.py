@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy import text
 
 from test_outreach_send import (  # noqa: F401 - fixtures are used by name
-    A, BOX, CAMPAIGN, ENROLMENT, NOW, OWNER, STAFF, STEP, database, h, insert, uid)
+    A, BOX, CAMPAIGN, ENROLMENT, NOW, OWNER, PROSPECT, STAFF, STEP, database, h, insert, uid)
 
 
 class MissingAutopilot(AssertionError):
@@ -351,3 +351,90 @@ def test_run_due_reads_the_clock_for_each_business():
     import inspect
     source = inspect.getsource(autopilot().run_due)
     assert "send_next(session, business, cid)" in source, "no single stale moment passed down"
+
+
+# ------------------------------------- review 3: pace enforced at the claim ---
+
+def another_recipient(h):
+    """A second due email in the same campaign (a copy of the seeded prospect)."""
+    new = uid("second-prospect")
+    for table, where in [("outreach_prospects", "id"), ("outreach_evidence", "prospect_id"),
+                         ("outreach_enrolments", "prospect_id")]:
+        row = dict(h.s.execute(text(f"SELECT * FROM {table} WHERE {where} = :p"), {"p": PROSPECT}).mappings().first())
+        row["id"] = uid("second-" + table)
+        if table == "outreach_prospects":
+            row["id"], row["email"] = new, "second@example.invalid"
+            row["email_key"] = h.m.suppression_digest(A, "email", row["email"])
+        else:
+            row["prospect_id"] = new
+            if table == "outreach_evidence":
+                row["verification_subject_email_key"] = h.m.suppression_digest(A, "email", "second@example.invalid")
+        insert(h.s, table, **row)
+    h.s.commit()
+
+
+def clock(h, monkeypatch, start=NOW):
+    at = [start]
+    monkeypatch.setattr(h.m, "now", lambda: at[0])
+    monkeypatch.setattr(h.a, "now", lambda: at[0])
+    return at
+
+
+def test_an_attempt_delayed_after_reserving_cannot_send_beside_a_newer_one(h, monkeypatch):
+    """Review 3 P1, as reproduced: reserve at 12:00, stall until 12:07; another
+    run reserves at 12:07 and sends. The stalled attempt must not also send."""
+    from sqlmodel import Session as S
+    a, m = actions(), autopilot()
+    granted(h)
+    another_recipient(h)
+    at = clock(h, monkeypatch)
+    real, seen = a.approve, {}
+
+    def stalled(*args, **kwargs):
+        at[0] = NOW + timedelta(minutes=7)
+        with S(h.engine) as other:
+            seen["other"] = m.send_next(other, h.b, CAMPAIGN, rng=lambda: 0.0)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(a, "approve", stalled)
+    first = send(h)
+    assert seen["other"]["sent"], seen
+    assert first["sent"] is None and len(h.p.sends) == 1
+
+
+def test_an_attempt_whose_slot_expired_while_waiting_does_not_send(h, monkeypatch):
+    """Delayed after the search, waiting for the lock: by the claim its slot
+    (12:00 + 6 minutes) has gone, so it stands down and gives the slot back."""
+    m = autopilot()
+    granted(h)
+    at = clock(h, monkeypatch)
+    real = h.m.search_before_claim
+
+    def slow(*args, **kwargs):
+        at[0] = NOW + timedelta(minutes=5)
+        out = real(*args, **kwargs)
+        at[0] = NOW + timedelta(minutes=6, seconds=30)    # lock finally acquired
+        return out
+    monkeypatch.setattr(h.m, "search_before_claim", slow)
+    out = m.send_next(h.s, h.b, CAMPAIGN, rng=lambda: 0.0)
+    assert out["sent"] is None and "slot" in (out["waiting"] or "") and h.p.sends == []
+    doc = json.loads(h.s.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"), {"b": A}).scalar())
+    assert "token" not in (doc.get("outreach_autopilot_pace") or {}), "the slot was given back"
+
+
+def test_two_automatic_claims_are_never_closer_than_the_minimum_gap(h, monkeypatch):
+    """Even if the pace slot is cleared or reset, the claim itself refuses a
+    send within 6 minutes of the last automatic claim."""
+    m = autopilot()
+    granted(h)
+    another_recipient(h)
+    at = clock(h, monkeypatch)
+    assert send(h)["sent"]
+    doc = json.loads(h.s.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"), {"b": A}).scalar())
+    doc["outreach_autopilot_pace"].pop("next_at")         # as if the slot were lost
+    h.s.execute(text("UPDATE business_settings SET settings = :s WHERE business_id = :b"), {"s": json.dumps(doc), "b": A})
+    h.s.commit()
+    at[0] = NOW + timedelta(minutes=3)
+    out = m.send_next(h.s, h.b, CAMPAIGN, rng=lambda: 0.0)
+    assert out["sent"] is None and len(h.p.sends) == 1
+    at[0] = NOW + timedelta(minutes=13)
+    assert m.send_next(h.s, h.b, CAMPAIGN, rng=lambda: 0.0)["sent"] and len(h.p.sends) == 2

@@ -101,3 +101,15 @@ Preserved verbatim in `audits/OUT-11-CODEX-REVIEW-2.md`. The revoke fix was conf
 - **Pacing from a stale moment:** `run_due` no longer passes one moment captured at its start. Each `send_next` reads the clock afresh, and `_reserve_pace` reserves from `max(moment, now())`, so a run that has been busy for a while can never hand out an already-expired slot.
 
 Its Ruff backlog item was already fixed (`fc4…`, the unused variable). Tests: autopilot **29 passed**.
+
+## Codex review 3 (`audits/OUT-11-CODEX-REVIEW-3.md`): pace enforced at the send boundary
+Review 3 found that reserving a slot was not enough on its own: an attempt delayed after reserving (or while waiting for the lock) could still send outside its slot, next to a newer one.
+
+The claim itself now enforces the pace. Inside the claim, holding the business lock, with the time read under that lock:
+- the attempt must still own the current slot;
+- the slot must not have expired;
+- the last automatic claim must be at least 6 minutes earlier.
+
+The claim time is recorded in the same transaction as the claim. Any refusal gives the slot back. Three regression tests cover these cases (delayed beside a newer run; expired while waiting for the lock; slot lost). Each fails without the fix.
+
+This was the fourth repair cycle, beyond the three allowed, so it waits for Mike's decision on a further Codex review.
