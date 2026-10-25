@@ -810,7 +810,7 @@ def test_ordinary_mail_is_never_read_while_the_business_is_locked(r, monkeypatch
     scan(r)
     assert r.s.execute(text('SELECT count(*) FROM outreach_replies')).scalar_one() == 1
     locked_mail = [w for t, w, locked in reads if t == 'email_messages' and locked]
-    assert locked_mail and all('id=' in w for w in locked_mail), 'under the lock, mail is read only by id'
+    assert locked_mail and all('AND id=:id' in w for w in locked_mail), 'under the lock, mail is read only by id'
     # The per-message prospect lookup runs only for the one real candidate, not the other 200 emails.
     assert len([1 for t, w, locked in reads if t == 'outreach_prospects' and locked and 'LIKE' in w]) == 1
 

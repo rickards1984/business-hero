@@ -158,7 +158,8 @@ export default function OutreachSetupWizard({ businessId, adding = false, onClos
                 </StepLabel>
                 <StepContent>
                   {step.key === 'brand' && <BrandsStep api={api} brands={brands} current={brand}
-                    onSaved={choose} onNext={() => setActive('mailboxes')} onChoose={choose} />}
+                    onSaved={id => { setBrandId(id); setNewBrand(false); setRevisiting(false); setActive('brand'); }}
+                    onNext={() => setActive('mailboxes')} onChoose={choose} />}
                   {step.key === 'mailboxes' && <><MailboxStep api={api} accounts={accounts.data || []} />
                     {brand && <BrandInbox api={api} brand={brand} accounts={accounts.data || []} />}</>}
                   {step.key === 'audience' && (brand ? <AudiencesStep key={brand.id} api={api} brand={brand} /> : <NeedBrand />)}
@@ -271,19 +272,19 @@ function BrandsStep({ api, brands, current, onSaved, onNext, onChoose }: {
         <Button variant="contained" disabled={api.busy || filled.length === 0} onClick={async () => {
           let first = '';
           const names: string[] = [];
+          const done = new Set<number>();          // rows saved, by position: every other row is kept
           setSaved([]);
-          for (const r of filled) {
+          for (const [i, r] of rows.entries()) {
+            if (!r.name.trim() || !r.sender.trim()) continue;
             const out = await api.call<{ id: string }>('POST', 'brands', { name: r.name.trim(), sender_identity: r.sender.trim() });
-            if (!out) {
-              setSaved(names);
-              setRows(rows.filter(x => !names.includes(x.name.trim())));   // keep what didn't save, to try again
-              return;
-            }
+            if (!out) break;
+            done.add(i);
             names.push(r.name.trim());
             first = first || out.id;
           }
+          const left = rows.filter((_, i) => !done.has(i));
           setSaved(names);
-          setRows([blank]);
+          setRows(left.length ? left : [blank]);
           if (first) onSaved(first);
         }}>{api.busy ? 'Saving…' : 'Save'}</Button>
         {brands.length > 0 && <Button variant="outlined" onClick={onNext}>Next: sending inbox</Button>}
