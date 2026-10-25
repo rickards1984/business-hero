@@ -9,6 +9,7 @@ the database is only read. Prints companies, roles and results, never email
 addresses. Each search is a real, billed provider call.
 """
 import json
+import re
 import time
 from collections import Counter
 
@@ -16,6 +17,15 @@ from services import ai_costs, ai_router
 from services import outreach_research as research
 
 DEFAULT_PAIRS = [("openai", "gpt-6.1-sol"), ("xai", "grok-4.7"), ("xai", "grok-4.20-0309-reasoning")]
+
+
+EMAIL = re.compile(r"[^\s@<>()\[\],;:\"']+@[^\s@<>()\[\],;:\"']+")
+
+
+def redact(value) -> str:
+    """Anything printed is first stripped of email addresses (Codex OUT-19 H
+    review 4: a model may put one in a company or role field)."""
+    return EMAIL.sub("[email]", str(value or ""))
 
 
 def parse_pairs(text: str) -> list:
@@ -61,10 +71,15 @@ def compare(session, business, compliance_id, pairs, *, fetch, mx, companies, se
             row["cost_pence"] = None
         row.update(tokens=reported, searches=searches)
         try:
-            candidates = [c for c in json.loads(ai_router.extract_json(answer)).get("candidates", []) if isinstance(c, dict)]
+            listed = json.loads(ai_router.extract_json(answer)).get("candidates")
         except (ValueError, AttributeError):
+            listed = None
+        if isinstance(listed, list):
+            candidates = [c for c in listed if isinstance(c, dict)]
+        else:
+            # An unreadable answer counts against this model only; the others still run.
             candidates = []
-            row["error"] = "no usable JSON answer"
+            row["error"] = "no usable list of candidates in the answer"
         held = {"domains": set(domains), "keys": set(keys), "seen": set()}
         tally, reasons, sample = Counter(), Counter(), []
         for c in candidates:
@@ -79,8 +94,8 @@ def compare(session, business, compliance_id, pairs, *, fetch, mx, companies, se
             else:
                 reasons[v.get("reason") or "rejected"] += 1
             if len(sample) < 8:
-                sample.append({"company": str(c.get("company") or "")[:80], "role": str(c.get("role") or "")[:60],
-                               "result": "passed" if v["ok"] else ("review" if v.get("review") else v.get("reason"))})
+                sample.append({"company": redact(c.get("company"))[:80], "role": redact(c.get("role"))[:60],
+                               "result": redact("passed" if v["ok"] else ("review" if v.get("review") else v.get("reason")))})
         row.update(candidates=len(candidates), passed=tally["passed"], decision_makers=tally["decision_makers"],
                    gatekeepers=tally["gatekeepers"], review=tally["review"], rejected=dict(reasons), sample=sample)
         if row.get("cost_pence") and tally["passed"]:
@@ -105,7 +120,7 @@ def render(results: list) -> str:
         if r.get("error"):
             lines.append(f"    note: {r['error']}")
         if r["rejected"]:
-            lines.append("    rejected: " + ", ".join(f"{k} ×{v}" for k, v in sorted(r["rejected"].items(), key=lambda kv: -kv[1])))
+            lines.append("    rejected: " + ", ".join(f"{redact(k)} ×{v}" for k, v in sorted(r["rejected"].items(), key=lambda kv: -kv[1])))
         for s in r["sample"]:
             lines.append(f"    · {s['company']} — {s['role'] or 'no role'} — {s['result']}")
-    return "\n".join(lines)
+    return redact("\n".join(lines))

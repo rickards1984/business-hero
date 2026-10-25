@@ -4,6 +4,8 @@ checks, and reports each model's verified contacts and cost."""
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from sqlalchemy import text
 from sqlmodel import Session
 
@@ -58,3 +60,42 @@ def test_model_lists_are_read_from_the_command_line():
     from services import research_compare
     assert research_compare.parse_pairs("openai:gpt-6.1-sol, xai:grok-4.7,junk") == [("openai", "gpt-6.1-sol"),
                                                                                      ("xai", "grok-4.7")]
+
+
+def test_no_email_address_is_printed_even_inside_a_role_or_company(db):
+    """Codex OUT-19 H review 4."""
+    from services import research_compare
+    biz, brand, lia, campaign = started(db)
+    world = World([])
+    leaky = person(1, role="Director: alice@example.invalid", company="Studio 1 Ltd (bob@studio1.example)")
+
+    def search(provider, model, brief):
+        world.site_company.setdefault("studio1.example", leaky["company"])
+        return json.dumps({"candidates": [leaky]}), SimpleNamespace(input_tokens=10, output_tokens=10), 1
+    with Session(db) as s:
+        out = research_compare.compare(s, biz, lia["id"], [("openai", "gpt-6.1-sol")], fetch=world.fetch, mx=world.mx,
+                                       companies=world.companies, searchers={"openai": search})
+    printed = research_compare.render(out)
+    assert "alice@" not in printed and "bob@" not in printed and "[email]" in printed
+
+
+
+@pytest.mark.parametrize("bad", ['{"candidates": null}', '{"candidates": "lots"}', '{"candidates": {"a": 1}}', "no json"])
+def test_an_unreadable_answer_from_one_model_never_stops_the_others(db, bad):
+    """Codex OUT-19 H review 4."""
+    from services import research_compare
+    biz, brand, lia, campaign = started(db)
+    world = World([])
+
+    def broken(provider, model, brief):
+        return bad, SimpleNamespace(input_tokens=10, output_tokens=10), 1
+
+    def fine(provider, model, brief):
+        world.site_company.setdefault("studio2.example", "Studio 2 Ltd")
+        return json.dumps({"candidates": [person(2)]}), SimpleNamespace(input_tokens=10, output_tokens=10), 1
+    with Session(db) as s:
+        out = research_compare.compare(s, biz, lia["id"], [("xai", "grok-4.20-0309-reasoning"), ("openai", "gpt-6.1-sol")],
+                                       fetch=world.fetch, mx=world.mx, companies=world.companies,
+                                       searchers={"xai": broken, "openai": fine})
+    assert "no usable" in out[0]["error"] and out[0]["candidates"] == 0
+    assert out[1]["passed"] == 1
