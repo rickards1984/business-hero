@@ -14,12 +14,15 @@ interface Props {
   businessLogo?: string | null;
   isMobile: boolean;
   showQuotes: boolean;
+  showOutreach: boolean;
+  /** Outreach is switched on but the owner has not finished setting it up. */
+  outreachNew?: boolean;
   onHelp: () => void;
   onSignOut: () => void;
 }
 
 const departments = [
-  ['dashboard', 'Aria'], ['comms', 'Comms'], ['finance', 'Finance'],
+  ['dashboard', 'Aria'], ['comms', 'Comms'], ['outreach', 'Outreach'], ['finance', 'Finance'],
   ['quotes', 'Quotes'], ['ai', 'AI Hub'],
 ];
 const settings = [
@@ -36,7 +39,7 @@ function luminance(hex: string) {
   return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
 }
 
-export default function AriaShellHeader({ activeSection, businessName, brandColor, businessLogo, isMobile, showQuotes, onHelp, onSignOut }: Props) {
+export default function AriaShellHeader({ activeSection, businessName, brandColor, businessLogo, isMobile, showQuotes, showOutreach, outreachNew, onHelp, onSignOut }: Props) {
   const { pathname } = useLocation();
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const logoSrc = resolveLogoSrc(businessLogo);
@@ -85,8 +88,10 @@ export default function AriaShellHeader({ activeSection, businessName, brandColo
             <AriaHero variant="band" />
           ) : <div className="aria-shell-compact">{avatar}</div>}
           <nav className="aria-shell-nav" aria-label="Departments">
-            {departments.filter(([key]) => key !== 'quotes' || showQuotes).map(([key, label]) => (
-              <Link key={key} to={`/app/${key}`} aria-current={activeSection === key ? 'page' : undefined}>{label}</Link>
+            {departments.filter(([key]) => (key !== 'quotes' || showQuotes) && (key !== 'outreach' || showOutreach)).map(([key, label]) => (
+              <Link key={key} to={`/app/${key}`} aria-current={activeSection === key ? 'page' : undefined}>
+                {label}{key === 'outreach' && outreachNew && <span className="aria-shell-new">New</span>}
+              </Link>
             ))}
           </nav>
         </>}

@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Button, Checkbox, Dialog, DialogActions, DialogContent, DialogTitle, FormControlLabel, MenuItem, Paper, Stack, Tab, Tabs, TextField, Typography } from '@mui/material';
+import { Alert, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent, DialogTitle, FormControlLabel, MenuItem, Paper, Stack, Tab, Tabs, TextField, Typography } from '@mui/material';
 import { useMe } from '@/hooks/useMe';
 import { useShellMobile } from '@/hooks/useShellMobile';
 import { apiRequest } from '@/lib/queryClient';
@@ -44,7 +44,7 @@ function OutreachDepartment({ businessId }: { businessId: string }) {
     {!owner.data && <Alert severity="info">Inspection only. Write controls require an active owner. The server checks account access on every request.</Alert>}
     {error && <Alert severity="error">{error}</Alert>}{notice && <Alert severity="success">{notice}</Alert>}
     <Tabs value={sections.includes(section) ? section : 'overview'} variant="scrollable" scrollButtons="auto" aria-label="Outreach sections">{sections.map(s => <Tab key={s} value={s} label={s} component={Link} to={href(s)} />)}</Tabs>
-    {section === 'overview' && <><ResearchSummary businessId={businessId} /><Overview businessId={businessId} /></>}
+    {section === 'overview' && <><ResearchSummary businessId={businessId} />{owner.data && <BrandsPanel businessId={businessId} />}<Overview businessId={businessId} /></>}
     {section === 'prospects' && <Prospects {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
     {section === 'campaigns' && <Campaigns {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
     {section === 'replies' && <Replies businessId={businessId} offset={offset} mailbox={mailbox} setParams={setParams} />}
@@ -55,6 +55,27 @@ function OutreachDepartment({ businessId }: { businessId: string }) {
 type Controls = { businessId: string; owner: boolean; busy: boolean; write: (method: string, path: string, body: unknown) => Promise<any> };
 type Paging = { offset: number; setOffset: (n: number) => void };
 function Pages({ offset, setOffset, total }: Paging & { total?: number }) { return <Stack direction="row" spacing={2}><Button disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 20))}>Previous</Button><Typography sx={{ alignSelf: 'center' }}>{total == null ? 'Total unavailable' : `${total} recorded`}</Typography><Button disabled={total == null || offset + 20 >= total} onClick={() => setOffset(offset + 20)}>Next</Button></Stack>; }
+// OUT-18: each brand, product or service at a glance, and setting up another
+// (or finishing one) by repeating the steps, any time after outreach starts.
+function BrandsPanel({ businessId }: { businessId: string }) {
+  const setup = useSetupStatus(businessId);
+  const [mode, setMode] = useState<'' | 'add' | 'continue'>('');
+  const brands = setup.data?.brands || [];
+  if (mode) return <OutreachSetupWizard businessId={businessId} adding={mode === 'add'} onClose={() => setMode('')} />;
+  return <Paper variant="outlined" sx={{ p: 2 }}><Stack spacing={1.5}>
+    <Typography variant="h6">Your brands, products and services</Typography>
+    {brands.map(b => <Stack key={b.id} direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Typography sx={{ fontWeight: 600 }}>{b.name}</Typography>
+      <Chip size="small" color={b.ready ? 'success' : 'default'} label={b.ready ? 'Ready' : 'Setup not finished'} />
+      {b.mailbox_address && <Typography variant="body2" color="text.secondary">{b.mailbox_address}</Typography>}
+      <Typography variant="body2" color="text.secondary">{b.audiences.filter(a => a.approved).length} audience(s)</Typography>
+    </Stack>)}
+    <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+      <Button variant="outlined" onClick={() => setMode('add')}>+ Set up another business, service or product</Button>
+      {brands.some(b => !b.ready) && <Button onClick={() => setMode('continue')}>Continue setup</Button>}
+    </Stack>
+  </Stack></Paper>;
+}
 function Overview({ businessId }: { businessId: string }) {
   const q = useOutreachSummary(businessId);
   return <><QueryState query={q} />{q.data && !q.isError && <><Typography>Aria's stored overview · loaded {new Date(q.dataUpdatedAt).toLocaleString('en-GB')}</Typography>{Object.entries(q.data.totals || {}).map(([key, value]) => <Paper variant="outlined" sx={{ p: 2 }} key={key}><Typography>{labels[key] || key}: {value}</Typography><Button component={Link} to={href((q.data?.sources?.[key] || '').includes('replies') ? 'replies' : key === 'campaigns' ? 'campaigns' : 'prospects')}>View source records</Button></Paper>)}</>}{sections.slice(1).map(s => <Button key={s} component={Link} to={href(s)}>{s}</Button>)}</>;
@@ -107,7 +128,7 @@ function Settings(c: Controls) {
   const [knowledgeOffset, setKnowledgeOffset] = useState(0);
   const knowledge = useOutreachData(c.businessId, `knowledge?limit=20&offset=${knowledgeOffset}${brand ? '&brand_id=' + brand : ''}`);
   const [cap, setCap] = useState<number | null>(null), [cc, setCc] = useState<string | null>(null);
-  return <><QueryState query={q} /><Typography>UK weekdays, 09:00–17:00. Current warm-up, business/mailbox caps and remaining allowance all apply; the lowest limit wins. Caps do not advance warm-up or approve mailbox health.</Typography>{q.data?.item && <><RecordText item={q.data.item} /><Button disabled={!c.owner || c.busy} onClick={() => c.write('PATCH', 'settings', { pause_all: !q.data!.item!.pause_all })}>{q.data.item.pause_all ? 'Unpause future checks' : 'Pause all'}</Button><Typography>Unpausing does not resume stopped prospects, grant permissions or send anything.</Typography><TextField label="Business daily cap (1–20)" type="number" value={cap ?? q.data.item.business_daily_cap} onChange={e => setCap(Number(e.target.value))} /><Button disabled={!c.owner || c.busy} onClick={() => c.write('PATCH', 'settings', { business_daily_cap: cap ?? q.data!.item!.business_daily_cap })}>Save business cap</Button><TextField label="Owner CC address" type="email" value={cc ?? q.data.item.owner_cc_address ?? ''} onChange={e => setCc(e.target.value)} /><Button disabled={!c.owner || c.busy} onClick={() => c.write('PATCH', 'settings', { owner_cc_default: true, owner_cc_address: cc ?? q.data!.item!.owner_cc_address })}>Enable CC on future cards</Button><Button disabled={!c.owner || c.busy} onClick={() => c.write('PATCH', 'settings', { owner_cc_default: false })}>Turn CC off</Button><Typography>CC is off by default and pinned on each immutable card.</Typography></>}
+  return <><QueryState query={q} /><Typography>UK weekdays, 09:00–17:00. Current warm-up, the per-brand and mailbox caps and remaining allowance all apply; the lowest limit wins. Caps do not advance warm-up or approve mailbox health.</Typography>{q.data?.item && <><RecordText item={q.data.item} /><Button disabled={!c.owner || c.busy} onClick={() => c.write('PATCH', 'settings', { pause_all: !q.data!.item!.pause_all })}>{q.data.item.pause_all ? 'Unpause future checks' : 'Pause all'}</Button><Typography>Unpausing does not resume stopped prospects, grant permissions or send anything.</Typography><TextField label="Daily new emails per brand (1–20)" type="number" value={cap ?? q.data.item.business_daily_cap} onChange={e => setCap(Number(e.target.value))} /><Button disabled={!c.owner || c.busy} onClick={() => c.write('PATCH', 'settings', { business_daily_cap: cap ?? q.data!.item!.business_daily_cap })}>Save daily limit</Button><TextField label="Owner CC address" type="email" value={cc ?? q.data.item.owner_cc_address ?? ''} onChange={e => setCc(e.target.value)} /><Button disabled={!c.owner || c.busy} onClick={() => c.write('PATCH', 'settings', { owner_cc_default: true, owner_cc_address: cc ?? q.data!.item!.owner_cc_address })}>Enable CC on future cards</Button><Button disabled={!c.owner || c.busy} onClick={() => c.write('PATCH', 'settings', { owner_cc_default: false })}>Turn CC off</Button><Typography>CC is off by default and pinned on each immutable card.</Typography></>}
     <Button component={Link} to="/app/settings/email">Manage connected mailboxes</Button><QueryState query={mailboxes} />{mailboxes.data?.items?.map(m => <MailboxCap key={`${m.id}:${m.daily_cap}`} {...c} item={m} />)}
     <Typography variant="h6">Knowledge by brand</Typography><TextField select label="Brand" value={brand} onChange={e => { setBrand(e.target.value); setKnowledgeOffset(0); }}><MenuItem value="">Choose brand for a new fact</MenuItem>{brands.data?.items?.map(b => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}</TextField><QueryState query={knowledge} />{knowledge.data?.items?.map(k => <Paper key={k.id} variant="outlined" sx={{ p: 2 }}><Typography>{brands.data?.items?.find(b => b.id === k.brand_id)?.name || k.brand_id}</Typography><RecordText item={k} />{(k.status !== 'approved' || Date.parse(k.review_due_at) <= Date.now()) && <Alert severity="warning">Unavailable for replies: retired, unapproved or expired.</Alert>}</Paper>)}<Pages offset={knowledgeOffset} setOffset={setKnowledgeOffset} total={knowledge.data?.total} /><TextField label="Topic" value={topic} onChange={e => setTopic(e.target.value)} /><TextField label="Approved answer" multiline minRows={3} value={answer} onChange={e => setAnswer(e.target.value)} /><TextField label="Source reference" value={source} onChange={e => setSource(e.target.value)} /><TextField label="Explicit review date" type="date" InputLabelProps={{ shrink: true }} value={date} onChange={e => setDate(e.target.value)} /><Button disabled={!c.owner || c.busy || !brand || !topic || !answer || !source || !date} onClick={async () => { if (await c.write('POST', 'knowledge', { brand_id: brand, topic, answer, source_reference: source, review_due_at: new Date(date + 'T23:59:59Z').toISOString() })) { setTopic(''); setAnswer(''); setSource(''); setDate(''); } }}>Approve and save knowledge version</Button></>;
 }

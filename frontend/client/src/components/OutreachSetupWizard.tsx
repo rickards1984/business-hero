@@ -13,18 +13,20 @@ import { apiRequest } from '@/lib/queryClient';
 import { outreachError } from '@/hooks/useOutreachData';
 
 type StepState = 'done' | 'todo' | 'blocked';
-export interface SetupStatus { steps: Record<string, StepState>; next: string | null; complete: boolean; started: boolean }
+export interface BrandAudience { id: string; description: string; approved: boolean; campaign: null | { id: string; name: string; mailbox_id: string; approved: boolean; other_inbox: boolean; ready: boolean } }
+export interface BrandSetup { id: string; name: string; sender_identity: string; mailbox_id: string | null; mailbox_address: string | null; mailbox_ok: boolean; privacy: boolean; audiences: BrandAudience[]; ready: boolean }
+export interface SetupStatus { steps: Record<string, StepState>; next: string | null; complete: boolean; started: boolean; brands?: BrandSetup[] }
 interface Account { id: string; email_address: string; display_name?: string | null; provider: string }
 interface Health { status: 'pass' | 'fail'; advice: string[]; evidence: Record<string, unknown>; enabled?: boolean; hold?: string | null }
 
-const STEPS: { key: string; label: string; optional?: boolean }[] = [
-  { key: 'brand', label: 'Your brands' },
-  { key: 'mailboxes', label: 'Sending mailboxes' },
-  { key: 'audience', label: "Who you'll contact, and why" },
+export const STEPS: { key: string; label: string; optional?: boolean }[] = [
+  { key: 'brand', label: 'What you do outreach for' },
+  { key: 'mailboxes', label: 'Sending inbox' },
+  { key: 'audience', label: "Who it contacts, and why" },
   { key: 'privacy', label: 'Privacy notice' },
   { key: 'knowledge', label: 'Facts Aria may use', optional: true },
   { key: 'limits', label: 'Daily limits' },
-  { key: 'campaign', label: 'Your first campaign' },
+  { key: 'campaign', label: 'The emails for each audience' },
 ];
 
 const setupPath = (path: string) => `/v1/outreach/setup/${path}`;
@@ -34,9 +36,9 @@ const setupPath = (path: string) => `/v1/outreach/setup/${path}`;
 const BusinessKey = createContext('');
 const useBusinessKey = () => useContext(BusinessKey);
 
-export function useSetupStatus(businessId: string) {
+export function useSetupStatus(businessId: string, enabled = true) {
   return useQuery<SetupStatus>({
-    queryKey: ['outreach-setup', businessId],
+    queryKey: ['outreach-setup', businessId], enabled: !!businessId && enabled,
     queryFn: async () => (await apiRequest('GET', setupPath('status'))).json(),
     staleTime: 10000, retry: false,
   });
@@ -74,16 +76,44 @@ function useCall(businessId: string) {
   return { call, busy, error };
 }
 
-export default function OutreachSetupWizard({ businessId }: { businessId: string }) {
+// OUT-18: outreach is set up per brand, product or service — its own inbox,
+// its own audiences, one email sequence per audience. Setup is finished when
+// one brand is ready; another is set up by repeating the steps.
+const REQUIRED_STEPS = STEPS.filter(s => !s.optional).map(s => s.key);
+
+function brandSteps(brand: BrandSetup | undefined, knowledge: StepState | undefined): Record<string, StepState> {
+  return {
+    brand: brand ? 'done' : 'todo',
+    mailboxes: brand?.mailbox_ok ? 'done' : 'todo',
+    audience: brand?.audiences.some(a => a.approved) ? 'done' : (brand ? 'todo' : 'blocked'),
+    privacy: brand?.privacy ? 'done' : 'todo',
+    knowledge: knowledge || 'todo',
+    limits: 'done',
+    campaign: brand?.audiences.some(a => a.approved && a.campaign?.ready) ? 'done' : 'todo',
+  };
+}
+
+export default function OutreachSetupWizard({ businessId, adding = false, onClose }: {
+  businessId: string; adding?: boolean; onClose?: () => void;
+}) {
   const status = useSetupStatus(businessId);
   const accounts = useAccounts(businessId);
   const api = useCall(businessId);
-  const [active, setActive] = useState<string | null>(null);
+  const [active, setActive] = useState<string | null>(adding ? 'brand' : null);
   const [brandId, setBrandId] = useState('');
-  const [complianceId, setComplianceId] = useState('');
-  const steps = status.data?.steps || {};
-  const current = active || status.data?.next || 'brand';
-  const started = status.data && Object.values(steps).some(s => s === 'done');
+  const [newBrand, setNewBrand] = useState(adding);
+  // A ready brand shows its summary unless the owner opens one of its steps
+  // (Codex OUT-18 part B review 1: finishing the steps must reach the summary).
+  const [revisiting, setRevisiting] = useState(false);
+  const brands = status.data?.brands || [];
+  const brand = brandId ? brands.find(b => b.id === brandId)
+    : newBrand ? undefined : (brands.find(b => !b.ready) || brands[0]);
+  const steps = brandSteps(brand, status.data?.steps?.knowledge);
+  const begun = !!status.data && (brands.length > 0 || Object.values(status.data.steps || {}).some(x => x === 'done'));
+  const current = active || REQUIRED_STEPS.find(k => steps[k] !== 'done') || 'campaign';
+  const choose = (id: string) => { setBrandId(id); setNewBrand(false); setActive(null); setRevisiting(false); };
+  const another = () => { setBrandId(''); setNewBrand(true); setActive('brand'); setRevisiting(false); };
+  const showReady = !!brand?.ready && !revisiting;
 
   if (status.isLoading) return <Typography>Loading setup…</Typography>;
   if (status.isError) return <Alert severity="warning">{outreachError(status.error)}</Alert>;
@@ -92,52 +122,66 @@ export default function OutreachSetupWizard({ businessId }: { businessId: string
     <BusinessKey.Provider value={businessId}>
     <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 } }}>
       <Stack spacing={2}>
-        <Typography variant="h5">Set up outreach</Typography>
+        <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between" flexWrap="wrap" useFlexGap>
+          <Typography variant="h5">{brand ? `Set up outreach for ${brand.name}` : 'Set up outreach'}</Typography>
+          {onClose && <Button onClick={onClose}>Close</Button>}
+        </Stack>
         <Typography color="text.secondary">
-          A few steps, saved as you go. Aria drafts the wording; you approve everything. Nothing is sent
-          until you approve each email.
+          Each brand, product or service you promote gets its own inbox, its own audiences and its own emails.
+          Steps save as you go. Aria drafts the wording; you edit and approve everything. Nothing is sent until you
+          approve it.
         </Typography>
-        {api.error && <Alert severity="error">{api.error}</Alert>}
-        {!started && (
+        {api.error && (current !== 'brand' || showReady) && <Alert severity="error">{api.error}</Alert>}
+        {!begun && (
           <Button variant="contained" disabled={api.busy} onClick={() => api.call('POST', 'begin')}>
             Start setting up outreach
           </Button>
         )}
-        <Stepper orientation="vertical" nonLinear activeStep={STEPS.findIndex(s => s.key === current)}>
-          {STEPS.map(step => (
-            <Step key={step.key} completed={steps[step.key] === 'done'}>
-              <StepLabel
-                optional={step.optional ? <Typography variant="caption">Optional, can be done later</Typography> : undefined}
-                onClick={() => setActive(step.key)} sx={{ cursor: 'pointer' }}
-              >
-                {step.label}
-              </StepLabel>
-              <StepContent>
-                {step.key === 'brand' && <BrandStep api={api} accounts={accounts.data || []} onSaved={setBrandId} />}
-                {step.key === 'mailboxes' && <MailboxStep api={api} accounts={accounts.data || []} />}
-                {step.key === 'audience' && <AudienceStep api={api} brandId={brandId} setBrandId={setBrandId} onApproved={setComplianceId} />}
-                {step.key === 'privacy' && <PrivacyStep api={api} brandId={brandId} setBrandId={setBrandId} />}
-                {step.key === 'knowledge' && <KnowledgeStep brandId={brandId} />}
-                {step.key === 'limits' && <LimitsStep />}
-                {step.key === 'campaign' && (
-                  <CampaignStep api={api} accounts={accounts.data || []} brandId={brandId}
-                    setBrandId={setBrandId} complianceId={complianceId} setComplianceId={setComplianceId} />
-                )}
-              </StepContent>
-            </Step>
-          ))}
-        </Stepper>
-        <Box>
-          <Button variant="contained" size="large" disabled={api.busy || !status.data?.complete}
-            onClick={() => api.call('POST', 'finish')}>
-            Start outreach
-          </Button>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            {status.data?.complete
-              ? 'Starting sends nothing. Aria prepares emails; you approve each one.'
-              : 'Finish the steps above first.'}
-          </Typography>
-        </Box>
+        {brands.length > 1 && (
+          <TextField select label="Setting up" value={brand?.id || ''} onChange={e => choose(e.target.value)}>
+            {brands.map(b => <MenuItem key={b.id} value={b.id}>{b.name}{b.ready ? ' · ready' : ' · in progress'}</MenuItem>)}
+          </TextField>
+        )}
+        {showReady && brand ? (
+          <BrandReady brand={brand} started={!!status.data?.started} busy={api.busy}
+            onAnother={another} onStart={() => api.call('POST', 'finish')} onClose={onClose}
+            onReview={() => { setActive('mailboxes'); setRevisiting(true); }} />
+        ) : (
+          <Stepper orientation="vertical" nonLinear activeStep={STEPS.findIndex(s => s.key === current)}>
+            {STEPS.map(step => (
+              <Step key={step.key} completed={steps[step.key] === 'done'}>
+                <StepLabel
+                  optional={step.optional ? <Typography variant="caption">Optional, can be done later</Typography> : undefined}
+                  onClick={() => { setActive(step.key); if (brand?.ready) setRevisiting(true); }} sx={{ cursor: 'pointer' }}
+                >
+                  {step.label}
+                </StepLabel>
+                <StepContent>
+                  {step.key === 'brand' && <BrandsStep api={api} brands={brands} current={brand}
+                    onSaved={choose} onNext={() => setActive('mailboxes')} onChoose={choose} />}
+                  {step.key === 'mailboxes' && <><MailboxStep api={api} accounts={accounts.data || []} />
+                    {brand && <BrandInbox api={api} brand={brand} accounts={accounts.data || []} />}</>}
+                  {step.key === 'audience' && (brand ? <AudiencesStep key={brand.id} api={api} brand={brand} /> : <NeedBrand />)}
+                  {step.key === 'privacy' && (brand ? <PrivacyStep key={brand.id} api={api} brand={brand} /> : <NeedBrand />)}
+                  {step.key === 'knowledge' && <KnowledgeStep brandId={brand?.id || ''} />}
+                  {step.key === 'limits' && <LimitsStep />}
+                  {step.key === 'campaign' && (brand ? <EmailsStep key={brand.id} api={api} brand={brand} /> : <NeedBrand />)}
+                </StepContent>
+              </Step>
+            ))}
+          </Stepper>
+        )}
+        {brand?.ready && revisiting && <Button sx={{ alignSelf: 'flex-start' }} onClick={() => setRevisiting(false)}>Back to {brand.name}'s summary</Button>}
+        {status.data?.complete && !status.data.started && !showReady && (
+          <Box>
+            <Button variant="contained" size="large" disabled={api.busy} onClick={() => api.call('POST', 'finish')}>
+              Start outreach
+            </Button>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+              Starting sends nothing. Aria prepares emails; you approve each one.
+            </Typography>
+          </Box>
+        )}
       </Stack>
     </Paper>
     </BusinessKey.Provider>
@@ -146,24 +190,119 @@ export default function OutreachSetupWizard({ businessId }: { businessId: string
 
 type Api = ReturnType<typeof useCall>;
 
-function BrandStep({ api, accounts, onSaved }: { api: Api; accounts: Account[]; onSaved: (id: string) => void }) {
-  const [name, setName] = useState('');
-  const [sender, setSender] = useState('');
-  const [mailbox, setMailbox] = useState('');
+function NeedBrand() {
+  return <Alert severity="info">Add what you do outreach for first.</Alert>;
+}
+
+function BrandReady({ brand, started, busy, onAnother, onStart, onClose, onReview }: {
+  brand: BrandSetup; started: boolean; busy: boolean; onAnother: () => void; onStart: () => void; onClose?: () => void;
+  onReview: () => void;
+}) {
+  const audiences = brand.audiences.filter(a => a.approved && a.campaign?.ready);
+  return (
+    <Alert severity="success" icon={false} sx={{ '& .MuiAlert-message': { width: '100%' } }}>
+      <Stack spacing={1.5}>
+        <Typography variant="h6">{brand.name} is ready.</Typography>
+        <Typography variant="body2">
+          Aria will look for {audiences.map(a => a.description.toLowerCase()).join('; ') || 'your audiences'} and
+          draft {audiences.length === 1 ? `the "${audiences[0].campaign!.name}" emails` : 'the right emails for each'}
+          {brand.mailbox_address ? `, sent from ${brand.mailbox_address}` : ''}. You approve every email before it goes.
+        </Typography>
+        <Typography variant="body2">
+          <strong>Have another business, service or product to promote?</strong> Set it up the same way: it gets its
+          own inbox, its own audiences and its own emails.
+        </Typography>
+        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+          <Button variant="outlined" onClick={onAnother}>+ Set up another</Button>
+          <Button onClick={onReview}>Review or change {brand.name}'s setup</Button>
+          {!started && <Button variant="contained" disabled={busy} onClick={onStart}>Start outreach</Button>}
+          {started && onClose && <Button variant="contained" onClick={onClose}>Done</Button>}
+        </Stack>
+      </Stack>
+    </Alert>
+  );
+}
+
+function BrandsStep({ api, brands, current, onSaved, onNext, onChoose }: {
+  api: Api; brands: BrandSetup[]; current?: BrandSetup; onSaved: (id: string) => void; onNext: () => void;
+  onChoose: (id: string) => void;
+}) {
+  const blank = { name: '', sender: '' };
+  const [rows, setRows] = useState([blank]);
+  // Mike's click test (25 Oct 2026): saving gave no sign it had worked, and the
+  // step moved on by itself. Now it says what was saved and stays here, so
+  // another brand can be added; "Next" moves on when the owner is ready.
+  const [saved, setSaved] = useState<string[]>([]);
+  const filled = rows.filter(r => r.name.trim() && r.sender.trim());
   return (
     <Stack spacing={1.5}>
-      <Typography variant="body2">Add each brand you contact people as, e.g. "New Body Gym" or "FitFutures".</Typography>
-      <TextField label="Brand name" value={name} onChange={e => setName(e.target.value)} />
-      <TextField label="Sender identity (shown in every footer)" helperText='e.g. "New Body Gym Ltd"'
-        value={sender} onChange={e => setSender(e.target.value)} />
-      <TextField select label="Usual sending mailbox (optional)" value={mailbox} onChange={e => setMailbox(e.target.value)}>
-        <MenuItem value="">Choose later</MenuItem>
-        {accounts.map(a => <MenuItem key={a.id} value={a.id}>{a.email_address}{a.display_name ? ` · ${a.display_name}` : ''}</MenuItem>)}
+      <Typography variant="body2">
+        Add each brand, product or service you want to win customers for: for example "New Body Gym", or
+        "FitFutures". Most businesses need just one.
+      </Typography>
+      {brands.length > 0 && (
+        <Stack spacing={1}>
+          {brands.map(b => (
+            <Paper key={b.id} variant="outlined" sx={{ p: 1.5, borderColor: current?.id === b.id ? 'primary.main' : undefined }}>
+              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                <Typography sx={{ fontWeight: 600 }}>{b.name}</Typography>
+                <Chip size="small" color={b.ready ? 'success' : 'default'} label={b.ready ? 'Ready' : 'In progress'} />
+                {b.mailbox_address && <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>{b.mailbox_address}</Typography>}
+                {current?.id !== b.id && <Button size="small" onClick={() => onChoose(b.id)}>Set up</Button>}
+              </Stack>
+            </Paper>
+          ))}
+        </Stack>
+      )}
+      {rows.map((row, i) => (
+        <Paper key={i} variant="outlined" sx={{ p: 1.5 }}>
+          <Stack spacing={1}>
+            <TextField label="Brand, product or service" value={row.name}
+              onChange={e => setRows(rows.map((r, j) => j === i ? { ...r, name: e.target.value } : r))} />
+            <TextField label="Who it's sent by (shown in every email footer)" helperText='e.g. "New Body Gym Ltd"'
+              value={row.sender} onChange={e => setRows(rows.map((r, j) => j === i ? { ...r, sender: e.target.value } : r))} />
+            {rows.length > 1 && <Button size="small" sx={{ alignSelf: 'flex-start' }}
+              onClick={() => setRows(rows.filter((_, j) => j !== i))}>Remove</Button>}
+          </Stack>
+        </Paper>
+      ))}
+      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+        <Button variant="text" onClick={() => setRows([...rows, blank])}>+ Add another brand, product or service</Button>
+        <Button variant="contained" disabled={api.busy || filled.length === 0} onClick={async () => {
+          let first = '';
+          const names: string[] = [];
+          setSaved([]);
+          for (const r of filled) {
+            const out = await api.call<{ id: string }>('POST', 'brands', { name: r.name.trim(), sender_identity: r.sender.trim() });
+            if (!out) {
+              setSaved(names);
+              setRows(rows.filter(x => !names.includes(x.name.trim())));   // keep what didn't save, to try again
+              return;
+            }
+            names.push(r.name.trim());
+            first = first || out.id;
+          }
+          setSaved(names);
+          setRows([blank]);
+          if (first) onSaved(first);
+        }}>{api.busy ? 'Saving…' : 'Save'}</Button>
+        {brands.length > 0 && <Button variant="outlined" onClick={onNext}>Next: sending inbox</Button>}
+      </Stack>
+      {saved.length > 0 && <Alert severity="success">Saved: {saved.join(', ')}. Add another below, or go on to the sending inbox.</Alert>}
+      {api.error && <Alert severity="error">Not saved: {api.error}</Alert>}
+    </Stack>
+  );
+}
+
+function BrandInbox({ api, brand, accounts }: { api: Api; brand: BrandSetup; accounts: Account[] }) {
+  return (
+    <Stack spacing={1} sx={{ mt: 2 }} key={brand.id}>
+      <TextField select label={`Send ${brand.name} emails from`} value={brand.mailbox_id || ''}
+        helperText={brand.mailbox_id && !brand.mailbox_ok ? 'Check this mailbox above before it can send.' :
+          'Each brand sends from its own inbox. Your general email default never changes this.'}
+        onChange={e => api.call('POST', 'brands', { name: brand.name, sender_identity: brand.sender_identity, default_mailbox_id: e.target.value })}>
+        {accounts.map(a => <MenuItem key={a.id} value={a.id}>{a.email_address}</MenuItem>)}
       </TextField>
-      <Button variant="outlined" disabled={api.busy || !name || !sender} onClick={async () => {
-        const out = await api.call<{ id: string }>('POST', 'brands', { name, sender_identity: sender, ...(mailbox ? { default_mailbox_id: mailbox } : {}) });
-        if (out) { onSaved(out.id); setName(''); setSender(''); setMailbox(''); }
-      }}>Save brand</Button>
     </Stack>
   );
 }
@@ -210,19 +349,29 @@ function MailboxStep({ api, accounts }: { api: Api; accounts: Account[] }) {
   );
 }
 
-function BrandPicker({ brandId, setBrandId }: { brandId: string; setBrandId: (id: string) => void }) {
-  const businessId = useBusinessKey();
-  const brands = useQuery<{ items?: { id: string; name: string }[] }>({
-    queryKey: ['outreach', businessId, 'setup-brands'], queryFn: async () => (await apiRequest('GET', '/v1/outreach/brands')).json(), retry: false,
-  });
+function AudiencesStep({ api, brand }: { api: Api; brand: BrandSetup }) {
+  const [adding, setAdding] = useState(brand.audiences.length === 0);
   return (
-    <TextField select label="Brand" value={brandId} onChange={e => setBrandId(e.target.value)}>
-      {(brands.data?.items || []).map(b => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}
-    </TextField>
+    <Stack spacing={1.5}>
+      <Typography variant="body2">
+        Add each type of organisation {brand.name} contacts. Each gets its own email: for example schools get a PE
+        provision email, charities a collaboration email.
+      </Typography>
+      {brand.audiences.map(a => (
+        <Paper key={a.id} variant="outlined" sx={{ p: 1.5 }}>
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            <Typography sx={{ overflowWrap: 'anywhere' }}>{a.description}</Typography>
+            <Chip size="small" color={a.approved ? 'success' : 'default'} label={a.approved ? 'Approved' : 'Draft'} />
+          </Stack>
+        </Paper>
+      ))}
+      {adding ? <AudienceForm api={api} brand={brand} onApproved={() => setAdding(false)} />
+        : <Button variant="outlined" sx={{ alignSelf: 'flex-start' }} onClick={() => setAdding(true)}>+ Add another type of organisation</Button>}
+    </Stack>
   );
 }
 
-function AudienceStep({ api, brandId, setBrandId, onApproved }: { api: Api; brandId: string; setBrandId: (id: string) => void; onApproved: (id: string) => void }) {
+function AudienceForm({ api, brand, onApproved }: { api: Api; brand: BrandSetup; onApproved: () => void }) {
   const [description, setDescription] = useState('');
   const [segments, setSegments] = useState('');
   const [regions, setRegions] = useState('');
@@ -233,52 +382,53 @@ function AudienceStep({ api, brandId, setBrandId, onApproved }: { api: Api; bran
   });
   const list = (s: string) => s.split(',').map(x => x.trim()).filter(Boolean);
   return (
-    <Stack spacing={1.5}>
-      <BrandPicker brandId={brandId} setBrandId={setBrandId} />
-      <TextField label="Who do you want to reach?" multiline minRows={2} value={description}
-        helperText="In your own words, e.g. independent gyms and PT studios that could host a trainee"
-        onChange={e => setDescription(e.target.value)} />
-      <TextField label="Sectors (comma separated)" value={segments} onChange={e => setSegments(e.target.value)} />
-      <TextField label="Areas (comma separated)" value={regions} onChange={e => setRegions(e.target.value)} />
-      <Button variant="outlined" disabled={api.busy || !brandId || !description} onClick={async () => {
-        const out = await api.call<Record<string, string>>('POST', 'audience/draft', { brand_id: brandId, description, segments: list(segments), regions: list(regions) });
-        if (out) setDraft(out);
-      }}>Ask Aria to draft the justification</Button>
-      {draft && (
-        <Stack spacing={1.5}>
-          <Alert severity="info">Aria's draft. Edit anything, then approve. This is your record of why contacting these people is fair (UK GDPR legitimate interests).</Alert>
-          {(['purpose', 'necessity', 'balancing_test', 'safeguards'] as const).map(k => (
-            <TextField key={k} label={k.replace('_', ' ')} multiline minRows={2} value={draft[k] || ''}
-              onChange={e => setDraft({ ...draft, [k]: e.target.value })} />
-          ))}
-          <TextField type="date" label="Review this again by" InputLabelProps={{ shrink: true }} value={reviewDate}
-            onChange={e => setReviewDate(e.target.value)} helperText="12 months by default; choose sooner if you prefer" />
-          <Button variant="contained" disabled={api.busy || !reviewDate} onClick={async () => {
-            const { purpose, necessity, balancing_test, safeguards } = draft;
-            const out = await api.call<{ id: string }>('POST', `audience/${draft.id}/approve`,
-              { purpose, necessity, balancing_test, safeguards, review_due_at: `${reviewDate}T23:59:59Z` });
-            if (out) { onApproved(out.id); setDraft(null); }
-          }}>Approve</Button>
-        </Stack>
-      )}
-    </Stack>
+    <Paper variant="outlined" sx={{ p: 1.5 }}>
+      <Stack spacing={1.5}>
+        <TextField label="Who should it contact?" multiline minRows={2} value={description}
+          helperText="In your own words, e.g. secondary schools that need PE support"
+          onChange={e => setDescription(e.target.value)} />
+        <TextField label="Sectors (comma separated)" value={segments} onChange={e => setSegments(e.target.value)} />
+        <TextField label="Areas (comma separated)" value={regions} onChange={e => setRegions(e.target.value)} />
+        <Button variant="outlined" disabled={api.busy || !description} onClick={async () => {
+          const out = await api.call<Record<string, string>>('POST', 'audience/draft', { brand_id: brand.id, description, segments: list(segments), regions: list(regions) });
+          if (out) setDraft(out);
+        }}>Ask Aria to draft the justification</Button>
+        {draft && (
+          <Stack spacing={1.5}>
+            <Alert severity="info">Aria's draft. Edit anything, then approve. This is your record of why contacting these organisations is fair (UK GDPR legitimate interests).</Alert>
+            {(['purpose', 'necessity', 'balancing_test', 'safeguards'] as const).map(k => (
+              <TextField key={k} label={k.replace('_', ' ')} multiline minRows={2} value={draft[k] || ''}
+                onChange={e => setDraft({ ...draft, [k]: e.target.value })} />
+            ))}
+            <TextField type="date" label="Review this again by" InputLabelProps={{ shrink: true }} value={reviewDate}
+              onChange={e => setReviewDate(e.target.value)} helperText="12 months by default; choose sooner if you prefer" />
+            <Button variant="contained" disabled={api.busy || !reviewDate} onClick={async () => {
+              const { purpose, necessity, balancing_test, safeguards } = draft;
+              const out = await api.call<{ id: string }>('POST', `audience/${draft.id}/approve`,
+                { purpose, necessity, balancing_test, safeguards, review_due_at: `${reviewDate}T23:59:59Z` });
+              if (out) { setDraft(null); setDescription(''); setSegments(''); setRegions(''); onApproved(); }
+            }}>Approve</Button>
+          </Stack>
+        )}
+      </Stack>
+    </Paper>
   );
 }
 
-function PrivacyStep({ api, brandId, setBrandId }: { api: Api; brandId: string; setBrandId: (id: string) => void }) {
+function PrivacyStep({ api, brand }: { api: Api; brand: BrandSetup }) {
   const [text, setText] = useState('');
   const [url, setUrl] = useState('');
   return (
     <Stack spacing={1.5}>
-      <Typography variant="body2">Every outreach email links to a short privacy notice. Aria drafts it; you check and approve it; Business Hero publishes it.</Typography>
-      <BrandPicker brandId={brandId} setBrandId={setBrandId} />
-      <Button variant="outlined" disabled={api.busy || !brandId} onClick={async () => {
-        const out = await api.call<{ text: string }>('POST', `brands/${brandId}/privacy/draft`);
+      <Typography variant="body2">Every {brand.name} email links to a short privacy notice. Aria drafts it; you check and approve it; Business Hero publishes it.</Typography>
+      {brand.privacy && !text && <Alert severity="success">{brand.name}'s notice is published. You can replace it below.</Alert>}
+      <Button variant="outlined" disabled={api.busy} onClick={async () => {
+        const out = await api.call<{ text: string }>('POST', `brands/${brand.id}/privacy/draft`);
         if (out) setText(out.text);
       }}>Ask Aria to draft the notice</Button>
       <TextField label="Privacy notice" multiline minRows={8} value={text} onChange={e => setText(e.target.value)} />
-      <Button variant="contained" disabled={api.busy || !brandId || !text.trim()} onClick={async () => {
-        const out = await api.call<{ url: string }>('POST', `brands/${brandId}/privacy/approve`, { text });
+      <Button variant="contained" disabled={api.busy || !text.trim()} onClick={async () => {
+        const out = await api.call<{ url: string }>('POST', `brands/${brand.id}/privacy/approve`, { text });
         if (out) setUrl(out.url);
       }}>Approve and publish</Button>
       {url && <Alert severity="success" sx={{ overflowWrap: 'anywhere' }}>Published at {url}</Alert>}
@@ -304,50 +454,57 @@ function LimitsStep() {
   return (
     <Stack spacing={1}>
       <Typography variant="body2">
-        Up to 20 new emails a day across the business, and never more than each mailbox's warm-up allows. Emails go
-        on weekdays, 9am to 5pm UK. Copying yourself in is off unless you turn it on.
+        Up to 20 new emails a day for each brand, and never more than each mailbox's warm-up allows (5, then 10, then
+        20 a day as it builds a sending history). Emails go on weekdays, 9am to 5pm UK. Copying yourself in is off
+        unless you turn it on.
       </Typography>
       <Button component={Link} to="/app/outreach/settings" variant="text" sx={{ alignSelf: 'flex-start' }}>Change limits</Button>
     </Stack>
   );
 }
 
-function CampaignStep({ api, accounts, brandId, setBrandId, complianceId, setComplianceId }: {
-  api: Api; accounts: Account[]; brandId: string; setBrandId: (id: string) => void; complianceId: string; setComplianceId: (id: string) => void;
-}) {
-  const [name, setName] = useState('');
-  const [mailbox, setMailbox] = useState('');
-  const [createdNow, setCreated] = useState('');
-  // After a reload, carry on with a drafted campaign whose emails aren't approved yet.
-  const drafts = useQuery<{ items?: { id: string; status: string }[] }>({
-    queryKey: ['outreach', useBusinessKey(), 'setup-campaigns'],
-    queryFn: async () => (await apiRequest('GET', '/v1/outreach/campaigns?limit=50')).json(), retry: false,
-  });
-  // Saving wording pauses a campaign, so a paused one is also still in setup.
-  const created = createdNow || (drafts.data?.items || []).find(c => c.status === 'draft' || c.status === 'paused')?.id || '';
-  const compliance = useQuery<{ items?: { id: string; brand_id: string; version: number; decision: string; reviewed_at?: string }[] }>({
-    queryKey: ['outreach', useBusinessKey(), 'setup-compliance'], queryFn: async () => (await apiRequest('GET', '/v1/outreach/compliance?limit=50')).json(), retry: false,
-  });
-  const audiences = (compliance.data?.items || []).filter(a => a.decision === 'approved')
-    .map(a => ({ ...a, summary: `Approved audience v${a.version}${a.reviewed_at ? `, ${a.reviewed_at.slice(0, 10)}` : ''}` }));
+function EmailsStep({ api, brand }: { api: Api; brand: BrandSetup }) {
+  const approved = brand.audiences.filter(a => a.approved);
+  const [open, setOpen] = useState<string>('');
+  if (approved.length === 0) return <Alert severity="info">Approve who {brand.name} contacts first.</Alert>;
   return (
     <Stack spacing={1.5}>
-      <BrandPicker brandId={brandId} setBrandId={setBrandId} />
-      <TextField label="Campaign name" value={name} onChange={e => setName(e.target.value)} />
-      <TextField select label="Send from" value={mailbox} onChange={e => setMailbox(e.target.value)}
-        helperText="Chosen explicitly. Changing your general email default never changes this.">
-        {accounts.map(a => <MenuItem key={a.id} value={a.id}>{a.email_address}</MenuItem>)}
-      </TextField>
-      {audiences.length > 0 ? (
-        <TextField select label="Approved audience" value={complianceId} onChange={e => setComplianceId(e.target.value)}>
-          {audiences.filter(a => !brandId || a.brand_id === brandId).map(a => <MenuItem key={a.id} value={a.id}>{a.summary || a.id}</MenuItem>)}
-        </TextField>
-      ) : !complianceId && <Alert severity="info">Approve who you'll contact first.</Alert>}
-      <Button variant="contained" disabled={api.busy || !name || !brandId || !mailbox || !complianceId} onClick={async () => {
-        const out = await api.call<{ id: string }>('POST', 'campaign', { name, brand_id: brandId, mailbox_id: mailbox, compliance_id: complianceId, daily_cap: 5 });
-        if (out) setCreated(out.id);
-      }}>Ask Aria to draft the three emails</Button>
-      {created && <CampaignTemplates campaignId={created} />}
+      <Typography variant="body2">
+        Aria drafts three emails for each type of organisation: a first email and two follow-ups. Edit anything, then
+        approve. Approving sends nothing.
+      </Typography>
+      {!brand.mailbox_id && <Alert severity="info">Choose {brand.name}'s sending inbox first.</Alert>}
+      {approved.map(a => (
+        <Paper key={a.id} variant="outlined" sx={{ p: 1.5 }}>
+          <Stack spacing={1}>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+              <Typography sx={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{a.description}</Typography>
+              {a.campaign && <Chip size="small" color={a.campaign.ready ? 'success' : a.campaign.other_inbox ? 'warning' : 'default'}
+                label={a.campaign.ready ? 'Emails approved' : a.campaign.other_inbox ? 'On another inbox' : !a.campaign.approved ? 'Waiting for your approval' : 'Inbox needs its check'} />}
+            </Stack>
+            {!a.campaign ? (
+              <Button variant="contained" sx={{ alignSelf: 'flex-start' }} disabled={api.busy || !brand.mailbox_id}
+                onClick={() => api.call('POST', 'campaign', { name: a.description.slice(0, 120), brand_id: brand.id,
+                  mailbox_id: brand.mailbox_id, compliance_id: a.id, daily_cap: 5 })}>
+                Ask Aria to draft the emails
+              </Button>
+            ) : a.campaign.other_inbox ? (
+              <Stack spacing={1}>
+                <Typography variant="body2">
+                  These emails send from a different inbox to {brand.name}'s{brand.mailbox_address ? ` (${brand.mailbox_address})` : ''}.
+                  Copy them across: same wording, which you approve once more.
+                </Typography>
+                <Button variant="contained" sx={{ alignSelf: 'flex-start' }} disabled={api.busy || !brand.mailbox_id}
+                  onClick={() => api.call('POST', `campaigns/${a.campaign!.id}/copy`, { mailbox_id: brand.mailbox_id })}>
+                  Copy the emails to {brand.name}'s inbox
+                </Button>
+              </Stack>
+            ) : a.campaign.ready && open !== a.id ? (
+              <Button size="small" sx={{ alignSelf: 'flex-start' }} onClick={() => setOpen(a.id)}>Read or edit the emails</Button>
+            ) : <CampaignTemplates campaignId={a.campaign.id} />}
+          </Stack>
+        </Paper>
+      ))}
     </Stack>
   );
 }
@@ -501,7 +658,8 @@ export function CopyCampaign({ businessId, campaignId }: { businessId: string; c
 
 // ---------------------------------------------------- OUT-10: research ---
 
-interface ResearchStatus { enabled: boolean; monthly_cap_pence: number; spent_pence: number; lessons: string[]; last_run?: string | null; summary?: string | null }
+interface BrandResearch { brand_id: string; name: string; enabled: boolean; monthly_cap_pence: number; spent_pence: number; paused_reason?: string | null; lessons: string[] }
+interface ResearchStatus { brands: BrandResearch[]; enabled: boolean; daily_target_per_brand: number; min_cap_pence: number; last_run?: string | null; summary?: string | null }
 
 export function useResearchStatus(businessId: string) {
   return useQuery<ResearchStatus>({
@@ -519,43 +677,60 @@ export function ResearchSummary({ businessId }: { businessId: string }) {
 
 export function ResearchPanel({ businessId }: { businessId: string }) {
   const research = useResearchStatus(businessId);
-  const client = useQueryClient();
-  const api = useCall(businessId);
-  const [budget, setBudget] = useState<string>('');
-  const [notes, setNotes] = useState<string | null>(null);
   const data = research.data;
-  async function save(path: string, body: unknown) {
-    if (await api.call('POST', path, body)) client.invalidateQueries({ queryKey: ['outreach-research', businessId] });
-  }
   if (!data) return null;
-  const pounds = (p: number) => `£${(p / 100).toFixed(2)}`;
   return (
     <Paper variant="outlined" sx={{ p: 2 }}>
       <Stack spacing={1.5}>
         <Typography variant="h6">Research</Typography>
         <Typography variant="body2">
-          Each weekday morning Aria looks for up to 20 new contacts per business, at least 10 of them named
-          decision-makers, and checks every one before it's kept: the email is on their website, the domain receives
-          mail, the company is registered at Companies House, and they haven't been contacted or opted out.
+          Each weekday morning Aria looks for up to {data.daily_target_per_brand} new contacts for each brand, at least
+          10 of them named decision-makers, and checks every one before it's kept: the email is on their website, the
+          domain receives mail, the company is registered at Companies House, and they haven't been contacted or opted out.
         </Typography>
         {data.summary && <Alert severity="info" icon={false}><strong>Latest:</strong> {data.summary}</Alert>}
-        <FormControlLabel control={<Checkbox checked={data.enabled} disabled={api.busy}
-          onChange={(_, v) => save('research', { enabled: v })} />} label="Aria researches new contacts each weekday" />
-        <Typography variant="body2">This month: {pounds(data.spent_pence)} of {pounds(data.monthly_cap_pence)}. Research pauses when the budget is reached.</Typography>
-        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-          <TextField size="small" type="number" label="Monthly budget (£)" value={budget}
-            placeholder={(data.monthly_cap_pence / 100).toFixed(0)} onChange={e => setBudget(e.target.value)} />
-          <Button variant="outlined" disabled={api.busy || budget === '' || Number(budget) < 0}
-            onClick={() => save('research', { monthly_cap_pence: Math.round(Number(budget) * 100) })}>Save budget</Button>
+        {data.brands.length === 0 && <Typography variant="body2">Add a brand in setup to start research.</Typography>}
+        {data.brands.map(b => <BrandResearchCard key={b.brand_id} businessId={businessId} brand={b} minCap={data.min_cap_pence} />)}
+      </Stack>
+    </Paper>
+  );
+}
+
+function BrandResearchCard({ businessId, brand, minCap }: { businessId: string; brand: BrandResearch; minCap: number }) {
+  const client = useQueryClient();
+  const api = useCall(businessId);
+  const [budget, setBudget] = useState('');
+  const [notes, setNotes] = useState<string | null>(null);
+  const pounds = (p: number) => `£${(p / 100).toFixed(2)}`;
+  const min = minCap / 100;
+  async function save(path: string, body: Record<string, unknown>) {
+    const ok = await api.call('POST', path, { brand_id: brand.brand_id, ...body });
+    if (ok) client.invalidateQueries({ queryKey: ['outreach-research', businessId] });
+    return ok;
+  }
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Stack spacing={1.25}>
+        <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{brand.name}</Typography>
+        {brand.paused_reason && <Alert severity="warning">Paused: {brand.paused_reason}</Alert>}
+        <FormControlLabel control={<Checkbox checked={brand.enabled} disabled={api.busy}
+          onChange={(_, v) => save('research', { enabled: v })} />} label={`Aria researches new contacts for ${brand.name} each weekday`} />
+        <Typography variant="body2">This month: {pounds(brand.spent_pence)} of {pounds(brand.monthly_cap_pence)}. Research for {brand.name} pauses when its budget is reached.</Typography>
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          <TextField size="small" type="number" label="Monthly budget (£)" value={budget} inputProps={{ min }}
+            placeholder={(brand.monthly_cap_pence / 100).toFixed(0)} onChange={e => setBudget(e.target.value)}
+            helperText={`At least £${min.toFixed(0)}`} />
+          <Button variant="outlined" disabled={api.busy || budget === '' || Number(budget) < min || Number(budget) > 1000}
+            onClick={async () => { if (await save('research', { monthly_cap_pence: Math.round(Number(budget) * 100) })) setBudget(''); }}>Save budget</Button>
         </Stack>
-        <Typography variant="subtitle2">What Aria has learned</Typography>
+        <Typography variant="subtitle2">What Aria has learned for {brand.name}</Typography>
         <Typography variant="body2" color="text.secondary">
-          Aria learns from your own results: which sectors, areas and roles reply. Add your own notes too, one per line.
+          Aria learns from this brand's own results: which sectors, areas and roles reply. Add your own notes too, one per line.
         </Typography>
-        <TextField multiline minRows={3} value={notes ?? data.lessons.join('\n')} onChange={e => setNotes(e.target.value)}
+        <TextField multiline minRows={3} value={notes ?? brand.lessons.join('\n')} onChange={e => setNotes(e.target.value)}
           placeholder="e.g. Independent studios reply far more than chains." />
         <Button variant="outlined" disabled={api.busy || notes === null} sx={{ alignSelf: 'flex-start' }}
-          onClick={async () => { await save('research/lessons', { lessons: (notes || '').split('\n').map(s => s.trim()).filter(Boolean) }); setNotes(null); }}>
+          onClick={async () => { if (await save('research/lessons', { lessons: (notes || '').split('\n').map(s => s.trim()).filter(Boolean) })) setNotes(null); }}>
           Save notes
         </Button>
         {api.error && <Alert severity="error">{api.error}</Alert>}

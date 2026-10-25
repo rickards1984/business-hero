@@ -1,4 +1,5 @@
-import { useOutreachData, useOutreachSummary } from '@/hooks/useOutreachData';
+import { useOutreachData } from '@/hooks/useOutreachData';
+import { useOutreachEnabled } from '@/hooks/useOutreachEntry';
 import { useQuery } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
@@ -115,9 +116,11 @@ export function useDashboardData(businessId?: string) {
     ...LIVE,
   });
 
-  const outreach = useOutreachSummary(businessId);
-  const outreachPending = useOutreachData(businessId, 'replies?resolution=pending&limit=20&offset=0');
-  const outreachHandedOver = useOutreachData(businessId, 'replies?resolution=handed_over&limit=20&offset=0');
+  // OUT-17: no outreach requests (and no "unavailable" notices) without Outreach.
+  const outreachOn = useOutreachEnabled();
+  const outreach = useOutreachData(businessId, 'summary', outreachOn);
+  const outreachPending = useOutreachData(businessId, 'replies?resolution=pending&limit=20&offset=0', outreachOn);
+  const outreachHandedOver = useOutreachData(businessId, 'replies?resolution=handed_over&limit=20&offset=0', outreachOn);
   return { calls, summary, tasks, usage, actions, outreach, outreachPending, outreachHandedOver };
 }
 

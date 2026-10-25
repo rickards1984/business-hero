@@ -108,12 +108,48 @@ def scan(session, business, *, classify=None, moment=None):
     """Scan existing storage; commit stopping before any optional classifier."""
     moment = moment or now()
     bid = str(business.id)
+    # Find the candidate mail BEFORE taking the business lock (Mike's click
+    # test, 25 Oct 2026: reading the whole inbox under the lock, on every sync,
+    # made saving a brand time out). Only mail from a prospect we have actually
+    # emailed, received since the first accepted outreach email, can be a
+    # reply; everything else is skipped without being read.
+    send.require(not session.new and not session.dirty and not session.deleted,
+                 'Storage completion requires a clean session')
+    session.rollback()
+    contacted = {_address(e) for (e,) in session.execute(text(
+        "SELECT DISTINCT p.email FROM outreach_prospects p JOIN outreach_messages m ON m.business_id=p.business_id "
+        "AND m.prospect_id=p.id WHERE p.business_id=:b AND m.direction='outbound' AND m.state='accepted'"),
+        {'b': bid}) if e}
+    first = session.execute(text(
+        "SELECT min(accepted_at) FROM outreach_messages WHERE business_id=:b AND direction='outbound' AND state='accepted'"),
+        {'b': bid}).scalar()
+    stale = session.execute(text(
+        "SELECT count(*) FROM outreach_replies WHERE business_id=:b AND resolution='pending' AND category='unknown'"),
+        {'b': bid}).scalar()
+    wanted = []
+    if contacted and first is not None:
+        for mid, sender in session.execute(text(
+                "SELECT id, from_email FROM email_messages m WHERE m.business_id=:b AND m.received_at >= :first "
+                "AND NOT EXISTS (SELECT 1 FROM outreach_replies r WHERE r.business_id=m.business_id "
+                "AND r.inbound_email_id=m.id) ORDER BY m.received_at, m.id"), {'b': bid, 'first': first}):
+            if _address(sender) in contacted:
+                wanted.append(str(mid))
+    session.rollback()
+    if not wanted and not stale:
+        return [str(r['id']) for r in send.rows(session, 'outreach_replies', bid)]
     _start(session, bid)
     accounts = {str(a['id']): a for a in send.rows(session, 'email_accounts', bid)}
     own = {_address(a['email_address']) for a in accounts.values()}
+    # A reply whose classifying worker died is never captured again: after the
+    # bounded wait it goes to the owner (Codex OUT-7 fix review 1).
+    for reply in send.rows(session, 'outreach_replies', bid, "AND resolution='pending' AND category='unknown'"):
+        if not _awaiting_classification(reply):
+            _hand_over(session, bid, reply, 'Reply needs owner review: classification did not finish', moment)
     captured = []
-    inbox = send.rows(session, 'email_messages', bid,
-        "AND NOT EXISTS (SELECT 1 FROM outreach_replies r WHERE r.business_id=:bid AND r.inbound_email_id=email_messages.id) ORDER BY received_at,id")
+    # Under the lock, only the candidates are read, each by id and re-checked.
+    inbox = [m for mid in wanted for m in send.rows(session, 'email_messages', bid,
+             "AND id=:id AND NOT EXISTS (SELECT 1 FROM outreach_replies r WHERE r.business_id=:bid "
+             "AND r.inbound_email_id=email_messages.id)", {'id': mid})]
     for incoming in inbox:
         sender = _address(incoming['from_email'])
         if not sender or sender in own or str(incoming['email_account_id']) not in accounts:
@@ -230,10 +266,27 @@ def _card(action):
     return {'id': str(action['id']), 'status': action['status'], 'version': version_of(payload), 'preview': payload}
 
 
+CLASSIFICATION_WAIT = timedelta(minutes=15)
+
+
+def _awaiting_classification(reply):
+    """Stored by a sync that has not classified it yet. Bounded: a reply left
+    unclassified (its worker died) goes to the owner after CLASSIFICATION_WAIT."""
+    if reply['resolution'] != 'pending' or reply['category'] != 'unknown':
+        return False
+    stored = _parse(reply['updated_at'])
+    return stored is not None and now() - stored < CLASSIFICATION_WAIT
+
+
 def propose_answer(session, business, *, reply_id, draft, moment):
     bid = str(business.id)
     _start(session, bid)
     reply = send.one(session, 'outreach_replies', bid, reply_id, True)
+    if _awaiting_classification(reply):
+        # Another sync stored this reply and is classifying it now; it proposes
+        # the answer itself. Handing over here made its classification lose.
+        session.commit()
+        return {'id': None, 'status': 'awaiting_classification', 'reply_id': str(reply_id)}
     slots = send.rows(session, 'outreach_reply_slots', bid, 'AND prospect_id=:p', {'p': str(reply['prospect_id'])})
     if slots:
         slot = slots[0]

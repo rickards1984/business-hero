@@ -11,6 +11,8 @@ import ApprovalCard from '@/components/ApprovalCard';
 import OutreachReplyCard from '@/components/OutreachReplyCard';
 import ReplyCard, { type ChaseReply } from '@/components/ReplyCard';
 import AriaHero from '@/components/AriaHero';
+import OutreachIntro from '@/components/OutreachIntro';
+import { useOutreachEnabled } from '@/hooks/useOutreachEntry';
 import { isBlocking } from '@/components/ReceptionistUsage';
 import { ago, useDashboardData } from '@/hooks/useDashboardData';
 import './DashboardPage.css';
@@ -56,6 +58,7 @@ function DashboardContent() {
   const queryClient = useQueryClient();
   const businessId = me?.id;
   const d = useDashboardData(businessId);
+  const outreachOn = useOutreachEnabled();
   const [showTasks, setShowTasks] = useState(false);
   // The open drafts are the server's list, refreshed (an edit or dismissal
   // made elsewhere updates or removes its card — Codex NS-B7 review 2). A card
@@ -90,7 +93,8 @@ function DashboardContent() {
   const cards = [...open, ...Object.values(finished).filter(c => !open.some(o => o.id === c.id))];
   const openReplies = d.summary.data?.replies ?? [];
   const replies = [...openReplies, ...Object.values(settled).filter(r => !openReplies.some(o => o.id === r.id))];
-  const outreachReplies = [...new Map([...(d.outreachPending.data?.items || []), ...(d.outreachHandedOver.data?.items || [])].map(r => [r.id, r])).values()];
+  // OUT-17 review 1: cached replies stop showing the moment Outreach is switched off.
+  const outreachReplies = !outreachOn ? [] : [...new Map([...(d.outreachPending.data?.items || []), ...(d.outreachHandedOver.data?.items || [])].map(r => [r.id, r])).values()];
   const inv = d.summary.data?.invoices;
   const em = d.summary.data?.emails;
   const synced = d.summary.data?.synced;
@@ -108,14 +112,16 @@ function DashboardContent() {
 
       {isMobile && <AriaHero variant="card" />}
 
+      <OutreachIntro businessId={businessId} />
+
       <section className="home-section" aria-label="Needs you">
         <div className="home-section-head">
           <h2>Needs you</h2>
           <span>Aria drafts. You approve. She acts once, signed as your AI assistant.</span>
         </div>
-        {(d.outreachPending.isError || d.outreachHandedOver.isError) && <Alert severity="info">Outreach replies unavailable. Outreach history access is required.</Alert>}
+        {outreachOn && (d.outreachPending.isError || d.outreachHandedOver.isError) && <Alert severity="info">Outreach replies unavailable. Outreach history access is required.</Alert>}
         {outreachReplies.map(r => <OutreachReplyCard key={`${businessId}:${r.id}`} businessId={businessId} reply={r} />)}
-        {!!d.outreach.data?.totals?.unresolved_replies && <button className="home-link" onClick={() => navigate('/app/outreach/replies')}>View all {d.outreach.data.totals.unresolved_replies} unresolved outreach replies</button>}
+        {outreachOn && !!d.outreach.data?.totals?.unresolved_replies && <button className="home-link" onClick={() => navigate('/app/outreach/replies')}>View all {d.outreach.data.totals.unresolved_replies} unresolved outreach replies</button>}
         {replies.length > 0 && (
           <div className="home-cards" style={{ marginBottom: 16 }}>
             {replies.map(r => <ReplyCard key={r.id} reply={r} onChanged={() => replyChanged(r)} />)}
@@ -165,11 +171,11 @@ function DashboardContent() {
       <section className="home-section" aria-label="Your business">
         <div className="home-section-head"><h2>Your business</h2></div>
         <div className="home-tiles">
-          <Tile name="Outreach" onClick={() => navigate('/app/outreach')}
+          {outreachOn && <Tile name="Outreach" onClick={() => navigate('/app/outreach')}
             loading={d.outreach.isLoading} failed={d.outreach.isError}
             figure={d.outreach.data && `${d.outreach.data.totals?.unresolved_replies ?? 'Unknown'} unresolved replies`}
             line={d.outreach.data && `${d.outreach.data.totals?.campaigns ?? 'Unknown'} stored campaigns`}
-            age={d.outreach.dataUpdatedAt ? `Loaded ${new Date(d.outreach.dataUpdatedAt).toLocaleTimeString('en-GB')}; inbox freshness unknown` : undefined} />
+            age={d.outreach.dataUpdatedAt ? `Loaded ${new Date(d.outreach.dataUpdatedAt).toLocaleTimeString('en-GB')}; inbox freshness unknown` : undefined} />}
           <Tile name="Invoices" onClick={() => navigate('/app/finance?tab=invoices')}
             loading={d.summary.isLoading} failed={d.summary.isError}
             figure={inv && (inv.overdue_count > 0 ? `${money(inv.overdue_total)} overdue` : money(inv.outstanding_total))}

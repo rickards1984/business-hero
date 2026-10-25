@@ -9,6 +9,7 @@ import stripe
 from sqlalchemy import text
 
 from app.billing.config import get_stripe_config
+from app.billing import plans
 
 logger = logging.getLogger(__name__)
 _last_result = None
@@ -88,7 +89,6 @@ def run(session, *, now=None, silence_threshold=timedelta(hours=48)):
     globals. The installed RequestsClient defaults to an 80-second timeout.
     SDK pagination preserves request options, including the retry bound.
     """
-    from main import _plan_item, _resolve_plan_from_price, _resolve_current_period_end
 
     started = _utc(now or datetime.now(timezone.utc))
     result = _new_result(started)
@@ -155,13 +155,13 @@ def run(session, *, now=None, silence_threshold=timedelta(hours=48)):
                 finding(kind, b["id"], sid, local=local, remote=remote)
             if b["subscription_status"] != sub.get("status"):
                 diff("subscription_status", b["subscription_status"], sub.get("status"))
-            price = ((_plan_item(sub) or {}).get("price") or {}).get("id")
-            plan = _resolve_plan_from_price(price)
+            price = ((plans.plan_item(sub) or {}).get("price") or {}).get("id")
+            plan = plans.resolve_plan_from_price(price)
             if plan is None:
                 diff("unresolved_price", b["plan_tier"], price)
             elif plan != b["plan_tier"]:
                 diff("plan_tier", b["plan_tier"], plan)
-            period = _resolve_current_period_end(sub)
+            period = plans.resolve_current_period_end(sub)
             local = _utc(b["current_period_end"])
             if period is None:
                 diff("unresolved_period", local.isoformat() if local else None)

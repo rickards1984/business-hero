@@ -598,6 +598,15 @@ def _outreach_delta(session, bid, meter, period, amount):
                     {'b': bid, 'm': meter, 'p': period, 'n': amount})
 
 
+def month_bounds(day):
+    """A UK calendar month as (first day, first day of the next month, Monday–
+    Friday count): the window and size of a brand's monthly allowance (OUT-18)."""
+    first = day.replace(day=1)
+    following = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+    weekdays = sum(1 for n in range((following - first).days) if (first + timedelta(days=n)).weekday() < 5)
+    return first, following, weekdays
+
+
 def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, prospect_id, message_id, moment):
     """Reserve once; caller owns transaction, rollback and action claim."""
     from services.outreach_send import rows, one, require, insert, loads, _parse
@@ -605,8 +614,6 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
     lock_outreach_usage(session, business, moment=moment)
     period = period_for(moment)
     require(not rows(session, 'outreach_usage_events', bid, 'AND operation_key=:k', {'k': operation_key}))
-    require(_read(session, bid, OUTREACH_SENT, period) + _read(session, bid, OUTREACH_HELD, period) < 500,
-            'Monthly outreach allowance exhausted')
     settings = one(session, 'outreach_settings', bid, lock=True)
     mailboxes = rows(session, 'outreach_mailboxes', bid, 'AND mailbox_id=:m', {'m': mailbox_id}, True)
     require(len(mailboxes) == 1)
@@ -634,7 +641,30 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
         "WHERE u.business_id=:b AND m.campaign_id=:c AND u.local_send_date=:d AND u.state IN ('reserved','committed','unknown')"),
         {'b': bid, 'c': campaign['id'], 'd': local.date().isoformat()}).scalar()
     require(count < campaign['daily_cap'], 'Campaign daily capacity exhausted')
-    for scope, scope_id, limit in (('business', bid, min(20, settings['business_daily_cap'])), ('mailbox', mailbox_id, cap)):
+    # OUT-18 (Mike, Option A): the daily limit of new emails is PER BRAND —
+    # 20, or the owner's lower business_daily_cap — counted like the campaign
+    # cap from this UK day's held and sent emails, under the business lock.
+    brand_count = session.execute(text(
+        "SELECT count(*) FROM outreach_usage_events u JOIN outreach_messages m ON m.business_id=u.business_id AND m.id=u.message_id "
+        "JOIN outreach_campaigns c ON c.business_id=m.business_id AND c.id=m.campaign_id "
+        "WHERE u.business_id=:b AND c.brand_id=:br AND u.local_send_date=:d AND u.state IN ('reserved','committed','unknown')"),
+        {'b': bid, 'br': str(campaign['brand_id']), 'd': local.date().isoformat()}).scalar()
+    daily_limit = min(20, settings['business_daily_cap'])
+    require(brand_count < daily_limit, 'Daily outreach capacity for this brand exhausted')
+    # The monthly allowance is per brand too (Mike, 25 Oct 2026): the daily
+    # limit times this UK month's weekdays, so no brand runs out mid-campaign.
+    # The business-wide sent/held meters are still kept for reporting.
+    first, following, weekdays = month_bounds(local.date())
+    month_count = session.execute(text(
+        "SELECT count(*) FROM outreach_usage_events u JOIN outreach_messages m ON m.business_id=u.business_id AND m.id=u.message_id "
+        "JOIN outreach_campaigns c ON c.business_id=m.business_id AND c.id=m.campaign_id "
+        "WHERE u.business_id=:b AND c.brand_id=:br AND u.local_send_date>=:first AND u.local_send_date<:following "
+        "AND u.state IN ('reserved','committed','unknown')"),
+        {'b': bid, 'br': str(campaign['brand_id']), 'first': first.isoformat(), 'following': following.isoformat()}).scalar()
+    require(month_count < daily_limit * weekdays, 'Monthly outreach allowance for this brand exhausted')
+    # The business row is still counted (reporting and settlement); the
+    # mailbox row enforces each mailbox's warm-up limit.
+    for scope, scope_id, limit in (('business', bid, None), ('mailbox', mailbox_id, cap)):
         usage = rows(session, 'outreach_daily_usage', bid, 'AND scope_type=:s AND scope_id=:i AND local_date=:d',
                      {'s': scope, 'i': scope_id, 'd': local.date().isoformat()}, True)
         if not usage:
@@ -642,7 +672,8 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
                            local_date=local.date().isoformat(), reserved=0, accepted=0, unknown=0)
             usage = [one(session, 'outreach_daily_usage', bid, ident)]
         u = usage[0]
-        require(sum(u[k] or 0 for k in ('reserved', 'accepted', 'unknown')) < limit, 'Daily outreach capacity exhausted')
+        if limit is not None:
+            require(sum(u[k] or 0 for k in ('reserved', 'accepted', 'unknown')) < limit, 'Daily outreach capacity exhausted')
         session.execute(text('UPDATE outreach_daily_usage SET reserved=reserved+1 WHERE business_id=:b AND id=:id'), {'b': bid, 'id': u['id']})
     month_start = start.replace(day=1)
     month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)

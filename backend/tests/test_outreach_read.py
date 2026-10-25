@@ -663,3 +663,13 @@ def test_out8_reply_detail_shows_scoped_stopped_sequences_and_takeover(harness, 
         assert enrolment['takeover_at'] == STAMP
         assert enrolment['stop_reason'] == 'Owner took over'
     assert uid(B, 'campaigns') not in json.dumps(result)
+
+
+@pytest.mark.parametrize("via", ["api", "tool"])
+def test_aria_is_told_the_daily_limit_is_per_brand(harness, via):
+    """OUT-18 C (Mike, Option A): 20 new emails a day for EACH brand. The
+    stored name says "business"; Aria must not read it as a business total."""
+    _, result = invoke(harness, next(s for s in SURFACES if s[1] == "get_outreach_settings_and_permissions"), via)
+    assert result["daily_limit"]["scope"] == "per_brand"
+    assert result["daily_limit"]["new_emails_per_brand_per_day"] == 20
+    assert "each brand" in result["daily_limit"]["message"].lower()
