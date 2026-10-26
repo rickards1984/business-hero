@@ -760,6 +760,23 @@ def test_hook_the_slot_records_the_full_payload_hash(r):
     assert len(stored) == 64 and stored.startswith(card['version'])
 
 
+def test_reading_an_outreach_reply_is_costed_against_its_brand(r):
+    """OUT-19: the reading is recorded, in its own transaction, against the
+    brand the prospect was found for, whatever then happens to the reply."""
+    from services import ai_costs
+    from types import SimpleNamespace
+
+    def reader(context):
+        ai_costs.note("openai", "gpt-6-luna", SimpleNamespace(prompt_tokens=500, completion_tokens=40),
+                      fallback=(10_000, 400))
+        return {'category': 'question', 'confidence': 100, 'classification_version': 1}
+    incoming(r)
+    scan(r, classify=reader)
+    key = f"classify:{BRAND}:openai/gpt-6-luna"
+    got = dict(r.s.execute(text("SELECT meter, value FROM usage_meters WHERE meter LIKE 'ai_%'")).fetchall())
+    assert float(got[f"ai_tokens_in:{key}"]) == 500 and float(got[f"ai_calls:{key}"]) == 1
+
+
 # ------------------------------- the business lock is held briefly (Mike's click test) ---
 # 25 Oct 2026: saving a brand timed out waiting for the business lock. Every
 # email sync ran this scan, which took the lock first and then read the WHOLE

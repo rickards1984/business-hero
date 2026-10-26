@@ -5615,6 +5615,8 @@ async def disconnect_xero(
 # ---------------------------------------------------------------------------
 from admin_business_api import router as admin_business_router  # noqa: E402
 app.include_router(admin_business_router)
+from admin_outreach_api import router as admin_outreach_router  # noqa: E402
+app.include_router(admin_outreach_router)
 
 
 if __name__ == "__main__":
