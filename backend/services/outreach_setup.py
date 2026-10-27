@@ -812,11 +812,21 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
     if not ai_costs.allowed(session):
         session.rollback()
         refuse(503, "Aria's drafting is paused for now. Write this yourself, or try again later.")
-    from services import outreach_allowance   # OUT-19 B: the brand's allowance, with a small reserve for drafting
-    if not outreach_allowance.may_draft(session, str(business.id), brand_id, now()):
+    # OUT-19 B: the brand's allowance, with a small reserve for drafting. The
+    # draft's likely cost is HELD under the business lock before Aria starts,
+    # so drafts and research running at once all see it (Codex OUT-19 B+C
+    # review 1), and released when its real cost is recorded.
+    from services import outreach_allowance
+    bid, moment = str(business.id), now()
+    hold = outreach_allowance.draft_hold_pence() if brand_id is not None else 0
+    session.rollback()
+    send.lock_business(session, bid) if send.pg(session) else session.execute(
+        text("UPDATE business_settings SET business_id = business_id WHERE business_id = :b"), {"b": bid})
+    if not outreach_allowance.may_draft(session, bid, brand_id, moment, hold):
         session.rollback()
         refuse(409, outreach_allowance.DRAFT_ALLOWANCE_USED)
-    session.rollback()   # no lock is held while Aria drafts
+    outreach_allowance.hold_draft(session, bid, brand_id, moment, hold)
+    session.commit()   # held; no lock is held while Aria drafts
     with ai_costs.collect() as spent:
         failure = None
         try:
@@ -825,17 +835,20 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
             failure = exc
             raise
         finally:
-            if spent:
-                try:
-                    session.rollback()
-                    ai_costs.save(session, str(business.id), spent, purpose="draft", brand_id=brand_id)
-                    session.commit()
-                except Exception:
-                    session.rollback()
-                    logger.exception("Could not record an Aria draft's AI cost for business %s", business.id)
-                    if failure is None:
-                        raise   # never hand out a draft whose cost wasn't recorded
-                    # otherwise the draft's own error propagates
+            try:
+                session.rollback()
+                if send.pg(session):
+                    send.lock_business(session, bid)
+                if spent:
+                    ai_costs.save(session, bid, spent, purpose="draft", brand_id=brand_id)
+                outreach_allowance.hold_draft(session, bid, brand_id, moment, -hold)   # settled: the real cost replaces it
+                session.commit()
+            except Exception:
+                session.rollback()
+                logger.exception("Could not record an Aria draft's AI cost for business %s", business.id)
+                if failure is None:
+                    raise   # never hand out a draft whose cost wasn't recorded
+                # otherwise the draft's own error propagates; its hold stays counted (fail closed)
 
 
 def model_draft_audience(context: dict) -> dict:

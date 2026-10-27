@@ -1009,7 +1009,7 @@ function OutreachBudget({ businessId }: { businessId: string }) {
         <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>Your monthly outreach budget</Typography>
         <Typography variant="body2">
           The most outreach may charge each month beyond your plan, for extra brands and top-ups. Nothing is charged beyond it.
-          Already committed this month: {pounds(b.committed_pence)}.
+          Your outreach brands' monthly prices come to {pounds(b.committed_pence)}; the budget can't be lower than that.
         </Typography>
         <Typography variant="body2">{b.budget_pence === null ? 'No budget set yet.' : <>Your budget: <strong>{pounds(b.budget_pence)}</strong> a month.</>}</Typography>
         <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="center">

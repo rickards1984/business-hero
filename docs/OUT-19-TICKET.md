@@ -93,7 +93,15 @@
 - **Only the active owner sets it,** and never below what is already committed (the paid brands).
 - **Every future charge** (an extra brand, a top-up: part F) must pass `can_charge`. With no budget set, nothing beyond what's already committed is charged until the owner chooses one; Aria's suggestion is one tap.
 
-**Tests first:** `backend/tests/test_outreach_allowance.py`, 16 tests, strict xfail until Mike approves.
+**Tests first:** `backend/tests/test_outreach_allowance.py`, 16 tests, strict xfail until Mike approves. **Mike approved them on 27 Oct 2026**, with one condition: "as long as we are always looking at a net profit for all transactions". PROFIT-1, below, is proposed to cover the rest of the platform.
+
+**Codex review 1 (`audits/OUT-19-BC-CODEX-REVIEW-1.md`, 1 × P1):**
+- **Drafts are held before Aria starts.** A draft's likely cost (`OUTREACH_DRAFT_HOLD_PENCE`, 50p) is held under the business lock before Aria starts, so drafts and research running at once all see it. It is released when the real cost is recorded; a failed recording leaves it counted (fail closed).
+- **Legacy research spend counts.** Spend on the business-wide research meter from before OUT-18 counts against every brand.
+- **Meter names are matched literally,** with `_` escaped.
+- **No top-up offers yet.** Messages no longer offer top-ups before part F exists.
+- **Reply sorting is tested behaviourally** above the allowance.
+- **Still for part F:** combining `can_charge` with a durable charge reservation under one lock. Today it is a predicate only.
 
 ### D — Research sized to sending capacity (decision 1)
 Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/test_outreach_research_capacity.py`.

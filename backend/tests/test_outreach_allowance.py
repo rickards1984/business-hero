@@ -27,6 +27,8 @@ from sqlmodel import Session
 from test_outreach_setup import A, OWNER, STAFF, db  # noqa: F401
 from test_outreach_research import NOW, World, person, research, run, run_clock, started
 from test_outreach_research_brands import second_brand
+from test_outreach_replies import r  # noqa: F401
+from test_outreach_send import database, h  # noqa: F401
 
 
 class MissingAllowance(AssertionError):
@@ -109,7 +111,8 @@ def test_research_stops_at_the_allowance(db):
     world = World([[person(i) for i in range(5)]])
     out = run(db, biz, lia, world)
     assert world.briefs == [] and out["spend_pence"] == 0
-    assert "allowance" in out["stopped"] and "top up" in out["stopped"].lower()
+    assert "allowance" in out["stopped"] and "next month" in out["stopped"]
+    assert "top up" not in out["stopped"].lower(), "top-ups don't exist until part F"
 
 
 def test_research_runs_while_the_allowance_has_room(db):
@@ -162,7 +165,7 @@ def test_drafting_carries_on_within_a_small_reserve_then_stops(db):
 
     def drafter(context):
         return [{"subject": f"S{i}", "body": f"B{i}"} for i in range(3)]
-    spend(db, brand, 2475 + m.DRAFT_RESERVE_PENCE - 1)
+    spend(db, brand, 2475 + m.DRAFT_RESERVE_PENCE - m.draft_hold_pence())   # exactly room for one draft's hold
     with run_clock(), Session(db) as s:
         assert len(setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "shorter", "current": CURRENT}, draft=drafter)["emails"]) == 3
     spend(db, brand, 1)
@@ -268,3 +271,90 @@ def test_the_budget_over_http(db, monkeypatch, who, code):
         assert client.get("/v1/outreach/setup/budget").json()["suggested_pence"] == 9900 + 2500
         assert client.put("/v1/outreach/setup/budget", json={"monthly_pence": 15000}).status_code == code
         assert client.put("/v1/outreach/setup/budget", json={"monthly_pence": "lots"}).status_code == 422
+
+
+
+# ------------------------------------------------------ Codex OUT-19 B+C review 1 ---
+
+def test_a_draft_holds_its_cost_before_aria_starts_so_two_at_once_cannot_overrun(db):
+    """P1: a second draft started while the first is still running sees the
+    first one's hold, so together they never pass the allowance + reserve."""
+    m = allowance()
+    from test_outreach_setup import setup_module_or_missing
+    from services.aria_actions import ActionRefused
+    setup = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+    spend(db, brand, 2475 + m.DRAFT_RESERVE_PENCE - m.draft_hold_pence())   # room for exactly one hold
+    seen = {}
+
+    def first_drafter(context):
+        with run_clock(), Session(db) as other:          # a second request arrives mid-draft
+            try:
+                setup.redraft_emails(other, biz, OWNER, campaign["id"], {"notes": "again", "current": CURRENT},
+                                     draft=lambda c: [{"subject": "x", "body": "y"}] * 3)
+                seen["second"] = "drafted"
+            except ActionRefused as exc:
+                seen["second"] = exc.detail
+        return [{"subject": f"S{i}", "body": f"B{i}"} for i in range(3)]
+    with run_clock(), Session(db) as s:
+        assert len(setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT},
+                                        draft=first_drafter)["emails"]) == 3
+    assert "allowance" in seen["second"]
+
+
+def test_a_finished_draft_releases_its_hold_and_keeps_its_real_cost(db):
+    m = allowance()
+    from test_outreach_setup import setup_module_or_missing
+    from services import ai_costs
+    setup = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+
+    def costly(context):
+        ai_costs.note("openai", "gpt-6.1-sol", None, fallback=(1000, 1000), estimated=True)
+        return [{"subject": f"S{i}", "body": f"B{i}"} for i in range(3)]
+    with run_clock(), Session(db) as s:
+        setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT}, draft=costly)
+    with Session(db) as s:
+        held = s.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE meter LIKE :m"),
+                         {"m": m.DRAFT_HOLD_METER + "%"}).scalar()
+        assert float(held or 0) == 0
+        assert m.spent_pence(s, A, brand["id"], PERIOD) == int(ai_costs.cost("openai", "gpt-6.1-sol", 1000, 1000))
+
+
+def test_research_spend_from_before_brands_still_counts_against_every_brand(db):
+    """P2: the business-wide research meter from before OUT-18 counts (fail closed)."""
+    m = allowance()
+    biz, brand, lia, campaign = started(db)
+    with Session(db) as s:
+        research()._add_meter(s, A, research().METER, NOW, 1900)
+        research()._spend(s, A, NOW, 100, brand["id"])
+        s.commit()
+    with Session(db) as s:
+        assert m.spent_pence(s, A, brand["id"], PERIOD) == 2000
+
+
+def test_meter_names_are_matched_literally(db):
+    """Backlog: '_' is a LIKE wildcard; a look-alike meter must not count."""
+    m = allowance()
+    biz, brand, lia, campaign = started(db)
+    with Session(db) as s:
+        s.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) VALUES "
+                       "(:b, :m, :p, 500, :at)"), {"b": A, "m": f"aiXpence:draft:{brand['id']}:x/y", "p": PERIOD,
+                                                  "at": NOW.isoformat()})
+        s.commit()
+        assert m.spent_pence(s, A, brand["id"], PERIOD) == 0
+
+
+def test_reply_sorting_still_runs_above_the_allowance(r):
+    """Backlog, behaviourally: with the brand far over its allowance, a reply
+    is still classified (an unsubscribe must always be understood)."""
+    from services import ai_costs
+    from test_outreach_replies import incoming, scan
+    from test_outreach_send import A as BIZ, BRAND, NOW as SEND_NOW
+    allowance()
+    ai_costs.record(r.s, BIZ, purpose="draft", brand_id=BRAND, provider="openai", model="gpt-6.1-sol",
+                    pence=100000, moment=SEND_NOW)
+    r.s.commit()
+    incoming(r)
+    scan(r, category="unsubscribe")
+    assert r.s.execute(text("SELECT category FROM outreach_replies")).scalar() == "unsubscribe"

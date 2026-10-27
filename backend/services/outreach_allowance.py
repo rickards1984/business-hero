@@ -31,6 +31,7 @@ DRAFT_RESERVE_PENCE = 300
 TOPUP_SHARE = 3                              # a top-up buys AI at cost × 3
 TOPUP_METER = "outreach_topup_pence"          # part F: paid top-ups per brand, per month
 BUDGET_KEY = "outreach_budget"                # settings-document key (kept by preserve_automations)
+DRAFT_HOLD_METER = "outreach_draft_hold_pence"  # drafts in progress, held before Aria starts (Codex B+C review 1)
 SUGGESTED_TOPUP_PENCE = 2500
 
 
@@ -65,18 +66,27 @@ def allowance_pence(session, bid: str, brand_id, period: str) -> int:
     return base + int(topped) // TOPUP_SHARE
 
 
+def _like(text_: str) -> str:
+    """A literal LIKE prefix: "_" and "%" in a meter name match only themselves."""
+    return text_.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def spent_pence(session, bid: str, brand_id, period: str) -> int:
     """All of a brand's AI spend this month: research as reserved and settled
-    (its own meter, which the ledger's research rows mirror), plus every other
-    purpose from the ledger."""
+    (its own meter, which the ledger's research rows mirror, plus the
+    business-wide research meter from before OUT-18, which counts against
+    every brand: fail closed, Codex B+C review 1), drafts held in progress,
+    and every other purpose from the ledger."""
     from services import outreach_research
-    research = _meter(session, str(bid), outreach_research.meter_for(brand_id), period)
+    research = (_meter(session, str(bid), outreach_research.meter_for(brand_id), period)
+                + _meter(session, str(bid), outreach_research.METER, period))
+    held = _meter(session, str(bid), f"{DRAFT_HOLD_METER}:{brand_id}", period)
     other = float(session.execute(text(
         "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND period = :p "
-        "AND meter LIKE :like AND meter NOT LIKE :research"),
-        {"b": str(bid), "p": period, "like": f"ai_pence:%:{brand_id}:%",
-         "research": f"ai_pence:research:{brand_id}:%"}).scalar() or 0)
-    return int(research + other)
+        "AND meter LIKE :like ESCAPE '\\' AND meter NOT LIKE :research ESCAPE '\\'"),
+        {"b": str(bid), "p": period, "like": _like("ai_pence:") + "%" + _like(f":{brand_id}:") + "%",
+         "research": _like(f"ai_pence:research:{brand_id}:") + "%"}).scalar() or 0)
+    return int(research + held + other)
 
 
 def used_percent(session, bid: str, brand_id, moment: datetime) -> int:
@@ -90,17 +100,36 @@ def may_research(session, bid: str, brand_id, moment: datetime, reserve: int) ->
     return spent_pence(session, bid, brand_id, period) + int(reserve) <= allowance_pence(session, bid, brand_id, period)
 
 
-def may_draft(session, bid: str, brand_id, moment: datetime) -> bool:
+DRAFT_HOLD_PENCE = 50   # a draft's most likely cost, failover included; held until its real cost is recorded
+
+
+def draft_hold_pence() -> int:
+    import os
+    try:
+        return max(1, int(os.environ.get("OUTREACH_DRAFT_HOLD_PENCE", DRAFT_HOLD_PENCE)))
+    except ValueError:
+        return DRAFT_HOLD_PENCE
+
+
+def may_draft(session, bid: str, brand_id, moment: datetime, hold: int = 0) -> bool:
     if brand_id is None:
         return True
     period = period_for(moment)
-    return spent_pence(session, bid, brand_id, period) < allowance_pence(session, bid, brand_id, period) + DRAFT_RESERVE_PENCE
+    return (spent_pence(session, bid, brand_id, period) + int(hold)
+            <= allowance_pence(session, bid, brand_id, period) + DRAFT_RESERVE_PENCE)
 
 
-ALLOWANCE_USED = ("This brand's AI allowance for the month is used, so research has stopped until next month. "
-                  "Top up to carry on now.")
-DRAFT_ALLOWANCE_USED = ("This brand's AI allowance for the month is used, so Aria can't draft this. "
-                        "Top up, or write it yourself.")
+def hold_draft(session, bid: str, brand_id, moment: datetime, pence: int) -> None:
+    """Add (or, to release, subtract) a draft's hold, in the caller's transaction."""
+    from services import outreach_research
+    if brand_id is not None and pence:
+        outreach_research._add_meter(session, str(bid), f"{DRAFT_HOLD_METER}:{brand_id}", moment, int(pence))
+
+
+# Top-ups arrive with part F; until then nothing offers them (Codex B+C review 1).
+ALLOWANCE_USED = "This brand's AI allowance for the month is used, so research has stopped until next month."
+DRAFT_ALLOWANCE_USED = ("This brand's AI allowance for the month is used, so Aria can't draft this until next month. "
+                        "Write it yourself for now.")
 
 
 # ------------------------------------------------------------- C: the budget ---
@@ -110,8 +139,8 @@ def _committed(session, bid: str, moment: datetime) -> int:
     and the top-ups bought this month."""
     paid = sum(price for price, included in prices(session, bid).values() if not included)
     topups = float(session.execute(text(
-        "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND period = :p AND meter LIKE :m"),
-        {"b": bid, "p": period_for(moment), "m": f"{TOPUP_METER}:%"}).scalar() or 0)
+        "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND period = :p AND meter LIKE :m ESCAPE '\\'"),
+        {"b": bid, "p": period_for(moment), "m": _like(f"{TOPUP_METER}:") + "%"}).scalar() or 0)
     return int(paid + topups)
 
 

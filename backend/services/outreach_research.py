@@ -392,9 +392,13 @@ def _spent(session, bid: str, moment: datetime, brand_id) -> int:
 
 def _spend(session, bid: str, moment: datetime, pence: int, brand_id) -> None:
     """Add (or, to settle a reservation, subtract) one brand's spend this month."""
+    _add_meter(session, bid, meter_for(brand_id), moment, pence)
+
+
+def _add_meter(session, bid: str, meter: str, moment: datetime, pence: int) -> None:
     if pence == 0:
         return
-    params = {"b": bid, "m": meter_for(brand_id), "p": period_for(moment), "v": int(pence), "at": moment}
+    params = {"b": bid, "m": meter, "p": period_for(moment), "v": int(pence), "at": moment}
     updated = session.execute(text("UPDATE usage_meters SET value = value + :v, updated_at = :at "
                                    "WHERE business_id = :b AND meter = :m AND period = :p"), params)
     if not updated.rowcount:

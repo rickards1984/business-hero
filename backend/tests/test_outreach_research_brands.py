@@ -204,7 +204,9 @@ def test_legacy_business_spend_this_month_counts_against_every_brand(db):
                        "(:b, 'outreach_research_pence', '2026-10', 1995, :at)"), {"b": A, "at": NOW.isoformat()})
     for target in (lia, fit_lia):
         world = World([[person(1)]])
-        assert "budget" in run(db, biz, target, world)["stopped"] and world.briefs == []
+        stopped = run(db, biz, target, world)["stopped"]
+        # Stopped by the research budget or, since OUT-19 B, the brand's allowance (which counts this too).
+        assert ("budget" in stopped or "allowance" in stopped) and world.briefs == []
 
 
 def test_a_legacy_business_setting_becomes_each_brand_starting_value_never_below_twenty(db):
