@@ -69,8 +69,31 @@
 - When it is reached, research stops until next month or a top-up. Drafting replies continues within a small reserve, so conversations are never stranded.
 - This replaces today's owner-set £20+ research budget as the hard ceiling. The owner's budget (C) can only lower it.
 
+**Decided (Mike, 27 Oct 2026: "Go with the recommendations. We can always review this when live"):**
+- **The allowance is 25% of what the brand pays:**
+  - the Pro add-on, £99 → **£24.75** a month;
+  - an extra brand, £79 → **£19.75**;
+  - a Business plan's included brand → a fixed **£20**.
+
+  A top-up (F) adds a third of its price to that brand's allowance for that month.
+- **All of a brand's AI spend counts:** research, Aria's drafting and reply sorting, from the OUT-19 cost ledger. Research reservations in flight count too.
+- **At the allowance:**
+  - research makes no further paid search until next month or a top-up, and says so with the top-up option;
+  - Aria's drafting carries on within a small reserve (`DRAFT_RESERVE_PENCE`, £3), then asks the owner to top up or write it themselves;
+  - **reply sorting never stops:** an unsubscribe must always be understood. Its cost is still recorded.
+- **The owner's research budget can only lower the allowance,** never raise it.
+- **The owner sees how much of the allowance is used, as a percentage, not the figure.** Mike sees the figures in the admin economics panel.
+
 ### C — The owner's monthly budget
 - A single £ figure for add-on brands and top-ups. Aria suggests a realistic amount from the brands, inboxes and warm-up stages. Nothing is charged beyond it.
+
+**Decided (Mike, 27 Oct 2026):**
+- **The budget** is one £ figure a month for what outreach may charge beyond the plan: paid brands and top-ups.
+- **Aria's suggestion:** each paid brand's price plus room for one £25 top-up per brand.
+- **Only the active owner sets it,** and never below what is already committed (the paid brands).
+- **Every future charge** (an extra brand, a top-up: part F) must pass `can_charge`. With no budget set, nothing beyond what's already committed is charged until the owner chooses one; Aria's suggestion is one tap.
+
+**Tests first:** `backend/tests/test_outreach_allowance.py`, 16 tests, strict xfail until Mike approves.
 
 ### D — Research sized to sending capacity (decision 1)
 Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/test_outreach_research_capacity.py`.

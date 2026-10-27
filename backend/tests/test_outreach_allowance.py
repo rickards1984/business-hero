@@ -1,0 +1,247 @@
+"""OUT-19 B + C — each brand's hidden AI allowance, and the owner's monthly
+budget (docs/OUT-19-TICKET.md). RED: money.
+
+Mike, 27 Oct 2026 ("go with the recommendations; review when live"):
+  * B: a brand's AI spend is capped at 25% of what it pays (£79 → £19.75,
+    the Pro add-on £99 → £24.75); a Business plan's included brand has a
+    fixed £20. All of a brand's AI spend counts (research, drafting, reply
+    sorting). At the allowance research stops until next month or a top-up;
+    Aria's drafting carries on within a small reserve; reply sorting never
+    stops (an unsubscribe must always be understood). The owner's research
+    budget can only lower it, never raise it.
+  * C: one £ figure for what outreach may charge each month beyond the plan
+    (add-on brands and top-ups). Aria suggests one; nothing is charged beyond it.
+
+Tests first, for Mike's approval: strict xfail until services.outreach_allowance
+exists. Every adapter is faked; no network, no model, no payment.
+"""
+# ruff: noqa: F811 - pytest fixtures imported from the research harness are parameters by design
+
+import importlib
+import importlib.util
+
+import pytest
+from sqlalchemy import text
+from sqlmodel import Session
+
+from test_outreach_setup import A, OWNER, STAFF, db  # noqa: F401
+from test_outreach_research import NOW, World, person, research, run, run_clock, started
+from test_outreach_research_brands import second_brand
+
+
+class MissingAllowance(AssertionError):
+    """Only the intentional absence of the module may be xfailed."""
+
+
+pytestmark = pytest.mark.xfail(raises=MissingAllowance, strict=True,
+                               reason="OUT-19 B + C tests first: awaiting Mike's approval")
+
+
+@pytest.fixture(autouse=True)
+def no_pilot_limit(monkeypatch):
+    monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", "0")
+
+
+def allowance():
+    if importlib.util.find_spec("services.outreach_allowance") is None:
+        raise MissingAllowance("backend/services/outreach_allowance.py does not exist yet")
+    return importlib.import_module("services.outreach_allowance")
+
+
+PERIOD = "2026-10"
+
+
+def spend(db, brand, pence, purpose="draft"):
+    """AI spend already recorded this month for a brand, as the ledger records it."""
+    from services import ai_costs
+    with Session(db) as s:
+        ai_costs.record(s, A, purpose=purpose, brand_id=brand["id"], provider="openai", model="gpt-6.1-sol",
+                        pence=pence, moment=NOW)
+        s.commit()
+
+
+def plan(db, tier):
+    with db.begin() as c:
+        c.execute(text("UPDATE businesses SET plan_tier = :p WHERE id = :b"), {"p": tier, "b": A})
+
+
+# ------------------------------------------------------------ B: the allowance ---
+
+def test_a_brand_may_spend_a_quarter_of_what_it_pays():
+    """£99 add-on → £24.75; each extra brand £79 → £19.75; Business plan's included brand → £20."""
+    m = allowance()
+    assert m.allowance_for_price(9900, included=False) == 2475
+    assert m.allowance_for_price(7900, included=False) == 1975
+    assert m.allowance_for_price(0, included=True) == 2000
+
+
+def test_each_brands_allowance_follows_its_place_and_the_plan(db):
+    m = allowance()
+    biz, brand, lia, campaign = started(db)          # business A is on Pro: its first brand is the £99 add-on
+    fit, fit_lia = second_brand(db, biz)              # an extra brand: £79
+    with Session(db) as s:
+        assert m.allowance_pence(s, A, brand["id"], PERIOD) == 2475
+        assert m.allowance_pence(s, A, fit["id"], PERIOD) == 1975
+    plan(db, "business")
+    with Session(db) as s:
+        assert m.allowance_pence(s, A, brand["id"], PERIOD) == 2000     # included in Business
+        assert m.allowance_pence(s, A, fit["id"], PERIOD) == 1975
+
+
+def test_all_of_a_brands_ai_spend_counts_and_only_its_own(db):
+    m = allowance()
+    biz, brand, lia, campaign = started(db)
+    fit, fit_lia = second_brand(db, biz)
+    spend(db, brand, 300, "draft")
+    spend(db, brand, 40, "classify")
+    spend(db, fit, 999, "draft")
+    with Session(db) as s:
+        assert m.spent_pence(s, A, brand["id"], PERIOD) == 340
+
+
+def test_research_stops_at_the_allowance(db):
+    """Spend from any purpose brings research to a stop before it pays for a search."""
+    allowance()
+    biz, brand, lia, campaign = started(db)
+    spend(db, brand, 2450)                            # £24.50 of £24.75 used: no room for a search's reserve
+    world = World([[person(i) for i in range(5)]])
+    out = run(db, biz, lia, world)
+    assert world.briefs == [] and out["spend_pence"] == 0
+    assert "allowance" in out["stopped"] and "top up" in out["stopped"].lower()
+
+
+def test_research_runs_while_the_allowance_has_room(db):
+    allowance()
+    biz, brand, lia, campaign = started(db)
+    spend(db, brand, 1000)
+    out = run(db, biz, lia, World([[person(i) for i in range(5)]], cost=30))
+    assert len(out["accepted"]) == 5
+
+
+def test_the_owners_research_budget_can_lower_the_allowance_but_never_raise_it(db):
+    allowance()
+    biz, brand, lia, campaign = started(db)
+    with Session(db) as s:                            # a budget above the allowance changes nothing
+        research().configure(s, biz, OWNER, {"brand_id": brand["id"], "monthly_cap_pence": 100000})
+    spend(db, brand, 2450)
+    world = World([[person(i) for i in range(5)]])
+    run(db, biz, lia, world)
+    assert world.briefs == []
+
+
+def test_an_owners_lower_research_budget_still_applies(db):
+    allowance()
+    biz, brand, lia, campaign = started(db)
+    with Session(db) as s:
+        research().configure(s, biz, OWNER, {"brand_id": brand["id"], "monthly_cap_pence": 2000})
+    with Session(db) as s:                            # research spend alone, as before
+        research()._spend(s, A, NOW, 1990, brand["id"])
+        s.commit()
+    world = World([[person(i) for i in range(5)]])
+    run(db, biz, lia, world)
+    assert world.briefs == []
+
+
+def test_one_brand_at_its_allowance_never_stops_another(db):
+    allowance()
+    biz, brand, lia, campaign = started(db)
+    fit, fit_lia = second_brand(db, biz)
+    spend(db, brand, 2475)
+    assert len(run(db, biz, fit_lia, World([[person(100 + i) for i in range(5)]], cost=30))["accepted"]) == 5
+
+
+def test_drafting_carries_on_within_a_small_reserve_then_stops(db):
+    """At the allowance Aria can still draft (a little), so a campaign is never
+    stranded; beyond the reserve she asks the owner to top up or write it."""
+    m = allowance()
+    from test_outreach_setup import setup_module_or_missing
+    setup = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+
+    def drafter(context):
+        return [{"subject": f"S{i}", "body": f"B{i}"} for i in range(3)]
+    spend(db, brand, 2475 + m.DRAFT_RESERVE_PENCE - 1)
+    with run_clock(), Session(db) as s:
+        assert len(setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "shorter"}, draft=drafter)["emails"]) == 3
+    spend(db, brand, 1)
+    from services.aria_actions import ActionRefused
+    with run_clock(), Session(db) as s, pytest.raises(ActionRefused) as exc:
+        setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "shorter"}, draft=drafter)
+    assert "allowance" in exc.value.detail
+
+
+def test_reply_sorting_is_never_stopped_by_the_allowance():
+    """An unsubscribe or a question must always be understood: the reply
+    classifier has no allowance check, and its cost is still recorded."""
+    import inspect
+    allowance()
+    from services import chase_replies, outreach_replies
+    for source in (inspect.getsource(chase_replies.classify_with_model), inspect.getsource(outreach_replies.scan)):
+        assert "outreach_allowance" not in source and "may_research" not in source and "may_draft" not in source
+
+
+def test_the_owner_sees_how_much_of_the_allowance_is_used_not_the_figure(db):
+    allowance()
+    biz, brand, lia, campaign = started(db)
+    spend(db, brand, 1238)                            # half of £24.75
+    with run_clock(), Session(db) as s:
+        row = next(b for b in research().status(s, biz)["brands"] if b["brand_id"] == brand["id"])
+    assert row["allowance_used_percent"] == 50
+    assert "allowance_pence" not in row
+
+
+def test_the_allowance_starts_again_each_month(db):
+    m = allowance()
+    biz, brand, lia, campaign = started(db)
+    spend(db, brand, 2475)
+    with Session(db) as s:
+        assert m.spent_pence(s, A, brand["id"], "2026-11") == 0
+
+
+# ----------------------------------------------------------- C: the budget ---
+
+def test_aria_suggests_a_budget_from_the_brands(db):
+    """Each paid brand's price, plus room for one £25 top-up per brand."""
+    m = allowance()
+    biz, brand, lia, campaign = started(db)            # Pro: first brand £99
+    fit, fit_lia = second_brand(db, biz)               # extra brand £79
+    with run_clock(), Session(db) as s:
+        out = m.budget_status(s, biz, moment=NOW)
+    assert out["committed_pence"] == 9900 + 7900
+    assert out["suggested_pence"] == 9900 + 7900 + 2 * 2500
+    assert out["budget_pence"] is None
+
+
+def test_only_the_owner_sets_the_budget_and_never_below_what_is_already_committed(db):
+    m = allowance()
+    biz, brand, lia, campaign = started(db)
+    with run_clock(), Session(db) as s:
+        with pytest.raises(Exception) as exc:
+            m.set_budget(s, biz, STAFF, {"monthly_pence": 20000})
+        assert getattr(exc.value, "status_code", None) == 403
+        s.rollback()
+        with pytest.raises(Exception) as exc:
+            m.set_budget(s, biz, OWNER, {"monthly_pence": 5000})     # below the £99 already committed
+        assert getattr(exc.value, "status_code", None) == 422
+        s.rollback()
+        assert m.set_budget(s, biz, OWNER, {"monthly_pence": 15000})["budget_pence"] == 15000
+
+
+def test_nothing_is_charged_beyond_the_budget(db):
+    """The check every future charge (an extra brand, a top-up) must pass."""
+    m = allowance()
+    biz, brand, lia, campaign = started(db)
+    with run_clock(), Session(db) as s:
+        m.set_budget(s, biz, OWNER, {"monthly_pence": 15000})
+    with run_clock(), Session(db) as s:
+        assert m.can_charge(s, biz, 5100, moment=NOW) is True        # 9900 + 5100 = 15000
+        assert m.can_charge(s, biz, 5101, moment=NOW) is False
+
+
+def test_without_a_budget_charges_wait_for_the_owner(db):
+    """No budget set: nothing beyond what is already committed is charged
+    until the owner chooses one (Aria's suggestion is one tap)."""
+    m = allowance()
+    biz, brand, lia, campaign = started(db)
+    with run_clock(), Session(db) as s:
+        assert m.can_charge(s, biz, 1000, moment=NOW) is False
