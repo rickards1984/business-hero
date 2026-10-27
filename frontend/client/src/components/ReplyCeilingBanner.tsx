@@ -16,15 +16,15 @@ export default function ReplyCeilingBanner({ businessId }: { businessId: string 
       {b.email || 'An outreach inbox'} can send {b.left} more email{b.left === 1 ? '' : 's'} today
       {b.pending_replies ? ` · ${b.pending_replies} repl${b.pending_replies === 1 ? 'y' : 'ies'} waiting` : ''}.
     </Typography>)}
-    <Typography variant="body2" sx={{ mt: 1 }}>Every reply still gets answered. Choose how:</Typography>
+    <Typography variant="body2" sx={{ mt: 1 }}>Replies are never held back by the cold-email limits, but each inbox can only send so many emails a day. Choose how to handle the rest:</Typography>
     <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1, '& .MuiButton-root': { minHeight: 44 } }}>
       <Button variant="contained" onClick={() => navigate('/app/outreach/replies')}>I'll reply myself</Button>
       <Button variant="outlined" onClick={() => navigate('/app/outreach')}>Add a second inbox</Button>
-      <Button variant="outlined" disabled>Boost this inbox</Button>
+      <Button variant="outlined" disabled>Boost this inbox (coming later)</Button>
     </Stack>
     <Typography variant="caption" component="p" sx={{ mt: 1 }}>
       "I'll reply myself": each reply shows Aria's briefing — who wrote, what they asked, her suggested answer and the facts behind it — to send from your own email.
-      A second inbox needs warming up before it sends. Boosting opens once an inbox has sent 20 a day for 4–6 weeks with clean results.
+      A second inbox needs warming up before it sends. Boosting an inbox isn't available yet.
     </Typography>
   </Alert>;
 }

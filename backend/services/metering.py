@@ -650,8 +650,21 @@ def reply_headroom(session, bid: str, mailbox_id: str, moment) -> dict:
                  {'s': 'mailbox', 'i': str(mailbox_id), 'd': moment.astimezone(LONDON).date().isoformat()})
     used = sum(usage[0][k] or 0 for k in ('reserved', 'accepted', 'unknown')) if usage else 0
     left = max(0, ceiling - used)
-    return {'cap': cap, 'ceiling': ceiling, 'used': int(used), 'left': left,
-            'near_ceiling': ceiling > 0 and left <= REPLY_NEAR}
+    # Remaining allowance is not the same as able to send: the send path also
+    # needs today's passing health check (Codex OUT-19 E review 1).
+    checked = _parse_moment(boxes[0]['health_checked_at']) if len(boxes) == 1 else None
+    blocked = None
+    if cap == 0:
+        blocked = "This inbox isn't passing its checks, so it can't send"
+    elif checked is None or checked.astimezone(LONDON).date() != moment.astimezone(LONDON).date():
+        blocked = "Today's inbox check hasn't run yet; sending starts once it passes"
+    return {'cap': cap, 'ceiling': ceiling, 'used': int(used), 'left': left, 'blocked': blocked,
+            'near_ceiling': blocked is None and ceiling > 0 and left <= REPLY_NEAR}
+
+
+def _parse_moment(value):
+    from services.outreach_send import _parse
+    return _parse(value)
 
 
 REPLY_NEAR = 5     # replies left today at which the owner is shown the choices

@@ -84,33 +84,47 @@ def handover(session, business, *, reply_id, user_id, moment):
 def brief(session, business, *, reply_id, user_id, moment):
     """OUT-19 E, "I'll reply myself": everything the owner needs to answer a
     reply from their own email — who wrote, what they asked, Aria's suggested
-    answer if she had one, and the approved facts it may rest on. Read-only;
-    the owner only (it carries the contact's details and message)."""
+    answer if it still rests on approved facts, and those facts. Read-only;
+    the owner only. Past the contact's retention date their details and
+    message are withheld, as everywhere else (Codex OUT-19 E review 1)."""
     bid = business.id
     send.require(_is_active_owner(session, business, user_id), 'Active owner required', 403)
     reply = send.one(session, 'outreach_replies', bid, reply_id)
     p = send.one(session, 'outreach_prospects', bid, reply['prospect_id'])
+    retained = p['retention_due_at'] is None or _parse(p['retention_due_at']) > moment
     inbound = send.rows(session, 'email_messages', bid, 'AND id=:i', {'i': str(reply['inbound_email_id'])})
     inbound = inbound[0] if inbound else {}
     account = send.rows(session, 'email_accounts', bid, 'AND id=:m', {'m': str(reply['mailbox_id'])})
+    # The brand that answers is the matched campaign's, as on the approval path.
     brand = None
-    if p['lia_id']:
-        brand = send.one(session, 'outreach_compliance', bid, p['lia_id'])['brand_id']
-    facts = []
-    if brand is not None:
-        for k in send.rows(session, 'outreach_knowledge', bid, "AND brand_id=:b AND status='approved' ORDER BY topic,version",
-                           {'b': str(brand)}):
-            if k['approved_by'] and _parse(k['approved_at']) and _parse(k['approved_at']) <= moment < _parse(k['review_due_at']):
-                facts.append({'topic': k['topic'], 'answer': k['answer'], 'source': k['source_reference']})
+    if reply['matched_message_id']:
+        message = send.rows(session, 'outreach_messages', bid, 'AND id=:m', {'m': str(reply['matched_message_id'])})
+        if message and message[0]['campaign_id']:
+            brand = send.one(session, 'outreach_campaigns', bid, message[0]['campaign_id'])['brand_id']
+    current = _facts(session, bid, brand, moment) if brand is not None else []
+    topics = {str(k['id']): k['topic'] for k in send.rows(session, 'outreach_knowledge', bid, 'AND brand_id=:b',
+                                                          {'b': str(brand)})} if brand is not None else {}
+    facts = [{'topic': topics.get(k['id']), 'answer': k['answer'], 'source': k['source_reference']} for k in current]
+    suggested, why_none = None, "Aria hasn't suggested an answer for this reply."
+    if reply.get('suggested_body'):
+        refs = send.loads(reply.get('knowledge_refs')) or []
+        if _grounded({'body': reply['suggested_body'], 'knowledge_refs': refs}, current):
+            suggested, why_none = reply['suggested_body'], None
+        else:
+            why_none = ("Aria's earlier suggestion relied on facts that are no longer approved, so it isn't shown. "
+                        "Check the facts below before you answer.")
     session.rollback()
     mailbox = account[0]['email_address'] if account else None
     return {
         'reply_id': str(reply['id']),
-        'who': {'name': p['name'], 'role': p['role'], 'company': p['company'], 'email': p['email']},
-        'asked': {'subject': inbound.get('subject'), 'received_at': str(reply['received_at'] or ''),
-                  'text': (inbound.get('body_text') or '')[:4000]},
+        'retained': retained,
+        'who': ({'name': p['name'], 'role': p['role'], 'company': p['company'], 'email': p['email']} if retained else
+                {'name': None, 'role': None, 'company': None, 'email': None}),
+        'asked': {'subject': inbound.get('subject') if retained else None, 'received_at': str(reply['received_at'] or ''),
+                  'text': (inbound.get('body_text') or '')[:4000] if retained else None},
         'category': reply['category'],
-        'suggested_answer': reply.get('suggested_body'),
+        'suggested_answer': suggested,
+        'no_suggestion_reason': why_none,
         'facts': facts,
         'mailbox': mailbox,
         'how': (f"Reply from {mailbox} in the same thread if you can, so it stays one conversation; "
@@ -119,9 +133,10 @@ def brief(session, business, *, reply_id, user_id, moment):
 
 
 def headroom(session, business, *, moment):
-    """OUT-19 E: for each campaign inbox, how many more emails it may send
-    today (replies included) and whether replies are close to its safety
-    ceiling. No contact details."""
+    """OUT-19 E: for each campaign inbox, how much of today's safety ceiling
+    is left (replies included), whether replies are close to it, and whether
+    the inbox can send at all today. Each inbox's own address is shown; no
+    prospect details."""
     from services import metering
     bid = business.id
     out = []

@@ -115,6 +115,13 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
     1. **I'll reply myself.** Each reply card shows **Aria's briefing** (`GET /v1/outreach/replies/{id}/brief`, owner only): who wrote, what they asked, her suggested answer and the approved facts behind it, with copy buttons. "I'll handle this" then stops her following up.
     2. **Add a second inbox**, through setup.
     3. **Boost this inbox**, shown but disabled until part G exists.
+- **Codex review 1 (`audits/OUT-19-E-CODEX-REVIEW-1.md`, 2 × P1).**
+  - The briefing offers Aria's suggested answer only if it still rests on today's approved facts for the matched campaign's brand; otherwise it says why.
+  - Both new reads pass the canonical outreach feature gate. The briefing is reply history, so it survives a downgrade like other reply reads; headroom needs full access.
+  - Past the contact's retention date, the briefing withholds their details and message.
+  - Headroom says when an inbox can't send today, because it isn't passing its checks or today's check hasn't run.
+  - Tests now isolate the inbox's warm-up limit, and cover kinds that are unknown (NULL) or unrecognised, and held and unknown outcomes.
+  - The wording no longer promises every reply gets answered. Boost is labelled "coming later", a missing suggestion gives its real reason, and fact sources are shown.
 
 ### F — Stripe: extra brands as subscription items, top-ups and boosts as one-off payments (decisions 3–4)
 - Entitlement checks follow the existing webhook rules (BH-006).

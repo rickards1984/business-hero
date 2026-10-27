@@ -20,7 +20,7 @@ export default function OutreachReplyCard({ businessId, reply }: { businessId: s
     `From: ${[brief.who?.name, brief.who?.role, brief.who?.company].filter(Boolean).join(', ')} <${brief.who?.email || ''}>`,
     `They asked: ${brief.asked?.text || ''}`,
     brief.suggested_answer ? `Suggested answer: ${brief.suggested_answer}` : '',
-    ...(brief.facts || []).map((f: OutreachRecord) => `Fact — ${f.topic}: ${f.answer}`),
+    ...(brief.facts || []).map((f: OutreachRecord) => `Fact — ${f.topic}: ${f.answer}${f.source ? ` (source: ${f.source})` : ''}`),
   ].filter(Boolean).join('\n\n') : '';
   const item = detail.data?.item;
   const original = item?.original_status === 'available' || item?.body_text != null ? item : null;
@@ -41,13 +41,14 @@ export default function OutreachReplyCard({ businessId, reply }: { businessId: s
     </> : <Alert severity="info">Original content unavailable.</Alert>}
     {brief && <Paper variant="outlined" sx={{ p: 1.5, bgcolor: 'action.hover' }}><Stack spacing={1}>
       <Typography variant="subtitle2">Aria's briefing — to answer from your own email</Typography>
+      {brief.retained === false && <Alert severity="info">This contact has passed its retention date, so their details and message are no longer kept.</Alert>}
       <Typography variant="body2"><strong>Who:</strong> {[brief.who?.name, brief.who?.role, brief.who?.company].filter(Boolean).join(', ') || 'Unknown'} · {brief.who?.email}</Typography>
       <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}><strong>They asked:</strong> {brief.asked?.text || 'Message unavailable'}</Typography>
       {brief.suggested_answer
         ? <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}><strong>Suggested answer:</strong> {brief.suggested_answer}</Typography>
-        : <Typography variant="body2">Aria has no approved facts that answer this, so she hasn't suggested an answer.</Typography>}
+        : <Typography variant="body2">{brief.no_suggestion_reason || "Aria hasn't suggested an answer for this reply."}</Typography>}
       {(brief.facts || []).length > 0 && <Typography variant="body2" component="div"><strong>Facts you've approved:</strong>
-        <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>{brief.facts.map((f: OutreachRecord) => <li key={f.topic}>{f.topic}: {f.answer}</li>)}</ul></Typography>}
+        <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>{brief.facts.map((f: OutreachRecord) => <li key={f.topic}>{f.topic}: {f.answer}{f.source ? <> <Typography component="span" variant="caption" color="text.secondary">(source: {f.source})</Typography></> : null}</li>)}</ul></Typography>}
       <Typography variant="caption">{brief.how}</Typography>
       <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
         {brief.suggested_answer && <Button size="small" variant="outlined" onClick={() => copy('answer', brief.suggested_answer)}>{copied === 'answer' ? 'Copied ✓' : 'Copy the answer'}</Button>}

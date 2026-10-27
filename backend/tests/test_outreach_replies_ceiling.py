@@ -125,7 +125,7 @@ def test_cold_emails_also_respect_the_ceiling_when_replies_filled_it(h):
 def test_headroom_says_when_replies_are_close_to_the_ceiling(h):
     cap = box_cap(h)
     room = metering.reply_headroom(h.s, A, BOX, NOW)
-    assert room == {"cap": cap, "ceiling": cap + 20, "used": 0, "left": cap + 20, "near_ceiling": False}
+    assert room == {"cap": cap, "ceiling": cap + 20, "used": 0, "left": cap + 20, "blocked": None, "near_ceiling": False}
     emails_today(h, cap + 20 - metering.REPLY_NEAR, kind="bespoke")
     near = metering.reply_headroom(h.s, A, BOX, NOW)
     assert near["left"] == metering.REPLY_NEAR and near["near_ceiling"] is True
@@ -190,9 +190,11 @@ def test_the_briefing_and_headroom_over_http(r, monkeypatch, user):
     from auth import get_user_business_context
     from db import get_session
     from app.email import router as email_router
+    import outreach_read
     from outreach_read import router
     from test_outreach_replies import incoming, reply_id, scan
     from test_outreach_send import STAFF
+    monkeypatch.setattr(outreach_read, "_load_business", lambda session, bid: r.b)
     incoming(r)
     scan(r)
     rid = reply_id(r)
@@ -207,3 +209,115 @@ def test_the_briefing_and_headroom_over_http(r, monkeypatch, user):
         room = client.get("/v1/outreach/inboxes/headroom")
     assert brief.status_code == (200 if user == "owner" else 403)
     assert room.status_code == 200 and room.json()["inboxes"]
+
+
+
+# ------------------------------------------------------ Codex OUT-19 E review 1 ---
+
+@pytest.mark.parametrize("plan,flags,status,active", [
+    ("business", {"outreach": False}, "active", True), ("starter", {}, "active", True),
+    ("business", {}, "active", False)])
+def test_the_new_reads_are_behind_the_outreach_gate(r, monkeypatch, plan, flags, status, active):
+    """P1: explicit denial, no entitlement and suspension refuse both reads."""
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from auth import get_user_business_context
+    from db import get_session
+    from app.email import router as email_router
+    import outreach_read
+    from test_outreach_replies import incoming, reply_id, scan
+    incoming(r)
+    scan(r)
+    rid = reply_id(r)
+    denied = SimpleNamespace(**{**vars(r.b), "plan_tier": plan, "feature_flags": flags,
+                                "subscription_status": status, "is_active": active})
+    app = FastAPI()
+    app.include_router(outreach_read.router)
+    app.dependency_overrides[get_user_business_context] = lambda: {"business_id": A, "user_id": OWNER}
+    app.dependency_overrides[get_session] = lambda: r.s
+    monkeypatch.setattr(email_router, "get_business_by_id", lambda *_: r.b)
+    monkeypatch.setattr(outreach_read, "_load_business", lambda session, bid: denied)
+    with TestClient(app) as client:
+        brief = client.get(f"/v1/outreach/replies/{rid}/brief").status_code
+        room = client.get("/v1/outreach/inboxes/headroom").status_code
+    # A briefing is reply history: like every reply read (OUT-7), it survives a
+    # downgrade while the account is active and outreach isn't explicitly denied.
+    assert brief == (200 if active and not flags else 403)
+    assert room == 403
+
+
+def test_a_suggestion_whose_fact_was_retired_is_not_offered(r):
+    """P1: the briefing re-checks Aria's answer against today's approved facts."""
+    from sqlalchemy import text as t
+    from test_outreach_replies import answer, fact, incoming, reply_id, scan
+    fact(r)
+    incoming(r)
+    scan(r)
+    answer(r)
+    r.s.execute(t("UPDATE outreach_knowledge SET status = 'retired'"))
+    r.s.commit()
+    out = r.replies.brief(r.s, r.b, reply_id=reply_id(r), user_id=OWNER, moment=NOW)
+    assert out["suggested_answer"] is None and "no longer approved" in out["no_suggestion_reason"]
+    assert out["facts"] == []
+
+
+def test_past_its_retention_date_the_briefing_withholds_the_contact(r):
+    """P2: retention minimisation, as on every other read."""
+    from datetime import timedelta
+    from sqlalchemy import text as t
+    from test_outreach_replies import incoming, reply_id, scan
+    incoming(r)
+    scan(r)
+    r.s.execute(t("UPDATE outreach_prospects SET retention_due_at = :d"), {"d": (NOW - timedelta(days=1)).isoformat()})
+    r.s.commit()
+    out = r.replies.brief(r.s, r.b, reply_id=reply_id(r), user_id=OWNER, moment=NOW)
+    assert out["retained"] is False and set(out["who"].values()) == {None} and out["asked"]["text"] is None
+
+
+def test_headroom_says_when_the_inbox_cannot_send_today(h):
+    """P2: allowance left is not the same as able to send."""
+    from datetime import timedelta
+    h.s.execute(text("UPDATE outreach_mailboxes SET health_checked_at = :d WHERE mailbox_id = :m"),
+                {"d": (NOW - timedelta(days=1)).isoformat(), "m": BOX})
+    h.s.commit()
+    room = metering.reply_headroom(h.s, A, BOX, NOW)
+    assert room["blocked"] and "check" in room["blocked"] and room["near_ceiling"] is False
+
+
+def test_the_warm_up_limit_holds_cold_emails_with_campaign_and_brand_room_to_spare(h):
+    """P2: isolate the inbox's own limit — another campaign on the same inbox
+    used it up, while this campaign and brand still have room."""
+    card = propose(h)
+    other = add(h.s, "campaigns", brand_id=BRAND, mailbox_id=BOX, name="Other", target_rules="{}", target_hash="other",
+                sequence_version=1, version=1, status="ready", timezone="Europe/London", daily_cap=20)
+    h.s.commit()
+    emails_today(h, box_cap(h), campaign=other)
+    refused_today(h, card, box_cap(h))
+
+
+@pytest.mark.parametrize("kind", [None, "imported", "followup"])
+def test_an_email_of_unknown_or_any_cold_kind_counts_as_cold(h, kind):
+    card = propose(h)
+    other = add(h.s, "campaigns", brand_id=BRAND, mailbox_id=BOX, name="Other", target_rules="{}", target_hash="other",
+                sequence_version=1, version=1, status="ready", timezone="Europe/London", daily_cap=20)
+    h.s.commit()
+    emails_today(h, box_cap(h), kind=kind, campaign=other)
+    refused_today(h, card, box_cap(h))
+
+
+@pytest.mark.parametrize("state", ["reserved", "unknown"])
+def test_held_and_unknown_cold_emails_count_toward_the_warm_up_limit(h, state):
+    card = propose(h)
+    other = add(h.s, "campaigns", brand_id=BRAND, mailbox_id=BOX, name="Other", target_rules="{}", target_hash="other",
+                sequence_version=1, version=1, status="ready", timezone="Europe/London", daily_cap=20)
+    h.s.commit()
+    emails_today(h, box_cap(h), campaign=other, state=state)
+    refused_today(h, card, box_cap(h))
+
+
+@pytest.mark.parametrize("state", ["committed", "unknown"])
+def test_sent_and_unknown_replies_never_count_as_cold(h, state):
+    card = propose(h)
+    emails_today(h, 10, kind="bespoke", state=state)
+    assert approve(h, card)["status"] == "done"
