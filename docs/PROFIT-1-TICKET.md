@@ -38,3 +38,25 @@ Today the cost ledger (OUT-19 A) and its alarm and kill switch see **outreach AI
 ## Not in PROFIT-1
 - Changing plan prices: the pre-launch pricing review is a separate task.
 - Stripe billing for outreach brands and top-ups (OUT-19 F).
+
+## Codex review 1 (`audits/PROFIT-1-CODEX-REVIEW-1.md`, 6 × P1) → fixed
+1. **Migration 039, `platform_meters`.** Costs no business owns, and the once-a-month alert markers, live in this new backend-only table: client access is removed and row-level security is on. `usage_meters` is never given a fake business id. **Mike runs `audits/039-PROD-RUNBOOK.md` before merging.** Until then the guard is safe, but it can't mark or send alerts, and it logs that.
+2. **The SDK hook works on async calls.** It handles a `create` that returns an awaitable (the async client). The tests drive the real OpenAI SDK with a mocked transport, and wrapping is idempotent.
+3. **Non-essential features are gated, not only recorded:**
+   - email drafting and the inbox briefing fall back to their plain versions;
+   - quote drafting is paused with a message. Its direct HTTP call is now recorded too, with images estimated at ~1,105 tokens each;
+   - inbox sorting is recorded but never stopped.
+   - Text-to-speech is recorded per character, as voice: essential.
+4. **Voice overage minutes count.**
+5. **`permits()` is `ai_costs.allowed`:** the absolute limit and the guard. **Essential work bypasses both** (the older absolute limit used to stop reply sorting too).
+6. **Router and research calls are marked `accounted()`,** so the hook never records them a second time.
+- **Also fixed:**
+  - A call without reported usage is charged at its request's maximum; a call that raised is recorded at that maximum, as estimated (it may have been billed).
+  - A failed savepoint drops the alerts it queued.
+  - A scheduled check every 15 minutes notices voice or fixed costs crossing a threshold.
+  - Attribution is scoped to each call, with business ids for chat, briefings, meetings, drafting and quotes.
+  - The admin panel refreshes every minute.
+- **Limits, stated plainly:**
+  - Income is monthly recurring revenue, or the trial budget before launch. Essential work is exempt from the kill switch.
+  - So the guard keeps platform costs well below income; it does not prove a profit on every single transaction.
+  - Full fixed costs can use up a small trial budget on day one: set the trial budget above them.

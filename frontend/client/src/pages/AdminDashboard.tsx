@@ -237,9 +237,12 @@ function ProfitPanel() {
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     let mounted = true;
-    apiRequest('GET', '/v1/admin/profit').then(r => r.json()).then(d => { if (mounted) setStatus(d); })
+    const load = () => apiRequest('GET', '/v1/admin/profit').then(r => r.json())
+      .then(d => { if (mounted) { setStatus(d); setFailed(false); } })
       .catch(() => { if (mounted) setFailed(true); });
-    return () => { mounted = false; };
+    load();
+    const timer = window.setInterval(load, 60000);   // a stale "healthy" is worse than none (Codex PROFIT-1 review 1)
+    return () => { mounted = false; window.clearInterval(timer); };
   }, []);
   const gbp = (p: number) => `£${(p / 100).toFixed(2)}`;
   if (failed) return <Alert severity="warning" variant="outlined" sx={{ mb: 3, borderRadius: 2 }}>Profit guard unavailable.</Alert>;

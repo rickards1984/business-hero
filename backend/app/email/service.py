@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import smtplib
+
+from services import profit_guard  # PROFIT-1: AI costs recorded and gated
 from datetime import datetime
 from email.message import EmailMessage
 from typing import Any, Dict, Iterable, List, Optional
@@ -403,15 +405,16 @@ def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
 
     try:
         client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": CATEGORIZE_SYSTEM_PROMPT},
-                {"role": "user", "content": "Analyze these emails:\n\n" + "\n---\n".join(email_items)},
-            ],
-            max_tokens=1500,
-            temperature=0.1,
-        )
+        with profit_guard.attributed(getattr(messages[0], "business_id", None) if messages else None, "classify"):
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": CATEGORIZE_SYSTEM_PROMPT},
+                    {"role": "user", "content": "Analyze these emails:\n\n" + "\n---\n".join(email_items)},
+                ],
+                max_tokens=1500,
+                temperature=0.1,
+            )
         content = (response.choices[0].message.content or "").strip()
         if content.startswith("```"):
             content = content.split("\n", 1)[1] if "\n" in content else content[3:]
@@ -463,7 +466,8 @@ def generate_email_briefing_markdown(
         fallback_lines.append(f"- {subject} — {sender}")
     fallback_text = "\n".join(fallback_lines)
 
-    if not OPENAI_API_KEY:
+    from services import profit_guard
+    if not OPENAI_API_KEY or not profit_guard.permits("briefing"):   # PROFIT-1: non-essential
         return fallback_text
 
     # Build structured section from AI analysis data
@@ -497,29 +501,30 @@ def generate_email_briefing_markdown(
                 f"AI Priority: {msg.ai_priority or 'N/A'}\n"
             )
         prompt = "\n---\n".join(items)
-        response = client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Write a concise, action-oriented email briefing in markdown. "
-                        "Group by urgency. Include key actions, deadlines, and suggested next steps. "
-                        "Do not hallucinate. If details are missing, say so explicitly."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Summarize these emails for {business.name}. "
-                        "Include key actions, deadlines, and suggested next steps:\n\n"
-                        f"{prompt}"
-                    ),
-                },
-            ],
-            max_tokens=1200,
-            temperature=0.2,
-        )
+        with profit_guard.attributed(business.id, "briefing"):
+            response = client.chat.completions.create(
+                model="gpt-5",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Write a concise, action-oriented email briefing in markdown. "
+                            "Group by urgency. Include key actions, deadlines, and suggested next steps. "
+                            "Do not hallucinate. If details are missing, say so explicitly."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Summarize these emails for {business.name}. "
+                            "Include key actions, deadlines, and suggested next steps:\n\n"
+                            f"{prompt}"
+                        ),
+                    },
+                ],
+                max_tokens=1200,
+                temperature=0.2,
+            )
         briefing = response.choices[0].message.content or fallback_text
 
         # Append structured section
@@ -548,7 +553,9 @@ def generate_email_reply_draft(message: EmailMessageModel, business: Business) -
         f"Best regards,\n{business.name}"
     )
 
-    if not OPENAI_API_KEY:
+    from services import profit_guard
+    # PROFIT-1: drafting is non-essential AI: at the kill switch, the plain draft.
+    if not OPENAI_API_KEY or not profit_guard.permits("draft"):
         return {"subject": reply_subject, "body_text": fallback_body, "body_html": _text_to_html(fallback_body)}
 
     try:
@@ -559,22 +566,23 @@ def generate_email_reply_draft(message: EmailMessageModel, business: Business) -
             f"Snippet: {message.snippet or ''}\n"
             f"Body:\n{message.body_text or ''}"
         )
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Draft a concise, action-oriented reply. "
-                        "Do not hallucinate. If details are missing, say so. "
-                        "Return JSON with keys: subject, body_text, body_html."
-                    ),
-                },
-                {"role": "user", "content": f"Draft a reply to this email:\n\n{prompt}"},
-            ],
-            max_tokens=400,
-            temperature=0.3,
-        )
+        with profit_guard.attributed(business.id, "draft"):
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Draft a concise, action-oriented reply. "
+                            "Do not hallucinate. If details are missing, say so. "
+                            "Return JSON with keys: subject, body_text, body_html."
+                        ),
+                    },
+                    {"role": "user", "content": f"Draft a reply to this email:\n\n{prompt}"},
+                ],
+                max_tokens=400,
+                temperature=0.3,
+            )
         content = response.choices[0].message.content or ""
         body_text = fallback_body
         body_html = _text_to_html(fallback_body)
@@ -617,7 +625,8 @@ def generate_email_reply_drafts(
     }
     fallback["body_html"] = _text_to_html(fallback["body_text"])
 
-    if not OPENAI_API_KEY:
+    from services import profit_guard
+    if not OPENAI_API_KEY or not profit_guard.permits("draft"):   # PROFIT-1: non-essential
         return [fallback]
 
     try:
@@ -630,30 +639,31 @@ def generate_email_reply_drafts(
             f"Body:\n{message.body_text or message.snippet or ''}"
         )
 
-        response = client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        f"You are a business email assistant for {business.name}. "
-                        f"The user's name is {sign_off_name}.\n\n"
-                        "Generate exactly 3 reply drafts with different tones:\n"
-                        '1. "professional" — Formal, polished, corporate tone.\n'
-                        '2. "friendly" — Warm, conversational but business-appropriate.\n'
-                        '3. "brief" — Ultra-concise, 2-3 sentences max.\n\n'
-                        "Each draft should actually address the email content, "
-                        f"be ready to send, and sign off as {sign_off_name}. "
-                        "Do not hallucinate details.\n\n"
-                        "Return ONLY a JSON array with 3 objects: tone, subject, body_text\n"
-                        "No markdown, no backticks, no explanation."
-                    ),
-                },
-                {"role": "user", "content": f"Generate 3 reply drafts for this email:\n\n{email_context}"},
-            ],
-            max_tokens=1200,
-            temperature=0.4,
-        )
+        with profit_guard.attributed(business.id, "draft"):
+            response = client.chat.completions.create(
+                model="gpt-5",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"You are a business email assistant for {business.name}. "
+                            f"The user's name is {sign_off_name}.\n\n"
+                            "Generate exactly 3 reply drafts with different tones:\n"
+                            '1. "professional" — Formal, polished, corporate tone.\n'
+                            '2. "friendly" — Warm, conversational but business-appropriate.\n'
+                            '3. "brief" — Ultra-concise, 2-3 sentences max.\n\n'
+                            "Each draft should actually address the email content, "
+                            f"be ready to send, and sign off as {sign_off_name}. "
+                            "Do not hallucinate details.\n\n"
+                            "Return ONLY a JSON array with 3 objects: tone, subject, body_text\n"
+                            "No markdown, no backticks, no explanation."
+                        ),
+                    },
+                    {"role": "user", "content": f"Generate 3 reply drafts for this email:\n\n{email_context}"},
+                ],
+                max_tokens=1200,
+                temperature=0.4,
+            )
 
         content = (response.choices[0].message.content or "").strip()
         if content.startswith("```"):

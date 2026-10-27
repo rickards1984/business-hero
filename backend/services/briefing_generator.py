@@ -6,7 +6,7 @@ Uses GPT to produce strategic business analysis from raw data.
 import os
 import json
 import logging
-from typing import Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple
 
 from openai import AsyncOpenAI
 
@@ -28,6 +28,7 @@ async def generate_weekly_briefing(
     owner_name: str,
     data: Dict[str, Any],
     detail_level: str = "standard",
+    business_id: Optional[str] = None,
 ) -> Tuple[str, List[Dict], Dict]:
     """
     Generate a weekly CEO briefing using GPT.
@@ -38,7 +39,6 @@ async def generate_weekly_briefing(
     # PROFIT-1: at the kill switch the briefing still goes, as the plain
     # fallback without AI; its AI cost is recorded as "briefing".
     from services import profit_guard
-    profit_guard.label("briefing")
     client = (AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
               if OPENAI_API_KEY and profit_guard.permits("briefing") else None)
 
@@ -101,15 +101,16 @@ Also return a JSON block at the end (after the briefing text) with this structur
 
     if client:
         try:
-            response = await client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.4,
-                max_tokens=2000,
-            )
+            with profit_guard.attributed(business_id, "briefing"):
+                response = await client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.4,
+                    max_tokens=2000,
+                )
             full_response = response.choices[0].message.content.strip()
 
             if "===JSON===" in full_response:
@@ -137,12 +138,12 @@ async def generate_daily_pulse(
     business_name: str,
     owner_name: str,
     data: Dict[str, Any],
+    business_id: Optional[str] = None,
 ) -> str:
     """Generate a short daily morning pulse."""
     # PROFIT-1: at the kill switch the briefing still goes, as the plain
     # fallback without AI; its AI cost is recorded as "briefing".
     from services import profit_guard
-    profit_guard.label("briefing")
     client = (AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
               if OPENAI_API_KEY and profit_guard.permits("briefing") else None)
 
@@ -160,18 +161,19 @@ RULES:
 - Use emoji for visual scanning
 - Only mention things that need attention or are noteworthy
 """
-            response = await client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": f"Generate a daily pulse from this data:\n{json.dumps(data, indent=2, default=_serialize_for_json)}",
-                    },
-                ],
-                temperature=0.3,
-                max_tokens=400,
-            )
+            with profit_guard.attributed(business_id, "briefing"):
+                response = await client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": f"Generate a daily pulse from this data:\n{json.dumps(data, indent=2, default=_serialize_for_json)}",
+                        },
+                    ],
+                    temperature=0.3,
+                    max_tokens=400,
+                )
             return response.choices[0].message.content.strip()
         except Exception as e:
             logger.error(f"[Briefing Generator] Failed to generate daily pulse: {e}")

@@ -49,6 +49,11 @@ def engine(tmp_path, monkeypatch):
                        "updated_at TEXT, UNIQUE (business_id, meter, period))"))
         c.execute(text("CREATE TABLE businesses (id TEXT PRIMARY KEY, name TEXT, plan_tier TEXT, "
                        "subscription_status TEXT, is_active BOOLEAN, feature_flags TEXT)"))
+        # Migration 039's table (its PostgreSQL text: tested on the local harness).
+        c.execute(text("CREATE TABLE platform_meters (period TEXT NOT NULL, meter TEXT NOT NULL, "
+                       "value NUMERIC NOT NULL DEFAULT 0, updated_at TEXT, PRIMARY KEY (period, meter))"))
+    from services import ai_costs
+    ai_costs._PLATFORM_TABLE.clear()
     yield e
     e.dispose()
 
@@ -114,7 +119,7 @@ def test_with_no_income_and_no_trial_budget_only_the_absolute_limit_applies(engi
 def test_costs_are_every_ai_call_voice_minutes_in_pounds_and_fixed_costs(engine, monkeypatch):
     business(engine, "a", "pro")
     ai_spend(engine, "a", 120, "chat")
-    ai_spend(engine, "platform", 30, "briefing")
+    ai_spend(engine, None, 30, "briefing")          # no business: the platform's own (migration 039)
     minutes(engine, "a", "receptionist_minutes", 10)
     minutes(engine, "a", "aria_voice_minutes", 5)
     monkeypatch.setenv("PLATFORM_FIXED_COSTS_PENCE", "4000")
@@ -236,7 +241,8 @@ def test_an_unattributed_sdk_call_is_recorded_against_the_platform(engine, monke
     monkeypatch.setattr(g, "_engine", lambda: engine)
     g.wrap_create(lambda *a, **k: response())(model="gpt-4o-mini", messages=[])
     with engine.connect() as c:
-        assert c.execute(text("SELECT value FROM usage_meters WHERE business_id = 'platform' AND meter = 'ai_pence'")).scalar()
+        assert c.execute(text("SELECT value FROM platform_meters WHERE meter = 'ai_pence'")).scalar()
+        assert c.execute(text("SELECT count(*) FROM usage_meters")).scalar() == 0, "never a fake business id"
 
 
 def test_a_call_already_recorded_by_the_router_is_not_counted_twice(engine, monkeypatch):
@@ -255,7 +261,7 @@ def test_a_model_without_a_price_is_recorded_at_a_conservative_estimate_never_fr
     monkeypatch.setattr(g, "_engine", lambda: engine)
     g.wrap_create(lambda *a, **k: response(model="some-new-model"))(model="some-new-model", messages=[])
     with engine.connect() as c:
-        rows = dict(c.execute(text("SELECT meter, value FROM usage_meters WHERE business_id = 'platform'")).fetchall())
+        rows = dict(c.execute(text("SELECT meter, value FROM platform_meters")).fetchall())
     assert rows["ai_pence"] > 0 and any(k.startswith("ai_estimated:") for k in rows)
 
 
@@ -326,8 +332,195 @@ def test_a_guard_that_cannot_read_holds_non_essential_ai_but_never_essential(mon
     assert g.permits("briefing") is False and g.permits("classify") is True
 
 
-def test_chat_costs_are_attributed_to_the_business():
+def test_chat_costs_are_attributed_to_the_business_within_the_call_only():
     import inspect
     guard()
     import assistant_chat
-    assert 'profit_guard.label("chat", business.id)' in inspect.getsource(assistant_chat.process_chat_message)
+    source = inspect.getsource(assistant_chat.process_chat_message)
+    assert source.count('with profit_guard.attributed(business.id, "chat"):') == 2 and "label(" not in source
+
+
+
+# ------------------------------------------------------ Codex PROFIT-1 review 1 ---
+
+def completion_json(model="gpt-4o-mini", prompt=1200, completion=300):
+    return {"id": "x", "object": "chat.completion", "created": 1, "model": model,
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "{}"}}],
+            "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}}
+
+
+def hooked_sdk(monkeypatch, engine):
+    """The REAL OpenAI SDK, its transport mocked, with the hook installed on its classes."""
+    import httpx
+    import openai
+    from openai.resources.chat import completions
+    g = guard()
+    monkeypatch.setattr(g, "_engine", lambda: engine)
+    monkeypatch.setattr(completions.Completions, "create", g.wrap_create(completions.Completions.create))
+    monkeypatch.setattr(completions.AsyncCompletions, "create", g.wrap_create(completions.AsyncCompletions.create))
+    handler = lambda request: httpx.Response(200, json=completion_json())
+    sync = openai.OpenAI(api_key="k", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    aio = openai.AsyncOpenAI(api_key="k", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    return g, sync, aio
+
+
+def tokens_recorded(engine, business_id):
+    with engine.connect() as c:
+        return c.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b "
+                              "AND meter LIKE 'ai_tokens_in:%'"), {"b": business_id}).scalar()
+
+
+def test_the_real_async_sdk_call_is_recorded_with_its_real_usage(engine, monkeypatch):
+    """P1 2: the async client's create isn't a coroutine function; its reply is still recorded."""
+    import asyncio
+    g, sync, aio = hooked_sdk(monkeypatch, engine)
+
+    async def call():
+        with g.attributed("biz-1", "briefing"):
+            return await aio.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}])
+    assert asyncio.run(call()).usage.prompt_tokens == 1200
+    assert tokens_recorded(engine, "biz-1") == 1200
+
+
+def test_the_real_sync_sdk_call_is_recorded(engine, monkeypatch):
+    g, sync, aio = hooked_sdk(monkeypatch, engine)
+    with g.attributed("biz-1", "chat"):
+        sync.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}])
+    assert tokens_recorded(engine, "biz-1") == 1200
+
+
+def test_attribution_ends_with_its_block_even_across_async_tasks(engine, monkeypatch):
+    """P2: scoped, never leaking into the caller or a sibling task."""
+    import asyncio
+    g, sync, aio = hooked_sdk(monkeypatch, engine)
+
+    async def one(bid):
+        with g.attributed(bid, "meeting"):
+            await asyncio.sleep(0)
+            await aio.chat.completions.create(model="gpt-4o-mini", messages=[])
+
+    async def both():
+        await asyncio.gather(one("biz-1"), one("biz-2"))
+    asyncio.run(both())
+    assert tokens_recorded(engine, "biz-1") == 1200 and tokens_recorded(engine, "biz-2") == 1200
+    assert g._attribution.get() is None
+
+
+def test_router_and_research_calls_are_never_recorded_twice(engine, monkeypatch):
+    """P1 6: calls the router records itself are suppressed in the hook."""
+    g, sync, aio = hooked_sdk(monkeypatch, engine)
+    with g.accounted():
+        sync.chat.completions.create(model="gpt-4o-mini", messages=[])
+    with engine.connect() as c:
+        assert c.execute(text("SELECT count(*) FROM usage_meters")).scalar() == 0
+        assert c.execute(text("SELECT count(*) FROM platform_meters")).scalar() == 0
+
+
+def test_the_router_marks_its_own_sdk_calls_as_accounted():
+    import inspect
+    guard()
+    from services import ai_router
+    for fn in (ai_router._openai_compatible_chat, ai_router._openai_compatible_search):
+        assert "with _accounted():" in inspect.getsource(fn)
+
+
+def test_a_call_that_raises_is_recorded_at_its_requests_maximum(engine, monkeypatch):
+    """P2: a timeout may still be billed."""
+    g = guard()
+    monkeypatch.setattr(g, "_engine", lambda: engine)
+
+    def times_out(*a, **k):
+        raise TimeoutError("read timed out")
+    with g.attributed("biz-1", "briefing"), pytest.raises(TimeoutError):
+        g.wrap_create(times_out)(model="gpt-4o-mini", messages=[{"role": "user", "content": "x" * 500}], max_tokens=800)
+    with engine.connect() as c:
+        rows = dict(c.execute(text("SELECT meter, value FROM usage_meters WHERE business_id = 'biz-1'")).fetchall())
+    assert rows["ai_pence"] > 0 and any(k.startswith("ai_estimated:") for k in rows)
+    assert next(v for k, v in rows.items() if k.startswith("ai_tokens_out:")) == 800
+
+
+def test_a_reply_without_usage_is_estimated_from_the_request_never_free(engine, monkeypatch):
+    g = guard()
+    monkeypatch.setattr(g, "_engine", lambda: engine)
+    no_usage = SimpleNamespace(model="gpt-4o-mini", usage=None)
+    with g.attributed("biz-1", "chat"):
+        g.wrap_create(lambda *a, **k: no_usage)(model="gpt-4o-mini", messages=[{"role": "user", "content": "y" * 300}])
+    assert tokens_recorded(engine, "biz-1") >= 300
+
+
+def test_voice_overage_minutes_count(engine):
+    """P1 4: overage is metered separately and must count."""
+    business(engine, "a", "pro")
+    minutes(engine, "a", "receptionist_overage_minutes", 100)
+    minutes(engine, "a", "aria_voice_overage_minutes", 10)
+    assert status(engine)["costs"]["voice_pence"] == 110 * 16
+
+
+def test_briefings_and_meetings_also_obey_the_absolute_limit(engine, monkeypatch):
+    """P1 5: permits() is ai_costs.allowed: the absolute limit and the guard."""
+    g = guard()
+    monkeypatch.setattr(g, "_engine", lambda: engine)
+    monkeypatch.setenv("AI_MONTHLY_KILL_PENCE", "100")
+    ai_spend(engine, "a", 150)
+    assert g.permits("briefing") is False and g.permits("meeting") is False and g.permits("classify") is True
+
+
+def test_a_failed_savepoint_drops_the_alert_it_queued(engine, monkeypatch):
+    """P2: the marker rolled back, so its email must not go."""
+    g = guard()
+    from services import ai_costs
+    business(engine, "a", "business")
+    sent = []
+    monkeypatch.setattr(g, "send_alert", lambda subject, body: sent.append(subject))
+    real = g.check_after_record
+
+    def queues_then_fails(session, moment):
+        real(session, moment)
+        raise RuntimeError("marker write failed")
+    monkeypatch.setattr(g, "check_after_record", queues_then_fails)
+    with Session(engine) as s:
+        ai_costs.record(s, "a", purpose="chat", provider="openai", model="gpt-6.1-sol", pence=20000, moment=NOW)
+        s.commit()
+    assert sent == []
+
+
+def test_voice_alone_crossing_the_alarm_is_noticed_by_the_scheduled_check(engine, monkeypatch):
+    """P2: no AI call needed for the alarm to go."""
+    g = guard()
+    monkeypatch.setattr(g, "_engine", lambda: engine)
+    business(engine, "a", "business")
+    minutes(engine, "a", "receptionist_minutes", 800)     # 800 × 16p = £128, 47% of £269
+    sent = []
+    monkeypatch.setattr(g, "send_alert", lambda subject, body: sent.append(subject))
+    g.periodic_check(NOW)
+    g.periodic_check(NOW)
+    assert len(sent) == 1 and "40%" in sent[0]
+
+
+def test_the_scheduler_runs_the_check():
+    import inspect
+    guard()
+    from services import briefing_scheduler
+    assert "_run_profit_check_if_due" in inspect.getsource(briefing_scheduler)
+
+
+def test_an_email_draft_at_the_kill_switch_is_the_plain_one_without_ai(monkeypatch):
+    """P1 3: non-essential features are gated, not only recorded."""
+    g = guard()
+    from services import ai_costs
+    from app.email import service
+    monkeypatch.setattr(service, "OPENAI_API_KEY", "k")
+    monkeypatch.setattr(g, "permits", lambda purpose: purpose in g.ESSENTIAL)
+    monkeypatch.setattr(service, "OpenAI", lambda **k: (_ for _ in ()).throw(AssertionError("no AI call")))
+    message = SimpleNamespace(subject="Hello", from_name="Sam", from_email="s@x", snippet="", body_text="hi")
+    business_row = SimpleNamespace(id="biz-1", name="New Body")
+    assert "get back to you" in service.generate_email_reply_draft(message, business_row)["body_text"]
+    assert ai_costs  # the same ledger
+
+
+def test_quote_drafting_is_gated_and_recorded():
+    import inspect
+    guard()
+    import quoting_api
+    source = inspect.getsource(quoting_api)
+    assert 'profit_guard.permits("quote")' in source and "profit_guard.record_direct(" in source

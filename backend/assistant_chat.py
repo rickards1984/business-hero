@@ -780,7 +780,6 @@ async def process_chat_message(
     
     client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
     from services import profit_guard
-    profit_guard.label("chat", business.id)   # PROFIT-1: chat is essential, but its cost is recorded
     
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
@@ -793,13 +792,14 @@ async def process_chat_message(
 
     while tool_round < MAX_TOOL_ROUNDS:
         try:
-            response = client.chat.completions.create(
-                model="gpt-5",
-                messages=messages,
-                tools=TOOL_DEFINITIONS,
-                tool_choice="auto",
-                timeout=120
-            )
+            with profit_guard.attributed(business.id, "chat"):
+                response = client.chat.completions.create(
+                    model="gpt-5",
+                    messages=messages,
+                    tools=TOOL_DEFINITIONS,
+                    tool_choice="auto",
+                    timeout=120
+                )
         except Exception as e:
             logger.error(f"OpenAI API error on round {tool_round}: {e}")
             return {"error": f"AI service error: {str(e)}", "status": 500}
@@ -864,11 +864,12 @@ async def process_chat_message(
 
     if assistant_reply is None:
         try:
-            final_response = client.chat.completions.create(
-                model="gpt-5",
-                messages=messages,
-                timeout=120
-            )
+            with profit_guard.attributed(business.id, "chat"):
+                final_response = client.chat.completions.create(
+                    model="gpt-5",
+                    messages=messages,
+                    timeout=120
+                )
             assistant_reply = final_response.choices[0].message.content or "I've completed the requested actions."
         except Exception as e:
             logger.error(f"OpenAI API error on final response: {e}")

@@ -27,13 +27,17 @@ from typing import Optional
 
 from sqlalchemy import event, text
 
-from services.metering import ARIA_VOICE_METER, RECEPTIONIST_METER, period_for
+from services.metering import (ARIA_VOICE_METER, ARIA_VOICE_OVERAGE_METER, OVERAGE_METER, RECEPTIONIST_METER,
+                               period_for)
 
 logger = logging.getLogger(__name__)
 
 PLAN_PRICE_PENCE = {"starter": 6900, "pro": 12900, "business": 26900}
 ESSENTIAL = frozenset({"classify", "receptionist", "unsubscribe", "chat", "voice", "answer"})
-PLATFORM = "platform"                          # ledger rows no business is known for
+PLATFORM = "platform"                          # ledger rows no business owns (platform_meters, migration 039)
+VOICE_METERS = (RECEPTIONIST_METER, OVERAGE_METER, ARIA_VOICE_METER, ARIA_VOICE_OVERAGE_METER)
+TTS_PENCE_PER_1K_CHARS = 1.2                   # tts-1, $15 per million characters
+DEFAULT_MAX_OUTPUT_TOKENS = 4096               # a call that sets no limit: its output estimated at this
 VOICE_DEFAULT_PENCE = 16                       # $0.20 a minute with Twilio folded in (PRICING-MODEL §2)
 TOPUP_METER = "outreach_topup_pence"           # OUT-19 F: paid top-ups
 ALERTED_METER = "profit_alerted"               # once per month per threshold
@@ -81,11 +85,21 @@ def income(session, period: str) -> tuple:
     return 0, "none"
 
 
+def _voice_minutes(session, period: str, business_id=None) -> float:
+    """Included AND overage minutes: overage is metered separately (Codex PROFIT-1 review 1)."""
+    names = ", ".join(f":v{i}" for i in range(len(VOICE_METERS)))
+    params = {"p": period, **{f"v{i}": m for i, m in enumerate(VOICE_METERS)}}
+    where = ""
+    if business_id is not None:
+        where, params["b"] = " AND business_id = :b", str(business_id)
+    return _sum(session, f"SELECT coalesce(sum(value), 0) FROM usage_meters WHERE period = :p AND meter IN ({names}){where}",
+                params)
+
+
 def costs(session, period: str) -> dict:
-    ai = _sum(session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE period = :p AND meter = 'ai_pence'",
-              {"p": period})
-    voice_minutes = _sum(session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE period = :p "
-                                  "AND meter IN (:r, :v)", {"p": period, "r": RECEPTIONIST_METER, "v": ARIA_VOICE_METER})
+    from services import ai_costs
+    ai = ai_costs.platform_total(session, period)    # every business's AI and the platform's own
+    voice_minutes = _voice_minutes(session, period)
     voice = voice_minutes * _int_env("VOICE_COST_PENCE_PER_MINUTE", VOICE_DEFAULT_PENCE)
     fixed = _int_env("PLATFORM_FIXED_COSTS_PENCE", 0)
     out = {"ai_pence": int(round(ai)), "voice_pence": int(round(voice)), "fixed_pence": int(fixed)}
@@ -128,9 +142,7 @@ def _losing(session, period: str) -> list:
         price = PLAN_PRICE_PENCE.get((plan or "").lower(), 0) if paying else 0
         ai = _sum(session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND period = :p "
                            "AND meter = 'ai_pence'", {"b": str(bid), "p": period})
-        voice = _sum(session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND period = :p "
-                              "AND meter IN (:r, :v)", {"b": str(bid), "p": period, "r": RECEPTIONIST_METER,
-                                                         "v": ARIA_VOICE_METER}) * rate
+        voice = _voice_minutes(session, period, bid) * rate
         cost = int(round(ai + voice))
         if cost > price:
             rows.append({"business_id": str(bid), "name": name, "pays_pence": price, "costs_pence": cost,
@@ -140,11 +152,14 @@ def _losing(session, period: str) -> list:
 
 def allowed(session, *, purpose: Optional[str], moment: Optional[datetime] = None) -> bool:
     """False for non-essential AI once this month's costs reach the kill
-    threshold of income. Essential work is never stopped here."""
+    threshold of income. Essential work is never stopped here. (The absolute
+    AI_MONTHLY_KILL_PENCE is ai_costs.allowed's; use that, or permits().)"""
     if purpose in ESSENTIAL:
         return True
     period = period_for(moment or datetime.now(timezone.utc))
     earned, _ = income(session, period)
+    if earned <= 0:
+        return True
     pct = _percent(costs(session, period)["total_pence"], earned)
     return pct is None or pct < kill_percent()
 
@@ -183,8 +198,11 @@ def check_after_record(session, moment: datetime) -> None:
     """Called by ai_costs.record in the recording transaction: a threshold
     crossed for the first time this month is marked in that transaction and
     alerted after it commits (dropped if it rolls back)."""
+    from services import ai_costs
     period = period_for(moment)
     earned, basis = income(session, period)
+    if earned <= 0:
+        return
     spent = costs(session, period)
     pct = _percent(spent["total_pence"], earned)
     if pct is None:
@@ -193,11 +211,13 @@ def check_after_record(session, moment: datetime) -> None:
         if pct < threshold:
             continue
         meter = f"{ALERTED_METER}:{name}"
-        if _sum(session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND meter = :m "
-                         "AND period = :p", {"b": PLATFORM, "m": meter, "p": period}):
+        if not ai_costs.has_platform_table(session):
+            logger.error("Profit guard: %s%% of income reached but migration 039 isn't applied, so no alert can be "
+                         "marked or sent", threshold)
             continue
-        session.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) "
-                             "VALUES (:b, :m, :p, 1, :at)"), {"b": PLATFORM, "m": meter, "p": period, "at": moment})
+        if ai_costs.platform_value(session, meter, period):
+            continue
+        ai_costs.platform_add(session, meter, period, 1, moment)
         what = ("non-essential AI is now paused" if name == "kill"
                 else "Business Hero's running costs are getting close to its income")
         subject = f"Business Hero: costs have reached {threshold}% of this month's income — {what}"
@@ -228,22 +248,46 @@ def attributed(business_id, purpose: str):
         _attribution.reset(token)
 
 
-def label(purpose: str, business_id=None) -> None:
-    """Attribute the rest of this request or task's AI calls (a function-wide
-    attributed(); the context is the caller's own copy, so it ends with it)."""
-    _attribution.set((str(business_id) if business_id else PLATFORM, purpose))
-
-
 def permits(purpose: str) -> bool:
-    """allowed(), in its own short session, for code without one. A failure
-    holds non-essential AI (fail closed)."""
+    """ai_costs.allowed (the absolute limit AND the profit guard), in its own
+    short session, for code without one. A failure holds non-essential AI
+    (fail closed)."""
     try:
         from sqlmodel import Session
+        from services import ai_costs
         with Session(_engine()) as s:
-            return allowed(s, purpose=purpose)
+            ok = ai_costs.allowed(s, purpose=purpose)
+            s.rollback()
+            return ok
     except Exception:
         logger.exception("Profit guard unavailable: %s held (fail closed)", purpose)
         return purpose in ESSENTIAL
+
+
+_accounted: ContextVar = ContextVar("profit_accounted", default=False)
+
+
+@contextlib.contextmanager
+def accounted():
+    """SDK calls inside the block are recorded by their caller (ai_router), so
+    the hook never records them too (Codex PROFIT-1 review 1)."""
+    token = _accounted.set(True)
+    try:
+        yield
+    finally:
+        _accounted.reset(token)
+
+
+def periodic_check(moment: Optional[datetime] = None) -> None:
+    """From the scheduler: voice minutes or fixed costs can cross a threshold
+    with no AI call to notice it. Never raises."""
+    try:
+        from sqlmodel import Session
+        with Session(_engine()) as s:
+            check_after_record(s, moment or datetime.now(timezone.utc))
+            s.commit()
+    except Exception:
+        logger.exception("Profit guard periodic check failed")
 
 
 def _engine():
@@ -261,16 +305,30 @@ def _tokens(usage) -> tuple:
     return first("prompt_tokens", "input_tokens"), first("completion_tokens", "output_tokens")
 
 
-def _record_response(result, kwargs) -> None:
+def _request_estimate(kwargs) -> tuple:
+    """(input, output) tokens a request could use at most, from what was sent:
+    every character a token, the full output limit."""
+    import json as _json
+    sent = kwargs.get("messages") if "messages" in kwargs else kwargs.get("input")
+    try:
+        chars = len(_json.dumps(sent, default=str)) + len(str(kwargs.get("instructions") or ""))
+    except Exception:
+        chars = len(str(sent))
+    out = (kwargs.get("max_completion_tokens") or kwargs.get("max_tokens") or kwargs.get("max_output_tokens")
+           or DEFAULT_MAX_OUTPUT_TOKENS)
+    return chars, int(out)
+
+
+def _record_call(model: str, tokens_in, tokens_out, kwargs, *, purpose_default="unattributed") -> None:
     from services import ai_costs
-    if ai_costs._collecting.get() is not None:
-        return   # inside ai_router: the router records it (never twice)
+    if ai_costs._collecting.get() is not None or _accounted.get():
+        return   # recorded by its caller (ai_router / research): never twice
     from sqlmodel import Session
-    business_id, purpose = _attribution.get() or (PLATFORM, "unattributed")
-    model = str(getattr(result, "model", None) or kwargs.get("model") or "unknown")
-    tokens_in, tokens_out = _tokens(getattr(result, "usage", None))
+    business_id, purpose = _attribution.get() or (PLATFORM, purpose_default)
     estimated = tokens_in is None or tokens_out is None
-    tokens_in, tokens_out = tokens_in or 0, tokens_out or 0
+    if estimated:
+        # No reported usage: the request's own maximum, never free (review 1).
+        tokens_in, tokens_out = _request_estimate(kwargs)
     pence, priced = None, False
     for name in (model, re.sub(r"-\d{4}-\d{2}-\d{2}$", "", model)):
         try:
@@ -283,38 +341,84 @@ def _record_response(result, kwargs) -> None:
         pence = (tokens_in * UNPRICED_PENCE[0] + tokens_out * UNPRICED_PENCE[1]) / 1_000_000
         estimated = True
     with Session(_engine()) as s:
-        ai_costs.record(s, business_id, purpose=purpose, provider="openai", model=model, input_tokens=tokens_in,
-                        output_tokens=tokens_out, pence=max(pence, 0.000001), estimated=estimated)
+        ai_costs.record(s, None if business_id == PLATFORM else business_id, purpose=purpose, provider="openai",
+                        model=model, input_tokens=tokens_in, output_tokens=tokens_out, pence=pence, estimated=estimated)
         s.commit()
 
 
-def wrap_create(fn):
-    """The SDK's create, recording each call's cost; recording never breaks the call."""
+def record_direct(model: str, tokens_in: int, tokens_out: int, *, estimated: bool, purpose: str, business_id) -> None:
+    """For AI calls made without the SDK (direct HTTP): never raises."""
+    def go():
+        with attributed(business_id, purpose):
+            _record_call(model, None if estimated else int(tokens_in), None if estimated else int(tokens_out),
+                         {"messages": "x" * int(tokens_in), "max_completion_tokens": int(tokens_out)})
+    _safely(go)
+
+
+def _record_response(result, kwargs) -> None:
+    model = str(getattr(result, "model", None) or kwargs.get("model") or "unknown")
+    tokens_in, tokens_out = _tokens(getattr(result, "usage", None))
+    _record_call(model, tokens_in, tokens_out, kwargs)
+
+
+def _record_failure(kwargs) -> None:
+    """A call that raised may still have been billed (a timeout after the
+    provider started): recorded at its request's maximum, as estimated."""
+    _record_call(str(kwargs.get("model") or "unknown"), None, None, kwargs)
+
+
+def _safely(fn, *args) -> None:
+    try:
+        fn(*args)
+    except Exception:
+        logger.exception("Could not record an AI call's cost")
+
+
+def wrap_create(fn, recorder=None):
+    """The SDK's create, recording each call's cost; recording never breaks the
+    call. Works whether the SDK's create returns a value or an awaitable (the
+    async client's create is not itself a coroutine function: review 1)."""
     import functools
     import inspect
-
-    if inspect.iscoroutinefunction(fn):
-        @functools.wraps(fn)
-        async def awrapped(*args, **kwargs):
-            result = await fn(*args, **kwargs)
-            try:
-                _record_response(result, kwargs)
-            except Exception:
-                logger.exception("Could not record an AI call's cost")
-            return result
-        awrapped._profit_wrapped = True
-        return awrapped
+    if getattr(fn, "_profit_wrapped", False):
+        return fn   # already recording: never twice
+    recorder = recorder or _record_response
 
     @functools.wraps(fn)
     def wrapped(*args, **kwargs):
-        result = fn(*args, **kwargs)
         try:
-            _record_response(result, kwargs)
-        except Exception:
-            logger.exception("Could not record an AI call's cost")
+            result = fn(*args, **kwargs)
+        except BaseException:
+            _safely(_record_failure, kwargs)
+            raise
+        if inspect.isawaitable(result):
+            async def finish():
+                try:
+                    value = await result
+                except BaseException:
+                    _safely(_record_failure, kwargs)
+                    raise
+                _safely(recorder, value, kwargs)
+                return value
+            return finish()
+        _safely(recorder, result, kwargs)
         return result
     wrapped._profit_wrapped = True
     return wrapped
+
+
+def _record_speech(result, kwargs) -> None:
+    """Text-to-speech, charged per character of the text (voice: essential)."""
+    from services import ai_costs
+    if ai_costs._collecting.get() is not None or _accounted.get():
+        return
+    from sqlmodel import Session
+    business_id, _ = _attribution.get() or (PLATFORM, "voice")
+    pence = len(str(kwargs.get("input") or "")) * TTS_PENCE_PER_1K_CHARS / 1000
+    with Session(_engine()) as s:
+        ai_costs.record(s, None if business_id == PLATFORM else business_id, purpose="voice", provider="openai",
+                        model=str(kwargs.get("model") or "tts"), pence=pence, estimated=True)
+        s.commit()
 
 
 def install_openai_hook() -> None:
@@ -324,8 +428,14 @@ def install_openai_hook() -> None:
         from openai.resources import responses
     except ImportError:
         return
-    for owner, attr in ((completions.Completions, "create"), (completions.AsyncCompletions, "create"),
-                        (responses.Responses, "create"), (responses.AsyncResponses, "create")):
+    targets = [(completions.Completions, "create", None), (completions.AsyncCompletions, "create", None),
+               (responses.Responses, "create", None), (responses.AsyncResponses, "create", None)]
+    try:
+        from openai.resources.audio import speech
+        targets += [(speech.Speech, "create", _record_speech), (speech.AsyncSpeech, "create", _record_speech)]
+    except ImportError:
+        pass
+    for owner, attr, recorder in targets:
         current = getattr(owner, attr, None)
         if current is not None and not getattr(current, "_profit_wrapped", False):
-            setattr(owner, attr, wrap_create(current))
+            setattr(owner, attr, wrap_create(current, recorder))
