@@ -195,8 +195,9 @@ def test_another_audiences_campaign_gives_this_audience_no_room(db):
     """P1 2: only campaigns for this audience count."""
     from test_outreach_setup import draft_lia, setup_module_or_missing
     m = setup_module_or_missing()
+    from test_outreach_research import setup_clock
     biz, brand, lia, campaign = started(db)
-    with Session(db) as s:
+    with setup_clock(), Session(db) as s:
         other = m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Schools in Kent",
                                                 "segments": ["school"], "regions": ["Kent"]}, draft=draft_lia)
         m.approve_audience(s, biz, OWNER, other["id"], {})
@@ -469,3 +470,25 @@ def test_reviews_use_a_shared_inbox_for_every_brand_on_it(db):
     world = World([[person(100 + i) for i in range(5)]])
     out = run(db, biz, fit_lia, world)
     assert world.briefs == [] and kept(out) == 0
+
+
+# ------------------------------------------ Codex OUT-19 D review 4 finding ---
+
+@pytest.mark.parametrize("pilot,campaign_cap", [("5", 20), ("0", 5)])
+def test_reviews_hold_their_campaigns_places_and_pilot_places(db, monkeypatch, pilot, campaign_cap):
+    """P1: a contact held for review takes its campaign's place (its daily cap
+    and its pilot places), not only the inbox's, so a full inbox of 20 with a
+    campaign of 5 gets one search, not three."""
+    monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", pilot)
+    biz, brand, lia, campaign = started(db)                        # inbox: 20 a day
+    with Session(db) as s:
+        s.execute(text("UPDATE outreach_campaigns SET daily_cap = :c WHERE id = :id"), {"c": campaign_cap, "id": campaign["id"]})
+        s.commit()
+    batches = [[person(10 * b + i, company=f"Sole {b}{i}") for i in range(5)] for b in range(3)]
+    world = World(batches)
+    for batch in batches:
+        world.not_companies.update(c["company"] for c in batch)
+    run(db, biz, lia, world)
+    assert len(world.briefs) == 1
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'") == 5
+    assert room(db, biz, brand)["room"] == 0

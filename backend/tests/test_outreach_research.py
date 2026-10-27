@@ -146,8 +146,27 @@ def own_inbox(db, brand, lia, *, address):
     return box
 
 
+def setup_clock():
+    """Setup (approvals, mailbox checks, templates) stamped an hour before the
+    pinned NOW, never on the real clock (Codex OUT-19 D review 4: once the
+    real time passed NOW, the audience approval read as "out of date")."""
+    from contextlib import ExitStack
+    from datetime import timedelta as _td
+    from unittest import mock
+    from services import aria_actions, outreach_send, outreach_setup
+    stack = ExitStack()
+    for module in (outreach_setup, outreach_send, aria_actions, research()):
+        stack.enter_context(mock.patch.object(module, "now", lambda: NOW - _td(hours=1)))
+    return stack
+
+
 def started(db, full=True):
     """A business with setup complete and research switched on."""
+    with setup_clock():
+        return _started(db, full)
+
+
+def _started(db, full):
     m = setup_module_or_missing()
     biz = grant(db)
     brand, lia, campaign = ready(m, db, biz)

@@ -29,7 +29,13 @@ def meter(brand):
     return f"outreach_research_pence:{brand['id']}"
 
 
-def second_brand(db, biz, *, name="FitFutures", enabled=True, cap=2000, inbox=True):
+def second_brand(db, biz, **kwargs):
+    from test_outreach_research import setup_clock
+    with setup_clock():
+        return _second_brand(db, biz, **kwargs)
+
+
+def _second_brand(db, biz, *, name="FitFutures", enabled=True, cap=2000, inbox=True):
     """A second brand with its own approved audience and, unless told
     otherwise, its own inbox and ready campaign (OUT-19 D: research finds only
     what an inbox can email)."""
@@ -77,12 +83,14 @@ def test_each_brand_has_at_most_ten_gatekeepers_a_day(db):
 def test_a_brands_audiences_still_share_its_twenty(db):
     m = setup_module_or_missing()
     biz, brand, lia, campaign = started(db)
-    with Session(db) as s:
+    from test_outreach_research import setup_clock
+    with setup_clock(), Session(db) as s:
         lia2 = m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Schools in Essex",
                                                "segments": ["school"], "regions": ["Essex"]}, draft=draft_lia)
         m.approve_audience(s, biz, OWNER, lia2["id"], {})
     run(db, biz, lia, World([batch(0)]))
-    assert run(db, biz, lia2, World([batch(2000)]))["accepted"] == []
+    out = run(db, biz, lia2, World([batch(2000)]))
+    assert out["accepted"] == [] and "approval" not in (out["stopped"] or ""), out["stopped"]
 
 
 # ---------------------------------------------------------- budget per brand ---
