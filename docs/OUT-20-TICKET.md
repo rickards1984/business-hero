@@ -39,3 +39,19 @@
 ## Not yet
 
 **Domain Connect's one-click flow.** Each provider must accept our template first, and names.co.uk doesn't support it. Detection is built; the flow follows once a provider approves.
+
+## Codex review 4 (`audits/OUT-20-CODEX-REVIEW-4.md`): follow-up after merge
+Mike authorised this review beyond the three-cycle limit on 26 Oct 2026. It found no P1s and three P2s, fixed on branch `fix/OUT-20-followup`.
+1. **DMARC repair:**
+   - whitespace the grammar allows around `:` and `,` is normalised, so `fo=0 : 1` is kept;
+   - a reporting address must be a real `mailto:` with a real domain, otherwise the owner's address replaces it.
+2. **A DNS lookup that times out** while checking the SPF fix is now "couldn't check": no value is offered, and the record isn't blamed for being written wrongly. pyspf's `temperror` is kept distinct.
+3. **names.co.uk:**
+   - the guide and the helper email say to **leave the hostname blank**, not to type `@`;
+   - the link goes to names.co.uk's "Changing your domain's DNS records" article;
+   - other hosts still say `@`.
+
+The backlog items are done too:
+- the banner says "adding", "adding or changing" or "checking", to match what's actually needed;
+- the claims that "everyday email keeps working" and "reach inboxes" are gone;
+- the old `advice` strings no longer say to replace SPF with a fresh record.

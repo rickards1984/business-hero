@@ -352,3 +352,53 @@ def test_dmarc_repair_drops_invalid_reporting_settings():
     guide = guide_for(dns(dict(NAMESCO, **{"_dmarc.newbody.example": [record]})))
     dmarc = next(r for r in guide["records"] if r["what"] == "dmarc")
     assert dmarc["value"] == "v=DMARC1; p=none; rua=mailto:partners-ukfi@newbody.example"
+
+
+# ------------------------------------------------------ Codex OUT-20 review 4 ---
+
+def test_dmarc_repair_keeps_settings_with_spaces_the_grammar_allows():
+    record = "V=DMARC1; p=none; fo=0 : 1; rua=mailto:a@newbody.example , mailto:b@newbody.example"
+    guide = guide_for(dns(dict(NAMESCO, **{"_dmarc.newbody.example": [record]})))
+    dmarc = next(r for r in guide["records"] if r["what"] == "dmarc")
+    assert dmarc["value"] == "v=DMARC1; p=none; fo=0:1; rua=mailto:a@newbody.example,mailto:b@newbody.example"
+
+
+@pytest.mark.parametrize("bad", ["mailto:reports@bad/#.com", "mailto:reports@-bad.com", "mailto:reports@bad",
+                                 "mailto:rep orts@bad.com", "http://bad.com"])
+def test_dmarc_repair_replaces_an_invalid_reporting_address(bad):
+    record = f"V=DMARC1; p=none; rua={bad}"
+    guide = guide_for(dns(dict(NAMESCO, **{"_dmarc.newbody.example": [record]})))
+    dmarc = next(r for r in guide["records"] if r["what"] == "dmarc")
+    assert dmarc["value"] == "v=DMARC1; p=none; rua=mailto:partners-ukfi@newbody.example"
+
+
+def test_a_dns_timeout_is_never_blamed_on_the_record():
+    """A lookup that failed while checking the fix is inconclusive: no value
+    offered, and no claim that the record is written wrongly."""
+    guide = guide_for(failing_dns(NAMESCO, {"_spf.google.com"}))
+    spf = next(r for r in guide["records"] if r["what"] == "spf")
+    assert spf["action"] == "unknown" and spf["value"] is None
+    body = guide["email_to_helper"]["body"]
+    assert "written incorrectly" not in body and "isn't written correctly" not in body
+
+
+def test_names_co_uk_is_told_to_leave_the_hostname_blank():
+    guide = evaluate(NAMESCO, ns("ns1.phase8.net", "ns2.phase8.net"))["guide"]
+    spf = next(r for r in guide["records"] if r["what"] == "spf")
+    assert spf["host_label"] == "leave it blank"
+    assert "leave the hostname blank" in guide["email_to_helper"]["body"] and "(host @)" not in guide["email_to_helper"]["body"]
+    assert guide["dns_host"]["help_url"] == "https://www.names.co.uk/support/articles/changing-your-domains-dns-settings/"
+    other = evaluate(NAMESCO, ns("ns1.domaincontrol.com"))["guide"]
+    assert next(r for r in other["records"] if r["what"] == "spf")["host_label"] == "@"
+
+
+def test_the_helper_email_promises_no_more_than_the_checks_establish():
+    body = evaluate(NAMESCO)["guide"]["email_to_helper"]["body"]
+    assert "reach inboxes" not in body and "less likely to be treated as spam" in body
+
+
+def test_the_old_advice_never_says_to_replace_spf_with_a_fresh_record():
+    m = setup_module_or_missing()
+    account = {"email_address": "partners-ukfi@newbody.example", "provider": "google", "token_ciphertext": "x"}
+    advice = " ".join(m._evaluate(account, dns(NAMESCO), ns())["advice"])
+    assert "v=spf1 include:_spf.google.com ~all" not in advice and "rather than adding a second" in advice
