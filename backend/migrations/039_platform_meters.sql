@@ -7,9 +7,9 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE IF NOT EXISTS public.platform_meters (
-  period text NOT NULL CHECK (period ~ '^[0-9]{4}-[0-9]{2}$'),
+  period text NOT NULL CHECK (period ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'),
   meter text NOT NULL CHECK (length(meter) BETWEEN 1 AND 200),
-  value numeric(14,4) NOT NULL DEFAULT 0,
+  value numeric(14,4) NOT NULL DEFAULT 0 CHECK (value >= 0),
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (period, meter)
 );

@@ -660,29 +660,31 @@ async def admin_ai_draft_response(
         import openai
         client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
 
-        resp = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "system",
-                    "content": f"""You are drafting a support response for Business Hero's admin team.
-The business is "{business_name}".
-Write a helpful, professional reply in British English. Be concise and actionable.
-Reference the knowledge base where relevant.
-
-KNOWLEDGE BASE:
-{kb_text}
-
-CONVERSATION SO FAR:
-{conversation_text}
-
-Draft a response that the admin can review, edit, and send. Start the response directly — don't include "Dear" or "Hi" unless appropriate.""",
-                },
-                {"role": "user", "content": "Draft a response to this support conversation."},
-            ],
-            temperature=0.4,
-            max_tokens=500,
-        )
+        from services import profit_guard   # PROFIT-1
+        with profit_guard.attributed(None, "support_draft"):
+            resp = await client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": f"""You are drafting a support response for Business Hero's admin team.
+    The business is "{business_name}".
+    Write a helpful, professional reply in British English. Be concise and actionable.
+    Reference the knowledge base where relevant.
+    
+    KNOWLEDGE BASE:
+    {kb_text}
+    
+    CONVERSATION SO FAR:
+    {conversation_text}
+    
+    Draft a response that the admin can review, edit, and send. Start the response directly — don't include "Dear" or "Hi" unless appropriate.""",
+                    },
+                    {"role": "user", "content": "Draft a response to this support conversation."},
+                ],
+                temperature=0.4,
+                max_tokens=500,
+            )
 
         draft = resp.choices[0].message.content.strip()
         return {"draft": draft}

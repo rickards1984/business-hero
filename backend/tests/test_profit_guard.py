@@ -546,3 +546,43 @@ def test_quote_drafting_is_gated_and_recorded():
     import quoting_api
     source = inspect.getsource(quoting_api)
     assert 'profit_guard.permits("quote")' in source and "profit_guard.record_direct(" in source
+
+
+# ------------------------------------------------------ Codex PROFIT-1 review 2 ---
+
+def test_every_named_ai_feature_is_labelled_for_the_guard():
+    """P1: assistant email drafting and support drafting are non-essential;
+    receptionist call summaries are essential. All are recorded."""
+    import inspect
+    g = guard()
+    import assistant_tools
+    import openai_utils
+    import support_api
+    assert 'profit_guard.attributed(business_id, "draft")' in inspect.getsource(assistant_tools)
+    assert 'profit_guard.attributed(None, "support_draft")' in inspect.getsource(support_api)
+    assert 'profit_guard.attributed(None, "receptionist")' in inspect.getsource(openai_utils.generate_call_summary)
+    assert "support_draft" not in g.ESSENTIAL and "draft" not in g.ESSENTIAL and "receptionist" in g.ESSENTIAL
+
+
+def test_a_call_summary_is_never_refused_and_support_drafting_is(engine, monkeypatch):
+    import asyncio
+    g, sync, aio = hooked_sdk(monkeypatch, engine)
+    monkeypatch.setattr(g, "permits", lambda purpose: purpose in g.ESSENTIAL)
+    import openai_utils
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setattr("openai.OpenAI", lambda **k: sync)
+    with g.attributed("biz-1", "chat"):   # the summary's own label wins inside it
+        summary = asyncio.run(openai_utils.generate_call_summary("Caller asked about prices."))
+    assert summary == "{}"
+    with g.attributed(None, "support_draft"), pytest.raises(g.Paused):
+        sync.chat.completions.create(model="gpt-4o-mini", messages=[])
+
+
+def test_the_estimate_counts_tools_and_the_models_own_output_maximum():
+    """P2: a request with tools and no output limit (owner chat)."""
+    g = guard()
+    tools = [{"type": "function", "function": {"name": "x", "description": "d" * 100000}}]
+    with_tools = g._request_estimate({"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}], "tools": tools})
+    without = g._request_estimate({"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}]})
+    assert with_tools[0] > without[0] + 100000
+    assert with_tools[1] == 128000 and g._request_estimate({"model": "gpt-4o-mini", "messages": []})[1] == 16384

@@ -2,7 +2,13 @@
 
 **For:** Mike. **Ticket:** PROFIT-1. **Migration:** `backend/migrations/039_platform_meters.sql`.
 
-**Rehearsed:** applied to the local PostgreSQL harness, a replay of every migration that matches production's policies (`scripts/rls-local.sh`). The PROFIT-1 PostgreSQL tests pass against it (`backend/tests/test_profit_guard_pg.py`).
+**Rehearsed locally:** applied to the local PostgreSQL harness, a replay of every migration that matches production's policies (`scripts/rls-local.sh`). The PostgreSQL tests in `backend/tests/test_profit_guard_pg.py` pass against it. They cover:
+- row-level security on with no policies, and no client role able to read it;
+- bad rows refused: a bad month, an empty meter name, a negative value;
+- the rollback, rehearsed inside a transaction that is undone;
+- the accounting and alerts themselves.
+
+**Staging first (AGENTS.md §7):** run STEPS 0–2 and the ROLLBACK on **staging (`gzcrsrqmygublveuzqyg`)**, then STEPS 0–2 again there. Only then repeat STEPS 0–2 on production. Send me the three staging outputs and I'll record them in `audits/039-STAGING-REHEARSAL.md`.
 
 **What it does:**
 - creates one empty table, `platform_meters`. It holds AI costs that no business owns, plus the profit guard's "alert already sent this month" markers;
@@ -59,7 +65,7 @@ SELECT to_regclass('public.platform_meters') AS platform_meters,
 
 **EXPECT:**
 - `platform_meters` = `platform_meters`;
-- `meter_columns` **4**;
+- `meter_columns` **4** (`period` must be a real month; `value` can't be negative);
 - `rls_on` **true**;
 - `meter_policies` **0**;
 - `client_grants` **0**;
@@ -70,7 +76,9 @@ SELECT to_regclass('public.platform_meters') AS platform_meters,
 
 ---
 
-## ROLLBACK (only if STEP 2 failed, or I ask)
+## ROLLBACK (only if STEP 2 failed, or I ask; on staging, as part of the rehearsal)
+
+Before PROFIT-1 is deployed the table is empty, so dropping it loses nothing. **After deployment it holds this month's platform costs and alert markers;** dropping it then loses them, so ask me first.
 
 ```sql
 DROP TABLE IF EXISTS public.platform_meters;

@@ -2878,29 +2878,31 @@ def _draft_email_reply(engine, business_id: str, args: dict) -> dict:
         import openai
         client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0, max_retries=1)
 
-        response = client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        f"Generate 3 reply drafts for a business email. Business: {business_name}.\n\n"
-                        "Tones:\n"
-                        '1. "professional" — Formal, polished corporate tone\n'
-                        '2. "friendly" — Warm, conversational but business-appropriate\n'
-                        '3. "brief" — Ultra-concise, 2-3 sentences max\n\n'
-                        "Return ONLY a JSON array with 3 objects: tone, subject, body\n"
-                        "No markdown, no backticks."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": f"From: {from_name or from_email}\nSubject: {subject}\nContent: {email_content[:1000]}"
-                }
-            ],
-            max_tokens=1000,
-            temperature=0.4,
-        )
+        from services import profit_guard   # PROFIT-1
+        with profit_guard.attributed(business_id, "draft"):
+            response = client.chat.completions.create(
+                model="gpt-5",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"Generate 3 reply drafts for a business email. Business: {business_name}.\n\n"
+                            "Tones:\n"
+                            '1. "professional" — Formal, polished corporate tone\n'
+                            '2. "friendly" — Warm, conversational but business-appropriate\n'
+                            '3. "brief" — Ultra-concise, 2-3 sentences max\n\n'
+                            "Return ONLY a JSON array with 3 objects: tone, subject, body\n"
+                            "No markdown, no backticks."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": f"From: {from_name or from_email}\nSubject: {subject}\nContent: {email_content[:1000]}"
+                    }
+                ],
+                max_tokens=1000,
+                temperature=0.4,
+            )
 
         content = response.choices[0].message.content or ""
         content = content.strip().strip("`").strip()

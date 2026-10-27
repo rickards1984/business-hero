@@ -37,7 +37,11 @@ ESSENTIAL = frozenset({"classify", "receptionist", "unsubscribe", "chat", "voice
 PLATFORM = "platform"                          # ledger rows no business owns (platform_meters, migration 039)
 VOICE_METERS = (RECEPTIONIST_METER, OVERAGE_METER, ARIA_VOICE_METER, ARIA_VOICE_OVERAGE_METER)
 TTS_PENCE_PER_1K_CHARS = 1.2                   # tts-1, $15 per million characters
-DEFAULT_MAX_OUTPUT_TOKENS = 4096               # a call that sets no limit: its output estimated at this
+# A call that sets no output limit is estimated at its model's own maximum
+# output (Codex PROFIT-1 review 2); a model not listed, at the largest of these.
+MODEL_MAX_OUTPUT_TOKENS = {"gpt-4o": 16384, "gpt-4o-mini": 16384, "gpt-4.1": 32768, "gpt-4.1-mini": 32768,
+                           "gpt-5": 128000, "gpt-5-mini": 128000, "gpt-5.4": 128000, "tts-1": 0}
+DEFAULT_MAX_OUTPUT_TOKENS = 128000
 VOICE_DEFAULT_PENCE = 16                       # $0.20 a minute with Twilio folded in (PRICING-MODEL §2)
 TOPUP_METER = "outreach_topup_pence"           # OUT-19 F: paid top-ups
 ALERTED_METER = "profit_alerted"               # once per month per threshold
@@ -283,7 +287,11 @@ def periodic_check(moment: Optional[datetime] = None) -> None:
     with no AI call to notice it. Never raises."""
     try:
         from sqlmodel import Session
+        from services import ai_costs
         with Session(_engine()) as s:
+            # The ledger's own lock, so this check and a cost being recorded
+            # never both claim a threshold and send it twice (Codex PROFIT-1 review 2).
+            ai_costs._serialise(s)
             check_after_record(s, moment or datetime.now(timezone.utc))
             s.commit()
     except Exception:
@@ -309,13 +317,16 @@ def _request_estimate(kwargs) -> tuple:
     """(input, output) tokens a request could use at most, from what was sent:
     every character a token, the full output limit."""
     import json as _json
-    sent = kwargs.get("messages") if "messages" in kwargs else kwargs.get("input")
+    billable = {k: kwargs.get(k) for k in ("messages", "input", "instructions", "tools", "functions",
+                                           "response_format", "text") if kwargs.get(k) is not None}
     try:
-        chars = len(_json.dumps(sent, default=str)) + len(str(kwargs.get("instructions") or ""))
+        chars = len(_json.dumps(billable, default=str))
     except Exception:
-        chars = len(str(sent))
-    out = (kwargs.get("max_completion_tokens") or kwargs.get("max_tokens") or kwargs.get("max_output_tokens")
-           or DEFAULT_MAX_OUTPUT_TOKENS)
+        chars = len(str(billable))
+    out = kwargs.get("max_completion_tokens") or kwargs.get("max_tokens") or kwargs.get("max_output_tokens")
+    if not out:
+        model = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", str(kwargs.get("model") or ""))
+        out = MODEL_MAX_OUTPUT_TOKENS.get(model, DEFAULT_MAX_OUTPUT_TOKENS)
     return chars, int(out)
 
 

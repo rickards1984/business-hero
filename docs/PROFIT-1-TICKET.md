@@ -58,5 +58,12 @@ Today the cost ledger (OUT-19 A) and its alarm and kill switch see **outreach AI
   - The admin panel refreshes every minute.
 - **Limits, stated plainly:**
   - Income is monthly recurring revenue, or the trial budget before launch. Essential work is exempt from the kill switch.
-  - So the guard keeps platform costs well below income; it does not prove a profit on every single transaction.
+  - So the guard pauses non-essential AI once costs reach a set share of income. Essential spending (live calls, reply sorting, unsubscribes, owner chat) can continue past it. It does not prove a profit on every single transaction.
   - Full fixed costs can use up a small trial budget on day one: set the trial budget above them.
+
+## Codex review 2 (`audits/PROFIT-1-CODEX-REVIEW-2.md`, 1 × P1) → fixed (cycle 3 is next, the last)
+- **Every named AI feature is labelled.** Assistant email drafting is `draft` and support drafting is `support_draft`, both non-essential and refused at the SDK at the kill switch; their code falls back to a message. Receptionist call summaries are `receptionist`: essential and never refused.
+- **The scheduled check takes the ledger's advisory lock,** so it and a cost being recorded never both send one threshold's alert. A deterministic PostgreSQL test fails without the lock.
+- **Estimates count every billable part of a request:** messages, tools, instructions and response format. With no output limit set, they use the model's own maximum output (128,000 when unknown).
+- **Migration 039 is constrained.** `period` must be a real month and `value` can't be negative. Tests on PostgreSQL show the table is backend-only and that its constraints and rollback work.
+- **The runbook adds a staging rehearsal** before production. Mike runs it.

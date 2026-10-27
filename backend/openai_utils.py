@@ -25,21 +25,23 @@ async def generate_call_summary(transcript: str) -> Optional[str]:
         
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0, max_retries=1)
         
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant that summarizes phone call transcripts. Create a concise summary with exactly 5 bullet points highlighting the key points, action items, and outcomes from the call."
-                },
-                {
-                    "role": "user",
-                    "content": f"Please summarize this call transcript in 5 bullet points:\n\n{transcript}"
-                }
-            ],
-            max_tokens=500,
-            temperature=0.3
-        )
+        from services import profit_guard   # PROFIT-1
+        with profit_guard.attributed(None, "receptionist"):
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant that summarizes phone call transcripts. Create a concise summary with exactly 5 bullet points highlighting the key points, action items, and outcomes from the call."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Please summarize this call transcript in 5 bullet points:\n\n{transcript}"
+                    }
+                ],
+                max_tokens=500,
+                temperature=0.3
+            )
         
         return response.choices[0].message.content
     
