@@ -721,6 +721,22 @@ def capacity(session, bid: str, brand_id, moment: datetime, audience_hash: Optio
         cap = metering.mailbox_daily_cap(boxes[0]) if len(boxes) == 1 else 0
         queued_here = sum(sum(queued.get(cid, [0, 0])) for cid, c in by_id.items() if str(c["mailbox_id"]) == mailbox_id)
         inbox_left[mailbox_id] = max(0, cap - sent_on_box.get(mailbox_id, 0) - queued_here)
+    # Contacts kept today that hold no place (held for the owner's review), of
+    # EVERY brand, use the inbox of a ready campaign for their audience, so a
+    # brand sharing that inbox sees them too (Codex OUT-19 D review 3).
+    unplaced, mine_unplaced = 0, 0
+    for p_brand, audience in session.execute(text(
+            "SELECT l.brand_id, l.audience_hash FROM outreach_prospects p JOIN outreach_compliance l "
+            "ON l.business_id = p.business_id AND l.id = p.lia_id WHERE p.business_id = :b AND p.captured_at >= :start "
+            "AND p.eligibility IN ('eligible', 'review') AND NOT EXISTS (SELECT 1 FROM outreach_enrolments e "
+            "WHERE e.business_id = p.business_id AND e.prospect_id = p.id)"), {"b": bid, "start": start}):
+        unplaced += 1
+        if str(p_brand) == br:
+            mine_unplaced += 1
+        ready = [c for c in campaigns if str(c["brand_id"]) == str(p_brand) and c["status"] in ("ready", "running")]
+        home = next((c for c in ready if c["target_hash"] == audience), ready[0] if ready else None)
+        if home is not None and inbox_left.get(str(home["mailbox_id"]), 0) > 0:
+            inbox_left[str(home["mailbox_id"])] -= 1
     limit = pilot_enrolments()
     matching = [c for c in mine if c["status"] in ("ready", "running")
                 and (audience_hash is None or c["target_hash"] == audience_hash)]
@@ -735,17 +751,10 @@ def capacity(session, bid: str, brand_id, moment: datetime, audience_hash: Optio
         if free:
             out["places"].append([c, free])
     out["inbox_left"] = sum(inbox_left.values())
-    # Contacts kept today that hold no place (held for the owner's review)
-    # still use today's room, durably, so later attempts and runs see them
-    # (Codex OUT-19 D review 2).
-    unplaced = session.execute(text(
-        "SELECT count(*) FROM outreach_prospects p JOIN outreach_compliance l ON l.business_id = p.business_id "
-        "AND l.id = p.lia_id WHERE p.business_id = :b AND l.brand_id = :br AND p.captured_at >= :start "
-        "AND p.eligibility IN ('eligible', 'review') AND NOT EXISTS (SELECT 1 FROM outreach_enrolments e "
-        "WHERE e.business_id = p.business_id AND e.prospect_id = p.id)"), {"b": bid, "br": br, "start": start}).scalar() or 0
-    out["unplaced_today"] = int(unplaced)
-    out["room"] = max(0, min(DAILY_TARGET - found["decision_maker"] - found["gatekeeper"], brand_left - unplaced,
-                             sum(f for _, f in out["places"]) - unplaced))
+    out["unplaced_today"] = mine_unplaced
+    # The brand's own unplaced contacts also use its 20, whichever inbox they sit on.
+    out["room"] = max(0, min(DAILY_TARGET - found["decision_maker"] - found["gatekeeper"], brand_left - mine_unplaced,
+                             sum(f for _, f in out["places"])))
     return out
 
 

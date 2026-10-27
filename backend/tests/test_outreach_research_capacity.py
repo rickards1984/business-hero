@@ -448,3 +448,24 @@ def test_an_email_of_unknown_outcome_counts_once(db):
                 created_at=NOW.isoformat(), updated_at=NOW.isoformat())
         s.commit()
     assert room(db, biz, brand)["room"] == 19
+
+
+# ------------------------------------------ Codex OUT-19 D review 3 finding ---
+
+def test_reviews_use_a_shared_inbox_for_every_brand_on_it(db):
+    """P1: brand A's contacts held for review take its inbox's room; brand B,
+    sharing that 5-a-day inbox, must not buy a search for places already used."""
+    from test_outreach_research import own_inbox
+    biz, brand, lia, campaign = started(db, full=False)          # the shared inbox: 5 a day
+    fit, fit_lia = second_brand(db, biz, inbox=False)
+    box = own_inbox(db, fit, fit_lia, address="shared@fit.example")
+    with Session(db) as s:
+        s.execute(text("UPDATE outreach_campaigns SET mailbox_id = :w WHERE mailbox_id = :m"), {"w": WORKSPACE, "m": box})
+        s.commit()
+    reviews = World([[person(i, company=f"Sole {i}") for i in range(5)]])
+    reviews.not_companies.update(f"Sole {i}" for i in range(5))
+    run(db, biz, lia, reviews)
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'") == 5
+    world = World([[person(100 + i) for i in range(5)]])
+    out = run(db, biz, fit_lia, world)
+    assert world.briefs == [] and kept(out) == 0

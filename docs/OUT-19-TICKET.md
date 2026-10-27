@@ -98,6 +98,7 @@ Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/tes
   - Contacts held for review use today's room, counted from the database, so later attempts and runs see them.
   - The search claim runs on the real clock. Its owner renews it before each paid search and before storing; a run that lost it stops and never takes it back.
   - Whatever fails, the claim is released.
+- **Codex review 3 (`audits/OUT-19-D-CODEX-REVIEW-3.md`, 1 × P1).** Contacts held for review, from every brand, now use the inbox of a ready campaign for their audience, so a brand sharing that inbox sees them too. Its regression test is `test_reviews_use_a_shared_inbox_for_every_brand_on_it`. Three cycles are done, so a further review is Mike's call.
 - **Pilot limit (OUT-10 decision E).** It stays at 5 active contacts per campaign for the first week of the restart, so research also keeps no more than can join a campaign. `OUTREACH_PILOT_ENROLMENTS` raises it without a deploy; `0` lifts it, leaving the inbox's capacity to decide. Before lifting it, index `prepare`'s scan of open cards (OUT-8 ticket, note 2).
 
 ### E — Replies outside the cold cap, with the over-ceiling choices (decision 2)
