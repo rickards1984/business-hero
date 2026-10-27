@@ -440,9 +440,16 @@ def propose(session, business, user_id, action_type: str, args: dict, *,
         # together with its one-answer slot.
         return {"error": "An outreach answer is drafted only from a stored reply."}
     if action_type == "send_outreach" and (automation or raised_by):
-        # OUT-6: every outreach email is a card the owner taps. No standing
-        # permission sends one, and none raises one.
-        return {"error": "Outreach is sent only when the owner approves each email."}
+        # OUT-6: every outreach email is a card the owner taps, unless the
+        # owner granted OUT-11's standing permission for THIS campaign and it
+        # still holds right now.
+        from services import outreach_autopilot
+        held = None
+        if automation == outreach_autopilot.MARKER and not raised_by:
+            held, _ = outreach_autopilot.valid_grant(session, business, str((args or {}).get("campaign_id") or ""))
+        if not held:
+            session.rollback()
+            return {"error": "Outreach is sent only when the owner approves each email."}
     problem = _feature_problem(business, action_type)
     if problem:
         return {"error": f"This can't be done on your current plan: {problem}"}
@@ -707,14 +714,26 @@ def _approve_outreach(session, business, action_id: str, row, user_id, version) 
     else:
         search, prepare, dispatch = (outreach_send.search_before_claim,
                                      outreach_send.prepare_claim, outreach_send.dispatch)
-    if not user_id or not _is_active_owner(session, business, user_id):
+    from services import outreach_autopilot
+    payload = _loads(row[2])
+    # OUT-11: no user means Aria approving under the owner's standing
+    # permission. Only a send_outreach card she raised under that marker,
+    # and only while the permission holds; never a reply.
+    automatic = (user_id is None and row[1] == "send_outreach"
+                 and payload.get("automation") == outreach_autopilot.MARKER and not payload.get("raised_by"))
+    if automatic:
+        held, why = outreach_autopilot.valid_grant(session, business, str(payload.get("campaign_id")))
+        if not held:
+            session.rollback()
+            raise ActionRefused(403, why or "Automatic sending is off for this campaign.")
+    elif not user_id or not _is_active_owner(session, business, user_id):
         session.rollback()
         raise ActionRefused(403, "Only the business owner can approve outreach.")
-    payload = _loads(row[2])
     if not version or version != version_of(payload):
         session.rollback()
         raise ActionRefused(409, CHANGED)
-    if payload.get("automation") or payload.get("authority_snapshot") or payload.get("raised_by"):
+    if ((payload.get("automation") and not automatic) or payload.get("authority_snapshot")
+            or payload.get("raised_by")):
         session.rollback()
         raise ActionRefused(403, "Outreach is sent only when the owner approves it.")
     if row[3] != "proposed" or _is_expired(row[4]):
@@ -724,20 +743,44 @@ def _approve_outreach(session, business, action_id: str, row, user_id, version) 
     search(session, business, action_id=str(action_id), payload=payload)
     try:
         moment = outreach_send.now()
-        prepare(session, business, action_id=str(action_id), payload=payload,
-                user_id=str(user_id), version=version, moment=moment)
-        # Again inside the claim, holding the membership row until commit, so
-        # ownership removed during the search stops it.
-        if not _is_active_owner(session, business, user_id, lock=True):
-            raise ActionRefused(403, "Only the business owner can approve outreach.")
+        if automatic:
+            # Re-read the permission under the claim's locks (business
+            # settings are locked by prepare): revoked now means not sent.
+            prepare(session, business, action_id=str(action_id), payload=payload,
+                    user_id=None, version=version, moment=moment, authority=held)
+            held, why = outreach_autopilot.valid_grant(session, business, str(payload.get("campaign_id")), lock=True)
+            if not held:
+                raise ActionRefused(403, why or "Automatic sending is off for this campaign.")
+            # The pace, enforced here at the send boundary with the time read
+            # under the lock (Codex OUT-11 review 3).
+            outreach_autopilot.claim_pace(session, str(business.id), outreach_send.now())
+            # Record the grant validated UNDER LOCK, the one that actually
+            # authorises this send (Codex OUT-11 review 1).
+            snap = session.execute(text(
+                "SELECT id, authority_snapshot FROM outreach_messages WHERE business_id = :b AND action_id = :a"),
+                {"b": str(business.id), "a": str(action_id)}).fetchone()
+            if snap is not None:
+                record = dict(_loads(snap[1]) or {})
+                record.update(granted_by=str(held["granted_by"]), granted_at=held.get("granted_at"))
+                cast = "CAST(:s AS jsonb)" if _is_postgres(session) else ":s"
+                session.execute(text(f"UPDATE outreach_messages SET authority_snapshot = {cast} "
+                                     "WHERE business_id = :b AND id = :id"),
+                                {"s": json.dumps(record), "b": str(business.id), "id": str(snap[0])})
+        else:
+            prepare(session, business, action_id=str(action_id), payload=payload,
+                    user_id=str(user_id), version=version, moment=moment)
+            # Again inside the claim, holding the membership row until commit, so
+            # ownership removed during the search stops it.
+            if not _is_active_owner(session, business, user_id, lock=True):
+                raise ActionRefused(403, "Only the business owner can approve outreach.")
         seen = "CAST(:seen AS jsonb)" if _is_postgres(session) else ":seen"
         claimed = session.execute(text(
             "UPDATE aria_actions SET status = 'executing', approved_by = :user_id, "
             "approved_at = :now, updated_at = :now "
             "WHERE id = :id AND business_id = :business_id AND status = 'proposed' "
             f"AND expires_at > :now AND payload = {seen} RETURNING id"),
-            {"id": str(action_id), "business_id": str(business.id), "user_id": str(user_id),
-             "now": moment, "seen": stored}).fetchone()
+            {"id": str(action_id), "business_id": str(business.id),
+             "user_id": None if automatic else str(user_id), "now": moment, "seen": stored}).fetchone()
         if claimed is None:
             raise ActionRefused(409, CHANGED)
         session.commit()  # claim + reservations durable before anything is sent

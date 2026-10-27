@@ -334,3 +334,43 @@ def test_staff_cannot_approve_on_postgres(pg):
         with pytest.raises(pg.a.ActionRefused) as exc:
             pg.a.approve(s, pg.b, card["id"], STAFF, version=card["version"])
     assert exc.value.status_code == 403 and not pg.p.sends and not pg.p.searches
+
+
+def test_an_automatic_send_under_the_owners_permission_on_postgres(pg):
+    """OUT-11 on real 037 rows: five owner-approved accepted sends earn trust,
+    the grant is stored, one email goes with no approver and the grant
+    recorded in its authority snapshot; revoking stops the next one."""
+    import json as _json
+    from services import outreach_autopilot
+    with pg.engine.begin() as c:
+        for i in range(5):
+            action, prospect = str(uuid.uuid4()), str(uuid.uuid4())
+            c.execute(text("INSERT INTO aria_actions (id, business_id, proposed_by, action_type, payload, status, "
+                           "approved_by, approved_at, executed_at, expires_at, created_at, updated_at) VALUES "
+                           "(:id, :b, :u, 'send_outreach', '{}'::jsonb, 'done', :u, now(), now(), now(), now(), now())"),
+                      {"id": action, "b": A, "u": OWNER})
+            c.execute(text("INSERT INTO outreach_prospects (id, business_id, company, email, email_key, subscriber_type, "
+                           "eligibility, captured_at, retention_due_at) VALUES (:id, :b, 'Earlier Ltd', :e, :k, 'corporate', "
+                           "'eligible', now(), now() + interval '300 days')"),
+                      {"id": prospect, "b": A, "e": f"earlier{i}@example.invalid", "k": f"earlier-key-{i}"})
+            c.execute(text("INSERT INTO outreach_messages (id, business_id, prospect_id, campaign_id, mailbox_id, action_id, "
+                           "kind, origin, direction, to_emails, cc_emails, subject, body, payload_hash, payload_version, "
+                           "state, provider, accepted_at, idempotency_key, authority_snapshot) VALUES (:id, :b, :p, :c, :m, :a, "
+                           "'initial', 'live', 'outbound', ARRAY[:e], ARRAY[]::text[], 'Earlier', 'Earlier', :h, 1, "
+                           "'accepted', 'google', now(), :k, CAST(:s AS jsonb))"),
+                      {"id": str(uuid.uuid4()), "b": A, "p": prospect, "c": base.CAMPAIGN, "m": base.BOX, "a": action,
+                       "e": f"earlier{i}@example.invalid", "h": "e" * 64, "k": f"earlier-op-{i}",
+                       "s": _json.dumps({"user_id": OWNER})})
+    with Session(pg.engine) as s:
+        row = s.execute(text("SELECT version, sequence_version FROM outreach_campaigns WHERE id = :c"),
+                        {"c": base.CAMPAIGN}).one()
+        outreach_autopilot.grant(s, pg.b, OWNER, base.CAMPAIGN, {"version": row[0], "sequence_version": row[1]})
+        out = outreach_autopilot.send_next(s, pg.b, base.CAMPAIGN, moment=NOW, rng=lambda: 0.0)
+    assert out["sent"] and len(pg.p.sends) == 1
+    with pg.engine.connect() as c:
+        approved_by, payload = c.execute(text("SELECT approved_by, payload FROM aria_actions WHERE id = :id"),
+                                         {"id": out["sent"]}).one()
+        snapshot = c.execute(text("SELECT authority_snapshot FROM outreach_messages WHERE action_id = :id"),
+                             {"id": out["sent"]}).scalar()
+    assert approved_by is None and payload["automation"] == "outreach_autopilot"
+    assert snapshot["automation"] == "outreach_autopilot" and snapshot["granted_by"] == OWNER

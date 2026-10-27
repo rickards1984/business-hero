@@ -72,7 +72,7 @@ PROFILE_FIELDS = ("offer", "audience", "proof", "tone", "ask", "website")
 # providers that offer one-click record changes (domainconnect.org).
 DNS_HOSTS = (
     (("phase8.net", "names.co.uk"), "namesco", "names.co.uk",
-     "https://www.names.co.uk/support/articles/namesco-dns-settings/"),
+     "https://www.names.co.uk/support/articles/changing-your-domains-dns-settings/"),
     (("domaincontrol.com",), "godaddy", "GoDaddy", "https://www.godaddy.com/help/manage-dns-records-680"),
     (("cloudflare.com",), "cloudflare", "Cloudflare",
      "https://developers.cloudflare.com/dns/manage-dns-records/how-to/create-dns-records/"),
@@ -385,21 +385,25 @@ def _install_spf_lookup():
     spf.DNSLookup = lookup
 
 
-def _spf_authorises(domain: str, sender_ip: str, txt: Callable, other: Callable) -> bool:
+def _spf_result(domain: str, sender_ip: str, txt: Callable, other: Callable) -> str:
     """RFC 7208 via pyspf, the established implementation (Mike, 24 Oct
-    2026, after Codex's OUT-15 review 4): would this domain's SPF authorise a
-    real sending address of the provider? Only a genuine `pass` passes; every
-    error, limit or failure is a fail."""
+    2026, after Codex's OUT-15 review 4): pyspf's result for a real sending
+    address of the provider — "pass", "fail", "permerror", "temperror" (a DNS
+    lookup failed: inconclusive, never a verdict on the record)..."""
     import spf
     _install_spf_lookup()
     _SPF_LOCAL.resolvers = (txt, other)
     try:
-        result = spf.query(i=sender_ip, s=f"postmaster@{domain}", h=domain, strict=True, timeout=15).check()[0]
+        return str(spf.query(i=sender_ip, s=f"postmaster@{domain}", h=domain, strict=True, timeout=15).check()[0])
     except Exception:
-        return False
+        return "temperror"
     finally:
         _SPF_LOCAL.resolvers = None
-    return result == "pass"
+
+
+def _spf_authorises(domain: str, sender_ip: str, txt: Callable, other: Callable) -> bool:
+    """Only a genuine `pass` passes; every error, limit or failure is a fail."""
+    return _spf_result(domain, sender_ip, txt, other) == "pass"
 
 
 def _usable_dmarc(record: str) -> bool:
@@ -457,8 +461,8 @@ def _evaluate(account: dict, resolve: Callable, other_records: Optional[Callable
     if _spf_authorises(domain, provider["sender_ip"], resolve, other_records):
         evidence["spf"] = "pass"
     else:
-        advice.append(f"SPF: your domain's SPF record must include {provider['name']}. Add or edit the TXT "
-                      f"record on {domain} to read: v=spf1 include:{provider['spf']} ~all")
+        advice.append(f"SPF: your domain's one SPF record must include include:{provider['spf']} for "
+                      f"{provider['name']}. Edit the existing record on {domain} rather than adding a second one.")
     for selector in provider["selectors"]:
         if any(_usable_dkim(t) for t in txt(f"{selector}._domainkey.{domain}")):
             evidence["dkim"] = "pass"
@@ -469,7 +473,7 @@ def _evaluate(account: dict, resolve: Callable, other_records: Optional[Callable
     if len(dmarc) == 1 and _usable_dmarc(dmarc[0]):   # more than one is invalid
         evidence["dmarc"] = "pass"
     else:
-        advice.append(f"DMARC: add a TXT record named _dmarc.{domain} with the value "
+        advice.append(f"DMARC: {domain} needs exactly one valid DMARC record (TXT at _dmarc.{domain}), for example "
                       f"v=DMARC1; p=none; rua=mailto:{address}")
     evidence["domain_control"] = bool(account.get("token_ciphertext"))   # connected by OAuth
     evidence["from_aligned"] = evidence["spf"] == "pass" and evidence["dkim"] == "pass"
@@ -517,12 +521,23 @@ def _guide(domain: str, address: str, provider: dict, evidence: dict, txt: Calla
                                        f"there must be only one. Combine them into a single record that includes {include}."})
             elif current:
                 proposed = _spf_with(current[0], include)
+
+                def proposed_txt(n):
+                    if n.lower().rstrip(".") == domain:
+                        return [proposed]
+                    found_n = txt(n)
+                    if found_n is None:   # a failed lookup stays a failure: inconclusive, not "no record"
+                        raise LookupError(n)
+                    return found_n
                 # Only offer a value that the SPF evaluator itself would pass for
                 # the provider (Codex OUT-20 review 3: a malformed term kept from
-                # the old record would still fail).
-                if _spf_authorises(domain, provider["sender_ip"],
-                                   lambda n: [proposed] if n.lower().rstrip(".") == domain else (txt(n) or []),
-                                   other_records):
+                # the old record would still fail). A lookup that failed is
+                # inconclusive, never blamed on the record (review 4).
+                verdict = _spf_result(domain, provider["sender_ip"], proposed_txt, other_records)
+                if verdict == "temperror":
+                    records.append({"what": "spf", "type": "TXT", "host": "@", "action": "unknown", "current": current[0],
+                                    "value": None, "why": unknown})
+                elif verdict == "pass":
                     records.append({"what": "spf", "type": "TXT", "host": "@", "action": "edit", "current": current[0],
                                     "value": proposed,
                                     "why": f"Your SPF record doesn't yet list {provider['name']}, so mail you send through "
@@ -530,9 +545,10 @@ def _guide(domain: str, address: str, provider: dict, evidence: dict, txt: Calla
                 else:
                     records.append({"what": "spf", "type": "TXT", "host": "@", "action": "manual", "current": current[0],
                                     "value": None, "include": include,
-                                    "why": "Your SPF record has a problem we can't safely fix for you (for example an entry "
-                                           f"that isn't written correctly). It needs correcting by hand so that it includes "
-                                           f"{include}: the email to your web person below explains this."})
+                                    "why": f"Even with {include} added, your SPF record wouldn't pass the check (for "
+                                           "example an entry written incorrectly, or too many lookups), so we can't safely "
+                                           "write the fix for you. It needs correcting by hand: the email to your web person "
+                                           "below explains this."})
             else:
                 records.append({"what": "spf", "type": "TXT", "host": "@", "action": "add", "current": None,
                                 "value": f"v=spf1 {include} ~all",
@@ -565,6 +581,13 @@ def _guide(domain: str, address: str, provider: dict, evidence: dict, txt: Calla
                                 "why": "Your DMARC record isn't written in a way receivers accept. Replace it with this "
                                        "(your existing policy is kept where it was valid)."})
     host = _dns_host(domain, txt, other_records)
+    # What to type in the host/name box. names.co.uk asks for it to be left
+    # blank for the domain itself (Codex OUT-20 review 4); most others take "@".
+    for r in records:
+        if r["host"] == "@":
+            r["host_label"] = "leave it blank" if host["key"] == "namesco" else "@"
+        else:
+            r["host_label"] = r["host"]
     return {"domain": domain, "mail_provider": provider["name"], "dns_host": host, "records": records,
             "email_to_helper": _helper_email(domain, host, records)}
 
@@ -580,14 +603,18 @@ def _spf_with(record: str, include: str) -> str:
     return " ".join([terms[0], include] + kept)
 
 
-_DMARC_URI = __import__("re").compile(r"^mailto:[^@\s,;!]+@[^@\s,;!]+\.[^@\s,;!]+(![0-9]+[kmgt]?)?$", __import__("re").I)
+# mailto:local@host.tld with an optional size limit (RFC 7489 §6.2); the host
+# must be a real domain name (Codex OUT-20 review 4: "bad/#.com" was kept).
+_DMARC_URI = __import__("re").compile(
+    r"^mailto:[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(![0-9]+[kmgt]?)?$",
+    __import__("re").I)
 _DMARC_FO = __import__("re").compile(r"^[01ds](:[01ds])*$", __import__("re").I)
 _DMARC_RF = __import__("re").compile(r"^[a-z0-9]+(:[a-z0-9]+)*$", __import__("re").I)
 # RFC 7489 §6.4 grammar for the optional tags kept on repair (Codex OUT-20 review 3).
 DMARC_TAGS = {
     "sp": lambda v: v.lower() in ("none", "quarantine", "reject"),
-    "rua": lambda v: bool(v) and all(_DMARC_URI.match(u.strip()) for u in v.split(",")),
-    "ruf": lambda v: bool(v) and all(_DMARC_URI.match(u.strip()) for u in v.split(",")),
+    "rua": lambda v: bool(v) and all(_DMARC_URI.match(u) for u in v.split(",")),
+    "ruf": lambda v: bool(v) and all(_DMARC_URI.match(u) for u in v.split(",")),
     "adkim": lambda v: v.lower() in ("r", "s"),
     "aspf": lambda v: v.lower() in ("r", "s"),
     "pct": lambda v: v.isdigit() and 0 <= int(v) <= 100,
@@ -609,27 +636,36 @@ def _dmarc_repaired(record: str, fresh: str) -> str:
     policy = next((v.lower() for k, v in tags if k == "p"), "")
     if policy not in ("none", "quarantine", "reject"):
         return fresh
+    # Whitespace the grammar allows around ":" and "," is normalised first
+    # (Codex OUT-20 review 4: "fo=0 : 1" is valid and was dropped).
+    import re as _re
+    tags = [(k, _re.sub(r"\s*([:,])\s*", r"\1", v)) for k, v in tags]
     kept = [(k, v) for k, v in tags if k in DMARC_TAGS and DMARC_TAGS[k](v)]
     if not any(k == "rua" for k, _ in kept):
         kept.append(("rua", fresh.split("rua=", 1)[1]))
     return "; ".join(["v=DMARC1", f"p={policy}"] + [f"{k}={v}" for k, v in kept])
 
 
+def _host_words(r: dict) -> str:
+    return "leave the hostname blank" if r.get("host_label") == "leave it blank" else f"host {r['host']}"
+
+
 def _helper_email(domain: str, host: dict, records: list) -> dict:
     lines = ["Hi,", "",
              f"Could you please add these settings to the DNS for {domain}"
-             + (f" (managed at {host['name']})" if host.get("name") else "") + "? They make sure the emails we "
-             "send are recognised as genuinely from us, so they reach inboxes rather than spam.", ""]
+             + (f" (managed at {host['name']})" if host.get("name") else "") + "? They let receiving mail servers check that the "
+             "emails we send really come from us, so they're less likely to be treated as spam.", ""]
     for n, r in enumerate(records, 1):
         if r["what"] == "spf" and r["action"] == "edit":
-            lines += [f"{n}. Edit the existing TXT record on {domain} (host @) that starts v=spf1, so it reads:",
+            lines += [f"{n}. Edit the existing TXT record on {domain} ({_host_words(r)}) that starts v=spf1, so it reads:",
                       f"   {r['value']}", f"   (it currently reads: {r['current']})"]
         elif r["what"] == "spf" and r["action"] == "merge":
             lines += [f"{n}. {domain} has more than one TXT record starting v=spf1. Please combine them into one "
                       f"record that also includes {r['include']}."]
         elif r["what"] == "spf" and r["action"] == "manual":
             lines += [f"{n}. The TXT record on {domain} that starts v=spf1 currently reads:", f"   {r['current']}",
-                      f"   It has an entry that isn't written correctly. Please correct it so it's valid and includes {r['include']}."]
+                      f"   Even with {r['include']} added it wouldn't pass an SPF check (for example an entry written",
+                      f"   incorrectly, or too many DNS lookups). Please correct it so it's valid and includes {r['include']}."]
         elif r["action"] == "unknown":
             lines += [f"{n}. We couldn't read {domain}'s {r['what'].upper()} record when this was written; please check "
                       "it exists and is valid."]
@@ -639,7 +675,7 @@ def _helper_email(domain: str, host: dict, records: list) -> dict:
             lines += [f"{n}. Replace the TXT record named _dmarc.{domain} with:", f"   {r['value']}",
                       f"   (it currently reads: {r['current']})"]
         elif r["what"] == "spf":
-            lines += [f"{n}. Add a TXT record on {domain} (host @) with the value:", f"   {r['value']}"]
+            lines += [f"{n}. Add a TXT record on {domain} ({_host_words(r)}) with the value:", f"   {r['value']}"]
         elif r["what"] == "dkim":
             lines += [f"{n}. Add the email signature (DKIM) record named {r['host']}. I'll send you its value from "
                       "our email admin console, or you can generate it there: " + r["help_url"]]

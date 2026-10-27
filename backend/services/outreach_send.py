@@ -253,11 +253,22 @@ def _business_days(moment, count):
     return local.astimezone(timezone.utc)
 
 
-def prepare_claim(session, business, *, action_id, payload, user_id, version, moment):
-    """Recheck and reserve inside caller's transaction. NEVER I/O or commit."""
+def prepare_claim(session, business, *, action_id, payload, user_id, version, moment, authority=None):
+    """Recheck and reserve inside caller's transaction. NEVER I/O or commit.
+
+    OUT-11: `authority` is the owner's standing permission for an automatic
+    send (validated by the caller and re-read under lock after this call).
+    Only a sequence email may use it, never a reply; every check below
+    applies exactly as for a tapped card."""
     bid = str(business.id)
-    require(user_id and version and version == version_of(payload), 'Owner/version required', 403)
-    require('automation' not in payload and 'authority_snapshot' not in payload, 'Manual approval required', 403)
+    automatic = payload.get('automation') == 'outreach_autopilot'
+    require(version and version == version_of(payload), 'Owner/version required', 403)
+    if automatic:
+        require(user_id is None and isinstance(authority, dict) and authority.get('granted_by')
+                and payload.get('action_kind') != 'reply_outreach', 'Standing permission required', 403)
+    else:
+        require(user_id and 'automation' not in payload, 'Manual approval required', 403)
+    require('authority_snapshot' not in payload, 'Manual approval required', 403)
     for value in (payload['subject'], payload['to'], payload['from_email'], *payload['cc']):
         _safe_header(value)
     require(set(payload['headers']) == {'List-Unsubscribe', 'List-Unsubscribe-Post'})
@@ -346,7 +357,10 @@ def prepare_claim(session, business, *, action_id, payload, user_id, version, mo
                         subject=payload['subject'], body='\n\n'.join(payload[k] for k in ('body', 'sign_off', 'footer')),
                         payload_hash=version, payload_version=1, state='claimed', provider=a['provider'],
                         rfc_message_id=payload['rfc_message_id'], idempotency_key=payload['idempotency_key'],
-                        authority_snapshot={'user_id': str(user_id), 'version': version, 'search_at': receipt[1].isoformat()})
+                        authority_snapshot=({'automation': 'outreach_autopilot', 'granted_by': str(authority['granted_by']),
+                                             'granted_at': authority.get('granted_at'), 'version': version,
+                                             'search_at': receipt[1].isoformat()} if automatic else
+                                            {'user_id': str(user_id), 'version': version, 'search_at': receipt[1].isoformat()}))
     metering.reserve_outreach_usage(session, business, operation_key=payload['idempotency_key'],
                                    mailbox_id=str(a['id']), prospect_id=str(p['id']), message_id=message_id, moment=moment)
     if is_reply:
@@ -485,7 +499,11 @@ def _settle(session, business, action_id, payload, job, evidence, result):
     update(session, 'outreach_messages', bid, job['message_id'], **fields)
     update(session, 'outreach_dispatch_jobs', bid, job['id'], status='completed' if outcome == 'accepted' else state)
     expr = 'CAST(:r AS jsonb)' if pg(session) else ':r'
-    session.execute(text(f'UPDATE aria_actions SET status=:s,result={expr},updated_at=:at WHERE business_id=:b AND id=:id'),
+    # executed_at marks a finished card, as for every other action (OUT-11:
+    # the home lists what Aria sent on her own by it).
+    finished = result['status'] in ('done', 'failed')
+    session.execute(text(f'UPDATE aria_actions SET status=:s,result={expr},updated_at=:at'
+                         + (',executed_at=:at' if finished else '') + ' WHERE business_id=:b AND id=:id'),
                     {'s': result['status'], 'r': json.dumps(result), 'at': now(), 'b': bid, 'id': str(action_id)})
 
 
