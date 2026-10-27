@@ -106,8 +106,41 @@ class World:
         return dict(search=self.search, fetch=self.fetch, mx=self.mx, companies=self.companies, moment=NOW)
 
 
+def run_clock():
+    """The research run on the pinned NOW too, so every check inside it (an
+    approval's dates, a contact's retention) reads the same time whatever the
+    real clock says. The research module's own clock is left alone."""
+    from contextlib import ExitStack
+    from unittest import mock
+    from services import aria_actions, outreach_send, outreach_setup
+    stack = ExitStack()
+    for module in (outreach_setup, outreach_send, aria_actions):
+        stack.enter_context(mock.patch.object(module, "now", lambda: NOW))
+    return stack
+
+
+def setup_clock():
+    """Setup (approvals, mailbox checks, templates) stamped an hour before the
+    pinned NOW, never on the real clock: once the real time passed NOW, the
+    audience approval read as "out of date" (failed from 07:30 UTC on
+    27 Oct 2026, the date NOW pins)."""
+    from contextlib import ExitStack
+    from datetime import timedelta as _td
+    from unittest import mock
+    from services import aria_actions, outreach_send, outreach_setup
+    stack = ExitStack()
+    for module in (outreach_setup, outreach_send, aria_actions, research()):
+        stack.enter_context(mock.patch.object(module, "now", lambda: NOW - _td(hours=1)))
+    return stack
+
+
 def started(db):
     """A business with setup complete and research switched on."""
+    with setup_clock():
+        return _started(db)
+
+
+def _started(db):
     m = setup_module_or_missing()
     biz = grant(db)
     brand, lia, campaign = ready(m, db, biz)
@@ -126,7 +159,7 @@ def count(db, sql, **params):
 
 
 def run(db, biz, lia, world):
-    with Session(db) as s:
+    with run_clock(), Session(db) as s:
         return research().run(s, biz, lia["id"], **world.kwargs())
 
 

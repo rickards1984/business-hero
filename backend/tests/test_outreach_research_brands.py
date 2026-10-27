@@ -21,7 +21,13 @@ def meter(brand):
     return f"outreach_research_pence:{brand['id']}"
 
 
-def second_brand(db, biz, *, name="FitFutures", enabled=True, cap=2000):
+def second_brand(db, biz, **kwargs):
+    from test_outreach_research import setup_clock
+    with setup_clock():
+        return _second_brand(db, biz, **kwargs)
+
+
+def _second_brand(db, biz, *, name="FitFutures", enabled=True, cap=2000):
     """A second brand with its own approved audience (no campaign needed to research)."""
     m = setup_module_or_missing()
     with Session(db) as s:
@@ -64,12 +70,14 @@ def test_each_brand_has_at_most_ten_gatekeepers_a_day(db):
 def test_a_brands_audiences_still_share_its_twenty(db):
     m = setup_module_or_missing()
     biz, brand, lia, campaign = started(db)
-    with Session(db) as s:
+    from test_outreach_research import setup_clock
+    with setup_clock(), Session(db) as s:
         lia2 = m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Schools in Essex",
                                                "segments": ["school"], "regions": ["Essex"]}, draft=draft_lia)
         m.approve_audience(s, biz, OWNER, lia2["id"], {})
     run(db, biz, lia, World([batch(0)]))
-    assert run(db, biz, lia2, World([batch(2000)]))["accepted"] == []
+    out = run(db, biz, lia2, World([batch(2000)]))
+    assert out["accepted"] == [] and "approval" not in (out["stopped"] or ""), out["stopped"]
 
 
 # ---------------------------------------------------------- budget per brand ---
@@ -392,7 +400,8 @@ def test_every_meter_write_happens_under_the_business_lock(db, monkeypatch, impo
                         (events.append(("spend", pence)), real_spend(session, bid, moment, pence, brand_id))[1])
     cost = r.impossible_search_pence() + 9 if impossible else r.SEARCH_RESERVE_PENCE
     world = World([batch(0)], cost=cost)
-    with Tracked(db) as s:
+    from test_outreach_research import run_clock
+    with run_clock(), Tracked(db) as s:
         out = r.run(s, biz, lia["id"], **world.kwargs())
     writes = [e for e in events if isinstance(e, tuple)]
     assert writes[0] == ("spend", r.SEARCH_RESERVE_PENCE) and len(writes) == 2   # reserve, then settle
