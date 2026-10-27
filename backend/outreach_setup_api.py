@@ -14,6 +14,7 @@ from sqlmodel import Session
 import auth
 from auth import get_user_business_context
 from db import get_session
+from services import outreach_autopilot as autopilot
 from services import outreach_research as research
 from services import outreach_setup as setup
 from rate_limiting import limiter
@@ -227,6 +228,28 @@ def research_configure(body: ResearchConfig, context=Depends(get_user_business_c
 @router.post("/research/lessons")
 def research_lessons(body: Lessons, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
     return _run(research.save_lessons, session, context, body.lessons, brand_id=str(body.brand_id))
+
+
+class Grant(Body):
+    version: int = Field(ge=1, strict=True)
+    sequence_version: int = Field(ge=1, strict=True)
+
+
+@router.get("/autopilot")
+def autopilot_status(context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return autopilot.status(session, auth._load_business(session, context["business_id"]))
+
+
+@router.post("/autopilot/{campaign_id}")
+def autopilot_grant(campaign_id: UUID, body: Grant, context=Depends(get_user_business_context),
+                    session: Session = Depends(get_session)):
+    return _run(autopilot.grant, session, context, str(campaign_id), _body(body))
+
+
+@router.delete("/autopilot/{campaign_id}")
+def autopilot_revoke(campaign_id: UUID, context=Depends(get_user_business_context),
+                     session: Session = Depends(get_session)):
+    return _run(autopilot.revoke, session, context, str(campaign_id))
 
 
 @public_router.get("/p/outreach-privacy/{brand_id}", response_class=HTMLResponse)

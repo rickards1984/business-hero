@@ -935,7 +935,7 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
 def _prepare_cards(session, business, prospect_ids: list) -> list:
     """Decision E: each newly enrolled contact's first email waits on the home
     page for the owner (or OUT-11's permission). Never sent here."""
-    from services import aria_actions
+    from services import aria_actions, outreach_autopilot
     bid, cards = str(business.id), []
     for pid in prospect_ids:
         rows = send.rows(session, "outreach_enrolments", bid, "AND prospect_id = :p AND state = 'active'", {"p": pid})
@@ -945,6 +945,12 @@ def _prepare_cards(session, business, prospect_ids: list) -> list:
         session.rollback()
         for e in rows:
             if str(e["id"]) in open_for:
+                continue
+            # OUT-11: a campaign Aria may send by herself gets no card — a
+            # waiting card would block her (she never sends over one).
+            held, _ = outreach_autopilot.valid_grant(session, business, str(e["campaign_id"]))
+            session.rollback()
+            if held:
                 continue
             step = next((s for s in send.rows(session, "outreach_sequence_steps", bid,
                                               "AND campaign_id = :c AND sequence_version = :v",

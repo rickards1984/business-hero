@@ -157,7 +157,9 @@ function DashboardContent() {
             {d.summary.data!.automated!.map((a, i) => (
               <li key={i}>
                 <span className="home-task-title">
-                  Chased {a.customer_name || 'a customer'} for {a.invoice_number || 'an invoice'} (stage {a.stage})
+                  {a.kind === 'outreach_autopilot'
+                    ? <>Sent outreach to {a.to || 'a prospect'}{a.subject ? `: “${a.subject}”` : ''} (sent automatically)</>
+                    : <>Chased {a.customer_name || 'a customer'} for {a.invoice_number || 'an invoice'} (stage {a.stage})</>}
                 </span>
                 {a.sent_at && <span className="home-task-due">{ago(a.sent_at)}</span>}
               </li>
