@@ -400,7 +400,8 @@ def test_every_meter_write_happens_under_the_business_lock(db, monkeypatch, impo
                         (events.append(("spend", pence)), real_spend(session, bid, moment, pence, brand_id))[1])
     cost = r.impossible_search_pence() + 9 if impossible else r.SEARCH_RESERVE_PENCE
     world = World([batch(0)], cost=cost)
-    with Tracked(db) as s:
+    from test_outreach_research import run_clock
+    with run_clock(), Tracked(db) as s:
         out = r.run(s, biz, lia["id"], **world.kwargs())
     writes = [e for e in events if isinstance(e, tuple)]
     assert writes[0] == ("spend", r.SEARCH_RESERVE_PENCE) and len(writes) == 2   # reserve, then settle
