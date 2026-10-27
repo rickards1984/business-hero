@@ -342,6 +342,10 @@ def test_briefing_and_headroom_never_reach_another_business(r):
     scan(r)
     rid = reply_id(r)
     other = SimpleNamespace(**{**vars(r.b), "id": B})
+    # The same user really owns business B too, so only tenant scoping can refuse (Codex review 3).
+    from test_outreach_send import insert
+    insert(r.s, "business_members", business_id=B, user_id=OWNER, role="owner", is_active=True)
+    r.s.commit()
     with pytest.raises(ActionRefused):
         r.replies.brief(r.s, other, reply_id=rid, user_id=OWNER, moment=NOW)
     r.s.rollback()
