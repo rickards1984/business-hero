@@ -656,7 +656,8 @@ def reply_headroom(session, bid: str, mailbox_id: str, moment) -> dict:
     blocked = None
     if cap == 0:
         blocked = "This inbox isn't passing its checks, so it can't send"
-    elif checked is None or checked.astimezone(LONDON).date() != moment.astimezone(LONDON).date():
+    elif checked is None or checked > moment or checked.astimezone(LONDON).date() != moment.astimezone(LONDON).date():
+        # As the send path: a check dated in the future, or not today, doesn't count.
         blocked = "Today's inbox check hasn't run yet; sending starts once it passes"
     return {'cap': cap, 'ceiling': ceiling, 'used': int(used), 'left': left, 'blocked': blocked,
             'near_ceiling': blocked is None and ceiling > 0 and left <= REPLY_NEAR}

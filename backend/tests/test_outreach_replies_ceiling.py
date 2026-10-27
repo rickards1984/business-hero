@@ -321,3 +321,34 @@ def test_sent_and_unknown_replies_never_count_as_cold(h, state):
     card = propose(h)
     emails_today(h, 10, kind="bespoke", state=state)
     assert approve(h, card)["status"] == "done"
+
+
+# ------------------------------------------------------ Codex OUT-19 E review 2 ---
+
+def test_a_health_check_dated_in_the_future_does_not_count(h):
+    from datetime import timedelta
+    h.s.execute(text("UPDATE outreach_mailboxes SET health_checked_at = :d WHERE mailbox_id = :m"),
+                {"d": (NOW + timedelta(minutes=30)).isoformat(), "m": BOX})
+    h.s.commit()
+    assert metering.reply_headroom(h.s, A, BOX, NOW)["blocked"]
+
+
+def test_briefing_and_headroom_never_reach_another_business(r):
+    from services.aria_actions import ActionRefused
+    from test_outreach_replies import incoming, reply_id, scan
+    from test_outreach_send import B
+    from types import SimpleNamespace
+    incoming(r)
+    scan(r)
+    rid = reply_id(r)
+    other = SimpleNamespace(**{**vars(r.b), "id": B})
+    with pytest.raises(ActionRefused):
+        r.replies.brief(r.s, other, reply_id=rid, user_id=OWNER, moment=NOW)
+    r.s.rollback()
+    assert all(b["mailbox_id"] != BOX for b in r.replies.headroom(r.s, other, moment=NOW)["inboxes"])
+
+
+def test_the_retention_notice_never_claims_deletion():
+    from pathlib import Path
+    card = (Path(__file__).parents[2] / "frontend/client/src/components/OutreachReplyCard.tsx").read_text()
+    assert "withheld from this briefing" in card and "no longer kept" not in card

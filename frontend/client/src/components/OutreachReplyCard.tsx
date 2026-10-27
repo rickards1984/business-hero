@@ -41,7 +41,7 @@ export default function OutreachReplyCard({ businessId, reply }: { businessId: s
     </> : <Alert severity="info">Original content unavailable.</Alert>}
     {brief && <Paper variant="outlined" sx={{ p: 1.5, bgcolor: 'action.hover' }}><Stack spacing={1}>
       <Typography variant="subtitle2">Aria's briefing — to answer from your own email</Typography>
-      {brief.retained === false && <Alert severity="info">This contact has passed its retention date, so their details and message are no longer kept.</Alert>}
+      {brief.retained === false && <Alert severity="info">This contact has passed its retention date, so their details and message are withheld from this briefing.</Alert>}
       <Typography variant="body2"><strong>Who:</strong> {[brief.who?.name, brief.who?.role, brief.who?.company].filter(Boolean).join(', ') || 'Unknown'} · {brief.who?.email}</Typography>
       <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}><strong>They asked:</strong> {brief.asked?.text || 'Message unavailable'}</Typography>
       {brief.suggested_answer

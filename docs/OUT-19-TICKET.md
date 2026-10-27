@@ -122,6 +122,9 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
   - Headroom says when an inbox can't send today, because it isn't passing its checks or today's check hasn't run.
   - Tests now isolate the inbox's warm-up limit, and cover kinds that are unknown (NULL) or unrecognised, and held and unknown outcomes.
   - The wording no longer promises every reply gets answered. Boost is labelled "coming later", a missing suggestion gives its real reason, and fact sources are shown.
+- **Codex review 2 (`audits/OUT-19-E-CODEX-REVIEW-2.md`, no P1s, 1 × P2).**
+  - The retention notice now says the details are withheld from the briefing, not that they're deleted.
+  - Backlog done: headroom ignores a health check dated in the future, as the send path does, and new tests show neither the briefing nor headroom reaches another business.
 
 ### F — Stripe: extra brands as subscription items, top-ups and boosts as one-off payments (decisions 3–4)
 - Entitlement checks follow the existing webhook rules (BH-006).
