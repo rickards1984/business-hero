@@ -374,6 +374,25 @@ def _safely(fn, *args) -> None:
         logger.exception("Could not record an AI call's cost")
 
 
+class Paused(RuntimeError):
+    """A non-essential AI call refused at the kill switch, before it reaches the
+    provider. Callers that already fall back on an AI failure (email drafts,
+    the inbox briefing) fall back on this too."""
+
+
+def _refuse_if_paused() -> None:
+    """Gate at the SDK itself: a call attributed to a non-essential purpose is
+    refused once the kill switch is on (Codex PROFIT-1 review 1). Calls the
+    router records (accounted) have their own checks; unattributed calls are
+    not refused here."""
+    attribution = _attribution.get()
+    if attribution is None or _accounted.get():
+        return
+    purpose = attribution[1]
+    if purpose not in ESSENTIAL and not permits(purpose):
+        raise Paused(f"{purpose} paused: this month's costs have reached the kill threshold of income")
+
+
 def wrap_create(fn, recorder=None):
     """The SDK's create, recording each call's cost; recording never breaks the
     call. Works whether the SDK's create returns a value or an awaitable (the
@@ -386,6 +405,7 @@ def wrap_create(fn, recorder=None):
 
     @functools.wraps(fn)
     def wrapped(*args, **kwargs):
+        _refuse_if_paused()
         try:
             result = fn(*args, **kwargs)
         except BaseException:

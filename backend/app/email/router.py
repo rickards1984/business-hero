@@ -1167,7 +1167,9 @@ async def generate_email_briefing(
     statement = statement.order_by(EmailMessage.received_at.desc()).limit(200)
     messages = session.exec(statement).all()
 
-    briefing_markdown = generate_email_briefing_markdown(messages, business)
+    from services import profit_guard   # PROFIT-1: recorded; paused at the kill switch (plain version instead)
+    with profit_guard.attributed(business.id, "briefing"):
+        briefing_markdown = generate_email_briefing_markdown(messages, business)
     stats = {
         "total_messages": len(messages),
         "unread_messages": sum(1 for m in messages if m.is_unread),
@@ -1267,7 +1269,9 @@ async def analyze_emails(
     batch_size = 10
     for i in range(0, len(messages), batch_size):
         batch = messages[i : i + batch_size]
-        batch_results = analyze_email_batch(batch)
+        from services import profit_guard   # PROFIT-1: inbox sorting is essential: recorded, never paused
+        with profit_guard.attributed(business.id, "classify"):
+            batch_results = analyze_email_batch(batch)
         all_analyses.extend(batch_results)
 
     for analysis in all_analyses:
@@ -1330,7 +1334,9 @@ async def generate_email_draft_options(
     except Exception:
         pass
 
-    draft_options = generate_email_reply_drafts(message, business, user_name)
+    from services import profit_guard   # PROFIT-1: recorded; paused at the kill switch (plain version instead)
+    with profit_guard.attributed(business.id, "draft"):
+        draft_options = generate_email_reply_drafts(message, business, user_name)
 
     saved_drafts: List[EmailDraftResponse] = []
     for option in draft_options:
@@ -1389,7 +1395,9 @@ async def generate_email_draft(
     if not to_emails:
         raise HTTPException(status_code=400, detail="Recipient email not available")
 
-    draft_content = generate_email_reply_draft(message, business)
+    from services import profit_guard   # PROFIT-1: recorded; paused at the kill switch (plain version instead)
+    with profit_guard.attributed(business.id, "draft"):
+        draft_content = generate_email_reply_draft(message, business)
     draft = EmailDraft(
         business_id=business.id,
         email_message_id=message.id,

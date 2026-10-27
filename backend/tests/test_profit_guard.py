@@ -504,18 +504,40 @@ def test_the_scheduler_runs_the_check():
     assert "_run_profit_check_if_due" in inspect.getsource(briefing_scheduler)
 
 
-def test_an_email_draft_at_the_kill_switch_is_the_plain_one_without_ai(monkeypatch):
-    """P1 3: non-essential features are gated, not only recorded."""
-    g = guard()
-    from services import ai_costs
+def test_an_email_draft_at_the_kill_switch_is_the_plain_one_without_ai(engine, monkeypatch):
+    """P1 3: gated at the SDK itself. The router labels the call "draft"; the
+    hook refuses it before the provider; the draft code's own fallback answers."""
+    import httpx
+    g, sync, aio = hooked_sdk(monkeypatch, engine)
     from app.email import service
+    calls = []
+    sync_client = __import__("openai").OpenAI(api_key="k", http_client=httpx.Client(transport=httpx.MockTransport(
+        lambda request: calls.append(1) or httpx.Response(200, json=completion_json()))))
     monkeypatch.setattr(service, "OPENAI_API_KEY", "k")
+    monkeypatch.setattr(service, "OpenAI", lambda **k: sync_client)
     monkeypatch.setattr(g, "permits", lambda purpose: purpose in g.ESSENTIAL)
-    monkeypatch.setattr(service, "OpenAI", lambda **k: (_ for _ in ()).throw(AssertionError("no AI call")))
     message = SimpleNamespace(subject="Hello", from_name="Sam", from_email="s@x", snippet="", body_text="hi")
     business_row = SimpleNamespace(id="biz-1", name="New Body")
-    assert "get back to you" in service.generate_email_reply_draft(message, business_row)["body_text"]
-    assert ai_costs  # the same ledger
+    with g.attributed("biz-1", "draft"):
+        out = service.generate_email_reply_draft(message, business_row)
+    assert "get back to you" in out["body_text"] and calls == [], "no AI call was made"
+
+
+def test_an_essential_call_is_never_refused_at_the_sdk(engine, monkeypatch):
+    g, sync, aio = hooked_sdk(monkeypatch, engine)
+    monkeypatch.setattr(g, "permits", lambda purpose: purpose in g.ESSENTIAL)
+    with g.attributed("biz-1", "classify"):
+        assert sync.chat.completions.create(model="gpt-4o-mini", messages=[]).usage.prompt_tokens == 1200
+
+
+def test_the_email_router_labels_each_ai_feature():
+    import inspect
+    guard()
+    from app.email import router
+    source = inspect.getsource(router)
+    assert source.count('profit_guard.attributed(business.id, "draft")') == 2
+    assert 'profit_guard.attributed(business.id, "briefing")' in source
+    assert 'profit_guard.attributed(business.id, "classify")' in source
 
 
 def test_quote_drafting_is_gated_and_recorded():

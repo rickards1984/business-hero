@@ -43,7 +43,7 @@ Today the cost ledger (OUT-19 A) and its alarm and kill switch see **outreach AI
 1. **Migration 039, `platform_meters`.** Costs no business owns, and the once-a-month alert markers, live in this new backend-only table: client access is removed and row-level security is on. `usage_meters` is never given a fake business id. **Mike runs `audits/039-PROD-RUNBOOK.md` before merging.** Until then the guard is safe, but it can't mark or send alerts, and it logs that.
 2. **The SDK hook works on async calls.** It handles a `create` that returns an awaitable (the async client). The tests drive the real OpenAI SDK with a mocked transport, and wrapping is idempotent.
 3. **Non-essential features are gated, not only recorded:**
-   - email drafting and the inbox briefing fall back to their plain versions;
+   - email drafting and the inbox briefing fall back to their plain versions. They're gated at the SDK hook itself: the email router labels each call (`attributed(..., "draft" / "briefing")`), and the hook refuses a non-essential labelled call before it reaches the provider (`Paused`). The drafting code already falls back on any AI failure;
    - quote drafting is paused with a message. Its direct HTTP call is now recorded too, with images estimated at ~1,105 tokens each;
    - inbox sorting is recorded but never stopped.
    - Text-to-speech is recorded per character, as voice: essential.
