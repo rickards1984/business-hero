@@ -844,13 +844,15 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
                     send.lock_business(session, bid)
                 if spent:
                     ai_costs.save(session, bid, spent, purpose="draft", brand_id=brand_id)
-                if failure is None:
-                    # Settled: the real cost replaces the hold.
+                if failure is None or isinstance(failure, ActionRefused):
+                    # Settled: the real cost replaces the hold. A refusal is
+                    # fully accounted too: every provider reported its failure
+                    # and each attempt was recorded (or none was dispatched at
+                    # all), so its hold is released (Codex OUT-19 B+C review 4).
                     outreach_allowance.hold_draft(session, bid, brand_id, moment, -hold)
-                # A draft that failed keeps its hold beside whatever it did
+                # Any other failure keeps its hold beside whatever it did
                 # record: an attempt interrupted after dispatch may still have
-                # been billed, and only success proves the accounting complete
-                # (fail closed; Codex OUT-19 B+C reviews 2 and 3).
+                # been billed (fail closed; Codex OUT-19 B+C reviews 2 and 3).
                 if spent and failure is None:
                     recorded = sum(ai_costs.cost(c["provider"], c["model"], c["input_tokens"], c["output_tokens"],
                                                  c.get("tool_calls", 0)) for c in spent)
@@ -875,7 +877,8 @@ MODEL_DRAFTS = None              # set below: the model drafters, whose cost the
 def _draft_hold(draft: Callable, context: dict) -> int:
     """What a draft holds against its brand's allowance before Aria starts: for
     the model drafters, the provider chain's worst case for this context, so
-    the real cost can never exceed it; for any other drafter, the configured
+    the real cost stays within it unless a provider bills more than the text it
+    was sent plus framing (logged); for any other drafter, the configured
     hold."""
     from services import outreach_allowance
     if draft in MODEL_DRAFTS:

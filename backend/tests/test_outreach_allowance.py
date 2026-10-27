@@ -379,7 +379,7 @@ def test_a_model_drafts_hold_is_its_real_worst_case_over_the_whole_chain(db, mon
     with Session(db) as s:
         recorded = m.spent_pence(s, A, brand["id"], PERIOD) - int(held(db, m))
     assert recorded > 0 and recorded <= during["held"], (recorded, during["held"])
-    assert held(db, m) == during["held"], "a failed draft keeps its hold (review 3: only success proves the accounting complete)"
+    assert held(db, m) == 0, "every provider reported its failure and was recorded: fully accounted, released (review 4)"
 
 
 def test_overlapping_model_drafts_never_pass_the_allowance_and_reserve(db, monkeypatch):
@@ -556,3 +556,67 @@ def test_reply_sorting_still_runs_above_the_allowance(r):
     assert r.s.execute(text("SELECT category FROM outreach_replies")).scalar() == "unsubscribe"
     recorded = r.s.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE meter LIKE 'ai_pence:classify:%'")).scalar()
     assert float(recorded or 0) > 0, "its cost is still recorded"
+
+
+
+# ------------------------------------------------------ Codex OUT-19 B+C review 4 ---
+
+def test_a_draft_tried_while_every_provider_is_down_releases_its_hold(db, monkeypatch):
+    """P2: nothing was dispatched, so nothing can have been billed: retries in
+    an outage never use up the brand's month."""
+    m = allowance()
+    from test_outreach_setup import setup_module_or_missing
+    from services import ai_router
+    from services.aria_actions import ActionRefused
+    setup = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+    failing_chain(monkeypatch)
+    every = [("openai", "gpt-6.1-sol"), ("xai", "grok-4.7")]
+    monkeypatch.setattr(ai_router, "chain", lambda purpose, include_down=False: every if include_down else [])
+    for _ in range(3):
+        with run_clock(), Session(db) as s, pytest.raises(ActionRefused):
+            setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT})
+    assert held(db, m) == 0
+    with Session(db) as s:
+        assert m.spent_pence(s, A, brand["id"], PERIOD) == 0
+
+
+def test_the_framing_margin_is_what_keeps_a_full_answer_within_its_hold(db, monkeypatch):
+    """P2: at the boundary (one provider, the longest instructions, the full
+    output, the text plus framing counted) the cost equals the hold, and only
+    the framing margin makes it fit."""
+    import json as _json
+    m = allowance()
+    from types import SimpleNamespace
+    from test_outreach_setup import setup_module_or_missing
+    from services import ai_router
+    setup = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+    monkeypatch.setenv("AI_PRICES_JSON", _json.dumps({"openai/gpt-6.1-sol": [20000, 20000, 0]}))
+    monkeypatch.setattr(ai_router, "chain", lambda purpose, include_down=False: [("openai", "gpt-6.1-sol")])
+    seen = {}
+
+    def answers(provider, model, system, user, max_tokens):
+        seen["system"] = len(system)
+        usage = SimpleNamespace(prompt_tokens=len(system) + len(user) + setup.PROVIDER_OVERHEAD_TOKENS,
+                                completion_tokens=max_tokens)
+        return _json.dumps({"emails": [{"subject": "s", "body": "b"}] * 3}), usage
+    monkeypatch.setattr(ai_router, "_openai_compatible_chat", answers)
+    with run_clock(), Session(db) as s:        # learn the instructions' real length, then leave no slack
+        setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT})
+    monkeypatch.setattr(setup, "SYSTEM_PROMPT_MAX_CHARS", seen["system"])
+    before = None
+    with Session(db) as s:
+        before = m.spent_pence(s, A, brand["id"], PERIOD)
+    during = {}
+    real = setup.ai_router.json_chat
+
+    def watching(*args, **kwargs):
+        during["held"] = held(db, m)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(setup.ai_router, "json_chat", watching)
+    with run_clock(), Session(db) as s:
+        setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT})
+    with Session(db) as s:
+        cost = m.spent_pence(s, A, brand["id"], PERIOD) - before
+    assert 0 < cost <= during["held"], (cost, during["held"])

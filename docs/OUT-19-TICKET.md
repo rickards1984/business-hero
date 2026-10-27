@@ -104,7 +104,7 @@
 - **Still for part F:** combining `can_charge` with a durable charge reservation under one lock. Today it is a predicate only.
 
 **Codex review 2 (`audits/OUT-19-BC-CODEX-REVIEW-2.md`, P1 not closed) → fixed:**
-- **The hold is the true worst case.** For Aria's real drafters, a draft's hold is `ai_router.chat_bound_pence`: the whole provider chain's worst case for that request (every provider tried, every character a token, the full output, at the highest rate), as `json_chat` charges a failed attempt. So what a draft records can never exceed its hold, and overlapping drafts never pass the allowance plus the £3 reserve.
+- **The hold is the true worst case.** For Aria's real drafters, a draft's hold is `ai_router.chat_bound_pence`: the whole provider chain's worst case for that request (every provider tried, every character a token, the full output, at the highest rate), as `json_chat` charges a failed attempt. So what a draft records stays within its hold, and overlapping drafts stay within the allowance plus the £3 reserve. The exception is a provider billing more than the text it was sent plus framing; that is logged and stated below as a residual risk.
 - **The instructions are bounded.** Aria's instructions are tested to fit `SYSTEM_PROMPT_MAX_CHARS`.
 - **Unknown failures stay held.** A draft that fails without reporting its usage keeps its hold (it may have been billed).
 - **The tests discriminate.** They use deliberately expensive prices, so a fixed hold fails them. Reply sorting above the allowance is shown to still record its cost.
@@ -114,6 +114,10 @@
 - **The bound covers message framing.** It adds `PROVIDER_OVERHEAD_TOKENS` for the tokens a provider counts beyond the text. A draft that ever records more than its hold is logged as an error.
 - **The request is frozen** before its hold is worked out, so the bound and the call see the same context.
 - **Residual risk:** a provider billing far more input tokens than the text it was sent. That's not seen in practice; the allowance still stops all further spend once it's reached.
+
+**Codex review 4 (`audits/OUT-19-BC-CODEX-REVIEW-4.md`, authorised by Mike).** The P1 is closed; Codex accepts the residual risk, since the allowance is a quarter of the price. It does not on its own prove "always a net profit" for the whole platform; PROFIT-1 covers that. Two P2s are fixed:
+- **A refusal releases its hold.** Every provider reported its failure and each attempt was recorded, or none was dispatched (all down), so the accounting is complete. An outage's retries never use up the brand's month.
+- **The framing-margin test now sits at the boundary:** one provider, the longest instructions, the full output. It fails without the margin.
 
 ### D — Research sized to sending capacity (decision 1)
 Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/test_outreach_research_capacity.py`.
