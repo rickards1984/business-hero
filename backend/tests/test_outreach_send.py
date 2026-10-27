@@ -247,6 +247,7 @@ class FakeProvider:
         self.outcome = 'accepted'
         self.message_id = 'accepted-id'
         self.during_send = None
+        self.extra = {}
 
     def search_from(self, *, account, senders, since):
         self.searches.append((str(account.id), senders, since))
@@ -268,7 +269,7 @@ class FakeProvider:
         return dict(outcome=self.outcome, mailbox_id=str(account.id), provider=account.provider,
                     provider_message_id=self.message_id, provider_thread_id='thread' if self.message_id else None,
                     rfc_message_id=message['rfc_message_id'], accepted_at=STAMP,
-                    error_code='rejected' if self.outcome == 'definitely_not_accepted' else None)
+                    error_code='rejected' if self.outcome == 'definitely_not_accepted' else None, **self.extra)
 
 
 def propose(h, **changes):
@@ -735,6 +736,38 @@ def test_followup_searches_since_actual_predecessor_and_preserves_thread(h):
     assert sent['provider_thread_id'] == 'previous-thread'
     assert sent['in_reply_to'] == '<previous@example.invalid>'
     assert '<previous@example.invalid>' in sent['references']
+    # Gmail threads only on a matching subject (Codex OUT-16 review 1): the
+    # follow-up is "Re:" the email it follows, not the step template's subject.
+    assert sent['subject'] == 'Re: Previous' and card['preview']['subject'] == 'Re: Previous'
+
+
+def test_a_thread_note_reaches_the_stored_action_result(h):
+    """Codex OUT-16 review 2 backlog: a threading doubt the adapter reports
+    is kept on the action, where the owner can see it."""
+    predecessor(h)
+    h.p.extra = {'thread_note': 'sent copy is in a different Outlook conversation from the email it follows'}
+    card = propose(h)
+    assert approve(h, card)['status'] == 'done'
+    stored = h.s.execute(text('SELECT result FROM aria_actions WHERE id=:id'), {'id': card['id']}).scalar()
+    assert 'different Outlook conversation' in (stored if isinstance(stored, str) else json.dumps(stored))
+
+
+def test_a_followup_keeps_the_whole_of_a_maximum_length_subject(h):
+    """Codex OUT-16 review 2: a 998-character subject (the sequence API's
+    limit) must not lose its end, or Gmail splits the thread."""
+    predecessor(h)
+    long = 'Fitness intern offer ' + 'x' * 977
+    assert len(long) == 998
+    change(h, 'outreach_messages', subject=long)
+    approve(h, propose(h))
+    assert h.p.sends[0][1]['subject'] == 'Re: ' + long
+
+
+def test_a_followup_to_a_re_subject_does_not_stack_re(h):
+    predecessor(h)
+    change(h, 'outreach_messages', subject='RE: Previous')
+    approve(h, propose(h))
+    assert h.p.sends[0][1]['subject'] == 'RE: Previous'
 
 
 def test_uncorrelated_acceptance_blocks_thread_dependent_followup(h):
