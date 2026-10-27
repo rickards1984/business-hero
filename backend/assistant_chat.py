@@ -206,7 +206,7 @@ Each item needs: description, quantity, unit, unit_cost, category (labour/materi
                             "response_format": {"type": "json_object"},
                         },
                     )
-            except Exception:
+            except BaseException:   # including cancellation: the provider may already have it (review 4)
                 profit_guard.record_direct("gpt-4o", worst_in, 16384, estimated=True, purpose="quote",
                                            business_id=business_id)   # may have been billed
                 raise

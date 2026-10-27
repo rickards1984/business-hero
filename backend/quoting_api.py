@@ -1276,7 +1276,7 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
                         "response_format": {"type": "json_object"},
                     },
                 )
-        except Exception:
+        except BaseException:   # including cancellation (Codex PROFIT-1 review 4)
             profit_guard.record_direct(QUOTE_AI_MODEL, worst_in, 4096, estimated=True, purpose="quote",
                                        business_id=business_id)   # may have been billed
             raise

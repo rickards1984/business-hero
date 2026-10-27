@@ -605,11 +605,53 @@ def test_quote_drafting_in_arias_chat_is_gated_and_recorded(engine, monkeypatch)
     assert tokens_recorded(engine, "biz-1") == 900
 
 
-def test_voice_previews_are_paused_at_the_kill_switch():
-    import inspect
-    guard()
-    import receptionist_api
-    assert inspect.getsource(receptionist_api).count('profit_guard.permits("voice_preview")') == 2
+def test_voice_previews_are_paused_at_the_kill_switch(monkeypatch):
+    """Review 4: behaviourally, both endpoints: 503 and no provider call on an
+    uncached request at the kill."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    g = guard()
+    import openai
+    import receptionist_api as api
+    from rate_limiting import limiter
+    from services.voice_presets import VOICE_PRESETS
+    monkeypatch.setattr(limiter, "enabled", False)
+    monkeypatch.setattr(g, "permits", lambda purpose: purpose in g.ESSENTIAL)
+    monkeypatch.setattr(api, "assert_feature_access", lambda *a, **k: None)
+    calls = []
+    monkeypatch.setattr(openai, "OpenAI", lambda **k: calls.append(1))
+    api._voice_preview_cache.clear()
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.get_current_user_business] = lambda: SimpleNamespace(id="biz-1")
+    client = TestClient(app)
+    voice = api.AVAILABLE_VOICES[0]["id"]
+    preset = VOICE_PRESETS[0]["id"]
+    first = client.get(f"{api.router.prefix}/voices/{voice}/preview")
+    second = client.post(f"{api.router.prefix}/voice-preview",
+                         json={"voice_preset_id": preset, "sample_text": "A fresh sample, never cached " + str(id(calls))})
+    assert (first.status_code, second.status_code) == (503, 503) and calls == []
+
+
+def test_a_cancelled_chat_quote_is_still_recorded(engine, monkeypatch):
+    """Review 4 P2: cancellation after the request was sent may be billed."""
+    import asyncio
+    import httpx
+    g = guard()
+    monkeypatch.setattr(g, "_engine", lambda: engine)
+    monkeypatch.setattr(g, "permits", lambda purpose: True)
+    import assistant_chat
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+
+    def cancelled(request):
+        raise asyncio.CancelledError()
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: real_client(transport=httpx.MockTransport(cancelled)))
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(assistant_chat._execute_tool_async("generate_ai_quote", {"description": "A fence"}, "biz-1"))
+    with engine.connect() as c:
+        rows = dict(c.execute(text("SELECT meter, value FROM usage_meters WHERE business_id = 'biz-1'")).fetchall())
+    assert rows.get("ai_pence", 0) > 0 and any(k.startswith("ai_estimated:quote:") for k in rows)
 
 
 def test_the_estimate_counts_tools_and_the_models_own_output_maximum():

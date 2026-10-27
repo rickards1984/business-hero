@@ -79,3 +79,8 @@ Today the cost ledger (OUT-19 A) and its alarm and kill switch see **outreach AI
   - `research_compare` is an admin script whose billed searches aren't persisted;
   - per-business top-ups (part F);
   - alert-delivery visibility.
+
+## Codex review 4 (`audits/PROFIT-1-CODEX-REVIEW-4.md`, authorised by Mike; no P1s, 2 × P2) → fixed
+- **A quote request cancelled after it was sent is recorded,** as estimated, in both quote paths. Cancellation still propagates.
+- **The voice-preview tests are behavioural:** both endpoints return 503 with no provider call at the kill. The test fails with the gates disabled.
+- **The race test always releases its writer and joins its worker,** even when its assertion fails.
