@@ -779,6 +779,8 @@ async def process_chat_message(
     logger.info(f"[DEBUG] System prompt built for {business.name} (voice_mode={voice_mode}, user_name={user_name}). History has {len(history)} messages.")
     
     client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
+    from services import profit_guard
+    profit_guard.label("chat", business.id)   # PROFIT-1: chat is essential, but its cost is recorded
     
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)

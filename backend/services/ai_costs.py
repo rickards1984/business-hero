@@ -195,15 +195,35 @@ def record(session, business_id, *, purpose: str, provider: str, model: str, bra
     alarm = os.environ.get("AI_MONTHLY_ALARM_PENCE")
     if alarm and before < float(alarm) <= before + amount:
         _alarm_after_commit(session, period, before + amount, alarm)
+    # PROFIT-1: costs against income, alerted once a month per threshold. In a
+    # savepoint, so a failure here never loses the cost just recorded.
+    # (A connection-level savepoint: a session-level one would fire the
+    # session's after_commit hooks, raising alarms before the real commit.)
+    try:
+        from services import profit_guard
+        with session.connection().begin_nested():
+            profit_guard.check_after_record(session, moment)
+    except Exception:
+        logger.exception("Profit guard check failed after recording an AI cost")
     return amount
 
 
-def allowed(session, *, moment: Optional[datetime] = None) -> bool:
-    """False once the platform's recorded AI spend this month reaches AI_MONTHLY_KILL_PENCE."""
+def allowed(session, *, moment: Optional[datetime] = None, purpose: Optional[str] = None) -> bool:
+    """False once the platform's recorded AI spend this month reaches
+    AI_MONTHLY_KILL_PENCE, or (PROFIT-1) once this month's running costs reach
+    the kill threshold of income, for non-essential purposes. A purpose not
+    given counts as non-essential (fail closed)."""
+    moment = moment or datetime.now(timezone.utc)
     kill = os.environ.get("AI_MONTHLY_KILL_PENCE")
-    if not kill:
-        return True
-    return platform_total(session, period_for(moment or datetime.now(timezone.utc))) < float(kill)
+    if kill and platform_total(session, period_for(moment)) >= float(kill):
+        return False
+    from services import profit_guard
+    try:
+        with session.connection().begin_nested():
+            return profit_guard.allowed(session, purpose=purpose, moment=moment)
+    except Exception:
+        logger.exception("Profit guard unavailable: non-essential AI held (fail closed)")
+        return purpose in profit_guard.ESSENTIAL
 
 
 @contextmanager

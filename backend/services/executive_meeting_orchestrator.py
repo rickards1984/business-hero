@@ -422,6 +422,11 @@ async def _gpt_chat_completion(
     Uses EXECUTIVE_MEETING_AI_MODEL env var to pick the model. Set this in
     Railway to override the default (e.g. "gpt-5.5").
     """
+    from services import profit_guard
+    if not profit_guard.permits("meeting"):
+        logger.warning("[ExecMeeting] paused by the profit guard (PROFIT-1)")
+        return None, 0
+    profit_guard.label("meeting")
     client = _get_async_client()
     if client is None:
         logger.error("[ExecMeeting] OPENAI_API_KEY not configured")

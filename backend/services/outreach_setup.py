@@ -809,7 +809,7 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
         session.rollback()
         refuse(503, "Aria's drafting is unavailable: no AI provider with a priced model is configured. "
                     "Write this yourself for now.")
-    if not ai_costs.allowed(session):
+    if not ai_costs.allowed(session, purpose="draft"):
         session.rollback()
         refuse(503, "Aria's drafting is paused for now. Write this yourself, or try again later.")
     session.rollback()   # no lock is held while Aria drafts

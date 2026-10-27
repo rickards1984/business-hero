@@ -35,6 +35,10 @@ def engine(tmp_path, monkeypatch):
     with e.begin() as c:
         c.execute(text("CREATE TABLE usage_meters (business_id TEXT, meter TEXT, period TEXT, value NUMERIC, "
                        "updated_at TEXT, UNIQUE (business_id, meter, period))"))
+        # PROFIT-1 reads subscriptions; with none paying and no trial budget it
+        # leaves only the absolute limit, which these tests are about.
+        c.execute(text("CREATE TABLE businesses (id TEXT PRIMARY KEY, name TEXT, plan_tier TEXT, "
+                       "subscription_status TEXT, is_active BOOLEAN, feature_flags TEXT)"))
     yield e
     e.dispose()
 
@@ -275,9 +279,8 @@ def test_economics_shows_each_business_cost_by_purpose_and_brand(engine):
 @pytest.fixture
 def report_db(engine):
     with engine.begin() as c:
-        c.execute(text("CREATE TABLE businesses (id TEXT PRIMARY KEY, name TEXT, plan_tier TEXT, feature_flags TEXT)"))
         c.execute(text("CREATE TABLE outreach_brands (id TEXT PRIMARY KEY, business_id TEXT, name TEXT, created_at TEXT)"))
-        c.execute(text("INSERT INTO businesses VALUES ('nb', 'New Body', 'business', '{}'), "
+        c.execute(text("INSERT INTO businesses (id, name, plan_tier, feature_flags) VALUES ('nb', 'New Body', 'business', '{}'), "
                        "('msc', 'MSC', 'pro', '{\"outreach\": true}'), ('gym2', 'Other', 'starter', '{}')"))
         c.execute(text("INSERT INTO outreach_brands VALUES ('fit', 'nb', 'FitFutures', '2026-09-01T09:00:00+00:00'), "
                        "('gym', 'nb', 'New Body Gym', '2026-09-02T09:00:00+00:00'), "

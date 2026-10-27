@@ -760,7 +760,7 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
             session.rollback()
             out["stopped"] = why
             break
-        if not ai_costs.allowed(session, moment=moment):
+        if not ai_costs.allowed(session, moment=moment, purpose="research"):
             session.rollback()
             out["stopped"] = "Research is paused: the platform's AI spending limit for the month is reached"
             break
