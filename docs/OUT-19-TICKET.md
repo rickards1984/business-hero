@@ -102,6 +102,7 @@ Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/tes
 - **Codex review 4 (`audits/OUT-19-D-CODEX-REVIEW-4.md`, Mike authorised it beyond three cycles, 1 × P1).**
   - A contact held for review also takes its campaign's place, both the campaign's daily cap and its pilot places, each counted once.
   - Test setup now runs on a clock an hour before the pinned research time, instead of the real one. A real clock past the pinned time had made audience approvals read as out of date.
+- **Codex review 5 (`audits/OUT-19-D-CODEX-REVIEW-5.md`, no P1s, 1 × P2).** The research run in tests now also uses the pinned clock (`run_clock()`), so the suites pass at any real time of day. They were checked with the clock faked to 00:59, 06:00, 07:45 and 23:30 UTC.
 - **Pilot limit (OUT-10 decision E).** It stays at 5 active contacts per campaign for the first week of the restart, so research also keeps no more than can join a campaign. `OUTREACH_PILOT_ENROLMENTS` raises it without a deploy; `0` lifts it, leaving the inbox's capacity to decide. Before lifting it, index `prepare`'s scan of open cards (OUT-8 ticket, note 2).
 
 ### E — Replies outside the cold cap, with the over-ceiling choices (decision 2)

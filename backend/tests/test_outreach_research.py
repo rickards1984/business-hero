@@ -146,6 +146,20 @@ def own_inbox(db, brand, lia, *, address):
     return box
 
 
+def run_clock():
+    """The research run on the pinned NOW too, so every check inside it (an
+    approval's dates, a contact's retention) reads the same time whatever the
+    real clock says (Codex OUT-19 D review 5). The research module's own clock
+    is left alone so a test can still move it (the search-claim tests)."""
+    from contextlib import ExitStack
+    from unittest import mock
+    from services import aria_actions, outreach_send, outreach_setup
+    stack = ExitStack()
+    for module in (outreach_setup, outreach_send, aria_actions):
+        stack.enter_context(mock.patch.object(module, "now", lambda: NOW))
+    return stack
+
+
 def setup_clock():
     """Setup (approvals, mailbox checks, templates) stamped an hour before the
     pinned NOW, never on the real clock (Codex OUT-19 D review 4: once the
@@ -187,7 +201,7 @@ def count(db, sql, **params):
 
 
 def run(db, biz, lia, world):
-    with Session(db) as s:
+    with run_clock(), Session(db) as s:
         return research().run(s, biz, lia["id"], **world.kwargs())
 
 

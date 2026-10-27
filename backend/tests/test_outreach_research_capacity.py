@@ -423,7 +423,8 @@ def test_manual_enrolment_follows_the_pilot_setting(db, monkeypatch, limit, allo
         s.execute(text("DELETE FROM outreach_enrolments WHERE business_id = :b"), {"b": A})
         s.commit()
     monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", limit)
-    with Session(db) as s:
+    from test_outreach_research import run_clock
+    with run_clock(), Session(db) as s:
         if allowed:
             assert len(outreach_manage.enrol(s, biz, OWNER, campaign["id"], {"prospect_ids": out["accepted"]})["items"]) == 7
         else:
