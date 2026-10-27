@@ -67,3 +67,15 @@ Today the cost ledger (OUT-19 A) and its alarm and kill switch see **outreach AI
 - **Estimates count every billable part of a request:** messages, tools, instructions and response format. With no output limit set, they use the model's own maximum output (128,000 when unknown).
 - **Migration 039 is constrained.** `period` must be a real month and `value` can't be negative. Tests on PostgreSQL show the table is backend-only and that its constraints and rollback work.
 - **The runbook adds a staging rehearsal** before production. Mike runs it.
+
+## Codex review 3 (`audits/PROFIT-1-CODEX-REVIEW-3.md`, the third cycle, 2 × P1) → fixed. A further review is Mike's call.
+- **Quote drafting in Aria's chat is gated and recorded.** It is a direct HTTP call; tested behaviourally.
+- **Receptionist voice previews are paused** at the kill switch. Live calls are unaffected.
+- **Call summaries are non-essential (`call_summary`).** A summary of a call that has already ended is skipped at the kill switch, returning its existing `None`. The live call is what's essential.
+- **A customer's support chat is labelled `chat`:** essential and recorded.
+- **The race test is synchronised on PostgreSQL itself.** It waits until the scheduled check is blocked behind the writer (`pg_blocking_pids`) and asserts the check completed. It fails three times out of three without the lock.
+- **The runbook names the project for each environment** and checks the actual constraint definitions, not only a column count. The staging rehearsal is Mike's step; its evidence is recorded after.
+- **Backlog:**
+  - `research_compare` is an admin script whose billed searches aren't persisted;
+  - per-business top-ups (part F);
+  - alert-delivery visibility.

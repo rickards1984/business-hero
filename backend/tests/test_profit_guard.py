@@ -560,22 +560,56 @@ def test_every_named_ai_feature_is_labelled_for_the_guard():
     import support_api
     assert 'profit_guard.attributed(business_id, "draft")' in inspect.getsource(assistant_tools)
     assert 'profit_guard.attributed(None, "support_draft")' in inspect.getsource(support_api)
-    assert 'profit_guard.attributed(None, "receptionist")' in inspect.getsource(openai_utils.generate_call_summary)
-    assert "support_draft" not in g.ESSENTIAL and "draft" not in g.ESSENTIAL and "receptionist" in g.ESSENTIAL
+    assert 'profit_guard.attributed(None, "call_summary")' in inspect.getsource(openai_utils.generate_call_summary)
+    assert 'profit_guard.attributed(None, "chat")' in inspect.getsource(support_api)   # a customer's support chat
+    for purpose in ("support_draft", "draft", "call_summary", "voice_preview", "quote"):
+        assert purpose not in g.ESSENTIAL
 
 
-def test_a_call_summary_is_never_refused_and_support_drafting_is(engine, monkeypatch):
+def test_a_finished_calls_summary_is_skipped_at_the_kill_switch(engine, monkeypatch):
+    """Review 3 P1: the summary is non-essential; its existing None fallback stands."""
     import asyncio
     g, sync, aio = hooked_sdk(monkeypatch, engine)
     monkeypatch.setattr(g, "permits", lambda purpose: purpose in g.ESSENTIAL)
     import openai_utils
     monkeypatch.setenv("OPENAI_API_KEY", "k")
-    monkeypatch.setattr("openai.OpenAI", lambda **k: sync)
-    with g.attributed("biz-1", "chat"):   # the summary's own label wins inside it
-        summary = asyncio.run(openai_utils.generate_call_summary("Caller asked about prices."))
-    assert summary == "{}"
+    calls = []
+    monkeypatch.setattr("openai.OpenAI", lambda **k: calls.append(1) or sync)
+    assert asyncio.run(openai_utils.generate_call_summary("Caller asked about prices.")) is None and calls == []
     with g.attributed(None, "support_draft"), pytest.raises(g.Paused):
         sync.chat.completions.create(model="gpt-4o-mini", messages=[])
+
+
+def test_quote_drafting_in_arias_chat_is_gated_and_recorded(engine, monkeypatch):
+    """Review 3 P1: the chat tool's direct HTTP quote path."""
+    import asyncio
+    import httpx
+    g = guard()
+    monkeypatch.setattr(g, "_engine", lambda: engine)
+    import assistant_chat
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    sent = []
+    content = '{"job_title": "Fence", "groups": [{"name": "Work", "items": [{"quantity": 1, "unit_cost": 100}]}]}'
+    reply = {"model": "gpt-4o", "usage": {"prompt_tokens": 900, "completion_tokens": 200},
+             "choices": [{"message": {"content": content}}]}
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: real_client(transport=httpx.MockTransport(
+        lambda request: sent.append(1) or httpx.Response(200, json=reply))))
+    args = {"description": "Replace a 10m garden fence"}
+    monkeypatch.setattr(g, "permits", lambda purpose: purpose in g.ESSENTIAL)
+    paused = asyncio.run(assistant_chat._execute_tool_async("generate_ai_quote", args, "biz-1"))
+    assert "paused" in paused["error"] and sent == []
+    monkeypatch.setattr(g, "permits", lambda purpose: True)
+    done = asyncio.run(assistant_chat._execute_tool_async("generate_ai_quote", args, "biz-1"))
+    assert done["subtotal"] == 100 and sent == [1]
+    assert tokens_recorded(engine, "biz-1") == 900
+
+
+def test_voice_previews_are_paused_at_the_kill_switch():
+    import inspect
+    guard()
+    import receptionist_api
+    assert inspect.getsource(receptionist_api).count('profit_guard.permits("voice_preview")') == 2
 
 
 def test_the_estimate_counts_tools_and_the_models_own_output_maximum():

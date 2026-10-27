@@ -131,13 +131,26 @@ def test_a_scheduled_check_racing_a_cost_alerts_once(pg, clean):
     clean.clear()
     first = Session(pg.engine)
     ai_costs.record(first, A, purpose="draft", provider="openai", model="gpt-4o-mini", pence=1000, moment=NOW)
-    check = threading.Thread(target=profit_guard.periodic_check, args=(NOW,))
+    mine = first.execute(text("SELECT pg_backend_pid()")).scalar()
+    result = {}
+    check = threading.Thread(target=lambda: result.setdefault("ran", profit_guard.periodic_check(NOW)))
     check.start()
-    time.sleep(0.5)                       # the check is now waiting (or, without the lock, racing)
+    # Synchronised on the database itself: wait until another backend is
+    # blocked behind this uncommitted transaction (on the ledger lock, or,
+    # without it, on the marker row), so the interleaving is the contested one.
+    deadline = time.monotonic() + 10
+    with pg.engine.connect() as watch:
+        while time.monotonic() < deadline:
+            blocked = watch.execute(text("SELECT count(*) FROM pg_stat_activity WHERE :me = ANY(pg_blocking_pids(pid))"),
+                                    {"me": mine}).scalar()
+            if blocked:
+                break
+            time.sleep(0.05)
+    assert blocked, "the scheduled check never reached the contested step"
     first.commit()
     first.close()
     check.join(15)
-    assert not check.is_alive()
+    assert not check.is_alive() and result.get("ran") is True, "the scheduled check ran to completion"
     assert sum("40%" in subject for subject in clean) == 1, clean
     assert platform(pg, "profit_alerted:alarm") == 1
     with pg.engine.begin() as c:

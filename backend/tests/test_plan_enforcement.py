@@ -106,6 +106,10 @@ def harness(monkeypatch):
     # Booking calls into a separate engine helper before it reaches a provider.
     import assistant_tools
     monkeypatch.setattr(assistant_tools, "_get_google_calendar_token", stop)
+    # PROFIT-1: the profit guard's read (in its own session) is domain I/O too,
+    # reached only after the plan gate has passed.
+    from services import profit_guard
+    monkeypatch.setattr(profit_guard, "permits", stop)
     from rate_limiting import limiter
     monkeypatch.setattr(limiter, "enabled", False)
 

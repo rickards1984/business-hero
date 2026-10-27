@@ -142,12 +142,14 @@ Confidence: 0.0 to 1.0 (how confident you are that you've fully resolved their q
         import openai
         client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
 
-        resp = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            temperature=0.3,
-            max_tokens=800,
-        )
+        from services import profit_guard   # PROFIT-1: a customer's support chat is essential: recorded, never paused
+        with profit_guard.attributed(None, "chat"):
+            resp = await client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                temperature=0.3,
+                max_tokens=800,
+            )
 
         ai_text = resp.choices[0].message.content.strip()
 

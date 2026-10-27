@@ -19,6 +19,11 @@ async def generate_call_summary(transcript: str) -> Optional[str]:
     
     if not transcript or not transcript.strip():
         return None
+    # PROFIT-1: a summary of a call already finished is non-essential (the live
+    # call is what's essential): at the kill switch, no summary (Codex review 3).
+    from services import profit_guard
+    if not profit_guard.permits("call_summary"):
+        return None
     
     try:
         from openai import OpenAI
@@ -26,7 +31,7 @@ async def generate_call_summary(transcript: str) -> Optional[str]:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0, max_retries=1)
         
         from services import profit_guard   # PROFIT-1
-        with profit_guard.attributed(None, "receptionist"):
+        with profit_guard.attributed(None, "call_summary"):
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[

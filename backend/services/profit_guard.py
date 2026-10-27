@@ -282,9 +282,9 @@ def accounted():
         _accounted.reset(token)
 
 
-def periodic_check(moment: Optional[datetime] = None) -> None:
+def periodic_check(moment: Optional[datetime] = None) -> bool:
     """From the scheduler: voice minutes or fixed costs can cross a threshold
-    with no AI call to notice it. Never raises."""
+    with no AI call to notice it. Never raises; True when the check ran."""
     try:
         from sqlmodel import Session
         from services import ai_costs
@@ -294,8 +294,10 @@ def periodic_check(moment: Optional[datetime] = None) -> None:
             ai_costs._serialise(s)
             check_after_record(s, moment or datetime.now(timezone.utc))
             s.commit()
+        return True
     except Exception:
         logger.exception("Profit guard periodic check failed")
+        return False
 
 
 def _engine():

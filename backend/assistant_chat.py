@@ -184,21 +184,42 @@ Given a job description, break it down into a detailed itemised quote with reali
 Respond with ONLY a JSON object with: job_title, groups (each with name and items array), estimated_duration, notes.
 Each item needs: description, quantity, unit, unit_cost, category (labour/materials/equipment/subcontractor/other)."""
 
+        # PROFIT-1: quote drafting is non-essential: paused at the kill switch,
+        # and this direct HTTP call (outside the SDK hook) is recorded here.
+        from services import profit_guard
+        if not profit_guard.permits("quote"):
+            return {"error": "Aria's quote drafting is paused for now. You can still build the quote by hand on the Quotes page."}
+        worst_in = len(system_prompt) + len(description)
         try:
-            async with _httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
-                    json={
-                        "model": "gpt-4o",
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": description},
-                        ],
-                        "temperature": 0.3,
-                        "response_format": {"type": "json_object"},
-                    },
-                )
+            try:
+                async with _httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
+                        json={
+                            "model": "gpt-4o",
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": description},
+                            ],
+                            "temperature": 0.3,
+                            "response_format": {"type": "json_object"},
+                        },
+                    )
+            except Exception:
+                profit_guard.record_direct("gpt-4o", worst_in, 16384, estimated=True, purpose="quote",
+                                           business_id=business_id)   # may have been billed
+                raise
+            try:
+                billed = resp.json() if resp.status_code == 200 else {}
+            except Exception:
+                billed = {}
+            usage = billed.get("usage") or {}
+            if usage or resp.status_code == 200 or resp.status_code >= 500:
+                profit_guard.record_direct(billed.get("model") or "gpt-4o",
+                                           usage.get("prompt_tokens") if usage else worst_in,
+                                           usage.get("completion_tokens") if usage else 16384,
+                                           estimated=not usage, purpose="quote", business_id=business_id)
 
             if resp.status_code != 200:
                 return {"error": "Failed to generate quote. Please try again."}

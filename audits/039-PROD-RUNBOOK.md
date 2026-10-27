@@ -23,7 +23,11 @@
 
 **Run each step ONE AT A TIME in the Supabase SQL editor.** Check the EXPECT before moving on. If anything matches STOP IF, stop and send me the output.
 
-**Before you start:** confirm the project selector reads **business-hero (`oxblcmwhuwtobdhsfgyi`)**.
+**Before you start, confirm the project selector reads:**
+- for the staging rehearsal, **staging (`gzcrsrqmygublveuzqyg`)**;
+- for the production run, **business-hero (`oxblcmwhuwtobdhsfgyi`)**.
+
+Each step below is run in whichever one you're on.
 
 ---
 
@@ -60,7 +64,9 @@ SELECT to_regclass('public.platform_meters') AS platform_meters,
        (SELECT count(*) FROM information_schema.role_table_grants
          WHERE table_name = 'platform_meters' AND grantee IN ('anon', 'authenticated', 'service_role')) AS client_grants,
        (SELECT count(*) FROM pg_policies WHERE schemaname = 'public') AS policies,
-       (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public') AS columns;
+       (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public') AS columns,
+       (SELECT string_agg(pg_get_constraintdef(oid), ' | ' ORDER BY conname)
+          FROM pg_constraint WHERE conrelid = 'public.platform_meters'::regclass) AS constraints;
 ```
 
 **EXPECT:**
@@ -70,7 +76,12 @@ SELECT to_regclass('public.platform_meters') AS platform_meters,
 - `meter_policies` **0**;
 - `client_grants` **0**;
 - `policies` = **P** (unchanged);
-- `columns` = **C + 4**.
+- `columns` = **C + 4**;
+- `constraints` contains all four of these, exactly as PostgreSQL prints them (checked against the local replay):
+  - `CHECK (((length(meter) >= 1) AND (length(meter) <= 200)))`;
+  - `CHECK ((period ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'::text))`;
+  - `CHECK ((value >= (0)::numeric))`;
+  - `PRIMARY KEY (period, meter)`.
 
 **STOP IF:** anything differs. Send me the row; see ROLLBACK below.
 
