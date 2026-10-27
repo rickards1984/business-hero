@@ -5,8 +5,9 @@
 #
 # coverage: FULL
 #
-# PENDING 039 (PROFIT-1): the four platform_meters rows were added by hand ahead of
-# Mike's production run (audits/039-PROD-RUNBOOK.md). Regenerate after it.
+# 039 (PROFIT-1) is live (Mike, 27 Oct 2026): the four platform_meters rows were added by
+# hand and match production's STEP 2 verification (4 columns, columns 1143 -> 1147). The next
+# regeneration with scripts/dump-live-schema.sql will include them natively.
 #
 # FULL means this file describes every table, so the guard checks every column
 # the backend writes and `test_full_coverage_leaves_nothing_unguarded` requires
