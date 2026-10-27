@@ -103,6 +103,12 @@
 - **Reply sorting is tested behaviourally** above the allowance.
 - **Still for part F:** combining `can_charge` with a durable charge reservation under one lock. Today it is a predicate only.
 
+**Codex review 2 (`audits/OUT-19-BC-CODEX-REVIEW-2.md`, P1 not closed) → fixed:**
+- **The hold is the true worst case.** For Aria's real drafters, a draft's hold is `ai_router.chat_bound_pence`: the whole provider chain's worst case for that request (every provider tried, every character a token, the full output, at the highest rate), as `json_chat` charges a failed attempt. So what a draft records can never exceed its hold, and overlapping drafts never pass the allowance plus the £3 reserve.
+- **The instructions are bounded.** Aria's instructions are tested to fit `SYSTEM_PROMPT_MAX_CHARS`.
+- **Unknown failures stay held.** A draft that fails without reporting its usage keeps its hold (it may have been billed).
+- **The tests discriminate.** They use deliberately expensive prices, so a fixed hold fails them. Reply sorting above the allowance is shown to still record its cost.
+
 ### D — Research sized to sending capacity (decision 1)
 Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/test_outreach_research_capacity.py`.
 

@@ -818,7 +818,7 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
     # review 1), and released when its real cost is recorded.
     from services import outreach_allowance
     bid, moment = str(business.id), now()
-    hold = outreach_allowance.draft_hold_pence() if brand_id is not None else 0
+    hold = _draft_hold(draft, context) if brand_id is not None else 0
     session.rollback()
     send.lock_business(session, bid) if send.pg(session) else session.execute(
         text("UPDATE business_settings SET business_id = business_id WHERE business_id = :b"), {"b": bid})
@@ -841,7 +841,11 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
                     send.lock_business(session, bid)
                 if spent:
                     ai_costs.save(session, bid, spent, purpose="draft", brand_id=brand_id)
-                outreach_allowance.hold_draft(session, bid, brand_id, moment, -hold)   # settled: the real cost replaces it
+                if spent or failure is None:
+                    # Settled: the real cost replaces the hold. A failure that
+                    # reported no usage may still have been billed, so its hold
+                    # stays counted (fail closed; Codex OUT-19 B+C review 2).
+                    outreach_allowance.hold_draft(session, bid, brand_id, moment, -hold)
                 session.commit()
             except Exception:
                 session.rollback()
@@ -849,6 +853,22 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
                 if failure is None:
                     raise   # never hand out a draft whose cost wasn't recorded
                 # otherwise the draft's own error propagates; its hold stays counted (fail closed)
+
+
+SYSTEM_PROMPT_MAX_CHARS = 8000   # the longest instructions Aria's drafts send (tested)
+MODEL_DRAFTS = None              # set below: the model drafters, whose cost the chain bound covers
+
+
+def _draft_hold(draft: Callable, context: dict) -> int:
+    """What a draft holds against its brand's allowance before Aria starts: for
+    the model drafters, the provider chain's worst case for this context, so
+    the real cost can never exceed it; for any other drafter, the configured
+    hold."""
+    from services import outreach_allowance
+    if draft in MODEL_DRAFTS:
+        chars = SYSTEM_PROMPT_MAX_CHARS + len(json.dumps(context, default=str))
+        return max(1, ai_router.chat_bound_pence(chars, DRAFT_MAX_TOKENS, "draft"))
+    return outreach_allowance.draft_hold_pence()
 
 
 def model_draft_audience(context: dict) -> dict:
@@ -1003,6 +1023,9 @@ def _insert_steps(session, bid: str, campaign_id: str, sequence_version: int, em
                     sequence_version=sequence_version, ordinal=ordinal, delay_business_days=delay,
                     template_text=envelope, template_hash=hashlib.sha256(envelope.encode()).hexdigest(),
                     allowed_variables=[])
+
+
+MODEL_DRAFTS = (model_draft_audience, model_draft_notice, model_draft_emails, model_redraft_emails)
 
 
 def create_first_campaign(session, business, user, data: dict, *, draft: Callable = model_draft_emails) -> dict:

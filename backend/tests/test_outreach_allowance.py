@@ -302,23 +302,155 @@ def test_a_draft_holds_its_cost_before_aria_starts_so_two_at_once_cannot_overrun
     assert "allowance" in seen["second"]
 
 
+def held(db, m):
+    with Session(db) as s:
+        return float(s.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE meter LIKE :m"),
+                               {"m": m.DRAFT_HOLD_METER + "%"}).scalar() or 0)
+
+
 def test_a_finished_draft_releases_its_hold_and_keeps_its_real_cost(db):
     m = allowance()
     from test_outreach_setup import setup_module_or_missing
     from services import ai_costs
     setup = setup_module_or_missing()
     biz, brand, lia, campaign = started(db)
+    during = {}
 
     def costly(context):
+        during["held"] = held(db, m)
         ai_costs.note("openai", "gpt-6.1-sol", None, fallback=(1000, 1000), estimated=True)
         return [{"subject": f"S{i}", "body": f"B{i}"} for i in range(3)]
     with run_clock(), Session(db) as s:
         setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT}, draft=costly)
+    assert during["held"] == m.draft_hold_pence(), "held while Aria drafted"
+    assert held(db, m) == 0, "released once the real cost was recorded"
     with Session(db) as s:
-        held = s.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE meter LIKE :m"),
-                         {"m": m.DRAFT_HOLD_METER + "%"}).scalar()
-        assert float(held or 0) == 0
         assert m.spent_pence(s, A, brand["id"], PERIOD) == int(ai_costs.cost("openai", "gpt-6.1-sol", 1000, 1000))
+
+
+def test_a_draft_that_fails_without_reporting_its_cost_stays_held(db):
+    """Review 2: an unknown failure may still have been billed: fail closed."""
+    m = allowance()
+    from test_outreach_setup import setup_module_or_missing
+    setup = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+
+    def crashes(context):
+        raise RuntimeError("connection reset")
+    with run_clock(), Session(db) as s, pytest.raises(RuntimeError):
+        setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT}, draft=crashes)
+    assert held(db, m) == m.draft_hold_pence()
+
+
+def failing_chain(monkeypatch):
+    """Two priced providers that both fail without reporting usage, so each
+    attempt is charged at its worst case, as json_chat does."""
+    import json as _json
+    from services import ai_router
+    # Expensive on purpose: a fixed 50p hold would not cover one worst case here.
+    monkeypatch.setenv("AI_PRICES_JSON", _json.dumps({"openai/gpt-6.1-sol": [20000, 20000, 0], "xai/grok-4.7": [20000, 20000, 0]}))
+    monkeypatch.setattr(ai_router, "chain", lambda purpose, include_down=False: [("openai", "gpt-6.1-sol"), ("xai", "grok-4.7")])
+
+    def fail(provider, model, system, user, max_tokens):
+        raise ai_router.ProviderError("down")
+    monkeypatch.setattr(ai_router, "_openai_compatible_chat", fail)
+    monkeypatch.setattr(ai_router, "_anthropic_chat", fail)
+    monkeypatch.setattr(ai_router, "_trip", lambda provider: None)
+
+
+def test_a_model_drafts_hold_is_its_real_worst_case_over_the_whole_chain(db, monkeypatch):
+    """Review 2 P1: for Aria's real drafters the hold is the provider chain's
+    worst case for this request, so what is recorded never exceeds it."""
+    m = allowance()
+    from test_outreach_setup import setup_module_or_missing
+    from services.aria_actions import ActionRefused
+    setup = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+    failing_chain(monkeypatch)
+    during = {}
+    real = setup.ai_router.json_chat
+
+    def watching(*args, **kwargs):
+        during["held"] = held(db, m)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(setup.ai_router, "json_chat", watching)
+    with run_clock(), Session(db) as s, pytest.raises(ActionRefused):
+        setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT})
+    with Session(db) as s:
+        recorded = m.spent_pence(s, A, brand["id"], PERIOD)
+    assert recorded > 0 and recorded <= during["held"], (recorded, during["held"])
+    assert held(db, m) == 0
+
+
+def test_overlapping_model_drafts_never_pass_the_allowance_and_reserve(db, monkeypatch):
+    """Review 2 P1: three drafts at once, each failing at its worst case."""
+    m = allowance()
+    from test_outreach_setup import setup_module_or_missing
+    from services.aria_actions import ActionRefused
+    setup = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+    failing_chain(monkeypatch)
+    spend(db, brand, 2475 + m.DRAFT_RESERVE_PENCE - 600)            # room for one worst-case hold, not three drafts
+    real, depth = setup.ai_router.json_chat, {"n": 0}
+
+    def nested(*args, **kwargs):
+        if depth["n"] < 2:                                          # another draft starts mid-draft, twice
+            depth["n"] += 1
+            with run_clock(), Session(db) as other:
+                try:
+                    setup.redraft_emails(other, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT})
+                except ActionRefused:
+                    pass
+        return real(*args, **kwargs)
+    monkeypatch.setattr(setup.ai_router, "json_chat", nested)
+    with run_clock(), Session(db) as s:
+        try:
+            setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT})
+        except ActionRefused:
+            pass
+    with Session(db) as s:
+        assert m.spent_pence(s, A, brand["id"], PERIOD) <= 2475 + m.DRAFT_RESERVE_PENCE
+
+
+def test_every_draft_prompt_fits_the_bound(monkeypatch):
+    """The bound assumes Aria's instructions are at most SYSTEM_PROMPT_MAX_CHARS."""
+    allowance()
+    from test_outreach_setup import setup_module_or_missing
+    setup = setup_module_or_missing()
+    seen = []
+
+    def capture(system, context, *, purpose, max_tokens):
+        seen.append(len(system))
+        assert max_tokens == setup.DRAFT_MAX_TOKENS
+        return {"emails": [{"subject": "s", "body": "b"}] * 3, "purpose": "p", "necessity": "n",
+                "balancing_test": "b", "safeguards": "s", "notice": "n", "text": "t"}
+    monkeypatch.setattr(setup.ai_router, "json_chat", capture)
+    for drafter in setup.MODEL_DRAFTS:
+        try:
+            drafter({"brand": "x", "current_emails": CURRENT, "owner_notes": "n"})
+        except Exception:
+            pass
+    assert seen and max(seen) <= setup.SYSTEM_PROMPT_MAX_CHARS
+
+
+def test_a_draft_in_progress_holds_room_research_cannot_use(db):
+    """Draft/research overlap: research started mid-draft sees the hold."""
+    m = allowance()
+    from test_outreach_setup import setup_module_or_missing
+    setup = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+    reserve = research().search_reserve_pence()
+    spend(db, brand, 2475 - reserve - m.draft_hold_pence() + 1)    # room for the search OR the hold, not both
+    seen = {}
+
+    def drafter(context):
+        world = World([[person(i) for i in range(3)]])
+        run(db, biz, lia, world)
+        seen["briefs"] = world.briefs
+        return [{"subject": f"S{i}", "body": f"B{i}"} for i in range(3)]
+    with run_clock(), Session(db) as s:
+        setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT}, draft=drafter)
+    assert seen["briefs"] == []
 
 
 def test_research_spend_from_before_brands_still_counts_against_every_brand(db):
@@ -356,5 +488,11 @@ def test_reply_sorting_still_runs_above_the_allowance(r):
                     pence=100000, moment=SEND_NOW)
     r.s.commit()
     incoming(r)
-    scan(r, category="unsubscribe")
+
+    def classify(_):
+        ai_costs.note("openai", "gpt-6-luna", None, fallback=(500, 100), estimated=True)
+        return {"category": "unsubscribe", "confidence": 100, "classification_version": 1}
+    scan(r, classify=classify)
     assert r.s.execute(text("SELECT category FROM outreach_replies")).scalar() == "unsubscribe"
+    recorded = r.s.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE meter LIKE 'ai_pence:classify:%'")).scalar()
+    assert float(recorded or 0) > 0, "its cost is still recorded"
