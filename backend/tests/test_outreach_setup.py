@@ -579,12 +579,15 @@ def test_the_daily_check_runs_once_from_seven_on_weekdays(db, monkeypatch):
     def counting(name):
         calls.append(name)
         return resolve(name)
-    tue = datetime(2026, 10, 27, 6, 59, tzinfo=timezone.utc)        # 06:59 UK (GMT)
+    # A fixed Tuesday that is never "today": the fixture's own health check runs
+    # on the real clock, so a pinned date equal to today read as already checked
+    # (failed on 27 Oct 2026, the date this test used to pin).
+    tue = datetime(2030, 1, 8, 6, 59, tzinfo=timezone.utc)          # 06:59 UK (GMT)
     with Session(db) as s:
         assert m.daily_health(s, resolve=counting, moment=tue)["checked"] == []
         assert m.daily_health(s, resolve=counting, moment=tue + timedelta(minutes=31))["checked"] == [WORKSPACE]
         assert m.daily_health(s, resolve=counting, moment=tue + timedelta(hours=3))["checked"] == []
-        sat = datetime(2026, 10, 31, 9, tzinfo=timezone.utc)
+        sat = datetime(2030, 1, 12, 9, tzinfo=timezone.utc)
         assert m.daily_health(s, resolve=counting, moment=sat)["checked"] == []
 
 
