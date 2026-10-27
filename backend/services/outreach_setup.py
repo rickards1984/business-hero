@@ -812,6 +812,10 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
     if not ai_costs.allowed(session):
         session.rollback()
         refuse(503, "Aria's drafting is paused for now. Write this yourself, or try again later.")
+    from services import outreach_allowance   # OUT-19 B: the brand's allowance, with a small reserve for drafting
+    if not outreach_allowance.may_draft(session, str(business.id), brand_id, now()):
+        session.rollback()
+        refuse(409, outreach_allowance.DRAFT_ALLOWANCE_USED)
     session.rollback()   # no lock is held while Aria drafts
     with ai_costs.collect() as spent:
         failure = None

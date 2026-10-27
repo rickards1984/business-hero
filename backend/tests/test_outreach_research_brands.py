@@ -8,6 +8,7 @@ Every adapter is faked; no network or model call happens here.
 # ruff: noqa: F811 - pytest fixtures imported from test_outreach_setup are parameters by design
 
 import json
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import text
@@ -46,6 +47,10 @@ def _second_brand(db, biz, *, name="FitFutures", enabled=True, cap=2000, inbox=T
                                               "segments": ["gym"], "regions": ["Kent"]}, draft=draft_lia)
         m.approve_audience(s, biz, OWNER, lia["id"], {})
         research().configure(s, biz, OWNER, {"brand_id": brand["id"], "enabled": enabled, "monthly_cap_pence": cap})
+        # Made after the first brand: the fixtures share one pinned clock, and brand order sets prices (OUT-19 B).
+        s.execute(text("UPDATE outreach_brands SET created_at = :t WHERE id = :b"),
+                  {"t": (NOW - timedelta(minutes=30)).isoformat(), "b": brand["id"]})
+        s.commit()
     if inbox:
         from test_outreach_research import full_inbox, own_inbox
         full_inbox(db, own_inbox(db, brand, lia, address=f"hello@{name.lower()}.example"))

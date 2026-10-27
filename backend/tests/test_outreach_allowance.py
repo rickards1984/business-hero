@@ -33,8 +33,7 @@ class MissingAllowance(AssertionError):
     """Only the intentional absence of the module may be xfailed."""
 
 
-pytestmark = pytest.mark.xfail(raises=MissingAllowance, strict=True,
-                               reason="OUT-19 B + C tests first: awaiting Mike's approval")
+# Mike approved these tests on 27 Oct 2026; the strict-xfail marker is removed.
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +48,7 @@ def allowance():
 
 
 PERIOD = "2026-10"
+CURRENT = [{"subject": f"Step {i}", "body": f"Body {i}"} for i in range(3)]
 
 
 def spend(db, brand, pence, purpose="draft"):
@@ -79,6 +79,8 @@ def test_each_brands_allowance_follows_its_place_and_the_plan(db):
     m = allowance()
     biz, brand, lia, campaign = started(db)          # business A is on Pro: its first brand is the £99 add-on
     fit, fit_lia = second_brand(db, biz)              # an extra brand: £79
+    with db.begin() as c:                             # made after the first (the fixtures share one pinned clock)
+        c.execute(text("UPDATE outreach_brands SET created_at = :t WHERE id = :b"), {"t": NOW.isoformat(), "b": fit["id"]})
     with Session(db) as s:
         assert m.allowance_pence(s, A, brand["id"], PERIOD) == 2475
         assert m.allowance_pence(s, A, fit["id"], PERIOD) == 1975
@@ -162,11 +164,11 @@ def test_drafting_carries_on_within_a_small_reserve_then_stops(db):
         return [{"subject": f"S{i}", "body": f"B{i}"} for i in range(3)]
     spend(db, brand, 2475 + m.DRAFT_RESERVE_PENCE - 1)
     with run_clock(), Session(db) as s:
-        assert len(setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "shorter"}, draft=drafter)["emails"]) == 3
+        assert len(setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "shorter", "current": CURRENT}, draft=drafter)["emails"]) == 3
     spend(db, brand, 1)
     from services.aria_actions import ActionRefused
     with run_clock(), Session(db) as s, pytest.raises(ActionRefused) as exc:
-        setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "shorter"}, draft=drafter)
+        setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "shorter", "current": CURRENT}, draft=drafter)
     assert "allowance" in exc.value.detail
 
 
@@ -245,3 +247,24 @@ def test_without_a_budget_charges_wait_for_the_owner(db):
     biz, brand, lia, campaign = started(db)
     with run_clock(), Session(db) as s:
         assert m.can_charge(s, biz, 1000, moment=NOW) is False
+
+
+@pytest.mark.parametrize("who,code", [(OWNER, 200), (STAFF, 403)])
+def test_the_budget_over_http(db, monkeypatch, who, code):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import auth
+    import outreach_setup_api as api
+    from auth import get_user_business_context
+    from db import get_session
+    allowance()
+    biz, brand, lia, campaign = started(db)
+    monkeypatch.setattr(auth, "_load_business", lambda session, bid: biz)
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[get_user_business_context] = lambda: {"business_id": A, "user_id": who}
+    app.dependency_overrides[get_session] = lambda: Session(db)
+    with run_clock(), TestClient(app) as client:
+        assert client.get("/v1/outreach/setup/budget").json()["suggested_pence"] == 9900 + 2500
+        assert client.put("/v1/outreach/setup/budget", json={"monthly_pence": 15000}).status_code == code
+        assert client.put("/v1/outreach/setup/budget", json={"monthly_pence": "lots"}).status_code == 422
