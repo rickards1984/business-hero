@@ -724,7 +724,7 @@ def capacity(session, bid: str, brand_id, moment: datetime, audience_hash: Optio
     # Contacts kept today that hold no place (held for the owner's review), of
     # EVERY brand, use the inbox of a ready campaign for their audience, so a
     # brand sharing that inbox sees them too (Codex OUT-19 D review 3).
-    unplaced, mine_unplaced = 0, 0
+    unplaced, mine_unplaced, on_campaign = 0, 0, {}
     for p_brand, audience in session.execute(text(
             "SELECT l.brand_id, l.audience_hash FROM outreach_prospects p JOIN outreach_compliance l "
             "ON l.business_id = p.business_id AND l.id = p.lia_id WHERE p.business_id = :b AND p.captured_at >= :start "
@@ -735,17 +735,22 @@ def capacity(session, bid: str, brand_id, moment: datetime, audience_hash: Optio
             mine_unplaced += 1
         ready = [c for c in campaigns if str(c["brand_id"]) == str(p_brand) and c["status"] in ("ready", "running")]
         home = next((c for c in ready if c["target_hash"] == audience), ready[0] if ready else None)
-        if home is not None and inbox_left.get(str(home["mailbox_id"]), 0) > 0:
-            inbox_left[str(home["mailbox_id"])] -= 1
+        if home is not None:
+            # It holds that campaign's place too: its daily cap and its pilot
+            # places (Codex OUT-19 D review 4), each counted once.
+            on_campaign[str(home["id"])] = on_campaign.get(str(home["id"]), 0) + 1
+            if inbox_left.get(str(home["mailbox_id"]), 0) > 0:
+                inbox_left[str(home["mailbox_id"])] -= 1
     limit = pilot_enrolments()
     matching = [c for c in mine if c["status"] in ("ready", "running")
                 and (audience_hash is None or c["target_hash"] == audience_hash)]
     out["campaigns"] = len(matching)
     for c in matching:
         cid, mailbox_id = str(c["id"]), str(c["mailbox_id"])
-        free = max(0, int(c["daily_cap"]) - used(cid))
+        held = on_campaign.get(cid, 0)
+        free = max(0, int(c["daily_cap"]) - used(cid) - held)
         if limit:
-            free = min(free, max(0, limit - members.get(cid, 0)))
+            free = min(free, max(0, limit - members.get(cid, 0) - held))
         free = min(free, inbox_left[mailbox_id])
         inbox_left[mailbox_id] -= free
         if free:
@@ -1146,7 +1151,7 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
 def _prepare_cards(session, business, prospect_ids: list) -> list:
     """Decision E: each newly enrolled contact's first email waits on the home
     page for the owner (or OUT-11's permission). Never sent here."""
-    from services import aria_actions
+    from services import aria_actions, outreach_autopilot
     bid, cards = str(business.id), []
     for pid in prospect_ids:
         rows = send.rows(session, "outreach_enrolments", bid, "AND prospect_id = :p AND state = 'active'", {"p": pid})
@@ -1156,6 +1161,12 @@ def _prepare_cards(session, business, prospect_ids: list) -> list:
         session.rollback()
         for e in rows:
             if str(e["id"]) in open_for:
+                continue
+            # OUT-11: a campaign Aria may send by herself gets no card — a
+            # waiting card would block her (she never sends over one).
+            held, _ = outreach_autopilot.valid_grant(session, business, str(e["campaign_id"]))
+            session.rollback()
+            if held:
                 continue
             step = next((s for s in send.rows(session, "outreach_sequence_steps", bid,
                                               "AND campaign_id = :c AND sequence_version = :v",
