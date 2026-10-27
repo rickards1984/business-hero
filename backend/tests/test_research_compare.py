@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from test_outreach_setup import A, db  # noqa: F401
-from test_outreach_research import World, gatekeeper, person, started
+from test_outreach_research import World, gatekeeper, person, run_clock, started
 
 
 def counts(db):
@@ -40,7 +40,7 @@ def test_each_model_is_scored_on_verified_contacts_and_nothing_is_stored(db):
     def broken(provider, model, brief):
         raise ai_router.ProviderError("down")
     before = counts(db)
-    with Session(db) as s:
+    with run_clock(), Session(db) as s:
         out = research_compare.compare(
             s, biz, lia["id"], [("openai", "gpt-6.1-sol"), ("xai", "grok-4.7"), ("anthropic", "claude-sonnet-4-5")],
             fetch=world.fetch, mx=world.mx, companies=world.companies,
@@ -72,7 +72,7 @@ def test_no_email_address_is_printed_even_inside_a_role_or_company(db):
     def search(provider, model, brief):
         world.site_company.setdefault("studio1.example", leaky["company"])
         return json.dumps({"candidates": [leaky]}), SimpleNamespace(input_tokens=10, output_tokens=10), 1
-    with Session(db) as s:
+    with run_clock(), Session(db) as s:
         out = research_compare.compare(s, biz, lia["id"], [("openai", "gpt-6.1-sol")], fetch=world.fetch, mx=world.mx,
                                        companies=world.companies, searchers={"openai": search})
     printed = research_compare.render(out)
@@ -93,7 +93,7 @@ def test_an_unreadable_answer_from_one_model_never_stops_the_others(db, bad):
     def fine(provider, model, brief):
         world.site_company.setdefault("studio2.example", "Studio 2 Ltd")
         return json.dumps({"candidates": [person(2)]}), SimpleNamespace(input_tokens=10, output_tokens=10), 1
-    with Session(db) as s:
+    with run_clock(), Session(db) as s:
         out = research_compare.compare(s, biz, lia["id"], [("xai", "grok-4.20-0309-reasoning"), ("openai", "gpt-6.1-sol")],
                                        fetch=world.fetch, mx=world.mx, companies=world.companies,
                                        searchers={"xai": broken, "openai": fine})
