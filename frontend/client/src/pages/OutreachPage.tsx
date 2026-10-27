@@ -8,6 +8,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { OutreachRecord, outreachError, useOutreachData, useOutreachOwner, useOutreachSummary, useRefreshOutreach } from '@/hooks/useOutreachData';
 import ApprovalCard, { Proposal } from '@/components/ApprovalCard';
 import OutreachReplyCard from '@/components/OutreachReplyCard';
+import ReplyCeilingBanner from '@/components/ReplyCeilingBanner';
 import OutreachSetupWizard, { AutopilotSwitch, ChangeSendingMailbox, CopyCampaign, OutreachMailboxes, ResearchPanel, ResearchSummary, useSetupStatus } from '@/components/OutreachSetupWizard';
 const sections = ['overview', 'prospects', 'campaigns', 'replies', 'suppression', 'settings'];
 const href = (section: string) => `/app/outreach${section === 'overview' ? '' : '/' + section}`;
@@ -116,7 +117,7 @@ function CampaignDetail(c: Controls & { id: string; accounts: OutreachRecord[]; 
 }
 function Replies({ businessId, offset, mailbox, setParams }: { businessId: string; offset: number; mailbox: string; setParams: (p: Record<string, string>) => void }) {
   const accounts = useAccounts(businessId), q = useOutreachData(businessId, `replies?limit=20&offset=${offset}${mailbox ? '&mailbox_id=' + mailbox : ''}`);
-  return <><TextField select label="Mailbox filter" value={mailbox} onChange={e => setParams({ mailbox: e.target.value, offset: '0' })}><MenuItem value="">All mailboxes</MenuItem>{accounts.data?.map(a => <MenuItem key={a.id} value={a.id}>{a.email_address} · {a.display_name || a.provider}</MenuItem>)}</TextField><QueryState query={q} />{q.data?.items?.map(r => <OutreachReplyCard key={r.id} businessId={businessId} reply={r} />)}<Pages offset={offset} setOffset={n => setParams({ mailbox, offset: String(n) })} total={q.data?.total} /></>;
+  return <><ReplyCeilingBanner businessId={businessId} /><TextField select label="Mailbox filter" value={mailbox} onChange={e => setParams({ mailbox: e.target.value, offset: '0' })}><MenuItem value="">All mailboxes</MenuItem>{accounts.data?.map(a => <MenuItem key={a.id} value={a.id}>{a.email_address} · {a.display_name || a.provider}</MenuItem>)}</TextField><QueryState query={q} />{q.data?.items?.map(r => <OutreachReplyCard key={r.id} businessId={businessId} reply={r} />)}<Pages offset={offset} setOffset={n => setParams({ mailbox, offset: String(n) })} total={q.data?.total} /></>;
 }
 function Suppressions(c: Controls & Paging) {
   const q = useOutreachData(c.businessId, `suppressions?limit=20&offset=${c.offset}`), [email, setEmail] = useState(''), [confirm, setConfirm] = useState(false);

@@ -195,7 +195,10 @@ def enrol(session, business, user, ident, data):
         else:
             pending.append(pid)
     active = send.rows(session, 'outreach_enrolments', business.id, "AND campaign_id=:c AND state IN ('pending','active')", {'c': ident})
-    send.require(len(active) + len(pending) <= 5, 'Pilot limit: five active enrolments per campaign')
+    from services.outreach_research import pilot_enrolments
+    limit = pilot_enrolments()   # one setting for every enrolment path (Codex OUT-19 D review 1)
+    send.require(not limit or len(active) + len(pending) <= limit,
+                 f'Pilot limit: {limit} active enrolments per campaign')
     for pid in pending:
         eid = send.insert(session, 'outreach_enrolments', business.id, prospect_id=pid, campaign_id=ident,
             sequence_version=c['sequence_version'], state='active', next_step=0, next_due_at=send.now())

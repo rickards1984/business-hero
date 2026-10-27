@@ -15,6 +15,14 @@ from sqlmodel import Session
 from test_outreach_send_rls import DATABASE_URL, pg  # noqa: F401 - the fixture is used by name
 from test_outreach_send import B, OWNER
 
+
+@pytest.fixture(autouse=True)
+def no_pilot_limit(monkeypatch):
+    """Research here is about cost and routing: OUT-10's pilot enrolment
+    limit is lifted (test_outreach_research_capacity tests it)."""
+    monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", "0")
+
+
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="RLS_LOCAL_DATABASE_URL is not set")
 
 BOX_ONE, BOX_TWO = str(uuid.uuid4()), str(uuid.uuid4())
@@ -124,6 +132,16 @@ def test_research_writes_verified_prospects_and_enrols_on_postgres(pg, biz, monk
         outreach_manage.approve_templates(s, biz, OWNER, campaign["id"], {"version": row[0], "sequence_version": row[1]})
         m.finish(s, biz, OWNER)
         outreach_research.configure(s, biz, OWNER, {"brand_id": brand["id"], "enabled": True})
+        # OUT-19 D: research is sized to the inbox. On a 5-a-day warm-up inbox
+        # there is room for 5; past warm-up, 20.
+        assert outreach_research.capacity(s, B, brand["id"], datetime.now(timezone.utc))["room"] == 5
+        s.rollback()
+        s.execute(text("UPDATE outreach_mailboxes SET warmup_stage = 20, daily_cap = 20, sending_days = 10, "
+                       "health_reviewed_by = :o, health_reviewed_at = now() WHERE business_id = :b"), {"o": OWNER, "b": B})
+        s.execute(text("UPDATE outreach_campaigns SET daily_cap = 20 WHERE business_id = :b"), {"b": B})
+        s.commit()
+        assert outreach_research.capacity(s, B, brand["id"], datetime.now(timezone.utc))["room"] == 20
+        s.rollback()
         world = World([[person(i) for i in range(12)] + [person(99, company="Sole Trader Gym")]], cost=25)
         world.not_companies.add("Sole Trader Gym")
         kw = world.kwargs()
@@ -136,6 +154,7 @@ def test_research_writes_verified_prospects_and_enrols_on_postgres(pg, biz, monk
                          {"b": B}).scalar() == 12
         assert c.execute(text("SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'"),
                          {"b": B}).scalar() == 1
-        assert c.execute(text("SELECT count(*) FROM outreach_enrolments WHERE business_id = :b"), {"b": B}).scalar() == 5
+        # The pilot limit is lifted in this module; every kept contact joins.
+        assert c.execute(text("SELECT count(*) FROM outreach_enrolments WHERE business_id = :b"), {"b": B}).scalar() == 12
         assert c.execute(text("SELECT value FROM usage_meters WHERE business_id = :b AND meter = :m"),
                          {"b": B, "m": f"outreach_research_pence:{brand['id']}"}).scalar() == 75, "each of the three searches is charged"

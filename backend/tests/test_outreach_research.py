@@ -35,6 +35,14 @@ def research():
     return importlib.import_module("services.outreach_research")
 
 
+@pytest.fixture(autouse=True)
+def no_pilot_limit(monkeypatch):
+    """These tests are about quotas, verification and spend: the pilot
+    enrolment limit (decision E) is lifted; test_outreach_research_capacity
+    tests it."""
+    monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", "0")
+
+
 # ------------------------------------------------------------------ fakes ---
 
 def person(i, *, company=None, name="Sam Taylor", role="Managing Director", email=None, kind=None,
@@ -106,10 +114,43 @@ class World:
         return dict(search=self.search, fetch=self.fetch, mx=self.mx, companies=self.companies, moment=NOW)
 
 
+def full_inbox(db, mailbox=None):
+    """OUT-19 D: research is sized to what the inbox can email. These tests
+    are about verification, quotas and spend, so they give the inbox its full
+    20 a day (past warm-up, reviewed) and the campaigns 20 a day."""
+    from test_outreach_setup import WORKSPACE
+    with Session(db) as s:
+        s.execute(text("UPDATE outreach_mailboxes SET warmup_stage = 20, daily_cap = 20, sending_days = 10, "
+                       "health_reviewed_by = :o, health_reviewed_at = :at WHERE business_id = :b AND mailbox_id = :m"),
+                  {"o": OWNER, "at": (NOW - timedelta(days=1)).isoformat(), "b": A, "m": mailbox or WORKSPACE})
+        s.execute(text("UPDATE outreach_campaigns SET daily_cap = 20 WHERE business_id = :b"), {"b": A})
+        s.commit()
+
+
+def own_inbox(db, brand, lia, *, address):
+    """A brand's own inbox and ready campaign, copied from the first brand's
+    (OUT-19 D: each brand's 20 a day needs an inbox that can send them)."""
+    from test_outreach_setup import WORKSPACE, _insert
+    box = str(uuid.uuid4())
+    with Session(db) as s:
+        account = dict(s.execute(text("SELECT * FROM email_accounts WHERE id = :m"), {"m": WORKSPACE}).mappings().one())
+        _insert(s, "email_accounts", **{**account, "id": box, "email_address": address})
+        mailbox = dict(s.execute(text("SELECT * FROM outreach_mailboxes WHERE mailbox_id = :m"), {"m": WORKSPACE}).mappings().one())
+        _insert(s, "outreach_mailboxes", **{**mailbox, "id": str(uuid.uuid4()), "mailbox_id": box})
+        audience = s.execute(text("SELECT audience_hash FROM outreach_compliance WHERE id = :l"), {"l": lia["id"]}).scalar()
+        campaign = dict(s.execute(text("SELECT * FROM outreach_campaigns WHERE business_id = :b ORDER BY created_at LIMIT 1"),
+                                  {"b": A}).mappings().one())
+        _insert(s, "outreach_campaigns", **{**campaign, "id": str(uuid.uuid4()), "brand_id": brand["id"],
+                                            "mailbox_id": box, "target_hash": audience, "name": f"{brand['id']} campaign"})
+        s.commit()
+    return box
+
+
 def run_clock():
     """The research run on the pinned NOW too, so every check inside it (an
     approval's dates, a contact's retention) reads the same time whatever the
-    real clock says. The research module's own clock is left alone."""
+    real clock says (Codex OUT-19 D review 5). The research module's own clock
+    is left alone so a test can still move it (the search-claim tests)."""
     from contextlib import ExitStack
     from unittest import mock
     from services import aria_actions, outreach_send, outreach_setup
@@ -121,9 +162,8 @@ def run_clock():
 
 def setup_clock():
     """Setup (approvals, mailbox checks, templates) stamped an hour before the
-    pinned NOW, never on the real clock: once the real time passed NOW, the
-    audience approval read as "out of date" (failed from 07:30 UTC on
-    27 Oct 2026, the date NOW pins)."""
+    pinned NOW, never on the real clock (Codex OUT-19 D review 4: once the
+    real time passed NOW, the audience approval read as "out of date")."""
     from contextlib import ExitStack
     from datetime import timedelta as _td
     from unittest import mock
@@ -134,13 +174,13 @@ def setup_clock():
     return stack
 
 
-def started(db):
+def started(db, full=True):
     """A business with setup complete and research switched on."""
     with setup_clock():
-        return _started(db)
+        return _started(db, full)
 
 
-def _started(db):
+def _started(db, full):
     m = setup_module_or_missing()
     biz = grant(db)
     brand, lia, campaign = ready(m, db, biz)
@@ -150,6 +190,8 @@ def _started(db):
         outreach_manage.approve_templates(s, biz, OWNER, campaign["id"], {"version": int(c[0]), "sequence_version": int(c[1])})
         m.finish(s, biz, OWNER)
         research().configure(s, biz, OWNER, {"brand_id": brand["id"], "enabled": True, "monthly_cap_pence": 2000})
+    if full:
+        full_inbox(db)
     return biz, brand, lia, campaign
 
 
@@ -394,11 +436,14 @@ def test_research_switched_off_or_outreach_paused_never_runs(db):
         assert r.run_due(s, moment=NOW, runner=lambda *a, **k: pytest.fail("ran while switched off")) == []
 
 
-def test_new_contacts_are_enrolled_into_the_audience_campaign_within_its_limit(db):
+def test_new_contacts_are_enrolled_into_the_audience_campaign_within_its_limit(db, monkeypatch):
     """Decision E: verified contacts join the active campaign for their
-    audience (pilot limit 5 for now); research never sends."""
+    audience (pilot limit 5 for now); research never sends. OUT-19 D: only
+    as many are kept as can join, so none is collected only to wait."""
+    monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", "5")
     biz, brand, lia, campaign = started(db)
-    run(db, biz, lia, World([[person(i) for i in range(8)]]))
+    out = run(db, biz, lia, World([[person(i) for i in range(8)]]))
+    assert len(out["accepted"]) == 5
     assert count(db, "SELECT count(*) FROM outreach_enrolments WHERE business_id = :b AND campaign_id = :c",
                  c=campaign["id"]) == 5
     assert count(db, "SELECT count(*) FROM aria_actions WHERE business_id = :b AND status <> 'proposed'") == 0

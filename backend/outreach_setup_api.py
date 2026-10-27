@@ -14,6 +14,7 @@ from sqlmodel import Session
 import auth
 from auth import get_user_business_context
 from db import get_session
+from services import outreach_allowance as allowance
 from services import outreach_autopilot as autopilot
 from services import outreach_research as research
 from services import outreach_setup as setup
@@ -228,6 +229,25 @@ def research_configure(body: ResearchConfig, context=Depends(get_user_business_c
 @router.post("/research/lessons")
 def research_lessons(body: Lessons, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
     return _run(research.save_lessons, session, context, body.lessons, brand_id=str(body.brand_id))
+
+
+class Budget(Body):
+    monthly_pence: int = Field(ge=0, le=10_000_000, strict=True)
+
+
+@router.get("/budget")
+def budget_status(context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    """OUT-19 C: the owner's monthly budget for paid brands and top-ups, and Aria's suggestion."""
+    business = auth._load_business(session, context["business_id"])
+    auth.assert_feature_access(business, "outreach")
+    return allowance.budget_status(session, business)
+
+
+@router.put("/budget")
+def budget_set(body: Budget, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    business = auth._load_business(session, context["business_id"])
+    auth.assert_feature_access(business, "outreach")
+    return _run(allowance.set_budget, session, context, _body(body))
 
 
 class Grant(Body):

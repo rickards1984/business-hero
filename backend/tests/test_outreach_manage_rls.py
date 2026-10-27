@@ -118,7 +118,7 @@ def test_enrolment_cap_serializes_and_loser_rolls_back(management_pg, monkeypatc
                    lambda s: manage.enrol(s, h.b, OWNER, CAMPAIGN, {"prospect_ids": [right]}))
     assert isinstance(result["first"], dict), result
     assert isinstance(result["second"], h.a.ActionRefused), result
-    assert "five" in result["second"].detail.lower()
+    assert "pilot limit: 5" in result["second"].detail.lower()
     assert _count(h, "SELECT count(*) FROM outreach_enrolments WHERE campaign_id=:c AND state='active'", c=CAMPAIGN) == 5
     assert _count(h, "SELECT count(*) FROM outreach_enrolments WHERE prospect_id=:p", p=right) == 0
 
