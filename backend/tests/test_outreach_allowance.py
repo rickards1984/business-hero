@@ -377,9 +377,9 @@ def test_a_model_drafts_hold_is_its_real_worst_case_over_the_whole_chain(db, mon
     with run_clock(), Session(db) as s, pytest.raises(ActionRefused):
         setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT})
     with Session(db) as s:
-        recorded = m.spent_pence(s, A, brand["id"], PERIOD)
+        recorded = m.spent_pence(s, A, brand["id"], PERIOD) - int(held(db, m))
     assert recorded > 0 and recorded <= during["held"], (recorded, during["held"])
-    assert held(db, m) == 0
+    assert held(db, m) == during["held"], "a failed draft keeps its hold (review 3: only success proves the accounting complete)"
 
 
 def test_overlapping_model_drafts_never_pass_the_allowance_and_reserve(db, monkeypatch):
@@ -408,8 +408,68 @@ def test_overlapping_model_drafts_never_pass_the_allowance_and_reserve(db, monke
             setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT})
         except ActionRefused:
             pass
+    with Session(db) as s:   # real recorded spend (failed drafts' holds also stay counted, on top)
+        real = m.spent_pence(s, A, brand["id"], PERIOD) - int(held(db, m))
+    assert real <= 2475 + m.DRAFT_RESERVE_PENCE
+
+
+def test_a_draft_that_fails_part_way_keeps_its_whole_hold(db, monkeypatch):
+    """Review 3: the first provider's failure was recorded, the fallback was
+    interrupted after dispatch: its cost is unknown, so the hold stays."""
+    m = allowance()
+    from test_outreach_setup import setup_module_or_missing
+    from services import ai_router
+    setup = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+    failing_chain(monkeypatch)
+    calls = {"n": 0}
+
+    def first_fails_then_interrupted(provider, model, system, user, max_tokens):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ai_router.ProviderError("down")
+        raise KeyboardInterrupt   # dispatched, never answered
+    monkeypatch.setattr(ai_router, "_openai_compatible_chat", first_fails_then_interrupted)
+    hold = {}
+    real = setup._draft_hold
+
+    def remember(draft, context):
+        hold["p"] = real(draft, context)
+        return hold["p"]
+    monkeypatch.setattr(setup, "_draft_hold", remember)
+    with run_clock(), Session(db) as s, pytest.raises(KeyboardInterrupt):
+        setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT})
+    assert held(db, m) == hold["p"]
+
+
+def test_a_provider_counting_framing_tokens_stays_within_the_hold(db, monkeypatch):
+    """Review 3: reported usage a little above the characters sent (message
+    framing) is covered by the overhead margin."""
+    m = allowance()
+    from types import SimpleNamespace
+    from test_outreach_setup import setup_module_or_missing
+    from services import ai_router
+    setup = setup_module_or_missing()
+    biz, brand, lia, campaign = started(db)
+    failing_chain(monkeypatch)
+    captured = {}
+
+    def answers(provider, model, system, user, max_tokens):
+        tokens_in = len(system) + len(user) + setup.PROVIDER_OVERHEAD_TOKENS   # every character a token, plus framing
+        captured["usage"] = SimpleNamespace(prompt_tokens=tokens_in, completion_tokens=max_tokens)
+        return '{"emails": [{"subject": "s", "body": "b"}, {"subject": "s", "body": "b"}, {"subject": "s", "body": "b"}]}', captured["usage"]
+    monkeypatch.setattr(ai_router, "_openai_compatible_chat", answers)
+    during = {}
+    real = setup.ai_router.json_chat
+
+    def watching(*args, **kwargs):
+        during["held"] = held(db, m)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(setup.ai_router, "json_chat", watching)
+    with run_clock(), Session(db) as s:
+        setup.redraft_emails(s, biz, OWNER, campaign["id"], {"notes": "x", "current": CURRENT})
     with Session(db) as s:
-        assert m.spent_pence(s, A, brand["id"], PERIOD) <= 2475 + m.DRAFT_RESERVE_PENCE
+        assert 0 < m.spent_pence(s, A, brand["id"], PERIOD) <= during["held"]
 
 
 def test_every_draft_prompt_fits_the_bound(monkeypatch):

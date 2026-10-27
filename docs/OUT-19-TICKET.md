@@ -109,6 +109,12 @@
 - **Unknown failures stay held.** A draft that fails without reporting its usage keeps its hold (it may have been billed).
 - **The tests discriminate.** They use deliberately expensive prices, so a fixed hold fails them. Reply sorting above the allowance is shown to still record its cost.
 
+**Codex review 3 (`audits/OUT-19-BC-CODEX-REVIEW-3.md`, the third cycle, P1 still open on two narrower points) → fixed. A further review is Mike's call:**
+- **Only a successful draft releases its hold.** A draft that fails keeps its whole hold beside whatever it recorded: an attempt interrupted after dispatch may have been billed.
+- **The bound covers message framing.** It adds `PROVIDER_OVERHEAD_TOKENS` for the tokens a provider counts beyond the text. A draft that ever records more than its hold is logged as an error.
+- **The request is frozen** before its hold is worked out, so the bound and the call see the same context.
+- **Residual risk:** a provider billing far more input tokens than the text it was sent. That's not seen in practice; the allowance still stops all further spend once it's reached.
+
 ### D — Research sized to sending capacity (decision 1)
 Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/test_outreach_research_capacity.py`.
 

@@ -818,6 +818,9 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
     # review 1), and released when its real cost is recorded.
     from services import outreach_allowance
     bid, moment = str(business.id), now()
+    # The request is frozen before its hold is worked out, so the bound and the
+    # call see the same context (Codex OUT-19 B+C review 3).
+    context = json.loads(json.dumps(context, default=str))
     hold = _draft_hold(draft, context) if brand_id is not None else 0
     session.rollback()
     send.lock_business(session, bid) if send.pg(session) else session.execute(
@@ -841,11 +844,18 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
                     send.lock_business(session, bid)
                 if spent:
                     ai_costs.save(session, bid, spent, purpose="draft", brand_id=brand_id)
-                if spent or failure is None:
-                    # Settled: the real cost replaces the hold. A failure that
-                    # reported no usage may still have been billed, so its hold
-                    # stays counted (fail closed; Codex OUT-19 B+C review 2).
+                if failure is None:
+                    # Settled: the real cost replaces the hold.
                     outreach_allowance.hold_draft(session, bid, brand_id, moment, -hold)
+                # A draft that failed keeps its hold beside whatever it did
+                # record: an attempt interrupted after dispatch may still have
+                # been billed, and only success proves the accounting complete
+                # (fail closed; Codex OUT-19 B+C reviews 2 and 3).
+                if spent and failure is None:
+                    recorded = sum(ai_costs.cost(c["provider"], c["model"], c["input_tokens"], c["output_tokens"],
+                                                 c.get("tool_calls", 0)) for c in spent)
+                    if recorded > hold:
+                        logger.error("An Aria draft for business %s cost %.1fp, over its %sp hold", bid, recorded, hold)
                 session.commit()
             except Exception:
                 session.rollback()
@@ -856,6 +866,9 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
 
 
 SYSTEM_PROMPT_MAX_CHARS = 8000   # the longest instructions Aria's drafts send (tested)
+# A provider counts a little more than the text itself (roles, message framing):
+# this margin, in tokens, covers it, so reported usage stays within the bound.
+PROVIDER_OVERHEAD_TOKENS = 1000
 MODEL_DRAFTS = None              # set below: the model drafters, whose cost the chain bound covers
 
 
@@ -866,7 +879,7 @@ def _draft_hold(draft: Callable, context: dict) -> int:
     hold."""
     from services import outreach_allowance
     if draft in MODEL_DRAFTS:
-        chars = SYSTEM_PROMPT_MAX_CHARS + len(json.dumps(context, default=str))
+        chars = SYSTEM_PROMPT_MAX_CHARS + len(json.dumps(context, default=str)) + PROVIDER_OVERHEAD_TOKENS
         return max(1, ai_router.chat_bound_pence(chars, DRAFT_MAX_TOKENS, "draft"))
     return outreach_allowance.draft_hold_pence()
 
