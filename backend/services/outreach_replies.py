@@ -12,6 +12,7 @@ from datetime import timedelta
 
 from sqlalchemy import text
 
+from services import ai_costs
 from services import outreach_send as send
 from services.aria_actions import _is_active_owner, version_of
 from services.chase_replies import _address, _parse
@@ -193,13 +194,23 @@ def scan(session, business, *, classify=None, moment=None):
             captured.append((rid, incoming, reply['updated_at']))
     session.commit()
     for rid, incoming, stamp in captured:
-        try:
-            result = classify(_context(incoming)) if classify else {}
-            category, confidence = result.get('category', 'unknown'), result.get('confidence', 0)
-            if category not in CATEGORIES or type(confidence) not in (int, float) or not 0 <= confidence <= 100:
-                category, confidence = 'unknown', 0
-        except Exception:
-            category, confidence, result = 'unknown', 0, {}
+        with ai_costs.collect() as spent:
+            try:
+                result = classify(_context(incoming)) if classify else {}
+                category, confidence = result.get('category', 'unknown'), result.get('confidence', 0)
+                if category not in CATEGORIES or type(confidence) not in (int, float) or not 0 <= confidence <= 100:
+                    category, confidence = 'unknown', 0
+            except Exception:
+                category, confidence, result = 'unknown', 0, {}
+        if spent:
+            # The reading was paid for, whatever happens to the reply next:
+            # recorded in its own short transaction (OUT-19).
+            brand = session.execute(text(
+                "SELECT c.brand_id FROM outreach_replies r JOIN outreach_prospects p ON p.business_id = r.business_id "
+                "AND p.id = r.prospect_id JOIN outreach_compliance c ON c.business_id = p.business_id AND c.id = p.lia_id "
+                "WHERE r.business_id = :b AND r.id = :r"), {'b': bid, 'r': str(rid)}).scalar()
+            ai_costs.save(session, bid, spent, purpose='classify', brand_id=str(brand) if brand else None, moment=moment)
+            session.commit()
         _start(session, bid)
         reply = send.one(session, 'outreach_replies', bid, rid, True)
         if reply['resolution'] != 'pending' or reply['updated_at'] != stamp or reply['category'] != 'unknown':

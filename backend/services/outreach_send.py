@@ -166,9 +166,11 @@ def build_payload(session, business, args, owner_name=None, timezone=None):
     cc = [_safe_header(settings['owner_cc_address'])] if settings['owner_cc_default'] else []
     source = rows(session, 'outreach_evidence', business.id, 'AND prospect_id=:p AND source_url IS NOT NULL ORDER BY fetched_at DESC', {'p': str(p['id'])})
     require(source and urlparse(b['privacy_url']).scheme == 'https')
-    base = os.environ.get('OUTREACH_UNSUBSCRIBE_BASE_URL', '')
-    require(urlparse(base).scheme == 'https' and urlparse(base).netloc and not urlparse(base).query,
-            'Outreach unsubscribe URL is not configured')
+    base = unsubscribe_base()
+    parsed = urlparse(base)
+    # A fragment never reaches the server, so the token after it would be lost (Codex OUT-16 review 1).
+    require(parsed.scheme == 'https' and parsed.netloc and not parsed.query and not parsed.fragment
+            and '#' not in base and '?' not in base, 'Outreach unsubscribe URL is not configured')
     token = secrets.token_urlsafe(32)
     link = base.rstrip('/') + '/' + token
     insert(session, 'outreach_unsubscribe_tokens', business.id,
@@ -187,7 +189,13 @@ def build_payload(session, business, args, owner_name=None, timezone=None):
         prev = _previous(session, business.id, c, p)
         require(prev and prev['provider_message_id'] and prev['provider_thread_id'] and prev['rfc_message_id'] and str(prev['mailbox_id']) == str(a['id']),
                 'Previous acceptance needs mailbox/thread correlation')
-        payload.update(in_reply_to=prev['rfc_message_id'], references=[prev['rfc_message_id']],
+        # Gmail threads a follow-up only when its subject matches the conversation's,
+        # and recipients' clients group by it too: a follow-up is "Re:" the email it
+        # follows, whatever subject the step's template carries (Codex OUT-16 review 1),
+        # never shortened: the MIME writer folds a long Subject line (review 2).
+        earlier = prev['subject'] or ''
+        payload.update(subject=_safe_header(earlier if earlier[:3].lower() == 're:' else 'Re: ' + earlier),
+                       in_reply_to=prev['rfc_message_id'], references=[prev['rfc_message_id']],
                        provider_thread_id=prev['provider_thread_id'])
     return payload
 
@@ -438,6 +446,8 @@ def dispatch(session, business, *, action_id, payload):
     outcome = evidence['outcome']
     result = {'status': {'accepted': 'done', 'definitely_not_accepted': 'failed', 'unknown': 'executing'}[outcome],
               'outcome': outcome, 'search_at': permit[1].isoformat(), 'dispatch_at': at.isoformat()}
+    if outcome == 'accepted' and isinstance(evidence.get('thread_note'), str):
+        result['thread_note'] = evidence['thread_note'][:200]
     try:
         _settle(session, business, action_id, payload, job[0], evidence, result)
         session.commit()
@@ -495,6 +505,16 @@ def _settle(session, business, action_id, payload, job, evidence, result):
     session.execute(text(f'UPDATE aria_actions SET status=:s,result={expr},updated_at=:at'
                          + (',executed_at=:at' if finished else '') + ' WHERE business_id=:b AND id=:id'),
                     {'s': result['status'], 'r': json.dumps(result), 'at': now(), 'b': bid, 'id': str(action_id)})
+
+
+def unsubscribe_base():
+    """Where unsubscribe links point (OUT-16): OUTREACH_UNSUBSCRIBE_BASE_URL, or
+    the app's own public address with /u, which serves the unsubscribe page."""
+    explicit = os.environ.get('OUTREACH_UNSUBSCRIBE_BASE_URL', '').strip()
+    if explicit:
+        return explicit.rstrip('/')
+    public = os.environ.get('PUBLIC_BASE_URL', '').strip().rstrip('/')
+    return f'{public}/u' if public else ''
 
 
 def unsubscribe(session, *, token, method):

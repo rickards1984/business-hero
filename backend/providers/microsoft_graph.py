@@ -1,3 +1,5 @@
+import base64
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -106,6 +108,68 @@ class MicrosoftGraphProvider(BaseEmailProvider):
             raise RuntimeError(f"Microsoft Graph send failed: {response.status_code} {response.text}")
 
         return ProviderSendResult(provider_message_id=None)
+
+    def send_outreach(self, *, account, operation_key, to_emails, cc_emails, subject, body_text, body_html=None,
+                      rfc_message_id, in_reply_to=None, references=None, provider_thread_id=None, headers=None,
+                      reply_provider_message_id=None) -> dict:
+        """OUT-16: one outreach email through Microsoft Graph, sent as a full MIME
+        message so our Message-ID and unsubscribe headers survive (Graph's JSON
+        form only allows x- headers). Graph returns no ids on send, so the sent
+        message is found again by its Message-ID.
+
+        Threading (Codex OUT-16 reviews 1-2): Graph's MIME /reply addresses the
+        original message's sender, which for a follow-up is our own mailbox. An
+        answer to a prospect's reply could use it, but one path keeps the
+        recipient exactly as approved; so both go through sendMail carrying In-Reply-To,
+        References and a "Re:" subject — what the recipient's mail client threads
+        on. Graph's own grouping is then checked, not assumed: the conversation
+        the sent copy landed in is reported, and a mismatch with the expected
+        thread is named in `thread_note` rather than hidden."""
+        from . import outreach_mime
+        evidence = {"provider": "microsoft", "mailbox_id": str(account.id), "rfc_message_id": rfc_message_id}
+        try:
+            message = outreach_mime.build(account=account, to_emails=to_emails, cc_emails=cc_emails, subject=subject,
+                                          body_text=body_text, rfc_message_id=rfc_message_id, in_reply_to=in_reply_to,
+                                          references=references, headers=headers)
+        except outreach_mime.UnsafeMessage as exc:
+            return {**evidence, "outcome": "definitely_not_accepted", "reason": str(exc)}
+        try:
+            access_token = get_valid_access_token(account)
+        except Exception as exc:
+            return {**evidence, "outcome": "definitely_not_accepted", "reason": f"token: {type(exc).__name__}"}
+        auth = {"Authorization": f"Bearer {access_token}"}
+        try:
+            with httpx.Client(timeout=30) as client:
+                response = client.post(f"{GRAPH_BASE_URL}/me/sendMail", headers={**auth, "Content-Type": "text/plain"},
+                                       content=base64.b64encode(message.as_bytes()))
+        except Exception as exc:
+            return {**evidence, "outcome": "unknown", "reason": type(exc).__name__}
+        outcome = outreach_mime.outcome_for_status(response.status_code, 202)
+        if outcome != "accepted":
+            return {**evidence, "outcome": outcome, "reason": f"HTTP {response.status_code}"}
+        found = {}
+        escaped = rfc_message_id.replace("'", "''")
+        for attempt in range(3):   # the sent copy takes a moment to appear
+            try:
+                with httpx.Client(timeout=15) as client:
+                    lookup = client.get(f"{GRAPH_BASE_URL}/me/messages", headers=auth,
+                                        params={"$filter": f"internetMessageId eq '{escaped}'",
+                                                "$select": "id,conversationId", "$top": "1"})
+                items = (lookup.json() or {}).get("value") or [] if lookup.status_code == 200 else []
+            except Exception:
+                items = []
+            if items:
+                found = items[0]
+                break
+            time.sleep(1.5)
+        result = {"outcome": "accepted", "provider": "microsoft", "mailbox_id": str(account.id),
+                  "provider_message_id": found.get("id"), "provider_thread_id": found.get("conversationId"),
+                  "rfc_message_id": rfc_message_id}
+        if provider_thread_id and found and found.get("conversationId") != provider_thread_id:
+            result["thread_note"] = "sent copy is in a different Outlook conversation from the email it follows"
+        elif provider_thread_id and not found:
+            result["thread_note"] = "sent copy not found yet, so its Outlook conversation is unconfirmed"
+        return result
 
     def sync_inbox_changes(
         self,

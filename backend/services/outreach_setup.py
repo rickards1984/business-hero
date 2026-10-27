@@ -21,7 +21,9 @@ from typing import Callable, Optional
 from fastapi import HTTPException
 from sqlalchemy import text
 
-from services import aria_actions
+import logging
+
+from services import ai_costs, ai_router, aria_actions
 from services import outreach_send as send
 from services.chase_replies import _address, _parse
 
@@ -39,18 +41,54 @@ PROVIDERS = {
                # a real Gmail/Workspace outbound address; SPF must authorise it
                "sender_ip": "209.85.220.41",
                "dkim_help": "In the Google Workspace admin console, open Apps, Google Workspace, "
-                            "Gmail, Authenticate email, generate a DKIM key and publish the record it gives you."},
+                            "Gmail, Authenticate email, generate a DKIM key and publish the record it gives you.",
+               "dkim_host": "google._domainkey",
+               "dkim_steps": ("Sign in to admin.google.com as an administrator.",
+                              "Open Apps → Google Workspace → Gmail → Authenticate email.",
+                              "Choose your domain and click Generate new record (2048-bit).",
+                              "Add the TXT record it shows, named google._domainkey, where your domain's DNS is managed.",
+                              "Wait for it to be live (up to an hour), then click Start authentication."),
+               "dkim_url": "https://support.google.com/a/answer/174124"},
     "microsoft": {"spf": "spf.protection.outlook.com", "selectors": ("selector1", "selector2"),
                   # a real Exchange Online outbound address (40.107.0.0/16)
                   "sender_ip": "40.107.22.50",
                   "name": "Microsoft 365",
                   "dkim_help": "In Microsoft 365 Defender, open Email authentication settings, DKIM, "
-                               "enable signing for your domain and publish the two selector CNAME records."},
+                               "enable signing for your domain and publish the two selector CNAME records.",
+                  "dkim_host": "selector1._domainkey and selector2._domainkey",
+                  "dkim_steps": ("Sign in to security.microsoft.com as an administrator.",
+                                 "Open Email & collaboration → Policies & rules → Threat policies → "
+                                 "Email authentication settings → DKIM.",
+                                 "Choose your domain; Microsoft shows two CNAME records (selector1 and selector2).",
+                                 "Add both CNAME records where your domain's DNS is managed.",
+                                 "Once they are live, switch 'Sign messages for this domain with DKIM signatures' on."),
+                  "dkim_url": "https://learn.microsoft.com/en-us/defender-office-365/email-authentication-dkim-configure"},
 }
 # Settings-document keys this ticket owns; the generic settings save keeps them.
 PRIVACY_KEY, AUDIENCE_KEY = "outreach_privacy", "outreach_audiences"
+PROFILE_KEY = "outreach_brand_profiles"   # OUT-20: what each brand offers, for Aria's drafts
+PROFILE_FIELDS = ("offer", "audience", "proof", "tone", "ask", "website")
+# OUT-20: who runs a domain's DNS, from its nameservers. Domain Connect marks
+# providers that offer one-click record changes (domainconnect.org).
+DNS_HOSTS = (
+    (("phase8.net", "names.co.uk"), "namesco", "names.co.uk",
+     "https://www.names.co.uk/support/articles/namesco-dns-settings/"),
+    (("domaincontrol.com",), "godaddy", "GoDaddy", "https://www.godaddy.com/help/manage-dns-records-680"),
+    (("cloudflare.com",), "cloudflare", "Cloudflare",
+     "https://developers.cloudflare.com/dns/manage-dns-records/how-to/create-dns-records/"),
+    (("ui-dns.",), "ionos", "IONOS", None),
+    (("123-reg.co.uk",), "123reg", "123 Reg", None),
+    (("registrar-servers.com",), "namecheap", "Namecheap", None),
+    (("squarespacedns.com", "googledomains.com"), "squarespace", "Squarespace", None),
+    (("wixdns.net",), "wix", "Wix", None),
+    (("awsdns",), "route53", "Amazon Route 53", None),
+    (("azure-dns.",), "azure", "Microsoft Azure DNS", None),
+)
 DNS_PAUSE = "Daily check failed:"
 SETUP_KEY = "outreach_setup"   # the only pause a DNS pass may lift
+
+
+logger = logging.getLogger(__name__)
 
 
 def now() -> datetime:
@@ -153,6 +191,7 @@ def save_brand(session, business, user, data: dict) -> dict:
     bid = str(business.id)
     name = _clean(data.get("name"), "Brand name", 120)
     sender = _clean(data.get("sender_identity"), "Sender identity", 200)
+    profile = _profile(data.get("profile")) if "profile" in data else None
     default_box = data.get("default_mailbox_id")
     if default_box:
         send.one(session, "email_accounts", bid, default_box)
@@ -167,6 +206,8 @@ def save_brand(session, business, user, data: dict) -> dict:
         if changes:
             send.update(session, "outreach_brands", bid, brand["id"], **changes,
                         version=int(brand["version"]) + 1, updated_at=now())
+        if profile is not None:
+            _save_profile(session, bid, str(brand["id"]), profile)
         session.commit()
         return {"id": str(brand["id"]), "version": int(brand["version"]) + bool(changes),
                 "privacy_url": brand["privacy_url"]}
@@ -176,8 +217,53 @@ def save_brand(session, business, user, data: dict) -> dict:
         "INSERT INTO outreach_brands (id, business_id, created_at, updated_at, name, default_mailbox_id, "
         "privacy_url, sender_identity, version) VALUES (:id, :b, :at, :at, :n, :m, :u, :s, 1)"),
         {"id": ident, "b": bid, "at": now(), "n": name, "m": default_box or None, "u": url, "s": sender})
+    if profile is not None:
+        _save_profile(session, bid, ident, profile)
     session.commit()
     return {"id": ident, "version": 1, "privacy_url": url}
+
+
+def _profile(value) -> dict:
+    value = value if isinstance(value, dict) else {}
+    out = {}
+    for k in PROFILE_FIELDS:
+        v = value.get(k)
+        if v is not None and str(v).strip():
+            out[k] = _clean(v, k.capitalize(), 1000, one_line=False)
+    return out
+
+
+def _save_profile(session, bid: str, brand_id: str, profile: dict) -> None:
+    doc = _settings_doc(session, bid)
+    doc.setdefault(PROFILE_KEY, {})[brand_id] = profile
+    _save_settings_doc(session, bid, doc)
+
+
+def update_brand(session, business, user, brand_id, data: dict) -> dict:
+    """OUT-20: edit a brand at any time — its name, sender identity and the
+    details Aria drafts from. Owner only; this business's brands only."""
+    _authority(session, business, user)
+    bid = str(business.id)
+    brand = send.one(session, "outreach_brands", bid, brand_id, True)
+    changes = {}
+    if "name" in data:
+        name = _clean(data.get("name"), "Brand name", 120)
+        clash = send.rows(session, "outreach_brands", bid, "AND name = :n AND id <> :i", {"n": name, "i": str(brand["id"])})
+        if clash:
+            refuse(409, "Another brand already has that name.")
+        if name != brand["name"]:
+            changes["name"] = name
+    if "sender_identity" in data:
+        sender = _clean(data.get("sender_identity"), "Sender identity", 200)
+        if sender != brand["sender_identity"]:
+            changes["sender_identity"] = sender
+    if changes:
+        send.update(session, "outreach_brands", bid, brand["id"], **changes,
+                    version=int(brand["version"]) + 1, updated_at=now())
+    if "profile" in data:
+        _save_profile(session, bid, str(brand["id"]), _profile(data.get("profile")))
+    session.commit()
+    return {"id": str(brand["id"]), "version": int(brand["version"]) + bool(changes)}
 
 
 def register_mailbox(session, business, user, data: dict) -> dict:
@@ -339,6 +425,8 @@ def dns_other(name: str, qtype: str) -> list:
         return [(r.preference, r.exchange.to_text(True)) for r in answer]
     if qtype == "PTR":
         return [r.target.to_text(True) for r in answer]
+    if qtype == "NS":   # OUT-20: who runs the domain's DNS (Codex OUT-20 review 1)
+        return [r.target.to_text(True) for r in answer]
     return []
 
 
@@ -386,7 +474,179 @@ def _evaluate(account: dict, resolve: Callable, other_records: Optional[Callable
     evidence["domain_control"] = bool(account.get("token_ciphertext"))   # connected by OAuth
     evidence["from_aligned"] = evidence["spf"] == "pass" and evidence["dkim"] == "pass"
     ok = all(evidence[k] == "pass" for k in ("spf", "dkim", "dmarc")) and evidence["domain_control"]
-    return {"status": "pass" if ok else "fail", "evidence": evidence, "advice": advice}
+    def txt_or_none(name):
+        """None when the lookup failed: a failure never means "no record"."""
+        try:
+            return [str(t) for t in (resolve(name) or [])]
+        except Exception:
+            return None
+    guide = _guide(domain, address, provider, evidence, txt_or_none, other_records)
+    return {"status": "pass" if ok else "fail", "evidence": evidence, "advice": advice, "guide": guide}
+
+
+def _dns_host(domain: str, txt: Callable, other_records: Callable) -> dict:
+    try:
+        servers = [str(n).lower().rstrip(".") for n in (other_records(domain, "NS") or [])]
+    except Exception:
+        servers = []
+    supported = any(str(t).strip() for t in (txt(f"_domainconnect.{domain}") or []))
+    connect = {"supported": supported, "available": supported and os.environ.get("DOMAIN_CONNECT_ENABLED") == "1"}
+    for marks, key, name, url in DNS_HOSTS:
+        if any(m in server for server in servers for m in marks):
+            return {"key": key, "name": name, "help_url": url, "nameservers": servers, "domain_connect": connect}
+    return {"key": "unknown", "name": None, "help_url": None, "nameservers": servers, "domain_connect": connect}
+
+
+def _guide(domain: str, address: str, provider: dict, evidence: dict, txt: Callable, other_records: Callable) -> dict:
+    """OUT-20: a plain fix guide built from the domain's real records — what to
+    change, exact values, and a ready-written email for whoever runs the DNS."""
+    records = []
+    unknown = "We couldn't read your domain's records just now, so we can't yet say exactly what to change. We'll check again shortly."
+    if evidence["spf"] != "pass":
+        found = txt(domain)
+        include = f"include:{provider['spf']}"
+        if found is None:
+            records.append({"what": "spf", "type": "TXT", "host": "@", "action": "unknown", "current": None,
+                            "value": None, "why": unknown})
+        else:
+            current = [t.strip() for t in found if t.strip().lower().split(" ")[0] == "v=spf1"]
+            if len(current) > 1:
+                records.append({"what": "spf", "type": "TXT", "host": "@", "action": "merge", "current": current,
+                                "value": None, "include": include,
+                                "why": "Your domain has more than one SPF record, and receivers ignore them all: "
+                                       f"there must be only one. Combine them into a single record that includes {include}."})
+            elif current:
+                proposed = _spf_with(current[0], include)
+                # Only offer a value that the SPF evaluator itself would pass for
+                # the provider (Codex OUT-20 review 3: a malformed term kept from
+                # the old record would still fail).
+                if _spf_authorises(domain, provider["sender_ip"],
+                                   lambda n: [proposed] if n.lower().rstrip(".") == domain else (txt(n) or []),
+                                   other_records):
+                    records.append({"what": "spf", "type": "TXT", "host": "@", "action": "edit", "current": current[0],
+                                    "value": proposed,
+                                    "why": f"Your SPF record doesn't yet list {provider['name']}, so mail you send through "
+                                           "it isn't proven to come from you. Edit the existing record (don't add a second one)."})
+                else:
+                    records.append({"what": "spf", "type": "TXT", "host": "@", "action": "manual", "current": current[0],
+                                    "value": None, "include": include,
+                                    "why": "Your SPF record has a problem we can't safely fix for you (for example an entry "
+                                           f"that isn't written correctly). It needs correcting by hand so that it includes "
+                                           f"{include}: the email to your web person below explains this."})
+            else:
+                records.append({"what": "spf", "type": "TXT", "host": "@", "action": "add", "current": None,
+                                "value": f"v=spf1 {include} ~all",
+                                "why": f"Your domain has no SPF record yet. This one says {provider['name']} may send "
+                                       "email for you."})
+    if evidence["dkim"] != "pass":
+        records.append({"what": "dkim", "type": "TXT" if provider["name"] == "Google Workspace" else "CNAME",
+                        "host": provider["dkim_host"], "action": "add", "current": None, "value": None,
+                        "why": "A signature key proves each email really came from you and wasn't altered.",
+                        "steps": list(provider["dkim_steps"]), "help_url": provider["dkim_url"]})
+    if evidence["dmarc"] != "pass":
+        found = txt(f"_dmarc.{domain}")
+        fresh = f"v=DMARC1; p=none; rua=mailto:{address}"
+        if found is None:
+            records.append({"what": "dmarc", "type": "TXT", "host": "_dmarc", "action": "unknown", "current": None,
+                            "value": None, "why": unknown})
+        else:
+            current = [t.strip() for t in found if t.strip().lower().startswith("v=dmarc1")]
+            if not current:
+                records.append({"what": "dmarc", "type": "TXT", "host": "_dmarc", "action": "add", "current": None,
+                                "value": fresh,
+                                "why": "This tells receivers your domain checks its email, and sends you reports."})
+            elif len(current) > 1:
+                records.append({"what": "dmarc", "type": "TXT", "host": "_dmarc", "action": "merge", "current": current,
+                                "value": None,
+                                "why": "Your domain has more than one DMARC record, so receivers ignore them: keep just one."})
+            else:
+                records.append({"what": "dmarc", "type": "TXT", "host": "_dmarc", "action": "edit", "current": current[0],
+                                "value": _dmarc_repaired(current[0], fresh),
+                                "why": "Your DMARC record isn't written in a way receivers accept. Replace it with this "
+                                       "(your existing policy is kept where it was valid)."})
+    host = _dns_host(domain, txt, other_records)
+    return {"domain": domain, "mail_provider": provider["name"], "dns_host": host, "records": records,
+            "email_to_helper": _helper_email(domain, host, records)}
+
+
+def _spf_with(record: str, include: str) -> str:
+    """The record with the provider's include as a passing mechanism placed
+    first, so nothing (such as an earlier "all") can stop it being reached.
+    Any other copy of that include — qualified or not — is removed; every
+    other mechanism is kept in order. Whole mechanisms only, never substrings."""
+    terms = record.split()
+    target = include.lower()
+    kept = [t for t in terms[1:] if t.lstrip("+-~?").lower() != target]
+    return " ".join([terms[0], include] + kept)
+
+
+_DMARC_URI = __import__("re").compile(r"^mailto:[^@\s,;!]+@[^@\s,;!]+\.[^@\s,;!]+(![0-9]+[kmgt]?)?$", __import__("re").I)
+_DMARC_FO = __import__("re").compile(r"^[01ds](:[01ds])*$", __import__("re").I)
+_DMARC_RF = __import__("re").compile(r"^[a-z0-9]+(:[a-z0-9]+)*$", __import__("re").I)
+# RFC 7489 §6.4 grammar for the optional tags kept on repair (Codex OUT-20 review 3).
+DMARC_TAGS = {
+    "sp": lambda v: v.lower() in ("none", "quarantine", "reject"),
+    "rua": lambda v: bool(v) and all(_DMARC_URI.match(u.strip()) for u in v.split(",")),
+    "ruf": lambda v: bool(v) and all(_DMARC_URI.match(u.strip()) for u in v.split(",")),
+    "adkim": lambda v: v.lower() in ("r", "s"),
+    "aspf": lambda v: v.lower() in ("r", "s"),
+    "pct": lambda v: v.isdigit() and 0 <= int(v) <= 100,
+    "fo": lambda v: bool(_DMARC_FO.match(v)),
+    "rf": lambda v: bool(_DMARC_RF.match(v)),
+    "ri": lambda v: v.isdigit(),
+}
+
+
+def _dmarc_repaired(record: str, fresh: str) -> str:
+    """A valid DMARC record that keeps the owner's policy and every valid
+    optional setting (subdomain policy, reports, alignment...) in order; an
+    invalid tag is dropped. Without a valid policy, the fresh starter record."""
+    tags = []
+    for part in record.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key.strip():
+            tags.append((key.strip().lower(), value.strip()))
+    policy = next((v.lower() for k, v in tags if k == "p"), "")
+    if policy not in ("none", "quarantine", "reject"):
+        return fresh
+    kept = [(k, v) for k, v in tags if k in DMARC_TAGS and DMARC_TAGS[k](v)]
+    if not any(k == "rua" for k, _ in kept):
+        kept.append(("rua", fresh.split("rua=", 1)[1]))
+    return "; ".join(["v=DMARC1", f"p={policy}"] + [f"{k}={v}" for k, v in kept])
+
+
+def _helper_email(domain: str, host: dict, records: list) -> dict:
+    lines = ["Hi,", "",
+             f"Could you please add these settings to the DNS for {domain}"
+             + (f" (managed at {host['name']})" if host.get("name") else "") + "? They make sure the emails we "
+             "send are recognised as genuinely from us, so they reach inboxes rather than spam.", ""]
+    for n, r in enumerate(records, 1):
+        if r["what"] == "spf" and r["action"] == "edit":
+            lines += [f"{n}. Edit the existing TXT record on {domain} (host @) that starts v=spf1, so it reads:",
+                      f"   {r['value']}", f"   (it currently reads: {r['current']})"]
+        elif r["what"] == "spf" and r["action"] == "merge":
+            lines += [f"{n}. {domain} has more than one TXT record starting v=spf1. Please combine them into one "
+                      f"record that also includes {r['include']}."]
+        elif r["what"] == "spf" and r["action"] == "manual":
+            lines += [f"{n}. The TXT record on {domain} that starts v=spf1 currently reads:", f"   {r['current']}",
+                      f"   It has an entry that isn't written correctly. Please correct it so it's valid and includes {r['include']}."]
+        elif r["action"] == "unknown":
+            lines += [f"{n}. We couldn't read {domain}'s {r['what'].upper()} record when this was written; please check "
+                      "it exists and is valid."]
+        elif r["what"] == "dmarc" and r["action"] == "merge":
+            lines += [f"{n}. {domain} has more than one DMARC record (_dmarc). Please keep just one."]
+        elif r["what"] == "dmarc" and r["action"] == "edit":
+            lines += [f"{n}. Replace the TXT record named _dmarc.{domain} with:", f"   {r['value']}",
+                      f"   (it currently reads: {r['current']})"]
+        elif r["what"] == "spf":
+            lines += [f"{n}. Add a TXT record on {domain} (host @) with the value:", f"   {r['value']}"]
+        elif r["what"] == "dkim":
+            lines += [f"{n}. Add the email signature (DKIM) record named {r['host']}. I'll send you its value from "
+                      "our email admin console, or you can generate it there: " + r["help_url"]]
+        else:
+            lines += [f"{n}. Add a TXT record named {r['host']}.{domain} with the value:", f"   {r['value']}"]
+    lines += ["", "Thank you!"]
+    return {"subject": f"Email settings for {domain}", "body": "\n".join(lines)}
 
 
 def _apply_health(session, bid: str, row: dict, result: dict, moment: datetime, *, daily: bool) -> None:
@@ -488,17 +748,54 @@ def recheck_health(session, *, resolve: Callable = dns_txt, moment: Optional[dat
 
 # ------------------------------------------------- audience and privacy ---
 
+DRAFT_MAX_TOKENS = 4000
+
+
+def draft_model() -> str:
+    return os.getenv("ARIA_DRAFT_MODEL", "gpt-4o")
+
+
 def _model_json(instructions: str, context: dict) -> dict:
-    from openai import OpenAI
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
+    """One JSON draft from the first AI provider that can serve it (OUT-19 H:
+    failover across providers; every attempt is noted for the cost ledger)."""
+    try:
+        return ai_router.json_chat(instructions, context, purpose="draft", max_tokens=DRAFT_MAX_TOKENS)
+    except ai_router.AllProvidersFailed:
         refuse(503, "Aria can't draft this right now; write it yourself or try again later.")
-    client = OpenAI(api_key=key, timeout=60.0, max_retries=1)
-    response = client.chat.completions.create(
-        model=os.getenv("ARIA_DRAFT_MODEL", "gpt-4o"), response_format={"type": "json_object"},
-        messages=[{"role": "system", "content": instructions},
-                  {"role": "user", "content": json.dumps(context, default=str)}])
-    return json.loads(response.choices[0].message.content or "{}")
+
+
+def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
+    """Run one Aria draft (OUT-19): refused while the platform's AI spend is
+    paused or the model has no price; its cost is recorded and committed as
+    soon as the model returns, whether or not the draft is then accepted."""
+    if draft in (model_draft_audience, model_draft_notice, model_draft_emails, model_redraft_emails) and \
+            not ai_router.chain("draft", include_down=True):
+        session.rollback()
+        refuse(503, "Aria's drafting is unavailable: no AI provider with a priced model is configured. "
+                    "Write this yourself for now.")
+    if not ai_costs.allowed(session):
+        session.rollback()
+        refuse(503, "Aria's drafting is paused for now. Write this yourself, or try again later.")
+    session.rollback()   # no lock is held while Aria drafts
+    with ai_costs.collect() as spent:
+        failure = None
+        try:
+            return draft(context)
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            if spent:
+                try:
+                    session.rollback()
+                    ai_costs.save(session, str(business.id), spent, purpose="draft", brand_id=brand_id)
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    logger.exception("Could not record an Aria draft's AI cost for business %s", business.id)
+                    if failure is None:
+                        raise   # never hand out a draft whose cost wasn't recorded
+                    # otherwise the draft's own error propagates
 
 
 def model_draft_audience(context: dict) -> dict:
@@ -519,12 +816,30 @@ def model_draft_notice(context: dict) -> str:
     return str(out.get("text") or "")
 
 
+EMAIL_CRAFT = (
+    "Write like a real person at this brand writing to one specific kind of organisation, not like marketing. "
+    "Use the brand details: what is offered, who it is for, proof, tone and the ask. Open with something "
+    "relevant to the recipient's world, not about the sender. One clear, low-effort ask. Plain, warm, "
+    "specific; no hype, no clichés ('I hope this finds you well', 'just checking in', 'game-changer'), no "
+    "exclamation marks, no invented facts, numbers or names. Short subject lines a colleague might write "
+    "(no clickbait, no capitals, no emojis). First email under 110 words; each follow-up shorter and adds "
+    "something new (a fact, a useful angle or an easy way to say no), never just a reminder. British English. "
+    "No signature, footer or unsubscribe line: those are added for you.")
+
+
 def model_draft_emails(context: dict) -> list:
     out = _model_json(
-        "Draft three short, specific B2B outreach emails for the campaign given: a first email, a "
-        "follow-up after 5 working days and a final one after 7 more. Honest, no hype, no invented "
-        "claims, one clear ask, under 120 words each. Do not add a signature or footer. Return JSON "
-        "{\"emails\": [{\"subject\": ..., \"body\": ...}, x3]}.", context)
+        "Draft three B2B outreach emails for the campaign given: a first email, a follow-up after 5 working "
+        "days and a final one after 7 more. " + EMAIL_CRAFT +
+        " Return JSON {\"emails\": [{\"subject\": ..., \"body\": ...}, x3]}.", context)
+    return list(out.get("emails") or [])
+
+
+def model_redraft_emails(context: dict) -> list:
+    out = _model_json(
+        "Rewrite the three outreach emails in current_emails, following the owner's notes in owner_notes "
+        "closely; they know their business and customers best. Keep what already works. " + EMAIL_CRAFT +
+        " Return JSON {\"emails\": [{\"subject\": ..., \"body\": ...}, x3]} in the same order.", context)
     return list(out.get("emails") or [])
 
 
@@ -536,8 +851,8 @@ def draft_audience(session, business, user, data: dict, *, draft: Callable = mod
              "segments": [str(s)[:80] for s in (data.get("segments") or [])][:20],
              "regions": [str(r)[:80] for r in (data.get("regions") or [])][:20]}
     audience_hash = hashlib.sha256(_canonical(rules).encode()).hexdigest()
-    session.rollback()   # no lock is held while Aria drafts
-    drafted = draft({"business": getattr(business, "name", None), "brand": brand["name"], **rules})
+    drafted = _ai_draft(session, business, draft, {"business": getattr(business, "name", None), "brand": brand["name"], **rules},
+                        brand_id=str(brand["id"]))
     fields = {k: _clean(drafted.get(k), k.replace("_", " ").capitalize(), 4000, one_line=False)
               for k in ("purpose", "necessity", "balancing_test", "safeguards")}
     _authority(session, business, user)
@@ -572,9 +887,9 @@ def approve_audience(session, business, user, compliance_id, edits: dict) -> dic
 def draft_privacy_notice(session, business, user, brand_id, *, draft: Callable = model_draft_notice) -> dict:
     _authority(session, business, user)
     brand = send.one(session, "outreach_brands", str(business.id), brand_id)
-    session.rollback()
-    return {"text": draft({"business": getattr(business, "name", None), "brand": brand["name"],
-                           "sender_identity": brand["sender_identity"]})}
+    drafted = _ai_draft(session, business, draft, {"business": getattr(business, "name", None), "brand": brand["name"],
+                                                   "sender_identity": brand["sender_identity"]}, brand_id=str(brand["id"]))
+    return {"text": drafted}
 
 
 def approve_privacy_notice(session, business, user, brand_id, data: dict) -> dict:
@@ -651,9 +966,11 @@ def create_first_campaign(session, business, user, data: dict, *, draft: Callabl
     name = _clean(data.get("name"), "Campaign name", 120)
     cap = int(data.get("daily_cap") or 5)
     send.require(1 <= cap <= 20, "A daily cap is 1–20", 422)
-    session.rollback()   # no lock is held while Aria drafts
-    emails = draft({"business": getattr(business, "name", None), "brand": brand["name"],
-                    "audience": rules, "purpose": lia["purpose"], "campaign": name})
+    profile = (_settings_doc(session, bid).get(PROFILE_KEY) or {}).get(str(brand["id"]), {})
+    emails = _ai_draft(session, business, draft, {"business": getattr(business, "name", None), "brand": brand["name"],
+                                                  "sender_identity": brand["sender_identity"], "brand_details": profile,
+                                                  "audience": rules, "purpose": lia["purpose"], "campaign": name},
+                       brand_id=str(brand["id"]))
     _authority(session, business, user)
     ident = send.insert(session, "outreach_campaigns", bid, name=name, brand_id=str(brand["id"]),
                         mailbox_id=str(box["mailbox_id"]), daily_cap=cap, status="draft", version=1,
@@ -664,6 +981,32 @@ def create_first_campaign(session, business, user, data: dict, *, draft: Callabl
     return {"id": ident, "version": 1}
 
 
+def redraft_emails(session, business, user, campaign_id, data: dict, *, draft: Callable = model_redraft_emails) -> dict:
+    """OUT-20: the owner works with Aria on the wording. Aria rewrites the three
+    emails from the owner's notes, the brand details and the audience; nothing
+    is saved — the owner reviews, edits, saves and approves as before."""
+    _authority(session, business, user)
+    bid = str(business.id)
+    campaign = send.one(session, "outreach_campaigns", bid, campaign_id)
+    brand = send.one(session, "outreach_brands", bid, campaign["brand_id"])
+    notes = _clean(data.get("notes"), "Your notes for Aria", 4000, one_line=False)
+    current = data.get("current") or []
+    send.require(isinstance(current, list) and len(current) == 3, "Send the three current emails", 422)
+    current = [{"subject": _clean(e.get("subject"), "Subject", 200), "body": _clean(e.get("body"), "Body", 20000, one_line=False)}
+               for e in current]
+    doc = _settings_doc(session, bid)
+    rules = send.loads(campaign["target_rules"]) if isinstance(campaign["target_rules"], str) else campaign["target_rules"]
+    context = {"business": getattr(business, "name", None), "brand": brand["name"],
+               "sender_identity": brand["sender_identity"],
+               "brand_details": (doc.get(PROFILE_KEY) or {}).get(str(brand["id"]), {}),
+               "audience": rules or {}, "campaign": campaign["name"], "current_emails": current, "owner_notes": notes}
+    emails = _ai_draft(session, business, draft, context, brand_id=str(brand["id"]))
+    send.require(isinstance(emails, list) and len(emails) == 3 and all(isinstance(e, dict) for e in emails),
+                 "Aria couldn't produce three emails this time. Try again, or edit them yourself.", 422)
+    return {"emails": [{"subject": _clean(e.get("subject"), "Subject", 200),
+                        "body": _clean(e.get("body"), "Body", 20000, one_line=False)} for e in emails]}
+
+
 # --------------------------------------------------------- status, finish ---
 
 REQUIRED = ("brand", "mailboxes", "audience", "privacy", "limits", "campaign")
@@ -672,11 +1015,13 @@ def _truthy(value) -> bool:
     return value in (True, 1, "1", "true", "t")
 
 
-def _brand_status(brand, notices, rules, boxes, accounts, healthy_ids, lias, campaigns, approved_steps) -> dict:
+def _brand_status(brand, notices, rules, boxes, accounts, healthy_ids, lias, campaigns, approved_steps,
+                  profiles=None) -> dict:
     """One brand's setup (OUT-18): its mailbox, its audiences each with its own
     email sequence, its privacy notice. Ready = an approved audience whose
     campaign is approved and sends from this brand's healthy mailbox."""
     bid_ = str(brand["id"])
+    profiles = profiles or {}
     mine = [c for c in campaigns if str(c["brand_id"]) == bid_]
     chosen = str(brand["default_mailbox_id"]) if brand["default_mailbox_id"] else None
 
@@ -722,6 +1067,7 @@ def _brand_status(brand, notices, rules, boxes, accounts, healthy_ids, lias, cam
     mailbox_ok = bool(mailbox and mailbox in healthy_ids)
     ready = privacy and mailbox_ok and any(a["approved"] and a["campaign"] and a["campaign"]["ready"] for a in audiences)
     return {"id": bid_, "name": brand["name"], "sender_identity": brand["sender_identity"],
+            "profile": profiles.get(bid_, {}),
             "mailbox_id": mailbox, "mailbox_address": accounts.get(mailbox) if mailbox else None,
             "mailbox_ok": mailbox_ok, "privacy": privacy, "audiences": audiences, "ready": ready}
 
@@ -755,8 +1101,9 @@ def status(session, business) -> dict:
         "SELECT count(*) FROM outreach_knowledge WHERE business_id = :b AND status = 'approved'"),
         {"b": bid}).scalar()
     session.rollback()
-    per_brand = [_brand_status(b, notices, rules, boxes, accounts, healthy_ids, lias, campaigns, approved_steps)
-                 for b in brands]
+    profiles = doc.get(PROFILE_KEY) or {}
+    per_brand = [_brand_status(b, notices, rules, boxes, accounts, healthy_ids, lias, campaigns, approved_steps,
+                               profiles) for b in brands]
     ready_brands = [b for b in per_brand if b["ready"]]
     focus = ready_brands[0] if ready_brands else (per_brand[-1] if per_brand else None)
     # OUT-18: setup is finished when ONE brand is ready; the steps describe the

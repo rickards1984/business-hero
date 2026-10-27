@@ -28,10 +28,37 @@ class Body(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class BrandProfile(Body):
+    """OUT-20: what Aria drafts from."""
+    offer: Optional[str] = Field(default=None, max_length=1000)
+    audience: Optional[str] = Field(default=None, max_length=1000)
+    proof: Optional[str] = Field(default=None, max_length=1000)
+    tone: Optional[str] = Field(default=None, max_length=1000)
+    ask: Optional[str] = Field(default=None, max_length=1000)
+    website: Optional[str] = Field(default=None, max_length=1000)
+
+
 class Brand(Body):
     name: str = Field(min_length=1, max_length=120)
     sender_identity: str = Field(min_length=1, max_length=200)
     default_mailbox_id: Optional[UUID] = None
+    profile: Optional[BrandProfile] = None
+
+
+class BrandEdit(Body):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    sender_identity: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    profile: Optional[BrandProfile] = None
+
+
+class EmailDraft(Body):
+    subject: str = Field(max_length=200)
+    body: str = Field(max_length=20000)
+
+
+class Redraft(Body):
+    notes: str = Field(min_length=1, max_length=4000)
+    current: list[EmailDraft] = Field(min_length=3, max_length=3)
 
 
 class Mailbox(Body):
@@ -108,6 +135,18 @@ def begin(context=Depends(get_user_business_context), session: Session = Depends
 @router.post("/brands")
 def brand(body: Brand, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
     return _run(setup.save_brand, session, context, _body(body))
+
+
+@router.patch("/brands/{brand_id}")
+def edit_brand(brand_id: UUID, body: BrandEdit, context=Depends(get_user_business_context),
+               session: Session = Depends(get_session)):
+    return _run(setup.update_brand, session, context, str(brand_id), _body(body))
+
+
+@router.post("/campaigns/{campaign_id}/redraft")
+def redraft(campaign_id: UUID, body: Redraft, context=Depends(get_user_business_context),
+            session: Session = Depends(get_session)):
+    return _run(setup.redraft_emails, session, context, str(campaign_id), _body(body))
 
 
 @router.post("/mailboxes")

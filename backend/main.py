@@ -466,7 +466,9 @@ app.include_router(outreach_router)
 from outreach_manage import router as outreach_manage_router
 app.include_router(outreach_manage_router)
 from outreach_setup_api import router as outreach_setup_router, public_router as outreach_public_router
+from outreach_unsubscribe_api import router as outreach_unsubscribe_router  # noqa: E402
 app.include_router(outreach_setup_router)
+app.include_router(outreach_unsubscribe_router)
 app.include_router(outreach_public_router)
 
 
@@ -5615,6 +5617,8 @@ async def disconnect_xero(
 # ---------------------------------------------------------------------------
 from admin_business_api import router as admin_business_router  # noqa: E402
 app.include_router(admin_business_router)
+from admin_outreach_api import router as admin_outreach_router  # noqa: E402
+app.include_router(admin_outreach_router)
 
 
 if __name__ == "__main__":
