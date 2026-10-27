@@ -271,14 +271,15 @@ def send_next(session, business, campaign_id, *, moment: Optional[datetime] = No
     try:
         result = aria_actions.approve(session, business, card["id"], None, card["version"])
     except aria_actions.ActionRefused as exc:
-        session.info.pop(PACE_TOKEN, None)
         try:
             aria_actions.dismiss(session, business, card["id"])
         except aria_actions.ActionRefused:
             pass
         _release_pace(session, bid, token, previous)
         return {"sent": None, "waiting": exc.detail}
-    session.info.pop(PACE_TOKEN, None)
+    finally:
+        # Whatever happened, the token never outlives this attempt (Codex OUT-11 review 4).
+        session.info.pop(PACE_TOKEN, None)
     went = result.get("status") in ("done", "executing")
     if not went:
         _release_pace(session, bid, token, previous)

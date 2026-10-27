@@ -438,3 +438,16 @@ def test_two_automatic_claims_are_never_closer_than_the_minimum_gap(h, monkeypat
     assert out["sent"] is None and len(h.p.sends) == 1
     at[0] = NOW + timedelta(minutes=13)
     assert m.send_next(h.s, h.b, CAMPAIGN, rng=lambda: 0.0)["sent"] and len(h.p.sends) == 2
+
+
+def test_a_failed_attempt_never_leaves_its_pace_token_behind(h, monkeypatch):
+    """Review 4 backlog: an unexpected error mid-approval still clears it."""
+    m = autopilot()
+    granted(h)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("search crashed")
+    monkeypatch.setattr(h.m, "search_before_claim", broken)
+    with pytest.raises(RuntimeError):
+        m.send_next(h.s, h.b, CAMPAIGN, rng=lambda: 0.0)
+    assert m.PACE_TOKEN not in h.s.info

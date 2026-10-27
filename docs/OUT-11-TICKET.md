@@ -113,3 +113,6 @@ The claim itself now enforces the pace. Inside the claim, holding the business l
 The claim time is recorded in the same transaction as the claim. Any refusal gives the slot back. Three regression tests cover these cases (delayed beside a newer run; expired while waiting for the lock; slot lost). Each fails without the fix.
 
 This was the fourth repair cycle, beyond the three allowed, so it waits for Mike's decision on a further Codex review.
+
+## Codex review 4 (`audits/OUT-11-CODEX-REVIEW-4.md`): APPROVE
+Mike authorised this review beyond the three-cycle limit on 26 Oct 2026. The review-3 P1 is closed, and no P2s were found. The one backlog item, clearing the pace token in a `finally`, is done, with a test.
