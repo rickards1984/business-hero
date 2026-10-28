@@ -1229,6 +1229,11 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
                 custom_rates += f"- {rate.get('role', 'Worker')}: £{rate.get('daily_rate', 0)}/day\n"
             system_prompt += custom_rates
 
+    # PROFIT-1: quote drafting is non-essential AI: paused at the kill switch.
+    from services import profit_guard
+    if not profit_guard.permits("quote"):
+        raise HTTPException(status_code=503, detail="Aria's quote drafting is paused for now. Build this quote by hand, "
+                                                    "or try again later.")
     try:
         openai_key = os.getenv("OPENAI_API_KEY")
 
@@ -1246,27 +1251,45 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
                     "image_url": {"url": f"data:image/jpeg;base64,{img_data}", "detail": "high"},
                 })
 
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {openai_key}",
-                    "Content-Type": "application/json",
-                },
-                # GPT-5-family models reject `temperature` (only the default is
-                # supported) and `max_tokens` (renamed `max_completion_tokens`).
-                # `max_completion_tokens` is also accepted by GPT-4o-family, so
-                # this payload is safe for any QUOTE_AI_MODEL setting.
-                json={
-                    "model": QUOTE_AI_MODEL,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_content},
-                    ],
-                    "max_completion_tokens": 4096,
-                    "response_format": {"type": "json_object"},
-                },
-            )
+        # Direct HTTP bypasses the SDK hook: recorded here (PROFIT-1). Its most
+        # an attempt can cost: the text, ~1,105 tokens per high-detail image, the full output.
+        worst_in = len(system_prompt) + len(job_description) + 1105 * len(images[:5])
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                resp = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {openai_key}",
+                        "Content-Type": "application/json",
+                    },
+                    # GPT-5-family models reject `temperature` (only the default is
+                    # supported) and `max_tokens` (renamed `max_completion_tokens`).
+                    # `max_completion_tokens` is also accepted by GPT-4o-family, so
+                    # this payload is safe for any QUOTE_AI_MODEL setting.
+                    json={
+                        "model": QUOTE_AI_MODEL,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_content},
+                        ],
+                        "max_completion_tokens": 4096,
+                        "response_format": {"type": "json_object"},
+                    },
+                )
+        except BaseException:   # including cancellation (Codex PROFIT-1 review 4)
+            profit_guard.record_direct(QUOTE_AI_MODEL, worst_in, 4096, estimated=True, purpose="quote",
+                                       business_id=business_id)   # may have been billed
+            raise
+        try:
+            billed = resp.json() if resp.status_code == 200 else {}
+        except Exception:
+            billed = {}
+        usage = billed.get("usage") or {}
+        if usage or resp.status_code == 200 or resp.status_code >= 500:
+            profit_guard.record_direct(billed.get("model") or QUOTE_AI_MODEL,
+                                       usage.get("prompt_tokens") if usage else worst_in,
+                                       usage.get("completion_tokens") if usage else 4096,
+                                       estimated=not usage, purpose="quote", business_id=business_id)
 
         if resp.status_code != 200:
             logger.error(f"OpenAI API error: {resp.status_code} {resp.text}")

@@ -19,27 +19,34 @@ async def generate_call_summary(transcript: str) -> Optional[str]:
     
     if not transcript or not transcript.strip():
         return None
+    # PROFIT-1: a summary of a call already finished is non-essential (the live
+    # call is what's essential): at the kill switch, no summary (Codex review 3).
+    from services import profit_guard
+    if not profit_guard.permits("call_summary"):
+        return None
     
     try:
         from openai import OpenAI
         
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0, max_retries=1)
         
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant that summarizes phone call transcripts. Create a concise summary with exactly 5 bullet points highlighting the key points, action items, and outcomes from the call."
-                },
-                {
-                    "role": "user",
-                    "content": f"Please summarize this call transcript in 5 bullet points:\n\n{transcript}"
-                }
-            ],
-            max_tokens=500,
-            temperature=0.3
-        )
+        from services import profit_guard   # PROFIT-1
+        with profit_guard.attributed(None, "call_summary"):
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant that summarizes phone call transcripts. Create a concise summary with exactly 5 bullet points highlighting the key points, action items, and outcomes from the call."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Please summarize this call transcript in 5 bullet points:\n\n{transcript}"
+                    }
+                ],
+                max_tokens=500,
+                temperature=0.3
+            )
         
         return response.choices[0].message.content
     

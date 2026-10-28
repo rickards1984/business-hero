@@ -161,6 +161,11 @@ def extract_json(text: str) -> str:
 
 # ---------------------------------------------------------------- chat ---
 
+def _accounted():
+    from services import profit_guard
+    return profit_guard.accounted()
+
+
 def _openai_compatible_chat(provider, model, system, user, max_tokens):
     from openai import OpenAI
     client = OpenAI(api_key=os.environ[KEYS[provider]], base_url=BASE_URLS.get(provider), timeout=60.0, max_retries=0)
@@ -168,9 +173,10 @@ def _openai_compatible_chat(provider, model, system, user, max_tokens):
         # OpenAI's reasoning models take max_completion_tokens (they reject
         # max_tokens); xAI's compatible API takes max_tokens.
         limit = {"max_completion_tokens": max_tokens} if provider == "openai" else {"max_tokens": max_tokens}
-        response = client.chat.completions.create(model=model, response_format={"type": "json_object"}, **limit,
-                                                  messages=[{"role": "system", "content": system},
-                                                            {"role": "user", "content": user}])
+        with _accounted():   # recorded by this router, never also by the PROFIT-1 SDK hook
+            response = client.chat.completions.create(model=model, response_format={"type": "json_object"}, **limit,
+                                                      messages=[{"role": "system", "content": system},
+                                                                {"role": "user", "content": user}])
     except Exception as exc:
         raise ProviderError(f"{provider}: {type(exc).__name__}") from exc
     usage = getattr(response, "usage", None)
@@ -302,9 +308,10 @@ def _openai_compatible_search(provider, model, brief):
     from openai import OpenAI
     client = OpenAI(api_key=os.environ[KEYS[provider]], base_url=BASE_URLS.get(provider), timeout=300.0, max_retries=0)
     try:
-        response = client.responses.create(model=model, tools=[{"type": "web_search", "search_context_size": "low"}],
-                                           input=brief, max_output_tokens=SEARCH_MAX_OUTPUT_TOKENS,
-                                           max_tool_calls=SEARCH_MAX_TOOL_CALLS)
+        with _accounted():   # research records every attempt itself
+            response = client.responses.create(model=model, tools=[{"type": "web_search", "search_context_size": "low"}],
+                                               input=brief, max_output_tokens=SEARCH_MAX_OUTPUT_TOKENS,
+                                               max_tool_calls=SEARCH_MAX_TOOL_CALLS)
     except Exception as exc:
         raise ProviderError(f"{provider}: {type(exc).__name__}") from exc
     usage = getattr(response, "usage", None)

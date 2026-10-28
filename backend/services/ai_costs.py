@@ -143,9 +143,42 @@ def _add(session, bid: str, meter: str, period: str, amount: float, at: datetime
         "updated_at = excluded.updated_at"), {"b": bid, "m": meter, "p": period, "v": amount, "at": at})
 
 
+PLATFORM = "platform"   # PROFIT-1: a cost no business owns lives in platform_meters (039)
+_PLATFORM_TABLE: dict = {}
+
+
+def has_platform_table(session) -> bool:
+    """Whether migration 039 has been applied on this database (checked once)."""
+    bind = session.get_bind()
+    key = str(bind.url)
+    if key not in _PLATFORM_TABLE:
+        from sqlalchemy import inspect as _inspect
+        try:
+            _PLATFORM_TABLE[key] = _inspect(session.connection()).has_table("platform_meters")
+        except Exception:
+            return False
+    return _PLATFORM_TABLE[key]
+
+
+def platform_add(session, meter: str, period: str, amount: float, at: datetime) -> None:
+    session.execute(text(
+        "INSERT INTO platform_meters (meter, period, value, updated_at) VALUES (:m, :p, :v, :at) "
+        "ON CONFLICT (period, meter) DO UPDATE SET value = platform_meters.value + excluded.value, "
+        "updated_at = excluded.updated_at"), {"m": meter, "p": period, "v": amount, "at": at})
+
+
+def platform_value(session, meter: str, period: str) -> float:
+    if not has_platform_table(session):
+        return 0.0
+    return float(session.execute(text("SELECT coalesce(sum(value), 0) FROM platform_meters WHERE meter = :m AND period = :p"),
+                                 {"m": meter, "p": period}).scalar() or 0)
+
+
 def platform_total(session, period: str) -> float:
-    return float(session.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE meter = :m AND period = :p"),
-                                 {"m": TOTAL, "p": period}).scalar() or 0)
+    """Every recorded AI cost this month: every business's, and the platform's own."""
+    businesses = float(session.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE meter = :m AND period = :p"),
+                                       {"m": TOTAL, "p": period}).scalar() or 0)
+    return businesses + platform_value(session, TOTAL, period)
 
 
 def _serialise(session) -> None:
@@ -182,28 +215,64 @@ def record(session, business_id, *, purpose: str, provider: str, model: str, bra
     business lock is ever requested while holding it."""
     moment = moment or datetime.now(timezone.utc)
     amount = float(pence) if pence is not None else cost(provider, model, input_tokens, output_tokens, tool_calls)
-    period, bid = period_for(moment), str(business_id)
+    period = period_for(moment)
+    platform = business_id is None or str(business_id) == PLATFORM
+    bid = PLATFORM if platform else str(business_id)
     key = f"{purpose}:{brand_id or '-'}:{provider}/{model}"
     _serialise(session)
     before = platform_total(session, period)
-    _add(session, bid, TOTAL, period, amount, moment)
+
+    def add(name, value):
+        if platform:
+            platform_add(session, name, period, value, moment)
+        else:
+            _add(session, bid, name, period, value, moment)
+    add(TOTAL, amount)
     for name, value in ((f"ai_pence:{key}", amount), (f"ai_calls:{key}", 1), (f"ai_tokens_in:{key}", input_tokens),
                         (f"ai_tokens_out:{key}", output_tokens), (f"ai_tools:{key}", tool_calls),
                         (f"ai_estimated:{key}", 1 if estimated else 0)):
         if value:
-            _add(session, bid, name, period, value, moment)
+            add(name, value)
     alarm = os.environ.get("AI_MONTHLY_ALARM_PENCE")
     if alarm and before < float(alarm) <= before + amount:
         _alarm_after_commit(session, period, before + amount, alarm)
+    # PROFIT-1: costs against income, alerted once a month per threshold. In a
+    # savepoint, so a failure here never loses the cost just recorded.
+    # (A connection-level savepoint: a session-level one would fire the
+    # session's after_commit hooks, raising alarms before the real commit.)
+    pending = session.info.get("profit_alerts")
+    queued = len(pending) if pending else 0
+    try:
+        from services import profit_guard
+        with session.connection().begin_nested():
+            profit_guard.check_after_record(session, moment)
+    except Exception:
+        # The savepoint undid the check's writes; undo its queued alerts too
+        # (Codex PROFIT-1 review 1).
+        if session.info.get("profit_alerts"):
+            del session.info["profit_alerts"][queued:]
+        logger.exception("Profit guard check failed after recording an AI cost")
     return amount
 
 
-def allowed(session, *, moment: Optional[datetime] = None) -> bool:
-    """False once the platform's recorded AI spend this month reaches AI_MONTHLY_KILL_PENCE."""
+def allowed(session, *, moment: Optional[datetime] = None, purpose: Optional[str] = None) -> bool:
+    """False once the platform's recorded AI spend this month reaches
+    AI_MONTHLY_KILL_PENCE, or (PROFIT-1) once this month's running costs reach
+    the kill threshold of income, for non-essential purposes. A purpose not
+    given counts as non-essential (fail closed)."""
+    moment = moment or datetime.now(timezone.utc)
+    from services import profit_guard
+    if purpose in profit_guard.ESSENTIAL:
+        return True   # live calls, reply sorting, unsubscribes, the owner's chat: never stopped (PROFIT-1)
     kill = os.environ.get("AI_MONTHLY_KILL_PENCE")
-    if not kill:
-        return True
-    return platform_total(session, period_for(moment or datetime.now(timezone.utc))) < float(kill)
+    if kill and platform_total(session, period_for(moment)) >= float(kill):
+        return False
+    try:
+        with session.connection().begin_nested():
+            return profit_guard.allowed(session, purpose=purpose, moment=moment)
+    except Exception:
+        logger.exception("Profit guard unavailable: non-essential AI held (fail closed)")
+        return purpose in profit_guard.ESSENTIAL
 
 
 @contextmanager

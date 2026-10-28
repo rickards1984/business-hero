@@ -5619,6 +5619,11 @@ from admin_business_api import router as admin_business_router  # noqa: E402
 app.include_router(admin_business_router)
 from admin_outreach_api import router as admin_outreach_router  # noqa: E402
 app.include_router(admin_outreach_router)
+from admin_profit_api import router as admin_profit_router  # noqa: E402
+app.include_router(admin_profit_router)
+# PROFIT-1: every OpenAI text call is recorded in the cost ledger.
+from services.profit_guard import install_openai_hook  # noqa: E402
+install_openai_hook()
 
 
 if __name__ == "__main__":

@@ -968,7 +968,7 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
             session.rollback()
             out["stopped"] = "Another search for this business is running; research carries on in a few minutes"
             break
-        if not ai_costs.allowed(session, moment=moment):
+        if not ai_costs.allowed(session, moment=moment, purpose="research"):
             session.rollback()
             out["stopped"] = "Research is paused: the platform's AI spending limit for the month is reached"
             break

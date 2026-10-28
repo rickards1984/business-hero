@@ -225,6 +225,51 @@ function StripeReconciliationBanner() {
 }
 
 
+// PROFIT-1: this month's running costs against income, the alarm and the kill
+// switch, and which businesses cost more than they pay.
+interface ProfitStatus { period: string; income_pence: number; income_basis: string; percent: number | null;
+  costs: { ai_pence: number; voice_pence: number; fixed_pence: number; total_pence: number };
+  alarm: boolean; kill: boolean; alarm_percent: number; kill_percent: number; note: string;
+  losing: { business_id: string; name: string; pays_pence: number; costs_pence: number; paying: boolean }[] }
+
+function ProfitPanel() {
+  const [status, setStatus] = useState<ProfitStatus | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let mounted = true;
+    const load = () => apiRequest('GET', '/v1/admin/profit').then(r => r.json())
+      .then(d => { if (mounted) { setStatus(d); setFailed(false); } })
+      .catch(() => { if (mounted) setFailed(true); });
+    load();
+    const timer = window.setInterval(load, 60000);   // a stale "healthy" is worse than none (Codex PROFIT-1 review 1)
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, []);
+  const gbp = (p: number) => `£${(p / 100).toFixed(2)}`;
+  if (failed) return <Alert severity="warning" variant="outlined" sx={{ mb: 3, borderRadius: 2 }}>Profit guard unavailable.</Alert>;
+  if (!status) return null;
+  const c = status.costs;
+  return (
+    <Alert severity={status.kill || status.alarm ? 'error' : 'success'} variant={status.kill || status.alarm ? 'filled' : 'outlined'}
+      sx={{ mb: 3, borderRadius: 2, '& .MuiAlert-message': { width: '100%', minWidth: 0 } }} data-testid="profit-guard">
+      <Typography variant="subtitle2">
+        {status.kill ? `Kill switch on: costs have reached ${status.kill_percent}% of income — non-essential AI is paused`
+          : status.alarm ? `Alarm: costs have reached ${status.alarm_percent}% of this month's income`
+          : 'Running costs against income'}
+      </Typography>
+      <Typography variant="body2" sx={{ mt: 0.5 }}>
+        {status.period}: costs {gbp(c.total_pence)} (AI {gbp(c.ai_pence)} · voice {gbp(c.voice_pence)} · fixed {gbp(c.fixed_pence)})
+        {' '}against income {gbp(status.income_pence)} ({status.income_basis}){status.percent !== null ? ` — ${status.percent}%` : ''}.
+        {' '}Alarm at {status.alarm_percent}%, kill switch at {status.kill_percent}%.
+      </Typography>
+      {status.note && <Typography variant="body2" sx={{ mt: 0.5 }}>{status.note}</Typography>}
+      {status.losing.length > 0 && <Typography variant="body2" sx={{ mt: 0.5 }}>
+        Costing more than they pay: {status.losing.map(b => `${b.name} (${gbp(b.costs_pence)} vs ${gbp(b.pays_pence)}${b.paying ? '' : ', not paying yet'})`).join(' · ')}
+      </Typography>}
+    </Alert>
+  );
+}
+
+
 // OUT-19: what outreach costs (every AI call, recorded) against what it earns,
 // per business and brand, so a money-losing account is seen the same day.
 interface EconomicsBrand { id: string; name: string; cost_pence: number; price_pence: number; included: boolean }
@@ -731,6 +776,7 @@ export default function AdminDashboard() {
       <Box component="main" sx={{ flexGrow: 1, minWidth: 0, p: 3, mt: 8, ml: isMobile ? 0 : '240px', overflowX: 'auto' }}>
         <Container maxWidth="xl" sx={{ px: { xs: 1, sm: 2, md: 3 } }}>
           {user && isAdmin && <StripeReconciliationBanner />}
+          {user && isAdmin && <ProfitPanel />}
           {user && isAdmin && <OutreachEconomicsPanel />}
           {error && (
             <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')} data-testid="alert-error">

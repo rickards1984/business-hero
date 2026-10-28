@@ -170,6 +170,21 @@ async def _run_outreach_autopilot_if_due():
     _outreach_autopilot_task = asyncio.create_task(asyncio.to_thread(_run))
 
 
+_last_profit_check = None
+
+
+async def _run_profit_check_if_due():
+    """PROFIT-1: voice minutes or fixed costs can cross a threshold with no
+    AI call to notice it: checked every 15 minutes, off the loop. Never raises."""
+    global _last_profit_check
+    current = datetime.now(timezone.utc)
+    if _last_profit_check and current - _last_profit_check < timedelta(minutes=15):
+        return
+    _last_profit_check = current
+    from services import profit_guard
+    asyncio.create_task(asyncio.to_thread(profit_guard.periodic_check))
+
+
 async def _deliver_metering_notices():
     """BH-012: send pending usage notices every tick, in a worker thread. In a
     thread there is no running event loop, so the WhatsApp send is awaited to
@@ -234,6 +249,11 @@ async def _scheduler_loop():
             await _run_outreach_autopilot_if_due()
         except Exception as e:
             logger.error(f"[Scheduler] Outreach autopilot scheduling failed: {e}")
+
+        try:
+            await _run_profit_check_if_due()
+        except Exception as e:
+            logger.error(f"[Scheduler] Profit check scheduling failed: {e}")
 
         try:
             await _reconcile_stripe_if_due()
@@ -727,7 +747,7 @@ async def _send_daily_pulse(
 
     with get_session_context() as session:
         data = await gather_business_data(session, business_id, period="yesterday")
-    pulse_text = await generate_daily_pulse(business_name, owner_name, data)  # noqa: F841  # TODO(day2): pulse_text generated then discarded; daily should mirror _send_weekly_briefing, which uses its generate_weekly_briefing() output. Live OpenAI cost per run with no output used.
+    pulse_text = await generate_daily_pulse(business_name, owner_name, data, business_id=business_id)  # noqa: F841  # TODO(day2): pulse_text generated then discarded; daily should mirror _send_weekly_briefing, which uses its generate_weekly_briefing() output. Live OpenAI cost per run with no output used.
 
     # Build structured variables for WhatsApp template
     calls = data.get("calls", {})
@@ -916,7 +936,7 @@ async def _send_weekly_briefing(
             session, business_id, period="week", include_previous=True
         )
     briefing_text, action_options, ai_analysis = await generate_weekly_briefing(
-        business_name, owner_name, data, detail_level
+        business_name, owner_name, data, detail_level, business_id=business_id
     )
 
     # Build structured variables for WhatsApp template

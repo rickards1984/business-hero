@@ -5,6 +5,10 @@
 #
 # coverage: FULL
 #
+# 039 (PROFIT-1) is live (Mike, 27 Oct 2026): the four platform_meters rows were added by
+# hand and match production's STEP 2 verification (4 columns, columns 1143 -> 1147). The next
+# regeneration with scripts/dump-live-schema.sql will include them natively.
+#
 # FULL means this file describes every table, so the guard checks every column
 # the backend writes and `test_full_coverage_leaves_nothing_unguarded` requires
 # that nothing is left unchecked. Keep UNGUARDED_BUDGET at 0 while this says
@@ -885,6 +889,10 @@ col   plan_definitions.sort_order integer(32,0) null=NO def=0
 col   plan_definitions.updated_at timestamp with time zone null=NO def=now()
 col   platform_admins.created_at timestamp with time zone null=NO def=now()
 col   platform_admins.user_id uuid null=NO def=-
+col   platform_meters.meter text null=NO def=-
+col   platform_meters.period text null=NO def=-
+col   platform_meters.updated_at timestamp with time zone null=NO def=now()
+col   platform_meters.value numeric(14,4) null=NO def=0
 col   profiles.created_at timestamp with time zone null=YES def=now()
 col   profiles.display_name text null=YES def=-
 col   profiles.full_name text null=YES def=-

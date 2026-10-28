@@ -593,6 +593,11 @@ async def preview_voice(
         voice_id, f"Hello, I'm {voice_id}. This is a preview of how I sound."
     )
 
+    # PROFIT-1: a voice preview is non-essential (live calls are what's
+    # essential): paused at the kill switch. Its cost is recorded by the hook.
+    from services import profit_guard
+    if not profit_guard.permits("voice_preview"):
+        raise HTTPException(status_code=503, detail="Voice previews are paused for now. Live calls are unaffected.")
     try:
         client = _openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""), timeout=30.0, max_retries=1)
         try:
@@ -712,6 +717,11 @@ async def preview_voice_preset(
 
     accent_instructions = get_accent_instructions(accent_name)
 
+    # PROFIT-1: a voice preview is non-essential (live calls are what's
+    # essential): paused at the kill switch. Its cost is recorded by the hook.
+    from services import profit_guard
+    if not profit_guard.permits("voice_preview"):
+        raise HTTPException(status_code=503, detail="Voice previews are paused for now. Live calls are unaffected.")
     try:
         client = _openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""), timeout=30.0, max_retries=1)
         # `gpt-4o-mini-tts` accepts an `instructions` parameter that steers

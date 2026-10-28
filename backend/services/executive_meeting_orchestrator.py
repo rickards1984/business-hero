@@ -90,6 +90,7 @@ async def start_meeting(meeting_id: str, session: Session) -> Dict[str, Any]:
 
     msgs = messages_for_opening(prep_data, settings)
     content, tokens = await _gpt_chat_completion(
+        business_id=str(meeting["business_id"]),
         messages=msgs,
         temperature=0.4,
         max_tokens=MAX_OPENING_TOKENS,
@@ -179,6 +180,7 @@ async def handle_turn(
     )
 
     content, tokens = await _gpt_chat_completion(
+        business_id=business_id,
         messages=msgs,
         temperature=0.4,
         max_tokens=MAX_OUTPUT_TOKENS,
@@ -414,6 +416,7 @@ async def _gpt_chat_completion(
     temperature: float = 0.4,
     max_tokens: int = MAX_OUTPUT_TOKENS,
     response_format: Optional[Dict[str, str]] = None,
+    business_id: Optional[str] = None,
 ) -> tuple[Optional[str], int]:
     """
     Single point of contact with OpenAI. Returns (content, tokens_used).
@@ -422,6 +425,10 @@ async def _gpt_chat_completion(
     Uses EXECUTIVE_MEETING_AI_MODEL env var to pick the model. Set this in
     Railway to override the default (e.g. "gpt-5.5").
     """
+    from services import profit_guard
+    if not profit_guard.permits("meeting"):
+        logger.warning("[ExecMeeting] paused by the profit guard (PROFIT-1)")
+        return None, 0
     client = _get_async_client()
     if client is None:
         logger.error("[ExecMeeting] OPENAI_API_KEY not configured")
@@ -437,7 +444,8 @@ async def _gpt_chat_completion(
         kwargs["response_format"] = response_format
 
     try:
-        response = await client.chat.completions.create(**kwargs)
+        with profit_guard.attributed(business_id, "meeting"):
+            response = await client.chat.completions.create(**kwargs)
     except Exception as exc:
         logger.exception("[ExecMeeting] GPT call failed: %s", exc)
         return None, 0
@@ -464,6 +472,7 @@ async def _run_extraction(
     """Run the extraction GPT call and persist results. Always returns counts."""
     msgs = messages_for_extraction(transcript)
     content, tokens = await _gpt_chat_completion(
+        business_id=business_id,
         messages=msgs,
         temperature=0.1,
         max_tokens=MAX_EXTRACTION_TOKENS,
