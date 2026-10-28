@@ -812,7 +812,24 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
     if not ai_costs.allowed(session):
         session.rollback()
         refuse(503, "Aria's drafting is paused for now. Write this yourself, or try again later.")
-    session.rollback()   # no lock is held while Aria drafts
+    # OUT-19 B: the brand's allowance, with a small reserve for drafting. The
+    # draft's likely cost is HELD under the business lock before Aria starts,
+    # so drafts and research running at once all see it (Codex OUT-19 B+C
+    # review 1), and released when its real cost is recorded.
+    from services import outreach_allowance
+    bid, moment = str(business.id), now()
+    # The request is frozen before its hold is worked out, so the bound and the
+    # call see the same context (Codex OUT-19 B+C review 3).
+    context = json.loads(json.dumps(context, default=str))
+    hold = _draft_hold(draft, context) if brand_id is not None else 0
+    session.rollback()
+    send.lock_business(session, bid) if send.pg(session) else session.execute(
+        text("UPDATE business_settings SET business_id = business_id WHERE business_id = :b"), {"b": bid})
+    if not outreach_allowance.may_draft(session, bid, brand_id, moment, hold):
+        session.rollback()
+        refuse(409, outreach_allowance.DRAFT_ALLOWANCE_USED)
+    outreach_allowance.hold_draft(session, bid, brand_id, moment, hold)
+    session.commit()   # held; no lock is held while Aria drafts
     with ai_costs.collect() as spent:
         failure = None
         try:
@@ -821,17 +838,53 @@ def _ai_draft(session, business, draft: Callable, context: dict, *, brand_id):
             failure = exc
             raise
         finally:
-            if spent:
-                try:
-                    session.rollback()
-                    ai_costs.save(session, str(business.id), spent, purpose="draft", brand_id=brand_id)
-                    session.commit()
-                except Exception:
-                    session.rollback()
-                    logger.exception("Could not record an Aria draft's AI cost for business %s", business.id)
-                    if failure is None:
-                        raise   # never hand out a draft whose cost wasn't recorded
-                    # otherwise the draft's own error propagates
+            try:
+                session.rollback()
+                if send.pg(session):
+                    send.lock_business(session, bid)
+                if spent:
+                    ai_costs.save(session, bid, spent, purpose="draft", brand_id=brand_id)
+                if failure is None or isinstance(failure, ActionRefused):
+                    # Settled: the real cost replaces the hold. A refusal is
+                    # fully accounted too: every provider reported its failure
+                    # and each attempt was recorded (or none was dispatched at
+                    # all), so its hold is released (Codex OUT-19 B+C review 4).
+                    outreach_allowance.hold_draft(session, bid, brand_id, moment, -hold)
+                # Any other failure keeps its hold beside whatever it did
+                # record: an attempt interrupted after dispatch may still have
+                # been billed (fail closed; Codex OUT-19 B+C reviews 2 and 3).
+                if spent and failure is None:
+                    recorded = sum(ai_costs.cost(c["provider"], c["model"], c["input_tokens"], c["output_tokens"],
+                                                 c.get("tool_calls", 0)) for c in spent)
+                    if recorded > hold:
+                        logger.error("An Aria draft for business %s cost %.1fp, over its %sp hold", bid, recorded, hold)
+                session.commit()
+            except Exception:
+                session.rollback()
+                logger.exception("Could not record an Aria draft's AI cost for business %s", business.id)
+                if failure is None:
+                    raise   # never hand out a draft whose cost wasn't recorded
+                # otherwise the draft's own error propagates; its hold stays counted (fail closed)
+
+
+SYSTEM_PROMPT_MAX_CHARS = 8000   # the longest instructions Aria's drafts send (tested)
+# A provider counts a little more than the text itself (roles, message framing):
+# this margin, in tokens, covers it, so reported usage stays within the bound.
+PROVIDER_OVERHEAD_TOKENS = 1000
+MODEL_DRAFTS = None              # set below: the model drafters, whose cost the chain bound covers
+
+
+def _draft_hold(draft: Callable, context: dict) -> int:
+    """What a draft holds against its brand's allowance before Aria starts: for
+    the model drafters, the provider chain's worst case for this context, so
+    the real cost stays within it unless a provider bills more than the text it
+    was sent plus framing (logged); for any other drafter, the configured
+    hold."""
+    from services import outreach_allowance
+    if draft in MODEL_DRAFTS:
+        chars = SYSTEM_PROMPT_MAX_CHARS + len(json.dumps(context, default=str)) + PROVIDER_OVERHEAD_TOKENS
+        return max(1, ai_router.chat_bound_pence(chars, DRAFT_MAX_TOKENS, "draft"))
+    return outreach_allowance.draft_hold_pence()
 
 
 def model_draft_audience(context: dict) -> dict:
@@ -986,6 +1039,9 @@ def _insert_steps(session, bid: str, campaign_id: str, sequence_version: int, em
                     sequence_version=sequence_version, ordinal=ordinal, delay_business_days=delay,
                     template_text=envelope, template_hash=hashlib.sha256(envelope.encode()).hexdigest(),
                     allowed_variables=[])
+
+
+MODEL_DRAFTS = (model_draft_audience, model_draft_notice, model_draft_emails, model_redraft_emails)
 
 
 def create_first_campaign(session, business, user, data: dict, *, draft: Callable = model_draft_emails) -> dict:

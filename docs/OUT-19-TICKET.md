@@ -69,8 +69,55 @@
 - When it is reached, research stops until next month or a top-up. Drafting replies continues within a small reserve, so conversations are never stranded.
 - This replaces today's owner-set £20+ research budget as the hard ceiling. The owner's budget (C) can only lower it.
 
+**Decided (Mike, 27 Oct 2026: "Go with the recommendations. We can always review this when live"):**
+- **The allowance is 25% of what the brand pays:**
+  - the Pro add-on, £99 → **£24.75** a month;
+  - an extra brand, £79 → **£19.75**;
+  - a Business plan's included brand → a fixed **£20**.
+
+  A top-up (F) adds a third of its price to that brand's allowance for that month.
+- **All of a brand's AI spend counts:** research, Aria's drafting and reply sorting, from the OUT-19 cost ledger. Research reservations in flight count too.
+- **At the allowance:**
+  - research makes no further paid search until next month or a top-up, and says so with the top-up option;
+  - Aria's drafting carries on within a small reserve (`DRAFT_RESERVE_PENCE`, £3), then asks the owner to top up or write it themselves;
+  - **reply sorting never stops:** an unsubscribe must always be understood. Its cost is still recorded.
+- **The owner's research budget can only lower the allowance,** never raise it.
+- **The owner sees how much of the allowance is used, as a percentage, not the figure.** Mike sees the figures in the admin economics panel.
+
 ### C — The owner's monthly budget
 - A single £ figure for add-on brands and top-ups. Aria suggests a realistic amount from the brands, inboxes and warm-up stages. Nothing is charged beyond it.
+
+**Decided (Mike, 27 Oct 2026):**
+- **The budget** is one £ figure a month for what outreach may charge beyond the plan: paid brands and top-ups.
+- **Aria's suggestion:** each paid brand's price plus room for one £25 top-up per brand.
+- **Only the active owner sets it,** and never below what is already committed (the paid brands).
+- **Every future charge** (an extra brand, a top-up: part F) must pass `can_charge`. With no budget set, nothing beyond what's already committed is charged until the owner chooses one; Aria's suggestion is one tap.
+
+**Tests first:** `backend/tests/test_outreach_allowance.py`, 16 tests, strict xfail until Mike approves. **Mike approved them on 27 Oct 2026**, with one condition: "as long as we are always looking at a net profit for all transactions". PROFIT-1, below, is proposed to cover the rest of the platform.
+
+**Codex review 1 (`audits/OUT-19-BC-CODEX-REVIEW-1.md`, 1 × P1):**
+- **Drafts are held before Aria starts.** A draft's likely cost (`OUTREACH_DRAFT_HOLD_PENCE`, 50p) is held under the business lock before Aria starts, so drafts and research running at once all see it. It is released when the real cost is recorded; a failed recording leaves it counted (fail closed).
+- **Legacy research spend counts.** Spend on the business-wide research meter from before OUT-18 counts against every brand.
+- **Meter names are matched literally,** with `_` escaped.
+- **No top-up offers yet.** Messages no longer offer top-ups before part F exists.
+- **Reply sorting is tested behaviourally** above the allowance.
+- **Still for part F:** combining `can_charge` with a durable charge reservation under one lock. Today it is a predicate only.
+
+**Codex review 2 (`audits/OUT-19-BC-CODEX-REVIEW-2.md`, P1 not closed) → fixed:**
+- **The hold is the true worst case.** For Aria's real drafters, a draft's hold is `ai_router.chat_bound_pence`: the whole provider chain's worst case for that request (every provider tried, every character a token, the full output, at the highest rate), as `json_chat` charges a failed attempt. So what a draft records stays within its hold, and overlapping drafts stay within the allowance plus the £3 reserve. The exception is a provider billing more than the text it was sent plus framing; that is logged and stated below as a residual risk.
+- **The instructions are bounded.** Aria's instructions are tested to fit `SYSTEM_PROMPT_MAX_CHARS`.
+- **Unknown failures stay held.** A draft that fails without reporting its usage keeps its hold (it may have been billed).
+- **The tests discriminate.** They use deliberately expensive prices, so a fixed hold fails them. Reply sorting above the allowance is shown to still record its cost.
+
+**Codex review 3 (`audits/OUT-19-BC-CODEX-REVIEW-3.md`, the third cycle, P1 still open on two narrower points) → fixed. A further review is Mike's call:**
+- **Only a successful draft releases its hold.** A draft that fails keeps its whole hold beside whatever it recorded: an attempt interrupted after dispatch may have been billed.
+- **The bound covers message framing.** It adds `PROVIDER_OVERHEAD_TOKENS` for the tokens a provider counts beyond the text. A draft that ever records more than its hold is logged as an error.
+- **The request is frozen** before its hold is worked out, so the bound and the call see the same context.
+- **Residual risk:** a provider billing far more input tokens than the text it was sent. That's not seen in practice; the allowance still stops all further spend once it's reached.
+
+**Codex review 4 (`audits/OUT-19-BC-CODEX-REVIEW-4.md`, authorised by Mike).** The P1 is closed; Codex accepts the residual risk, since the allowance is a quarter of the price. It does not on its own prove "always a net profit" for the whole platform; PROFIT-1 covers that. Two P2s are fixed:
+- **A refusal releases its hold.** Every provider reported its failure and each attempt was recorded, or none was dispatched (all down), so the accounting is complete. An outage's retries never use up the brand's month.
+- **The framing-margin test now sits at the boundary:** one provider, the longest instructions, the full output. It fails without the margin.
 
 ### D — Research sized to sending capacity (decision 1)
 Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/test_outreach_research_capacity.py`.

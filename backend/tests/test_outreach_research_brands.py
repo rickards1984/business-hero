@@ -8,6 +8,7 @@ Every adapter is faked; no network or model call happens here.
 # ruff: noqa: F811 - pytest fixtures imported from test_outreach_setup are parameters by design
 
 import json
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import text
@@ -46,6 +47,10 @@ def _second_brand(db, biz, *, name="FitFutures", enabled=True, cap=2000, inbox=T
                                               "segments": ["gym"], "regions": ["Kent"]}, draft=draft_lia)
         m.approve_audience(s, biz, OWNER, lia["id"], {})
         research().configure(s, biz, OWNER, {"brand_id": brand["id"], "enabled": enabled, "monthly_cap_pence": cap})
+        # Made after the first brand: the fixtures share one pinned clock, and brand order sets prices (OUT-19 B).
+        s.execute(text("UPDATE outreach_brands SET created_at = :t WHERE id = :b"),
+                  {"t": (NOW - timedelta(minutes=30)).isoformat(), "b": brand["id"]})
+        s.commit()
     if inbox:
         from test_outreach_research import full_inbox, own_inbox
         full_inbox(db, own_inbox(db, brand, lia, address=f"hello@{name.lower()}.example"))
@@ -199,7 +204,9 @@ def test_legacy_business_spend_this_month_counts_against_every_brand(db):
                        "(:b, 'outreach_research_pence', '2026-10', 1995, :at)"), {"b": A, "at": NOW.isoformat()})
     for target in (lia, fit_lia):
         world = World([[person(1)]])
-        assert "budget" in run(db, biz, target, world)["stopped"] and world.briefs == []
+        stopped = run(db, biz, target, world)["stopped"]
+        # Stopped by the research budget or, since OUT-19 B, the brand's allowance (which counts this too).
+        assert ("budget" in stopped or "allowance" in stopped) and world.briefs == []
 
 
 def test_a_legacy_business_setting_becomes_each_brand_starting_value_never_below_twenty(db):

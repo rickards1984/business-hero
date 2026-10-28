@@ -246,6 +246,20 @@ def json_chat(system: str, context, *, purpose: str, max_tokens: int) -> dict:
     raise AllProvidersFailed("No AI provider could serve this" + (f" (tried {', '.join(tried)})" if tried else ""))
 
 
+def chat_bound_pence(chars: int, max_tokens: int, purpose: str) -> int:
+    """The most one json_chat can cost over the WHOLE chain for `purpose`:
+    every provider tried and failing at its worst (every character a token,
+    the full output, at its highest rate), as json_chat itself charges an
+    attempt without reported usage. Providers cooling down count too: a
+    cooldown can end mid-call. A hold of this size bounds a draft's real cost
+    (Codex OUT-19 B+C review 2)."""
+    total = 0.0
+    for provider, model in chain(purpose, include_down=True):
+        p_in, p_out, _ = ai_costs.price_max(provider, model)
+        total += (chars * p_in + max_tokens * p_out) / 1_000_000
+    return int(-(-total // 1))
+
+
 # ------------------------------------------------------------ research ---
 
 def max_search_pence(provider: str, model: str) -> int:

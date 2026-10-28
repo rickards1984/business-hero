@@ -947,7 +947,7 @@ export function CopyCampaign({ businessId, campaignId }: { businessId: string; c
 
 // ---------------------------------------------------- OUT-10: research ---
 
-interface BrandResearch { brand_id: string; name: string; enabled: boolean; monthly_cap_pence: number; spent_pence: number; paused_reason?: string | null; lessons: string[] }
+interface BrandResearch { brand_id: string; name: string; enabled: boolean; monthly_cap_pence: number; spent_pence: number; paused_reason?: string | null; lessons: string[]; allowance_used_percent?: number }
 interface ResearchStatus { brands: BrandResearch[]; enabled: boolean; daily_target_per_brand: number; min_cap_pence: number; last_run?: string | null; summary?: string | null }
 
 export function useResearchStatus(businessId: string) {
@@ -973,13 +973,51 @@ export function ResearchPanel({ businessId }: { businessId: string }) {
       <Stack spacing={1.5}>
         <Typography variant="h6">Research</Typography>
         <Typography variant="body2">
-          Each weekday morning Aria looks for up to {data.daily_target_per_brand} new contacts for each brand, at least
-          10 of them named decision-makers, and checks every one before it's kept: the email is on their website, the
+          Each weekday morning Aria looks for as many new contacts as each brand's inbox can email that day (up to
+          {data.daily_target_per_brand}, mostly named decision-makers), and checks every one before it's kept: the email is on their website, the
           domain receives mail, the company is registered at Companies House, and they haven't been contacted or opted out.
         </Typography>
         {data.summary && <Alert severity="info" icon={false}><strong>Latest:</strong> {data.summary}</Alert>}
         {data.brands.length === 0 && <Typography variant="body2">Add a brand in setup to start research.</Typography>}
         {data.brands.map(b => <BrandResearchCard key={b.brand_id} businessId={businessId} brand={b} minCap={data.min_cap_pence} />)}
+        <OutreachBudget businessId={businessId} />
+      </Stack>
+    </Paper>
+  );
+}
+
+// OUT-19 C: one monthly figure for what outreach may charge beyond the plan.
+interface BudgetStatus { budget_pence: number | null; committed_pence: number; suggested_pence: number }
+function OutreachBudget({ businessId }: { businessId: string }) {
+  const client = useQueryClient();
+  const api = useCall(businessId);
+  const q = useQuery<BudgetStatus>({ queryKey: ['outreach-budget', businessId], retry: false, staleTime: 30000,
+    queryFn: async () => (await apiRequest('GET', setupPath('budget'))).json() });
+  const [value, setValue] = useState('');
+  if (!q.data) return null;
+  const b = q.data;
+  const pounds = (p: number) => `£${(p / 100).toFixed(2)}`;
+  async function save(pence: number) {
+    if (await api.call('PUT', 'budget', { monthly_pence: pence })) {
+      setValue('');
+      client.invalidateQueries({ queryKey: ['outreach-budget', businessId] });
+    }
+  }
+  return (
+    <Paper variant="outlined" sx={{ p: 1.5 }}>
+      <Stack spacing={1}>
+        <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>Your monthly outreach budget</Typography>
+        <Typography variant="body2">
+          The most outreach may charge each month beyond your plan, for extra brands and top-ups. Nothing is charged beyond it.
+          Your outreach brands' monthly prices come to {pounds(b.committed_pence)}; the budget can't be lower than that.
+        </Typography>
+        <Typography variant="body2">{b.budget_pence === null ? 'No budget set yet.' : <>Your budget: <strong>{pounds(b.budget_pence)}</strong> a month.</>}</Typography>
+        <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="center">
+          <Button variant="outlined" disabled={api.busy} onClick={() => save(b.suggested_pence)}>Use Aria's suggestion: {pounds(b.suggested_pence)}</Button>
+          <TextField size="small" label="Or your own (£)" type="number" value={value} onChange={e => setValue(e.target.value)} sx={{ width: 160 }} />
+          <Button disabled={api.busy || !value} onClick={() => save(Math.round(Number(value) * 100))}>Save</Button>
+        </Stack>
+        {api.error && <Alert severity="error">{api.error}</Alert>}
       </Stack>
     </Paper>
   );
@@ -1002,6 +1040,9 @@ function BrandResearchCard({ businessId, brand, minCap }: { businessId: string; 
       <Stack spacing={1.25}>
         <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{brand.name}</Typography>
         {brand.paused_reason && <Alert severity="warning">Paused: {brand.paused_reason}</Alert>}
+        {typeof brand.allowance_used_percent === 'number' && (brand.allowance_used_percent >= 100
+          ? <Alert severity="warning">This brand's AI allowance for the month is used, so research has stopped until next month. Top-ups are coming soon.</Alert>
+          : <Typography variant="body2">AI allowance this month: {brand.allowance_used_percent}% used.</Typography>)}
         <FormControlLabel control={<Checkbox checked={brand.enabled} disabled={api.busy}
           onChange={(_, v) => save('research', { enabled: v })} />} label={`Aria researches new contacts for ${brand.name} each weekday`} />
         <Typography variant="body2">This month: {pounds(brand.spent_pence)} of {pounds(brand.monthly_cap_pence)}. Research for {brand.name} pauses when its budget is reached.</Typography>

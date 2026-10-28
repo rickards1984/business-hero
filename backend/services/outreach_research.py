@@ -188,6 +188,7 @@ def save_lessons(session, business, user, notes: list, *, brand_id) -> dict:
 
 
 def status(session, business) -> dict:
+    from services import outreach_allowance
     bid = str(business.id)
     cfg = _config(_doc(session, bid))
     moment = now()
@@ -197,6 +198,8 @@ def status(session, business) -> dict:
         brands.append({"brand_id": str(brand["id"]), "name": brand["name"], "enabled": b["enabled"],
                        "monthly_cap_pence": b["monthly_cap_pence"], "spent_pence": _spent(session, bid, moment, brand["id"]),
                        "paused_reason": b.get("paused_reason"), "lessons": b["lessons"],
+                       # OUT-19 B: how much of the hidden allowance is used, never the figure
+                       "allowance_used_percent": outreach_allowance.used_percent(session, bid, brand["id"], moment),
                        "lessons_from_results": lessons(session, business, brand["id"])[:10]})
     session.rollback()
     return {"brands": brands, "enabled": any(b["enabled"] for b in brands),
@@ -389,9 +392,13 @@ def _spent(session, bid: str, moment: datetime, brand_id) -> int:
 
 def _spend(session, bid: str, moment: datetime, pence: int, brand_id) -> None:
     """Add (or, to settle a reservation, subtract) one brand's spend this month."""
+    _add_meter(session, bid, meter_for(brand_id), moment, pence)
+
+
+def _add_meter(session, bid: str, meter: str, moment: datetime, pence: int) -> None:
     if pence == 0:
         return
-    params = {"b": bid, "m": meter_for(brand_id), "p": period_for(moment), "v": int(pence), "at": moment}
+    params = {"b": bid, "m": meter, "p": period_for(moment), "v": int(pence), "at": moment}
     updated = session.execute(text("UPDATE usage_meters SET value = value + :v, updated_at = :at "
                                    "WHERE business_id = :b AND meter = :m AND period = :p"), params)
     if not updated.rowcount:
@@ -980,6 +987,14 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
             # reserved or spent (Codex OUT-19 H review 1).
             session.rollback()
             out["stopped"] = "Research is paused: no AI provider is available"
+            break
+        # OUT-19 B: the brand's AI allowance (a quarter of what it pays) is the
+        # hard ceiling, across all its AI spend; the owner's budget below can
+        # only lower it.
+        from services import outreach_allowance
+        if not outreach_allowance.may_research(session, bid, brand_id, moment, reserve):
+            out["stopped"] = outreach_allowance.ALLOWANCE_USED
+            session.rollback()
             break
         b = _brand_config(_config(_doc(session, bid)), brand_id)
         if not b["enabled"] or _spent(session, bid, moment, brand_id) + reserve > int(b["monthly_cap_pence"]):
