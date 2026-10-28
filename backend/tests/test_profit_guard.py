@@ -662,3 +662,17 @@ def test_the_estimate_counts_tools_and_the_models_own_output_maximum():
     without = g._request_estimate({"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}]})
     assert with_tools[0] > without[0] + 100000
     assert with_tools[1] == 128000 and g._request_estimate({"model": "gpt-4o-mini", "messages": []})[1] == 16384
+
+
+
+def test_before_launch_the_trial_budget_is_a_floor_a_small_subscription_never_replaces(engine, monkeypatch):
+    """Seen 28 Oct 2026: Mike's own Pro subscription (£129) displaced his £200
+    trial budget, and fixed costs alone raised the alarm."""
+    business(engine, "mike", "pro")
+    monkeypatch.setenv("PROFIT_TRIAL_BUDGET_PENCE", "20000")
+    monkeypatch.setenv("PLATFORM_FIXED_COSTS_PENCE", "8500")
+    out = status(engine)
+    assert out["income_pence"] == 20000 and out["income_basis"] == "trial budget"
+    assert out["percent"] == 42
+    monkeypatch.setenv("PROFIT_TRIAL_BUDGET_PENCE", "5000")      # subscriptions now larger: they count
+    assert status(engine)["income_pence"] == 12900 and status(engine)["income_basis"] == "subscriptions"
