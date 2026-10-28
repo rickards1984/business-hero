@@ -73,8 +73,62 @@
 - A single £ figure for add-on brands and top-ups. Aria suggests a realistic amount from the brands, inboxes and warm-up stages. Nothing is charged beyond it.
 
 ### D — Research sized to sending capacity (decision 1)
+Built on branch `ticket/OUT-19-D-research-capacity`; tests in `backend/tests/test_outreach_research_capacity.py`.
+
+- **Room per search.** Before each paid search, and again under the lock before anything is stored, research works out how many new contacts the brand can email for the first time today:
+  - **what can be sent today** = the smallest of:
+    - the brand's 20 (or the owner's lower cap);
+    - each campaign's cap;
+    - each campaign mailbox's warm-up limit, the same number the send path enforces (`metering.mailbox_daily_cap`, asserted equal inside `reserve_outreach_usage`). An inbox shared by two brands is counted once.
+  - **minus what is already spoken for:**
+    - sends made or held today;
+    - follow-ups due by the end of today;
+    - contacts waiting for their first email (enrolled and not sent, or found today and not enrolled).
+  - Never above 20 and never below 0. Once follow-ups run, this settles at about a third of the inbox's limit.
+- **No room, no search.** A brand with no ready campaign on a healthy inbox, or a full inbox, makes no paid search, and the summary says why.
+- **The brief** asks for some spare (up to twice the room, at most 5 extra), since verification turns some candidates away. Only the room is kept, and the "at least N named decision-makers" requirement scales with it.
+- **Codex review 1 (`audits/OUT-19-D-CODEX-REVIEW-1.md`, 5 × P1) → redesigned.**
+  - Each contact kept takes a place in a campaign **for its audience**, enrolled in the same locked transaction that stores it, so retries, other audiences and other brands always see the places already taken.
+  - Today's use is counted whatever the campaign's state now. An email already being sent counts once, as a send.
+  - The room is checked under the same lock as the spend reservation.
+  - Only one paid search runs per business at a time; a second run waits and pays nothing. The claim expires after 10 minutes if a run dies.
+  - Manual enrolment reads the same pilot setting.
+- **Codex review 2 (`audits/OUT-19-D-CODEX-REVIEW-2.md`, 2 × P1).**
+  - A contact is kept only with a campaign place; one that cannot join is not collected.
+  - Contacts held for review use today's room, counted from the database, so later attempts and runs see them.
+  - The search claim runs on the real clock. Its owner renews it before each paid search and before storing; a run that lost it stops and never takes it back.
+  - Whatever fails, the claim is released.
+- **Codex review 3 (`audits/OUT-19-D-CODEX-REVIEW-3.md`, 1 × P1).** Contacts held for review, from every brand, now use the inbox of a ready campaign for their audience, so a brand sharing that inbox sees them too. Its regression test is `test_reviews_use_a_shared_inbox_for_every_brand_on_it`. Three cycles are done, so a further review is Mike's call.
+- **Codex review 4 (`audits/OUT-19-D-CODEX-REVIEW-4.md`, Mike authorised it beyond three cycles, 1 × P1).**
+  - A contact held for review also takes its campaign's place, both the campaign's daily cap and its pilot places, each counted once.
+  - Test setup now runs on a clock an hour before the pinned research time, instead of the real one. A real clock past the pinned time had made audience approvals read as out of date.
+- **Codex review 5 (`audits/OUT-19-D-CODEX-REVIEW-5.md`, no P1s, 1 × P2).** The research run in tests now also uses the pinned clock (`run_clock()`), so the suites pass at any real time of day. They were checked with the clock faked to 00:59, 06:00, 07:45 and 23:30 UTC.
+- **Pilot limit (OUT-10 decision E).** It stays at 5 active contacts per campaign for the first week of the restart, so research also keeps no more than can join a campaign. `OUTREACH_PILOT_ENROLMENTS` raises it without a deploy; `0` lifts it, leaving the inbox's capacity to decide. Before lifting it, index `prepare`'s scan of open cards (OUT-8 ticket, note 2).
 
 ### E — Replies outside the cold cap, with the over-ceiling choices (decision 2)
+Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are in `backend/tests/test_outreach_replies_ceiling.py`.
+
+- **Sending (`metering.reserve_outreach_usage`).**
+  - A reply (a `bespoke` message) skips every cold limit: the campaign's cap, the brand's 20, the monthly allowance and the inbox's warm-up limit.
+  - Replies count only against the inbox's safety ceiling, `reply_ceiling(cap)` = the warm-up limit + 20, never above 70. The ceiling also binds cold emails, so an inbox never sends more than it in a day.
+  - Cold limits are counted from the usage events without replies. An email whose kind is unknown counts as cold.
+- **Research (D).** Replies never reduce the room for new contacts.
+- **The owner's three choices.**
+  - `GET /v1/outreach/inboxes/headroom` lists each campaign inbox's room today. The inbox is flagged near the ceiling at 5 or fewer left.
+  - The banner on the home page and the Outreach replies page offers:
+    1. **I'll reply myself.** Each reply card shows **Aria's briefing** (`GET /v1/outreach/replies/{id}/brief`, owner only): who wrote, what they asked, her suggested answer and the approved facts behind it, with copy buttons. "I'll handle this" then stops her following up.
+    2. **Add a second inbox**, through setup.
+    3. **Boost this inbox**, shown but disabled until part G exists.
+- **Codex review 1 (`audits/OUT-19-E-CODEX-REVIEW-1.md`, 2 × P1).**
+  - The briefing offers Aria's suggested answer only if it still rests on today's approved facts for the matched campaign's brand; otherwise it says why.
+  - Both new reads pass the canonical outreach feature gate. The briefing is reply history, so it survives a downgrade like other reply reads; headroom needs full access.
+  - Past the contact's retention date, the briefing withholds their details and message.
+  - Headroom says when an inbox can't send today, because it isn't passing its checks or today's check hasn't run.
+  - Tests now isolate the inbox's warm-up limit, and cover kinds that are unknown (NULL) or unrecognised, and held and unknown outcomes.
+  - The wording no longer promises every reply gets answered. Boost is labelled "coming later", a missing suggestion gives its real reason, and fact sources are shown.
+- **Codex review 2 (`audits/OUT-19-E-CODEX-REVIEW-2.md`, no P1s, 1 × P2).**
+  - The retention notice now says the details are withheld from the briefing, not that they're deleted.
+  - Backlog done: headroom ignores a health check dated in the future, as the send path does, and new tests show neither the briefing nor headroom reaches another business.
 
 ### F — Stripe: extra brands as subscription items, top-ups and boosts as one-off payments (decisions 3–4)
 - Entitlement checks follow the existing webhook rules (BH-006).

@@ -13,6 +13,14 @@ from test_outreach_setup import A, db  # noqa: F401
 from test_outreach_research import World, gatekeeper, person, run_clock, started
 
 
+@pytest.fixture(autouse=True)
+def no_pilot_limit(monkeypatch):
+    """Research here is about cost and routing: OUT-10's pilot enrolment
+    limit is lifted (test_outreach_research_capacity tests it)."""
+    monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", "0")
+
+
+
 def counts(db):
     with db.connect() as c:
         return tuple(c.execute(text(f"SELECT count(*) FROM {t}")).scalar()
