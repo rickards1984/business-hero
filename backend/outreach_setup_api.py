@@ -259,7 +259,7 @@ class TopUp(Body):
 def _return_url(request: Request) -> str:
     from app.billing.config import get_stripe_config
     base = (get_stripe_config().get("app_base_url") or str(request.base_url)).rstrip("/")
-    return f"{base}/app/outreach/research"
+    return f"{base}/app/outreach/settings"     # the research panel (and its billing) lives there
 
 
 @router.get("/billing")

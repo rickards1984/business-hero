@@ -183,6 +183,10 @@ async def _run_profit_check_if_due():
     _last_profit_check = current
     from services import profit_guard
     asyncio.create_task(asyncio.to_thread(profit_guard.periodic_check))
+    # OUT-19 F: brand changes and top-ups Stripe didn't confirm are checked
+    # with Stripe on the same 15-minute beat (never raises).
+    from services import outreach_billing
+    asyncio.create_task(asyncio.to_thread(outreach_billing.scheduled_check))
 
 
 async def _deliver_metering_notices():

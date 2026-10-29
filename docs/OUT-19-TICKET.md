@@ -197,7 +197,7 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
 
 **Mike sets these in Stripe and Railway:**
 - two recurring prices: "Extra brand £79/month" (`STRIPE_PRICE_EXTRA_BRAND`) and "Outreach add-on £99/month" (`STRIPE_PRICE_OUTREACH_ADDON`);
-- the webhook events `payment_intent.succeeded` and `payment_intent.payment_failed`.
+- the webhook events `payment_intent.succeeded`, `payment_intent.payment_failed`, `checkout.session.expired`, `customer.subscription.updated` and `invoice.paid` (the last two are usually already on).
 
 **Tests first:** `backend/tests/test_outreach_billing.py`, strict xfail until Mike approves. **Mike approved them on 29 Oct 2026.**
 
@@ -206,18 +206,40 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
   - `GET /v1/outreach/setup/billing`;
   - `POST` and `DELETE /v1/outreach/setup/brands/{id}/billing`;
   - `POST /v1/outreach/setup/topups`, rate limited.
-- **The webhook** hands subscription events to `apply_subscription`, and `payment_intent.succeeded` / `payment_intent.payment_failed` to `apply_payment_intent`, in its own transaction.
+- **The webhook** hands every event to `outreach_billing.webhook`, inside its retry boundary: a failure returns 503 and Stripe retries. A business with no outreach billing is untouched.
 - **Billing switches on only once both Stripe price IDs are set.** Until then a new brand changes nothing.
 - **The gates:**
   - research (`run`) and cold sending (`reserve_outreach_usage`, inside `if not reply`) refuse a brand awaiting payment;
   - the budget's committed total counts brands that are charged or pending, plus top-ups reserved but not yet confirmed.
-- **The `complimentary` flag** (with `outreach_brands_free`) means the profit guard counts the business as £0 income. Both flags are known metadata keys in `auth`.
+- **Two separate flags,** both known metadata keys in `auth`:
+  - `outreach_brands_free`: every brand of the business is live with no brand billing. It does **not** change the profit guard's income;
+  - `complimentary`: the profit guard counts the business as £0 income (it pays nothing). MSC and New Body, free permanently with every feature, need both.
 - **Screens.** On each brand's research card:
   - "Add for £79/month" (or £99);
   - "Waiting for Stripe…";
   - the £10, £25 and £50 top-ups. When the bank asks for 3-D Secure, the owner goes to Stripe's page;
   - "Stop paying for this brand", with a confirmation.
 
+
+**Codex review 1 (`audits/OUT-19-F-CODEX-REVIEW-1.md`, 7 × P1, 5 × P2) → reworked around two principles:**
+- **Durable operations.** Every brand change and top-up has an identity saved before Stripe is called and reused as Stripe's idempotency key. An outcome Stripe didn't confirm (a timeout, a 5xx) is kept as `uncertain` and checked later, never assumed to have failed. A retry reuses the identity, so it can't charge twice.
+- **Stripe is the truth.** `reconcile()` fetches the subscription as Stripe has it now; an event's own copy, which may be old, is never trusted. It runs on every subscription or invoice event and every 15 minutes (`scheduled_check`, alongside the profit check).
+- **The findings, one by one:**
+  1. Webhooks for businesses without outreach: the lock is the `business_settings` row, and the billing call is inside the webhook's 503 boundary.
+  2. Uncertain outcomes are kept and checked, as above.
+  3. Each top-up is keyed by its own reservation (in Stripe's metadata), so a payment releases only its own.
+  4. 3-D Secure: the off-session attempt is cancelled, and the hosted page keeps the reservation until it is paid or `checkout.session.expired` arrives.
+  5. Races: one subscription operation at a time per business (a claim), no change while Stripe has an unpaid update waiting, and quantities set to an absolute number (the brands being paid for), never +1/−1.
+  6. Stale events: see "Stripe is the truth".
+  7. A top-up is credited only when the payment is the business's own Stripe customer, in pounds, one of the three sizes, for one of its brands; once, by a durable per-payment row.
+  - P2s: a stopped brand stops counting in the budget once its paid month ends; an addition whose invoice was never paid goes back to "awaiting payment" after an hour, with a note; billing needs both prices; Stripe returns the owner to the settings tab; the flag mismatch (above).
+- **Screens:** the billing card checks every 10 seconds while a payment is being confirmed, and shows why a payment didn't go through.
+- **The webhook's order.** Outreach billing runs first, before the handler writes the business row. The owner's billing actions lock `business_settings` and then `businesses`, so the webhook takes them in the same order and holds no row lock while it asks Stripe. Today's raw-SQL reads don't autoflush the business write, so the old order didn't actually deadlock; the new order makes that safe by construction.
+- **Tests:**
+  - `test_outreach_billing.py` has 53 tests on a stateful fake Stripe. Eight mutations, one per fix, are each caught.
+  - `test_outreach_billing_pg.py` runs through the real webhook endpoint on PostgreSQL: an ordinary customer's event is accepted without asking Stripe; a brand goes live; Stripe being down gives a 503 with nothing kept; a top-up is credited once; and the lock order holds while the owner holds the lock.
+  - Fixed in passing: that test and PROFIT-1's race test both polled `pg_stat_activity` inside one transaction, which is one snapshot, so they failed now and then when run together. They now take a fresh snapshot each poll: 12 of 12 clean, against 2 failures in 8 before.
+- **Backlog (Codex):** revenue reporting from real Stripe amounts (PROFIT-2).
 
 ### G — Boost eligibility and steps (decision 5)
 

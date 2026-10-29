@@ -987,12 +987,14 @@ export function ResearchPanel({ businessId }: { businessId: string }) {
 }
 
 // OUT-19 F: paying for a brand, top-ups and stopping a brand's billing.
-interface BillingRow { brand_id: string; billing: string; price_pence: number; live: boolean; ends_at?: string | null }
+interface BillingRow { brand_id: string; billing: string; price_pence: number; live: boolean; ends_at?: string | null; note?: string | null }
 function BrandBilling({ businessId, brandId, brandName }: { businessId: string; brandId: string; brandName: string }) {
   const client = useQueryClient();
   const api = useCall(businessId);
   const q = useQuery<{ brands: BillingRow[]; topup_sizes: number[] }>({ queryKey: ['outreach-billing', businessId], retry: false,
-    staleTime: 15000, queryFn: async () => (await apiRequest('GET', setupPath('billing'))).json() });
+    staleTime: 15000, queryFn: async () => (await apiRequest('GET', setupPath('billing'))).json(),
+    // while Stripe is confirming a payment, check every 10 seconds so the brand goes live on screen
+    refetchInterval: query => (query.state.data?.brands.some(b => b.billing === 'pending') ? 10000 : false) });
   const [note, setNote] = useState('');
   const [confirmStop, setConfirmStop] = useState(false);
   const row = q.data?.brands.find(b => b.brand_id === brandId);
@@ -1026,7 +1028,7 @@ function BrandBilling({ businessId, brandId, brandName }: { businessId: string; 
     <Stack spacing={1}>
       {row.billing === 'awaiting_payment' && <Alert severity="info" action={
         <Button size="small" variant="contained" disabled={api.busy} onClick={pay}>Add for {pounds(row.price_pence)}/month</Button>}>
-        {brandName} costs {pounds(row.price_pence)} a month. It's added to your subscription now (charged pro-rata for the rest of this month) and goes live once paid.
+        {row.note ? `${row.note} ` : ''}{brandName} costs {pounds(row.price_pence)} a month. It's added to your subscription now (charged pro-rata for the rest of this month) and goes live once paid.
       </Alert>}
       {row.billing === 'pending' && <Alert severity="info">Waiting for Stripe to confirm the payment for {brandName}…</Alert>}
       {row.billing === 'ending' && <Alert severity="warning">Billing stopped: {brandName} stays live until {row.ends_at ? new Date(row.ends_at).toLocaleDateString('en-GB') : 'the end of the month'}.</Alert>}

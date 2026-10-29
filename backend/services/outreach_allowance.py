@@ -141,7 +141,7 @@ def _committed(session, bid: str, moment: datetime) -> int:
     # OUT-19 F: brands still awaiting payment, and a free business's brands,
     # charge nothing; top-ups reserved but not yet confirmed already count.
     from services import outreach_billing
-    paid = outreach_billing.charged_brand_pence(session, bid) + outreach_billing.pending_topup_pence(session, bid, moment)
+    paid = outreach_billing.charged_brand_pence(session, bid, moment) + outreach_billing.pending_topup_pence(session, bid, moment)
     topups = float(session.execute(text(
         "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND period = :p AND meter LIKE :m ESCAPE '\\'"),
         {"b": bid, "p": period_for(moment), "m": _like(f"{TOPUP_METER}:") + "%"}).scalar() or 0)
