@@ -180,6 +180,27 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
 ### F — Stripe: extra brands as subscription items, top-ups and boosts as one-off payments (decisions 3–4)
 - Entitlement checks follow the existing webhook rules (BH-006).
 
+**Decided (Mike, 29 Oct 2026: "Go with recommendations ... they also protect expenditure vs income"):**
+1. **A new paid brand is charged straight away.** It's added to the customer's existing Stripe subscription as an item, pro-rata for the rest of the month (`proration_behavior=always_invoice`), then billed with the plan each month.
+2. **It goes live only once Stripe confirms the payment.**
+   - `payment_behavior=pending_if_incomplete`: the subscription changes only when the invoice is paid, and the webhook then shows the new quantity.
+   - Until then the brand can be set up, but research and cold sending are off. Replies are never stopped.
+3. **Top-ups (£10, £25 or £50) take two taps on the saved card.**
+   - Each is an off-session PaymentIntent on the subscription's saved payment method. If the bank requires 3-D Secure, the owner is sent to Stripe's hosted page to finish.
+   - Every charge passes the owner's budget (C), **reserved under the business lock** before Stripe is called, so two top-ups at once can't pass the budget.
+   - The top-up is credited only on Stripe's `payment_intent.succeeded`, once (keyed on the payment). A failure releases the reservation.
+4. **Removing a paid brand stops billing at the end of the month already paid.** The quantity is reduced with no proration, and the brand stays live until the period ends. No refund.
+
+**Also decided:**
+- **Grandfathering.** Brands that exist when F goes live stay live with no billing change; this includes Mike's own.
+- **Free-month switch.** An admin flag, `outreach_brands_free`, keeps every brand of a business live without billing, for the free-month businesses.
+
+**Mike sets these in Stripe and Railway:**
+- two recurring prices: "Extra brand £79/month" (`STRIPE_PRICE_EXTRA_BRAND`) and "Outreach add-on £99/month" (`STRIPE_PRICE_OUTREACH_ADDON`);
+- the webhook events `payment_intent.succeeded` and `payment_intent.payment_failed`.
+
+**Tests first:** `backend/tests/test_outreach_billing.py`, strict xfail until Mike approves.
+
 ### G — Boost eligibility and steps (decision 5)
 
 ### H — AI routing and failover (decision 6)
