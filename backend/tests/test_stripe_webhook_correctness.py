@@ -1411,3 +1411,38 @@ NOT_PINNED = {
 def test_the_not_pinned_registry_explains_itself():
     for area, reason in NOT_PINNED.items():
         assert len(reason) > 80, f"NOT_PINNED['{area}'] must say why"
+
+
+# ── 29 Oct 2026: a real, signed event carrying a price must be storable ──────
+
+def test_a_real_signed_event_with_decimal_prices_is_stored_as_plain_json(monkeypatch):
+    """The first real event after the webhook was repointed (29 Oct 2026) failed
+    with 503: the Stripe SDK's to_dict() turns *_decimal fields into Decimal,
+    which the JSONB payload column cannot serialise. Real signature, real SDK,
+    a payload shaped like Stripe's: the stored payload must be the raw JSON."""
+    import hashlib
+    import hmac
+    import json as _json
+    import time as _time
+    for key, value in STRIPE_ENV.items():
+        monkeypatch.setenv(key, value)
+    business = a_business(plan_tier="pro")
+    session = WebhookSession(business)
+    event = subscription_event("customer.subscription.updated", PRICE_PRO, event_id="evt_decimal_1", status="active")
+    item = event["data"]["object"]["items"]["data"][0]
+    item["price"].update({"object": "price", "unit_amount": 150, "unit_amount_decimal": "150"})
+    item["plan"] = {"id": PRICE_PRO, "object": "plan", "amount": 150, "amount_decimal": "150"}
+    event.update({"object": "event", "api_version": "2025-12-15.clover"})
+    raw = _json.dumps(event)
+    stamp = int(_time.time())
+    signature = hmac.new(STRIPE_ENV["STRIPE_WEBHOOK_SECRET"].encode(), f"{stamp}.{raw}".encode(),
+                         hashlib.sha256).hexdigest()
+    main.app.dependency_overrides[get_session] = lambda: session
+    try:
+        response = TestClient(main.app).post("/v1/billing/webhook", content=raw.encode(),
+                                             headers={"stripe-signature": f"t={stamp},v1={signature}"})
+    finally:
+        main.app.dependency_overrides.pop(get_session, None)
+    assert response.status_code == 200, response.text
+    stored = session.committed_events[0].payload
+    assert _json.dumps(stored) and stored == _json.loads(raw)
