@@ -899,7 +899,8 @@ def test_a_failed_check_again_still_recovers_by_itself(db):
     broken = {k: v for k, v in GOOD_GOOGLE.items() if not k.startswith("_dmarc")}
     with Session(db) as s:
         m.check_mailbox_health(s, biz, OWNER, WORKSPACE, resolve=dns(broken))
-        m.daily_health(s, resolve=dns(GOOD_GOOGLE), moment=datetime(2026, 10, 28, 8, tzinfo=timezone.utc))
+        # A weekday never "today": the manual check above runs on the real clock (failed on 28 Oct 2026).
+        m.daily_health(s, resolve=dns(GOOD_GOOGLE), moment=datetime(2030, 1, 9, 8, tzinfo=timezone.utc))
     with db.connect() as c:
         assert bool(c.execute(text("SELECT enabled FROM outreach_mailboxes WHERE mailbox_id = :m"),
                               {"m": WORKSPACE}).scalar())
