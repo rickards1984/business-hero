@@ -160,6 +160,7 @@ def subscription_event(db, items, pending_update=None):
 
 
 def paid_brand_flow(db):
+    billing()   # the module first: until it exists every test fails here, for that reason only
     biz, brand, lia, campaign = started(db)
     stripe_ids(db)
     fit, fit_lia = new_brand(db, biz)
