@@ -303,7 +303,8 @@ def test_status_lists_every_brand_with_its_budget_and_spend(db):
     biz, brand, lia, campaign = started(db)
     fit, fit_lia = second_brand(db, biz, cap=5000)
     run(db, biz, fit_lia, World([batch(0)], cost=23))
-    with Session(db) as s:
+    from test_outreach_research import run_clock
+    with run_clock(), Session(db) as s:   # status reads "this month" from the clock: the test's, not the real one
         rows = {b["brand_id"]: b for b in research().status(s, biz)["brands"]}
     assert rows[fit["id"]] == {**rows[fit["id"]], "name": "FitFutures", "enabled": True,
                                "monthly_cap_pence": 5000, "spent_pence": 23}
