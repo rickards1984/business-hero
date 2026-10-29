@@ -1232,7 +1232,12 @@ async def stripe_webhook(
             business_id=business.id if business else None,
             event_id=event_id,
             type=event_type,
-            payload=event_dict,
+            # The raw body Stripe signed, parsed as plain JSON. The SDK's
+            # to_dict() turns *_decimal fields into Decimal, which the JSONB
+            # column can't serialise, so every priced subscription event failed
+            # here with a 503 (found 29 Oct 2026, the first real event since the
+            # webhook was repointed from the dead Replit address).
+            payload=json.loads(payload),
         ))
     try:
         session.commit()
