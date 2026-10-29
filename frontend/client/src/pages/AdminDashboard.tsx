@@ -256,13 +256,13 @@ function ProfitPanel() {
           : status.alarm ? `Alarm: costs have reached ${status.alarm_percent}% of this month's income`
           : 'Running costs against income'}
       </Typography>
-      <Typography variant="body2" sx={{ mt: 0.5 }}>
+      <Typography variant="body2" sx={{ mt: 0.5, color: 'inherit' }}>
         {status.period}: costs {gbp(c.total_pence)} (AI {gbp(c.ai_pence)} · voice {gbp(c.voice_pence)} · fixed {gbp(c.fixed_pence)})
         {' '}against income {gbp(status.income_pence)} ({status.income_basis}){status.percent !== null ? ` — ${status.percent}%` : ''}.
         {' '}Alarm at {status.alarm_percent}%, kill switch at {status.kill_percent}%.
       </Typography>
-      {status.note && <Typography variant="body2" sx={{ mt: 0.5 }}>{status.note}</Typography>}
-      {status.losing.length > 0 && <Typography variant="body2" sx={{ mt: 0.5 }}>
+      {status.note && <Typography variant="body2" sx={{ mt: 0.5, color: 'inherit' }}>{status.note}</Typography>}
+      {status.losing.length > 0 && <Typography variant="body2" sx={{ mt: 0.5, color: 'inherit' }}>
         Costing more than they pay: {status.losing.map(b => `${b.name} (${gbp(b.costs_pence)} vs ${gbp(b.pays_pence)}${b.paying ? '' : ', not paying yet'})`).join(' · ')}
       </Typography>}
     </Alert>

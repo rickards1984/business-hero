@@ -81,11 +81,15 @@ def income(session, period: str) -> tuple:
         total += PLAN_PRICE_PENCE.get((plan or "").lower(), 0)
     total += int(_sum(session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE period = :p "
                                "AND meter LIKE :m ESCAPE '\\'", {"p": period, "m": TOPUP_METER.replace("_", "\\_") + ":%"}))
+    # Before launch the trial budget is a FLOOR, not only a stand-in for zero:
+    # Mike's own (or a trial business's) subscription must not replace a
+    # larger pre-launch budget (seen 28 Oct 2026: one Pro subscription, £129,
+    # displaced a £200 trial budget and raised the alarm on fixed costs alone).
+    trial = _int_env("PROFIT_TRIAL_BUDGET_PENCE") or 0
+    if trial > total:
+        return trial, "trial budget"
     if total:
         return total, "subscriptions"
-    trial = _int_env("PROFIT_TRIAL_BUDGET_PENCE")
-    if trial:
-        return trial, "trial budget"
     return 0, "none"
 
 
@@ -131,7 +135,8 @@ def status(session, *, moment: Optional[datetime] = None) -> dict:
         out["note"] = ("No income yet and no trial budget set: only the absolute AI limit (AI_MONTHLY_KILL_PENCE) "
                        "protects spend. Set PROFIT_TRIAL_BUDGET_PENCE before launch.")
     elif basis == "trial budget":
-        out["note"] = "Before launch: the trial budget stands in for income."
+        out["note"] = ("Before launch: the trial budget stands in for income while it is higher than what "
+                       "subscriptions bring in. Remove PROFIT_TRIAL_BUDGET_PENCE at launch.")
     if not out["alerts"]["email"]:
         out["note"] = (out["note"] + " Email alerts aren't set up (PROFIT_ALERT_FROM_ACCOUNT, PROFIT_ALERT_TO).").strip()
     return out

@@ -2471,3 +2471,10 @@ input, textarea, select, button, a, svg, canvas, video, img {
   background-color: rgba(248, 113, 113, 0.1) !important;
   color: #f87171 !important;
 }
+
+/* Text inside a filled alert takes the alert's own contrasting colour, in both
+   themes (the profit-guard banner was unreadable: dark text on red). */
+.MuiAlert-filled .MuiTypography-root,
+.dark .MuiAlert-filled .MuiTypography-root {
+  color: inherit !important;
+}
