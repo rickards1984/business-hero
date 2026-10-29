@@ -986,6 +986,67 @@ export function ResearchPanel({ businessId }: { businessId: string }) {
   );
 }
 
+// OUT-19 F: paying for a brand, top-ups and stopping a brand's billing.
+interface BillingRow { brand_id: string; billing: string; price_pence: number; live: boolean; ends_at?: string | null }
+function BrandBilling({ businessId, brandId, brandName }: { businessId: string; brandId: string; brandName: string }) {
+  const client = useQueryClient();
+  const api = useCall(businessId);
+  const q = useQuery<{ brands: BillingRow[]; topup_sizes: number[] }>({ queryKey: ['outreach-billing', businessId], retry: false,
+    staleTime: 15000, queryFn: async () => (await apiRequest('GET', setupPath('billing'))).json() });
+  const [note, setNote] = useState('');
+  const [confirmStop, setConfirmStop] = useState(false);
+  const row = q.data?.brands.find(b => b.brand_id === brandId);
+  if (!row) return null;
+  const pounds = (p: number) => `£${(p / 100).toFixed(p % 100 ? 2 : 0)}`;
+  const refresh = () => {
+    client.invalidateQueries({ queryKey: ['outreach-billing', businessId] });
+    client.invalidateQueries({ queryKey: ['outreach-budget', businessId] });
+    client.invalidateQueries({ queryKey: ['outreach-research', businessId] });
+  };
+  async function pay() {
+    if (await api.call('POST', `brands/${brandId}/billing`)) {
+      setNote(`Thanks. ${brandName} goes live as soon as Stripe confirms the payment, usually within a minute.`);
+      refresh();
+    }
+  }
+  async function stop() {
+    const out = await api.call<{ ends_at?: string }>('DELETE', `brands/${brandId}/billing`);
+    if (out) {
+      setConfirmStop(false);
+      setNote(`Billing for ${brandName} stops. It stays live until ${out.ends_at ? new Date(out.ends_at).toLocaleDateString('en-GB') : 'the end of this month'}.`);
+      refresh();
+    }
+  }
+  async function topUp(amount: number) {
+    const out = await api.call<{ status: string; checkout_url?: string }>('POST', 'topups', { brand_id: brandId, amount_pence: amount });
+    if (out?.checkout_url) { window.location.href = out.checkout_url; return; }   // the bank wants to confirm it: Stripe's secure page
+    if (out) { setNote(`Thanks. Your ${pounds(amount)} top-up applies as soon as Stripe confirms it.`); refresh(); }
+  }
+  return (
+    <Stack spacing={1}>
+      {row.billing === 'awaiting_payment' && <Alert severity="info" action={
+        <Button size="small" variant="contained" disabled={api.busy} onClick={pay}>Add for {pounds(row.price_pence)}/month</Button>}>
+        {brandName} costs {pounds(row.price_pence)} a month. It's added to your subscription now (charged pro-rata for the rest of this month) and goes live once paid.
+      </Alert>}
+      {row.billing === 'pending' && <Alert severity="info">Waiting for Stripe to confirm the payment for {brandName}…</Alert>}
+      {row.billing === 'ending' && <Alert severity="warning">Billing stopped: {brandName} stays live until {row.ends_at ? new Date(row.ends_at).toLocaleDateString('en-GB') : 'the end of the month'}.</Alert>}
+      {row.live && (q.data?.topup_sizes || []).length > 0 && <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="center">
+        <Typography variant="body2">Top up this month's research:</Typography>
+        {(q.data?.topup_sizes || []).map(a => <Button key={a} size="small" variant="outlined" disabled={api.busy} onClick={() => topUp(a)}>{pounds(a)}</Button>)}
+      </Stack>}
+      {row.billing === 'active' && (confirmStop
+        ? <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+            <Typography variant="body2">Stop paying for {brandName}? It stays live until the end of the month already paid for. No refund.</Typography>
+            <Button size="small" color="error" disabled={api.busy} onClick={stop}>Yes, stop</Button>
+            <Button size="small" onClick={() => setConfirmStop(false)}>Keep it</Button>
+          </Stack>
+        : <Button size="small" sx={{ alignSelf: 'flex-start' }} onClick={() => setConfirmStop(true)}>Stop paying for this brand</Button>)}
+      {note && <Alert severity="success" onClose={() => setNote('')}>{note}</Alert>}
+      {api.error && <Alert severity="error">{api.error}</Alert>}
+    </Stack>
+  );
+}
+
 // OUT-19 C: one monthly figure for what outreach may charge beyond the plan.
 interface BudgetStatus { budget_pence: number | null; committed_pence: number; suggested_pence: number }
 function OutreachBudget({ businessId }: { businessId: string }) {
@@ -1041,8 +1102,9 @@ function BrandResearchCard({ businessId, brand, minCap }: { businessId: string; 
         <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{brand.name}</Typography>
         {brand.paused_reason && <Alert severity="warning">Paused: {brand.paused_reason}</Alert>}
         {typeof brand.allowance_used_percent === 'number' && (brand.allowance_used_percent >= 100
-          ? <Alert severity="warning">This brand's AI allowance for the month is used, so research has stopped until next month. Top-ups are coming soon.</Alert>
+          ? <Alert severity="warning">This brand's AI allowance for the month is used, so research has stopped. A top-up below carries it on now.</Alert>
           : <Typography variant="body2">AI allowance this month: {brand.allowance_used_percent}% used.</Typography>)}
+        <BrandBilling businessId={businessId} brandId={brand.brand_id} brandName={brand.name} />
         <FormControlLabel control={<Checkbox checked={brand.enabled} disabled={api.busy}
           onChange={(_, v) => save('research', { enabled: v })} />} label={`Aria researches new contacts for ${brand.name} each weekday`} />
         <Typography variant="body2">This month: {pounds(brand.spent_pence)} of {pounds(brand.monthly_cap_pence)}. Research for {brand.name} pauses when its budget is reached.</Typography>

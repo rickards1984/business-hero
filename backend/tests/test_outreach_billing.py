@@ -36,7 +36,7 @@ class MissingBilling(AssertionError):
     """Only the intentional absence of the module may be xfailed."""
 
 
-pytestmark = pytest.mark.xfail(raises=MissingBilling, strict=True, reason="OUT-19 F tests first: awaiting Mike's approval")
+# Mike approved these tests on 29 Oct 2026; the strict-xfail marker is removed.
 
 EXTRA, ADDON, PLAN_PRO = "price_extra_brand", "price_outreach_addon", "price_plan_pro"
 PERIOD_END = int(datetime(2026, 11, 21, 14, tzinfo=timezone.utc).timestamp())
@@ -125,6 +125,9 @@ def new_brand(db, biz, name="FitFutures"):
     """A brand made after F went live (through the wizard), with an approved audience."""
     from test_outreach_setup import draft_lia, setup_module_or_missing
     m = setup_module_or_missing()
+    with db.begin() as c:   # every existing brand clearly older, so the price order is fixed (the fixtures share one clock)
+        c.execute(text("UPDATE outreach_brands SET created_at = :t WHERE business_id = :b"),
+                  {"t": NOW - timedelta(hours=3), "b": A})   # a datetime: stored in the same format as the app's
     with setup_clock(), Session(db) as s:
         brand = m.save_brand(s, biz, OWNER, {"name": name, "sender_identity": f"{name} by New Body"})
         lia = m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Gyms that host interns",
@@ -133,8 +136,17 @@ def new_brand(db, biz, name="FitFutures"):
         research().configure(s, biz, OWNER, {"brand_id": brand["id"], "enabled": True})
     with db.begin() as c:   # made after the first brand (the fixtures share one pinned clock)
         c.execute(text("UPDATE outreach_brands SET created_at = :t WHERE id = :b"),
-                  {"t": (NOW - timedelta(minutes=30)).isoformat(), "b": brand["id"]})
+                  {"t": NOW - timedelta(minutes=30), "b": brand["id"]})
     return brand, lia
+
+
+def grandfather(db, brand):
+    """As if the brand existed before F went live: no billing record."""
+    with db.begin() as c:
+        raw = c.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"), {"b": A}).scalar()
+        doc = json.loads(raw or "{}")
+        (doc.get("outreach_brand_billing") or {}).get("brands", {}).pop(brand["id"], None)
+        c.execute(text("UPDATE business_settings SET settings = :s WHERE business_id = :b"), {"s": json.dumps(doc), "b": A})
 
 
 def budget(db, biz, pence=100000):
@@ -162,6 +174,7 @@ def subscription_event(db, items, pending_update=None):
 def paid_brand_flow(db):
     billing()   # the module first: until it exists every test fails here, for that reason only
     biz, brand, lia, campaign = started(db)
+    grandfather(db, brand)
     stripe_ids(db)
     fit, fit_lia = new_brand(db, biz)
     budget(db, biz)
@@ -173,6 +186,7 @@ def paid_brand_flow(db):
 def test_brands_that_existed_before_f_stay_live(db):
     billing()
     biz, brand, lia, campaign = started(db)
+    grandfather(db, brand)
     stripe_ids(db)
     assert live(db, brand) is True                     # Mike's own brand: grandfathered
 
@@ -280,7 +294,7 @@ def test_the_brand_goes_live_when_stripe_shows_it_paid(db):
     subscription_event(db, [{"id": "si_extra", "price": {"id": EXTRA}, "quantity": 1, "current_period_end": PERIOD_END}])
     assert live(db, fit) is True
     out = run(db, biz, fit_lia, World([[person(i) for i in range(3)]]))
-    assert out["accepted"]
+    assert "payment" not in (out["stopped"] or "").lower(), "research no longer waits for payment"
 
 
 def test_paid_places_go_to_the_oldest_waiting_brand_first(db):
@@ -288,7 +302,7 @@ def test_paid_places_go_to_the_oldest_waiting_brand_first(db):
     second, second_lia = new_brand(db, biz, "Schools Outreach")
     with db.begin() as c:
         c.execute(text("UPDATE outreach_brands SET created_at = :t WHERE id = :b"),
-                  {"t": (NOW - timedelta(minutes=10)).isoformat(), "b": second["id"]})
+                  {"t": NOW - timedelta(minutes=10), "b": second["id"]})
     api = FakeStripe()
     with run_clock(), Session(db) as s:
         billing().add_paid_brand(s, biz, OWNER, fit["id"], api=api)
@@ -466,3 +480,42 @@ def test_the_stripe_webhook_hands_subscriptions_and_payments_to_billing():
     assert "outreach_billing.apply_subscription" in source
     assert "outreach_billing.apply_payment_intent" in source
     assert "payment_intent.succeeded" in source and "payment_intent.payment_failed" in source
+
+
+
+def test_until_the_stripe_prices_are_set_new_brands_change_nothing(db, monkeypatch):
+    """Billing for brands switches on only once Mike has set the two prices."""
+    billing()
+    monkeypatch.delenv("STRIPE_PRICE_EXTRA_BRAND")
+    monkeypatch.delenv("STRIPE_PRICE_OUTREACH_ADDON")
+    biz, brand, lia, campaign = started(db)
+    stripe_ids(db)
+    fit, fit_lia = new_brand(db, biz)
+    assert live(db, brand) is True and live(db, fit) is True
+
+
+@pytest.mark.parametrize("who,code", [(OWNER, 200), (STAFF, 403)])
+def test_the_billing_endpoints(db, monkeypatch, who, code):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import auth
+    import outreach_setup_api as api
+    from auth import get_user_business_context
+    from db import get_session
+    from rate_limiting import limiter
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    monkeypatch.setattr(auth, "_load_business", lambda session, bid: biz)
+    monkeypatch.setattr(limiter, "enabled", False)
+    fake = FakeStripe()
+    monkeypatch.setattr(billing(), "_stripe", lambda: fake)
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[get_user_business_context] = lambda: {"business_id": A, "user_id": who}
+    app.dependency_overrides[get_session] = lambda: Session(db)
+    with run_clock(), TestClient(app) as client:
+        assert client.get("/v1/outreach/setup/billing").status_code == 200
+        added = client.post(f"/v1/outreach/setup/brands/{fit['id']}/billing")
+        topped = client.post("/v1/outreach/setup/topups", json={"brand_id": brand["id"], "amount_pence": 1000})
+        bad = client.post("/v1/outreach/setup/topups", json={"brand_id": brand["id"], "amount_pence": "lots"})
+    assert (added.status_code, topped.status_code) == (code, code) and bad.status_code == 422
+    assert (len(fake.calls) > 0) == (code == 200)

@@ -219,6 +219,8 @@ def save_brand(session, business, user, data: dict) -> dict:
         {"id": ident, "b": bid, "at": now(), "n": name, "m": default_box or None, "u": url, "s": sender})
     if profile is not None:
         _save_profile(session, bid, ident, profile)
+    from services import outreach_billing   # OUT-19 F: a brand that costs money waits for payment
+    outreach_billing.mark_new_brand(session, bid, ident)
     session.commit()
     return {"id": ident, "version": 1, "privacy_url": url}
 

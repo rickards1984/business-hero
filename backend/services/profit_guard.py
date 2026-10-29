@@ -76,8 +76,11 @@ def _sum(session, sql: str, params: dict) -> float:
 def income(session, period: str) -> tuple:
     """(pence, basis) for the month."""
     total = 0
-    for plan, in session.execute(text(
-            "SELECT plan_tier FROM businesses WHERE subscription_status = 'active' AND is_active = :t"), {"t": True}):
+    for plan, flags in session.execute(text(
+            "SELECT plan_tier, feature_flags FROM businesses WHERE subscription_status = 'active' AND is_active = :t"),
+            {"t": True}):
+        if _complimentary(flags):
+            continue                       # free by Mike's choice: no income (OUT-19 F)
         total += PLAN_PRICE_PENCE.get((plan or "").lower(), 0)
     total += int(_sum(session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE period = :p "
                                "AND meter LIKE :m ESCAPE '\\'", {"p": period, "m": TOPUP_METER.replace("_", "\\_") + ":%"}))
@@ -91,6 +94,16 @@ def income(session, period: str) -> tuple:
     if total:
         return total, "subscriptions"
     return 0, "none"
+
+
+def _complimentary(flags) -> bool:
+    if isinstance(flags, str):
+        try:
+            import json as _json
+            flags = _json.loads(flags or "{}")
+        except ValueError:
+            return False
+    return isinstance(flags, dict) and flags.get("complimentary") is True
 
 
 def _voice_minutes(session, period: str, business_id=None) -> float:
@@ -145,9 +158,9 @@ def status(session, *, moment: Optional[datetime] = None) -> dict:
 def _losing(session, period: str) -> list:
     rate = _int_env("VOICE_COST_PENCE_PER_MINUTE", VOICE_DEFAULT_PENCE)
     rows = []
-    for bid, name, plan, sub, active in session.execute(text(
-            "SELECT id, name, plan_tier, subscription_status, is_active FROM businesses")):
-        paying = sub == "active" and bool(active)
+    for bid, name, plan, sub, active, flags in session.execute(text(
+            "SELECT id, name, plan_tier, subscription_status, is_active, feature_flags FROM businesses")):
+        paying = sub == "active" and bool(active) and not _complimentary(flags)
         price = PLAN_PRICE_PENCE.get((plan or "").lower(), 0) if paying else 0
         ai = _sum(session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND period = :p "
                            "AND meter = 'ai_pence'", {"b": str(bid), "p": period})

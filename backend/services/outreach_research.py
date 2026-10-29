@@ -939,6 +939,11 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
         return out
     lia, rules = _audience(session, bid, compliance_id, moment)
     brand_id = str(lia["brand_id"])
+    from services import outreach_billing
+    if not outreach_billing.brand_live(session, bid, brand_id, moment):   # OUT-19 F
+        session.rollback()
+        out["stopped"] = "This brand is waiting for payment: research starts once it's paid for."
+        return out
     session.rollback()
     found_new = False
     claim = None

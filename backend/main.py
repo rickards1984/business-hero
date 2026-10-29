@@ -1227,6 +1227,19 @@ async def stripe_webhook(
     # that committed without its audit row would be applied twice on
     # redelivery. It used to be a second, separate commit whose failure was
     # swallowed.
+    # OUT-19 F: paid outreach brands go live as Stripe shows them paid, and
+    # outreach top-ups are credited once Stripe confirms them. In this same
+    # transaction, so the event is applied and recorded together.
+    from services import outreach_billing
+    if event_type in ("customer.subscription.created", "customer.subscription.updated",
+                      "customer.subscription.deleted"):
+        outreach_billing.apply_subscription(session, event_data)
+    if event_type in ("payment_intent.succeeded", "payment_intent.payment_failed"):
+        created = event_dict.get("created")
+        outreach_billing.apply_payment_intent(
+            session, event_type, event_data,
+            created=datetime.fromtimestamp(int(created), tz=timezone.utc) if created else None)
+
     if event_id:
         session.add(StripeEvent(
             business_id=business.id if business else None,

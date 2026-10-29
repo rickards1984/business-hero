@@ -199,7 +199,25 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
 - two recurring prices: "Extra brand £79/month" (`STRIPE_PRICE_EXTRA_BRAND`) and "Outreach add-on £99/month" (`STRIPE_PRICE_OUTREACH_ADDON`);
 - the webhook events `payment_intent.succeeded` and `payment_intent.payment_failed`.
 
-**Tests first:** `backend/tests/test_outreach_billing.py`, strict xfail until Mike approves.
+**Tests first:** `backend/tests/test_outreach_billing.py`, strict xfail until Mike approves. **Mike approved them on 29 Oct 2026.**
+
+**As built:**
+- **Module and endpoints.** `services/outreach_billing.py`, with these routes:
+  - `GET /v1/outreach/setup/billing`;
+  - `POST` and `DELETE /v1/outreach/setup/brands/{id}/billing`;
+  - `POST /v1/outreach/setup/topups`, rate limited.
+- **The webhook** hands subscription events to `apply_subscription`, and `payment_intent.succeeded` / `payment_intent.payment_failed` to `apply_payment_intent`, in its own transaction.
+- **Billing switches on only once both Stripe price IDs are set.** Until then a new brand changes nothing.
+- **The gates:**
+  - research (`run`) and cold sending (`reserve_outreach_usage`, inside `if not reply`) refuse a brand awaiting payment;
+  - the budget's committed total counts brands that are charged or pending, plus top-ups reserved but not yet confirmed.
+- **The `complimentary` flag** (with `outreach_brands_free`) means the profit guard counts the business as £0 income. Both flags are known metadata keys in `auth`.
+- **Screens.** On each brand's research card:
+  - "Add for £79/month" (or £99);
+  - "Waiting for Stripe…";
+  - the £10, £25 and £50 top-ups. When the bank asks for 3-D Secure, the owner goes to Stripe's page;
+  - "Stop paying for this brand", with a confirmation.
+
 
 ### G — Boost eligibility and steps (decision 5)
 
