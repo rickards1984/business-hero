@@ -283,10 +283,12 @@ def webhook(db, api, event_type="customer.subscription.updated", data=None, mome
         s.commit()
 
 
-def reconcile(db, api, moment):
+def reconcile(db, api, moment, recover=True):
+    """The scheduled check's reconcile (recover=True: it may re-send a page
+    creation Stripe never confirmed); the webhook's passes recover=False."""
     api.now = moment
     with run_clock(), Session(db) as s:
-        billing().reconcile(s, A, api=api, moment=moment)
+        billing().reconcile(s, A, api=api, moment=moment, recover=recover)
         s.commit()
 
 
@@ -938,6 +940,107 @@ def test_a_failed_delayed_payment_releases_its_reservation(db):
     page = dict(api.pages["cs_1"], status="complete", payment_status="unpaid")
     webhook(db, api, "checkout.session.async_payment_failed", page)
     assert committed(db, biz) == 9900 and topped_up(db, brand) == 0
+
+
+# ------------------------------------------------- Codex review 4 regressions ---
+
+def test_a_check_never_abandons_an_addition_whose_retry_is_in_flight(db):
+    """P1 1: an unconfirmed addition, an hour old, is retried; the check runs
+    between the retry's read and its request. It must not clear the addition."""
+    from unittest import mock
+    from services import outreach_send
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    api.fail["Subscription.modify"] = APIConnectionError("never arrived")
+    add_refused(db, biz, fit, api)
+    real = api.Subscription.retrieve
+
+    once = []
+
+    def read_then_check(sub_id, **kw):
+        snapshot = real(sub_id)
+        if not once:
+            once.append(1)
+            reconcile(db, api, LATER)      # sees no line and no update: the addition looks abandoned
+        return snapshot
+    api.Subscription.retrieve = staticmethod(read_then_check)
+    with run_clock(), mock.patch.object(outreach_send, "now", lambda: LATER), Session(db) as s:
+        billing().add_paid_brand(s, biz, OWNER, fit["id"], api=api)
+    api.Subscription.retrieve = staticmethod(real)
+    reconcile(db, api, LATER)
+    assert live(db, fit) is True and len(api.billed()) == 1
+    assert code(add_refused(db, biz, fit, api)) == 409, "nothing left to pay: no second line"
+
+
+def test_a_renewal_is_honoured_even_while_another_payment_is_pending(db):
+    """P1 2: the deletion waits for the pending payment; the renewed month still counts."""
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    second, second_lia = new_brand(db, biz, "Schools Outreach", age=timedelta(minutes=20))
+    api = FakeStripe()
+    paid_for(db, biz, fit, api)
+    api.fail["Subscription.modify"] = APIConnectionError("read timed out")
+    remove_refused(db, biz, fit, api)
+    renewed = PERIOD_END + 30 * 24 * 3600
+    for item in api.items:
+        item["current_period_end"] = renewed
+    api.hold = True
+    doc = settings(db)                     # the removal's claim has lapsed; another brand is added: payment pending
+    doc["outreach_brand_billing"]["op"] = {}
+    save_settings(db, doc)
+    add(db, biz, second, api)
+    sent = len(api.named("Subscription.modify"))
+    check(db, api, AFTER_PERIOD)
+    assert len(api.named("Subscription.modify")) == sent, "no deletion while a payment is pending"
+    assert live(db, fit, AFTER_PERIOD) is True, "the renewed month was paid for"
+
+
+@pytest.mark.parametrize("action", ["add", "remove"])
+def test_a_stripe_set_up_error_never_leaves_the_subscription_claimed(db, monkeypatch, action):
+    """P2 1."""
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    if action == "remove":
+        paid_for(db, biz, fit, FakeStripe())
+    def broken():
+        raise RuntimeError("Stripe key unreadable")
+    monkeypatch.setattr(billing(), "_stripe", broken)
+    with Session(db) as s:
+        fn = billing().add_paid_brand if action == "add" else billing().remove_paid_brand
+        refused(fn, s, biz, OWNER, fit["id"])
+    assert not (settings(db)["outreach_brand_billing"].get("op") or {}).get("token")
+
+
+def test_the_scheduled_finish_of_a_removal_never_leaves_the_subscription_claimed(db, monkeypatch):
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    paid_for(db, biz, fit, api)
+    api.fail["Subscription.modify"] = APIConnectionError("read timed out")
+    remove_refused(db, biz, fit, api)
+    def broken():
+        raise RuntimeError("Stripe key unreadable")
+    monkeypatch.setattr(billing(), "_stripe", broken)
+    with run_clock(), Session(db) as s:
+        try:
+            billing().resend_removals(s, A, moment=NOW + timedelta(minutes=11))
+        except RuntimeError:
+            pass
+    assert not (settings(db)["outreach_brand_billing"].get("op") or {}).get("token")
+
+
+def test_the_webhook_never_creates_a_payment_page(db):
+    """P2 2: only the scheduled check re-sends an unconfirmed page creation."""
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    api.fail["checkout.Session.create"] = APIConnectionError("never arrived")
+    topup_refused(db, biz, brand, 2500, api)
+    api.now = SOON
+    from unittest import mock
+    from services import outreach_send
+    with run_clock(), mock.patch.object(outreach_send, "now", lambda: SOON), Session(db) as s:   # ten minutes on
+        billing().webhook(s, "invoice.paid", {"subscription": "sub_mike", "customer": "cus_mike"}, created=SOON, api=api)
+        s.commit()
+    assert len(api.named("checkout.Session.create")) == 1 and api.pages == {}
+    reconcile(db, api, SOON)               # the scheduled check does recover it
+    assert len(api.pages) == 1
 
 # ----------------------------------------------------------- the wiring ---
 

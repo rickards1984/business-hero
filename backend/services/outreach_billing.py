@@ -377,8 +377,8 @@ def add_paid_brand(session, business, user, brand_id, *, api=None) -> dict:
 
     def mine(e):
         return e.get("op") == op and e.get("state") == "pending"
-    api = api or _stripe()
     try:
+        api = api or _stripe()             # inside: a set-up error still releases the claim (Codex review 4)
         sub = api.Subscription.retrieve(row["stripe_subscription_id"])
         price_id = entry.get("price_id")
         if price_id and (price_id in _billed_prices(sub) or price_id in _waiting_prices(sub)):
@@ -445,8 +445,8 @@ def remove_paid_brand(session, business, user, brand_id, *, api=None) -> dict:
 
     def unchanged(e):
         return e.get("state") == "active" and e.get("price_id") == price_id
-    api = api or _stripe()
     try:
+        api = api or _stripe()             # inside: a set-up error still releases the claim (Codex review 4)
         sub = api.Subscription.retrieve(row["stripe_subscription_id"])
     except Exception:
         _update(session, bid, brand_id, lambda e: False, token)
@@ -508,11 +508,9 @@ def resend_removals(session, bid: str, *, api=None, moment: Optional[datetime] =
         return
     _save(session, bid, billing)
     session.commit()
-    api = api or _stripe()
     try:
+        api = api or _stripe()             # inside: a set-up error still releases the claim (Codex review 4)
         sub = api.Subscription.retrieve(row["stripe_subscription_id"])
-        if _get(sub, "pending_update"):
-            return
         items = {_get(i, "id"): i for i in _items(sub)}
         for brand_id, entry in waiting.items():
             def mine(e, op=entry["remove_op"]):
@@ -521,11 +519,15 @@ def resend_removals(session, bid: str, *, api=None, moment: Optional[datetime] =
             if item is None:               # already gone: Stripe carried it out
                 _update(session, bid, brand_id, mine, None, uncertain=None)
                 continue
+            # A renewal is honoured even while another payment is pending and
+            # the deletion has to wait (Codex review 4): it was paid for.
             renewed = _get(item, "current_period_end")
             if renewed and (_parse(entry.get("ends_at")) is None or
                             datetime.fromtimestamp(int(renewed), tz=timezone.utc) > _parse(entry["ends_at"])):
                 _update(session, bid, brand_id, mine, None,
                         ends_at=datetime.fromtimestamp(int(renewed), tz=timezone.utc).isoformat())
+            if _get(sub, "pending_update"):
+                continue                   # never while Stripe holds an unpaid update
             try:
                 api.Subscription.modify(row["stripe_subscription_id"], items=[{"id": entry["item_id"], "deleted": True}],
                                         proration_behavior="none",
@@ -558,7 +560,7 @@ def _fingerprint(entry: dict) -> tuple:
     return tuple(entry.get(k) for k in ("state", "op", "price_id", "remove_op", "uncertain"))
 
 
-def reconcile(session, bid: str, *, api=None, moment: Optional[datetime] = None) -> None:
+def reconcile(session, bid: str, *, api=None, moment: Optional[datetime] = None, recover: bool = False) -> None:
     """Bring a business's brands and top-ups into line with Stripe as it is
     NOW. Stripe is asked with no lock held; its answers are then applied under
     the lock ONLY to records unchanged since they were read (Codex review 2:
@@ -573,10 +575,10 @@ def reconcile(session, bid: str, *, api=None, moment: Optional[datetime] = None)
     purchases_before = {k: dict(p) for k, p in billing["purchases"].items()}
     api = api or _stripe()                 # plain reads so far: no lock is held while Stripe is asked
     sub = api.Subscription.retrieve(row["stripe_subscription_id"])
-    pages = _ask_about_pages(api, bid, row, billing, moment)
+    pages = _ask_about_pages(api, bid, row, billing, moment, recover=recover)
     _lock(session, bid)
     billing = _billing(_doc(session, bid))
-    _apply_brands(billing, sub, moment, before)
+    _apply_brands(billing, sub, moment, before, in_progress=_op_held(billing, moment))
     for key, page in pages.items():
         if billing["purchases"].get(key) == purchases_before.get(key):
             _settle_page(session, bid, row, billing, key, page, moment)
@@ -590,7 +592,10 @@ def reconcile(session, bid: str, *, api=None, moment: Optional[datetime] = None)
     _save(session, bid, billing)
 
 
-def _apply_brands(billing: dict, sub, moment: datetime, before: dict) -> None:
+def _apply_brands(billing: dict, sub, moment: datetime, before: dict, *, in_progress: bool = False) -> None:
+    """Stripe's answer, applied. While a subscription operation is in progress
+    (its claim held) nothing is taken away: Stripe's answer may predate the
+    request that operation is making (Codex review 4)."""
     billed, waiting = _billed_prices(sub), _waiting_prices(sub)
     for brand_id, entry in billing["brands"].items():
         if before.get(brand_id) != _fingerprint(entry):
@@ -605,14 +610,14 @@ def _apply_brands(billing: dict, sub, moment: datetime, before: dict) -> None:
             if price_id and price_id in waiting:
                 continue                  # Stripe holds it until the invoice is paid
             requested = _parse(entry.get("requested_at"))
-            if requested is not None and moment - requested >= STALE:
+            if not in_progress and requested is not None and moment - requested >= STALE:
                 # No line and no update waiting, an hour on: the addition was
                 # declined, abandoned or never arrived. Try again.
                 entry.update(state="awaiting_payment", note="The payment didn't go through. Try again, or check "
                                                             "the card on your subscription.")
                 for k in ("requested_at", "op", "uncertain", "price_id"):
                     entry.pop(k, None)
-        elif state == "active" and price_id not in billed:
+        elif state == "active" and price_id not in billed and not in_progress:
             entry.update(state="awaiting_payment", note="Stripe is no longer billing this brand, so it has "
                                                         "paused. Add it again to carry on.")
             for k in ("requested_at", "op", "uncertain", "price_id"):
@@ -686,7 +691,7 @@ def start_topup(session, business, user, brand_id, amount_pence, *, api=None, re
     return {"status": "checkout", "checkout_url": _get(page, "url")}
 
 
-def _ask_about_pages(api, bid: str, row: dict, billing: dict, moment: datetime) -> dict:
+def _ask_about_pages(api, bid: str, row: dict, billing: dict, moment: datetime, *, recover: bool = False) -> dict:
     """Stripe's answer for each unsettled top-up page, asked with no lock held:
     a known page is fetched; a page whose creation wasn't confirmed is re-sent
     with the same key (Stripe returns the page it made, if it made one)."""
@@ -698,7 +703,8 @@ def _ask_about_pages(api, bid: str, row: dict, billing: dict, moment: datetime) 
         try:
             if purchase.get("checkout_id"):
                 out[key] = api.checkout.Session.retrieve(purchase["checkout_id"])
-            elif age < PAGE_REBUILD_UNTIL and row.get("stripe_customer_id") and purchase.get("return_url"):
+            elif recover and age < PAGE_REBUILD_UNTIL and row.get("stripe_customer_id") and purchase.get("return_url"):
+                # only from the scheduled check: the webhook reads, never writes, to Stripe
                 out[key] = _create_page(api, bid, row["stripe_customer_id"], purchase, key)
         except Exception:
             logger.exception("Outreach top-up: could not check reservation %s", key)
@@ -795,7 +801,7 @@ def scheduled_check(*, api=None) -> int:
         for bid in ids:
             try:
                 with Session(engine) as s:
-                    reconcile(s, bid, api=api)
+                    reconcile(s, bid, api=api, recover=True)
                     s.commit()
                 with Session(engine) as s:
                     resend_removals(s, bid, api=api)

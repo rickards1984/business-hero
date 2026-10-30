@@ -272,7 +272,7 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
 2. **No change can slip between a removal's read and its deletion.**
    - A removal claims the subscription operation before reading Stripe.
    - An unconfirmed removal is finished by `resend_removals`, run by the scheduled check in its own session. It also claims first, reads Stripe fresh, and never acts while Stripe holds an unpaid update.
-   - The webhook no longer sends anything to Stripe.
+   - The webhook no longer sends brand changes to Stripe (and, after review 4, no payment pages either).
 3. **Renewal.** If the line renewed into a new paid period before an unconfirmed removal finished, the brand stays live to the end of that period: it was paid for.
 - **P2s:**
   - Top-up pages expire 60 minutes after reservation, so a re-send within 30 minutes still meets Stripe's 30-minutes-from-creation rule. The fake now enforces that rule.
@@ -280,6 +280,14 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
   - An unconfirmed removal is marked as being checked; the screen says so and polls until Stripe confirms.
 - **Tests:** `test_outreach_billing.py` has 74 tests. Seven new mutations, one per fix, are each caught.
 - **Mike adds the webhook event** `checkout.session.async_payment_failed`.
+
+**Codex review 4 (`audits/OUT-19-F-CODEX-REVIEW-4.md`, 2 × P1, 2 × P2) → fixed. A 5th review is Mike's call.**
+1. **Nothing is taken away while a subscription operation is in progress.** While a claim is held, `reconcile` neither abandons a pending addition nor pauses an active brand: Stripe's answer may predate the request that operation is making. This prevents a retry in flight being cleared and the brand charged twice.
+2. **A renewal is honoured even while another payment is pending.** The paid period's end is extended first; only the deletion waits.
+- **P2s:**
+  - Setting up the Stripe client happens inside each claim's cleanup, so a configuration error never leaves the subscription claimed.
+  - Only the scheduled check re-sends an unconfirmed page creation (`reconcile(recover=True)`); the webhook only reads from Stripe.
+- **Tests:** `test_outreach_billing.py` has 80 tests. Four new mutations, plus the original ordering of the renewal bug, are each caught.
 
 ### G — Boost eligibility and steps (decision 5)
 
