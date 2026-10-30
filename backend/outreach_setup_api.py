@@ -16,6 +16,7 @@ from auth import get_user_business_context
 from db import get_session
 from services import outreach_allowance as allowance
 from services import outreach_billing as billing
+from services import outreach_boost as boosting
 from services import outreach_autopilot as autopilot
 from services import outreach_research as research
 from services import outreach_setup as setup
@@ -293,6 +294,25 @@ def topup(request: Request, body: TopUp, context=Depends(get_user_business_conte
     return _run(billing.start_topup, session, context, str(body.brand_id), body.amount_pence,
                 return_url=_return_url(request))
 
+
+
+@router.get("/inboxes/{mailbox_id}/boost")
+def boost_status(mailbox_id: UUID, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    """OUT-19 G: the inbox's level, whether it may step up now, the measures
+    not yet met and the evidence behind them."""
+    business = auth._load_business(session, context["business_id"])
+    auth.assert_feature_access(business, "outreach")
+    return boosting.eligibility(session, str(business.id), str(mailbox_id), setup.now())
+
+
+@router.post("/inboxes/{mailbox_id}/boost")
+@limiter.limit("10/minute")
+def boost_inbox(request: Request, mailbox_id: UUID, context=Depends(get_user_business_context),
+                session: Session = Depends(get_session)):
+    """OUT-19 G: the owner steps a qualifying inbox up one level."""
+    business = auth._load_business(session, context["business_id"])
+    auth.assert_feature_access(business, "outreach")
+    return _run(boosting.boost, session, context, str(mailbox_id))
 
 class Grant(Body):
     version: int = Field(ge=1, strict=True)

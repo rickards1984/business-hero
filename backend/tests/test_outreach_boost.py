@@ -12,8 +12,8 @@ Each later step: 14 days at the current level and the same over 14 days with
 at least 150 cold emails. Dropping back: a miss over the last 14 days drops a
 step (then a 14-day hold); a complaint or any pause goes back to 20.
 
-Tests first: strict xfail until services.outreach_boost exists and Mike
-approves. Synthetic SQLite, the real send path, no network.
+Tests first; Mike approved them on 30 Oct 2026. Synthetic SQLite, the real
+send path, no network.
 """
 # ruff: noqa: F811 - pytest fixtures imported from the OUT-6 harness are parameters by design
 
@@ -27,8 +27,7 @@ import pytest
 from sqlalchemy import text
 
 from test_outreach_send import (  # noqa: F401 - fixtures are used by name
-    A, BOX, BRAND, CAMPAIGN, NOW, OWNER, PROSPECT, STAFF, STAMP, add, approve, database, h, propose,
-    refused_today, sent_today)
+    A, BOX, BRAND, CAMPAIGN, NOW, OWNER, STAFF, STAMP, add, approve, database, h, propose, sent_today)
 from test_outreach_replies_ceiling import emails_today
 from services import metering
 
@@ -37,8 +36,6 @@ class MissingBoost(AssertionError):
     """Only the intentional absence of the module may be xfailed."""
 
 
-pytestmark = pytest.mark.xfail(strict=True, raises=MissingBoost,
-                               reason="OUT-19 G: tests first, until Mike approves and the module exists")
 
 
 def boost():
@@ -64,10 +61,12 @@ def stage20(h, *, reviewed_days=29):
 
 
 def history(h, n, *, days=28, kind="initial"):
-    """n cold emails sent from the campaign inbox over the `days` before today."""
+    """n cold emails sent from the campaign inbox over the `days` before today,
+    to other people (never the campaign's own prospect)."""
+    others = add(h.s, "prospects", email_key=uuid.uuid4().hex)
     for i in range(n):
         when = day(1 + i % (days - 1))
-        message = add(h.s, "messages", campaign_id=CAMPAIGN, mailbox_id=BOX, prospect_id=PROSPECT,
+        message = add(h.s, "messages", campaign_id=CAMPAIGN, mailbox_id=BOX, prospect_id=others,
                       direction="outbound", state="accepted", kind=kind)
         add(h.s, "usage_events", operation_key=f"history:{i}:{message}", kind="outreach_emails_sent", quantity=1,
             state="committed", mailbox_id=BOX, local_send_date=when, message_id=message,
@@ -76,8 +75,11 @@ def history(h, n, *, days=28, kind="initial"):
 
 
 def replies(h, category, n=1, *, days_ago=3):
+    """n replies of `category` to the campaign inbox, each from a different
+    person (never the campaign's own prospect, whom a reply would stop)."""
     for _ in range(n):
-        add(h.s, "replies", prospect_id=PROSPECT, mailbox_id=BOX, inbound_email_id=str(uuid.uuid4()),
+        prospect = add(h.s, "prospects", email_key=uuid.uuid4().hex)
+        add(h.s, "replies", prospect_id=prospect, mailbox_id=BOX, inbound_email_id=str(uuid.uuid4()),
             category=category, knowledge_refs="[]", resolution="pending",
             received_at=(NOW - timedelta(days=days_ago)).isoformat())
     h.s.commit()
@@ -126,6 +128,13 @@ def do_boost(h, user=OWNER, moment=NOW):
     out = boost().boost(h.s, h.b, user, BOX, moment=moment)
     h.s.commit()
     return out
+
+
+def refused_today(h, card, _limit):
+    """The send is refused and nothing goes out."""
+    with pytest.raises(h.a.ActionRefused) as exc:
+        approve(h, card)
+    assert exc.value.status_code in (403, 404, 409, 422) and not h.p.sends
 
 
 def cap(h):
@@ -233,6 +242,7 @@ def test_an_inbox_that_does_not_qualify_is_never_boosted(h):
 
 def test_each_later_step_waits_fourteen_days_at_the_current_level(h):
     qualified(h)
+    history(h, 150, days=14)               # the later steps look at the last 14 days
     set_level(h, 30, since_days=10)
     out = eligibility(h)
     assert out["next"] == 40 and out["eligible"] is False and any("14 days" in r for r in out["unmet"])
@@ -261,13 +271,16 @@ def test_fifty_is_the_ceiling(h):
 
 # ------------------------------------------------- what a boost changes ---
 
-def test_a_boosted_inbox_sends_up_to_its_new_limit_and_no_further(h):
+@pytest.mark.parametrize("already,sends", [(29, True), (30, False)])
+def test_a_boosted_inbox_sends_up_to_its_new_limit_and_no_further(h, already, sends):
     qualified(h)
     do_boost(h)
-    emails_today(h, 29)
-    assert approve(h, propose(h))["status"] == "done"
+    emails_today(h, already)
     card = propose(h)
-    refused_today(h, card, 30)
+    if sends:
+        assert approve(h, card)["status"] == "done" and len(h.p.sends) == 1
+    else:
+        refused_today(h, card, already)
 
 
 def test_without_a_boost_the_inbox_still_stops_at_twenty(h):
@@ -407,3 +420,33 @@ def test_another_business_cannot_see_or_boost_this_inbox(h):
     other = boost().eligibility(h.s, B, BOX, NOW)
     h.s.rollback()
     assert other["eligible"] is False and other["evidence"]["cold"] == 0
+
+
+# --------------------------------------------------------------- endpoints ---
+
+@pytest.mark.parametrize("who,code", [(OWNER, 200), (STAFF, 403)])
+def test_the_boost_endpoints(h, monkeypatch, who, code):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from sqlmodel import Session
+    import auth
+    import outreach_setup_api as api
+    from auth import get_user_business_context
+    from db import get_session
+    from rate_limiting import limiter
+    from services import outreach_setup
+    qualified(h)
+    monkeypatch.setattr(auth, "_load_business", lambda session, bid: h.b)
+    monkeypatch.setattr(auth, "assert_feature_access", lambda business, feature, **kw: None)
+    monkeypatch.setattr(limiter, "enabled", False)
+    monkeypatch.setattr(outreach_setup, "now", lambda: NOW)
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[get_user_business_context] = lambda: {"business_id": A, "user_id": who}
+    app.dependency_overrides[get_session] = lambda: Session(h.engine)
+    with TestClient(app) as client:
+        seen = client.get(f"/v1/outreach/setup/inboxes/{BOX}/boost")
+        stepped = client.post(f"/v1/outreach/setup/inboxes/{BOX}/boost")
+    assert seen.status_code == 200 and seen.json()["eligible"] is True and seen.json()["next"] == 30
+    assert stepped.status_code == code
+    assert level(h) == (30 if code == 200 else 20)

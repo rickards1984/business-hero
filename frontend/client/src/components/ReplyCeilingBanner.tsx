@@ -1,6 +1,7 @@
 import { Alert, AlertTitle, Button, Stack, Typography } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
 import { OutreachRecord, useOutreachData } from '@/hooks/useOutreachData';
+import { BoostInbox } from '@/components/OutreachSetupWizard';
 
 // OUT-19 E (Mike's decision 2): replies never wait on the cold-email limits,
 // but each inbox has a daily safety ceiling. When replies get close to it,
@@ -20,11 +21,11 @@ export default function ReplyCeilingBanner({ businessId }: { businessId: string 
     <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1, '& .MuiButton-root': { minHeight: 44 } }}>
       <Button variant="contained" onClick={() => navigate('/app/outreach/replies')}>I'll reply myself</Button>
       <Button variant="outlined" onClick={() => navigate('/app/outreach')}>Add a second inbox</Button>
-      <Button variant="outlined" disabled>Boost this inbox (coming later)</Button>
+      {near.map(b => <BoostInbox key={b.mailbox_id} businessId={businessId} mailboxId={String(b.mailbox_id)} email={b.email} compact />)}
     </Stack>
     <Typography variant="caption" component="p" sx={{ mt: 1 }}>
       "I'll reply myself": each reply shows Aria's briefing — who wrote, what they asked, her suggested answer and the facts behind it — to send from your own email.
-      A second inbox needs warming up before it sends. Boosting an inbox isn't available yet.
+      A second inbox needs warming up before it sends. A boost raises an inbox's cold emails a step at a time (30, 40, then 50 a day) once its record is proven; replies get room as well.
     </Typography>
   </Alert>;
 }

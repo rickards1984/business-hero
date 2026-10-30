@@ -340,7 +340,33 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
 - The boost screen says: "Reputation is judged from our own evidence. Business Hero can't see Google's or Microsoft's internal score."
 - Rotating inboxes to get round limits is never offered (OUT-2). More volume beyond 50 comes from a properly warmed second inbox.
 
-**Tests first:** `backend/tests/test_outreach_boost.py`, strict xfail until Mike approves.
+**Tests first:** `backend/tests/test_outreach_boost.py`, strict xfail until Mike approves. **Mike approved the rules and tests on 30 Oct 2026.**
+
+**As built:**
+- **`services/outreach_boost.py`:**
+  - `level`;
+  - `eligibility` (the level, the next step, the measures not met, and the evidence);
+  - `boost` (owner only, under the business lock, re-checking the level);
+  - `review` (dropping back);
+  - `record_check`;
+  - `evidence`;
+  - `follow` (an owner limit at 20 follows the boost; a lower one binds).
+- **Evidence (`evidence`):**
+  - cold emails: committed usage events for the inbox, not replies;
+  - bounces, complaints and genuine replies: the inbox's replies;
+  - unsubscribes: distinct people, by reply, or by link traced through the people this inbox emailed;
+  - failed checks: `usage_meters` rows `outreach_check_failed:<inbox>:<UK date>`.
+- **Sending (`metering`):**
+  - `mailbox_daily_cap(box, health, boost)` is the one number for the send path, research and headroom;
+  - the campaign, brand and monthly limits follow the boost through `follow`;
+  - a provider's recorded limit binds only when one is recorded (it previously defaulted to 20).
+- **Research (D)** sizes itself with each inbox's boost: the brand's limit follows the highest boost among its campaign inboxes.
+- **The daily inbox check** (`outreach_setup._apply_health`) records failures and runs `review`.
+- **Endpoints:** `GET` and `POST /v1/outreach/setup/inboxes/{mailbox_id}/boost`. The POST is owner-only and limited to 10 a minute.
+- **Screens:**
+  - the replies banner's "Boost this inbox" is live per inbox;
+  - Settings → Sending mailboxes shows each campaign inbox's level, its boost button, or what's still needed with the evidence;
+  - the notice says it's judged from our own evidence.
 
 ### H — AI routing and failover (decision 6)
 

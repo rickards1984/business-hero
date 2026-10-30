@@ -707,6 +707,11 @@ def _apply_health(session, bid: str, row: dict, result: dict, moment: datetime, 
         "UPDATE outreach_mailboxes SET " + ", ".join(
             f"{k} = {expr}" if k == "health_evidence" else f"{k} = :{k}" for k in fields) +
         " WHERE business_id = :b AND id = :id"), {**fields, "b": bid, "id": str(row["id"])})
+    # OUT-19 G: the check's own history (a failure, per inbox per day), and
+    # the boost's daily review: drop back if the record has worsened.
+    from services import outreach_boost
+    outreach_boost.record_check(session, bid, row["mailbox_id"], moment, passed=passed)
+    outreach_boost.review(session, bid, row["mailbox_id"], moment)
 
 
 def check_mailbox_health(session, business, user, mailbox_id, *, resolve: Callable = dns_txt) -> dict:
