@@ -368,6 +368,24 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
   - Settings → Sending mailboxes shows each campaign inbox's level, its boost button, or what's still needed with the evidence;
   - the notice says it's judged from our own evidence.
 
+**Codex review 1 (`audits/OUT-19-G-CODEX-REVIEW-1.md`, 5 × P1, 4 × P2) → fixed:**
+1. **A complaint or pause resets the boost in the transaction that pauses the inbox.** This covers the complaint and bounce hold, a failed daily check, and an owner retiring the inbox. It no longer waits for a daily review that a paused inbox never gets.
+2. **A reset or a drop to 20 is remembered.**
+   - After a reset, the first step's 28 days count from the reset.
+   - After a drop, there are 14 days before stepping up again.
+3. **The whole decision is made under the lock,** in the transaction that saves the boost: a pause, failed check or complaint landing just before the grant is seen.
+4. **Dropping back uses every measure:** missing the 150-email minimum or a genuine reply over the fortnight drops a step, as the ticket says. A newly granted level gets its first full fortnight before review; a complaint or pause still resets at once.
+5. **A provider's recorded limit survives the daily check** and binds everything the inbox sends, replies included (`metering.mailbox_ceiling`).
+- **P2s:**
+  - one brand-limit policy for sending and research (`outreach_boost.brand_level`: the highest boost among the brand's inboxes that can send);
+  - every measure uses whole UK days;
+  - a link unsubscribe counts only against an inbox that actually sent to the person (an accepted message);
+  - the screen shows what the inbox can actually send (`effective`) alongside its boost level, and the boost button is shown to owners only.
+  - Failed checks are counted as failed days.
+- **Tests:** `test_outreach_boost.py` has 55 tests.
+  - The health-check hooks are now tested through the real daily check (`_apply_health`), and the complaint through the real complaint path.
+  - Eleven mutations, one per fix, are each caught.
+
 ### H — AI routing and failover (decision 6)
 
 Built in `services/ai_router.py`. Research and Aria's setup drafts go through it.

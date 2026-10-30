@@ -10,6 +10,7 @@ import {
   FormControlLabel, MenuItem, Paper, Stack, Step, StepContent, StepLabel, Stepper, TextField, Typography,
 } from '@mui/material';
 import { ExpandMore } from '@mui/icons-material';
+import { useOutreachOwner } from '@/hooks/useOutreachData';
 import { apiRequest } from '@/lib/queryClient';
 import { outreachError } from '@/hooks/useOutreachData';
 
@@ -924,17 +925,19 @@ export function OutreachMailboxes({ businessId }: { businessId: string }) {
 
 // OUT-19 G: boosting an inbox with a proven record (Mike, 30 Oct 2026: free,
 // the owner opts in; dropping back is automatic). 20 → 30 → 40 → 50 a day.
-interface BoostStatus { mailbox_id: string; level: number; next: number | null; eligible: boolean; unmet: string[];
-  evidence: { cold: number; bounces: number; unsubscribes: number; complaints: number; failed_checks: number; genuine_replies: number; days: number };
+interface BoostStatus { mailbox_id: string; level: number; effective: number; next: number | null; eligible: boolean; unmet: string[];
+  evidence: { cold: number; bounces: number; unsubscribes: number; complaints: number; failed_check_days: number; genuine_replies: number; days: number };
   notice: string }
 export function BoostInbox({ businessId, mailboxId, email, compact }: { businessId: string; mailboxId: string; email?: string; compact?: boolean }) {
   const client = useQueryClient();
   const api = useCall(businessId);
   const q = useQuery<BoostStatus>({ queryKey: ['outreach-boost', businessId, mailboxId], retry: false, staleTime: 60000,
     queryFn: async () => (await apiRequest('GET', setupPath(`inboxes/${mailboxId}/boost`))).json() });
+  const owner = useOutreachOwner(businessId);
   const [open, setOpen] = useState(false);
   const b = q.data;
   if (!b || b.unmet.some(u => u.startsWith("This isn't one of"))) return null;   // not a campaign inbox
+  if (compact && !owner.data) return null;                                       // boosting is the owner's choice
   async function step() {
     const out = await api.call<{ level: number }>('POST', `inboxes/${mailboxId}/boost`);
     client.invalidateQueries({ queryKey: ['outreach-boost', businessId, mailboxId] });
@@ -944,17 +947,19 @@ export function BoostInbox({ businessId, mailboxId, email, compact }: { business
   const who = email || 'This inbox';
   return (
     <Stack spacing={0.75}>
-      {b.eligible && b.next
+      {owner.data && (b.eligible && b.next
         ? <Button variant={compact ? 'outlined' : 'contained'} size={compact ? 'medium' : 'small'} sx={{ alignSelf: 'flex-start' }}
             disabled={api.busy} onClick={step}>Boost {compact ? 'this inbox' : who} to {b.next} a day</Button>
         : <Button variant="outlined" size={compact ? 'medium' : 'small'} sx={{ alignSelf: 'flex-start' }} onClick={() => setOpen(v => !v)}>
-            {b.next ? `Boost this inbox: not yet` : `${who} is at the 50-a-day ceiling`}</Button>}
-      {!compact && <Typography variant="body2">{who} sends up to {b.level} cold emails a day{b.level > 20 ? ' (boosted)' : ''}.</Typography>}
+            {b.next ? `Boost this inbox: not yet` : `${who} is at the 50-a-day ceiling`}</Button>)}
+      {!compact && <Typography variant="body2">{b.effective > 0
+        ? `${who} can send up to ${b.effective} cold emails a day`
+        : `${who} can't send cold emails today`}{b.level > 20 ? ` (boosted to ${b.level}${b.effective < b.level ? '; a lower limit applies' : ''})` : ''}.</Typography>}
       {open && !b.eligible && <Alert severity="info">
         <Typography variant="body2" sx={{ mb: 0.5 }}>{b.next ? `To step up to ${b.next} a day, still needed:` : 'For more volume, add a properly warmed second inbox.'}</Typography>
         {b.next && <ul style={{ margin: 0, paddingLeft: 18 }}>{b.unmet.map(u => <li key={u}><Typography variant="body2">{u}</Typography></li>)}</ul>}
         <Typography variant="caption" component="p" sx={{ mt: 0.5 }}>
-          Last {b.evidence.days} days: {b.evidence.cold} cold emails, {b.evidence.bounces} bounces, {b.evidence.unsubscribes} unsubscribes, {b.evidence.complaints} complaints, {b.evidence.genuine_replies} genuine replies.
+          Last {b.evidence.days} days: {b.evidence.cold} cold emails, {b.evidence.bounces} bounces, {b.evidence.unsubscribes} unsubscribes, {b.evidence.complaints} complaints, {b.evidence.failed_check_days} days with a failed inbox check, {b.evidence.genuine_replies} genuine replies.
         </Typography>
       </Alert>}
       {(open || b.eligible) && <Typography variant="caption">{b.notice} If results worsen, the inbox drops back a step on its own.</Typography>}

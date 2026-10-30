@@ -634,11 +634,23 @@ def mailbox_daily_cap(box, health=None, boost=20) -> int:
     base = min(stage, box['warmup_stage'])
     if base == 20 and boost in (30, 40, 50):
         base = boost
-    from services.outreach_boost import follow
+    from services.outreach_boost import follow, provider_limit
     limits = [base, follow(box['daily_cap'], base)]
-    if health.get('provider_daily_cap') is not None:
-        limits.append(int(health['provider_daily_cap']))
+    if provider_limit(health) is not None:
+        limits.append(provider_limit(health))
     return max(0, min(limits))
+
+
+def mailbox_ceiling(box, cap, health=None) -> int:
+    """Everything the inbox may send today, replies included: the safety
+    ceiling (cap + 20, at most 70), and never above a provider's recorded
+    limit, which binds the inbox's whole sending (OUT-19 G, Codex review 1)."""
+    from services.outreach_send import loads
+    from services.outreach_boost import provider_limit
+    health = loads(box['health_evidence']) or {} if health is None else health
+    ceiling = reply_ceiling(cap)
+    provider = provider_limit(health)
+    return min(ceiling, provider) if provider is not None else ceiling
 
 
 REPLY_HEADROOM, REPLY_CEILING_MAX = 20, 70     # OUT-19 decision 2
@@ -658,7 +670,7 @@ def reply_headroom(session, bid: str, mailbox_id: str, moment) -> dict:
     from services import outreach_boost
     boxes = rows(session, 'outreach_mailboxes', bid, 'AND mailbox_id=:m', {'m': str(mailbox_id)})
     cap = mailbox_daily_cap(boxes[0], boost=outreach_boost.level(session, bid, mailbox_id)) if len(boxes) == 1 else 0
-    ceiling = reply_ceiling(cap)
+    ceiling = mailbox_ceiling(boxes[0], cap) if len(boxes) == 1 else 0
     usage = rows(session, 'outreach_daily_usage', bid, 'AND scope_type=:s AND scope_id=:i AND local_date=:d',
                  {'s': 'mailbox', 'i': str(mailbox_id), 'd': moment.astimezone(LONDON).date().isoformat()})
     used = sum(usage[0][k] or 0 for k in ('reserved', 'accepted', 'unknown')) if usage else 0
@@ -727,8 +739,9 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
         from services import outreach_billing
         require(outreach_billing.brand_live(session, bid, campaign['brand_id'], moment),
                 'This brand is waiting for payment')
-        _cold_limits(session, bid, campaign, settings, mailbox_id, cap, local, cold, boost=boost)
-    for scope, scope_id, limit in (('business', bid, None), ('mailbox', mailbox_id, reply_ceiling(cap))):
+        _cold_limits(session, bid, campaign, settings, mailbox_id, cap, local, cold, boost=boost,
+                     brand_boost=outreach_boost.brand_level(session, bid, campaign['brand_id']))
+    for scope, scope_id, limit in (('business', bid, None), ('mailbox', mailbox_id, mailbox_ceiling(box, cap, health))):
         usage = rows(session, 'outreach_daily_usage', bid, 'AND scope_type=:s AND scope_id=:i AND local_date=:d',
                      {'s': scope, 'i': scope_id, 'd': local.date().isoformat()}, True)
         if not usage:
@@ -749,7 +762,7 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
     _outreach_delta(session, bid, OUTREACH_HELD, period, 1)
 
 
-def _cold_limits(session, bid, campaign, settings, mailbox_id, cap, local, cold, boost=20):
+def _cold_limits(session, bid, campaign, settings, mailbox_id, cap, local, cold, boost=20, brand_boost=20):
     """The limits on cold emails (initial and follow-ups), each counted from
     this UK day's held and sent cold emails, under the business lock. With a
     boost (OUT-19 G), a campaign or brand limit left at 20 follows it; one the
@@ -770,7 +783,9 @@ def _cold_limits(session, bid, campaign, settings, mailbox_id, cap, local, cold,
         "JOIN outreach_campaigns c ON c.business_id=m.business_id AND c.id=m.campaign_id "
         "WHERE u.business_id=:b AND c.brand_id=:br AND u.local_send_date=:d AND u.state IN ('reserved','committed','unknown') " + cold),
         {'b': bid, 'br': str(campaign['brand_id']), 'd': local.date().isoformat()}).scalar()
-    daily_limit = follow(min(20, settings['business_daily_cap']), boost)
+    # The brand's limit follows the highest boost among its sending inboxes:
+    # one policy with research (outreach_boost.brand_level).
+    daily_limit = follow(min(20, settings['business_daily_cap']), brand_boost)
     require(brand_count < daily_limit, 'Daily outreach capacity for this brand exhausted')
     # The monthly allowance is per brand too (Mike, 25 Oct 2026): the daily
     # limit times this UK month's weekdays, so no brand runs out mid-campaign.

@@ -29,6 +29,7 @@ from sqlalchemy import text
 from test_outreach_send import (  # noqa: F401 - fixtures are used by name
     A, BOX, BRAND, CAMPAIGN, NOW, OWNER, STAFF, STAMP, add, approve, database, h, propose, sent_today)
 from test_outreach_replies_ceiling import emails_today
+from test_outreach_replies import r  # noqa: F401 - the reply harness, for the real complaint path
 from services import metering
 
 
@@ -360,18 +361,20 @@ def review(h, moment=NOW):
 
 def test_a_clean_fortnight_keeps_the_boost(h):
     qualified(h)
+    history(h, 150, days=14)
     set_level(h, 40, since_days=20)
     review(h)
     assert level(h) == 40
 
 
 @pytest.mark.parametrize("spoil", [
-    lambda h: replies(h, "bounce", 5, days_ago=2),
+    lambda h: replies(h, "bounce", 6, days_ago=2),
     lambda h: replies(h, "unsubscribe", 3, days_ago=2),
     lambda h: (boost().record_check(h.s, A, BOX, NOW - timedelta(days=2), passed=False), h.s.commit()),
 ])
 def test_a_worse_fortnight_drops_one_step_and_holds_fourteen_days(h, spoil):
     qualified(h)
+    history(h, 150, days=14)
     set_level(h, 40, since_days=20)
     spoil(h)
     review(h)
@@ -401,17 +404,39 @@ def test_a_failed_daily_check_is_recorded_for_the_inbox_that_failed(h):
     boost().record_check(h.s, A, BOX, NOW, passed=False)
     boost().record_check(h.s, A, BOX, NOW, passed=True)
     h.s.commit()
+    boost().record_check(h.s, A, BOX, NOW, passed=False)        # a second failure the same day
+    h.s.commit()
     out = boost().evidence(h.s, A, BOX, NOW + timedelta(hours=1), days=14)
     h.s.rollback()
-    assert out["failed_checks"] == 1
+    assert out["failed_check_days"] == 1, "counted as failed days"
 
 
-def test_the_daily_inbox_check_records_failures_and_reviews_the_boost():
-    import inspect
-    boost()
+def health_check(h, *, passed, evidence=None):
+    """The real daily-check write (outreach_setup._apply_health)."""
     from services import outreach_setup
-    source = inspect.getsource(outreach_setup._apply_health)
-    assert "outreach_boost.record_check" in source and "outreach_boost.review" in source
+    row = h.s.execute(text("SELECT * FROM outreach_mailboxes WHERE mailbox_id = :m"), {"m": BOX}).mappings().one()
+    evidence = evidence or {"domain_control": True, "from_aligned": True, "spf": "pass", "dkim": "pass", "dmarc": "pass"}
+    outreach_setup._apply_health(h.s, A, dict(row), {"status": "pass" if passed else "fail", "evidence": evidence,
+                                                     "advice": [] if passed else ["Fix SPF"]}, NOW, daily=True)
+    h.s.commit()
+
+
+def test_a_failed_daily_check_resets_the_boost_and_is_recorded(h):
+    qualified(h)
+    set_level(h, 40, since_days=20)
+    health_check(h, passed=False)
+    assert level(h) == 20
+    out = boost().evidence(h.s, A, BOX, NOW, days=14)
+    h.s.rollback()
+    assert out["failed_check_days"] == 1
+
+
+def test_a_passing_daily_check_reviews_the_boost(h):
+    qualified(h)
+    set_level(h, 40, since_days=20)
+    replies(h, "bounce", 6, days_ago=2)
+    health_check(h, passed=True)
+    assert level(h) == 30
 
 
 def test_another_business_cannot_see_or_boost_this_inbox(h):
@@ -421,6 +446,168 @@ def test_another_business_cannot_see_or_boost_this_inbox(h):
     h.s.rollback()
     assert other["eligible"] is False and other["evidence"]["cold"] == 0
 
+
+
+# ------------------------------------------------- Codex review 1 regressions ---
+
+def test_a_complaint_resets_the_boost_in_the_transaction_that_pauses_the_inbox(r):
+    """P1 1: through the real complaint path, not the daily review."""
+    from test_outreach_replies import incoming
+    qualified(r)
+    set_level(r, 50, since_days=20)
+    ident = incoming(r, sender="mailer-daemon@example.invalid")
+    message = r.s.execute(text("SELECT id, provider_message_id FROM outreach_messages WHERE state = 'accepted' "
+                               "AND provider_message_id IS NOT NULL")).first()
+    r.replies.observe_health(r.s, r.b, inbound_email_id=ident, message_id=message.id, kind="complaint",
+                             evidence={"authenticated": True, "mailbox_id": BOX, "provider": "google",
+                                       "provider_message_id": message.provider_message_id}, moment=NOW)
+    r.s.commit()
+    assert level(r) == 20
+
+
+def test_after_a_reset_the_inbox_qualifies_again_from_the_start(h):
+    """P1 2: lifting a pause doesn't bring back a boost on old evidence."""
+    qualified(h)
+    set_level(h, 30, since_days=20)
+    boost().reset(h.s, A, BOX, NOW - timedelta(days=2), "paused")
+    h.s.commit()
+    out = eligibility(h)                   # the pause is lifted; the evidence is still clean
+    assert out["eligible"] is False and any("counted from its reset" in u for u in out["unmet"])
+
+
+def test_dropping_to_twenty_keeps_its_fourteen_day_hold(h):
+    """P1 2: a 30 → 20 drop is remembered."""
+    qualified(h)
+    history(h, 150, days=14)
+    set_level(h, 30, since_days=20)
+    replies(h, "unsubscribe", 3, days_ago=2)
+    review(h)
+    assert level(h) == 20
+    out = eligibility(h)
+    assert out["eligible"] is False and any("dropped back" in u for u in out["unmet"])
+
+
+def test_a_pause_landing_before_the_grant_is_seen(h, monkeypatch):
+    """P1 3: the decision is made under the lock that saves it."""
+    from services import outreach_setup
+    qualified(h)
+    real = outreach_setup._authority
+
+    def pause_then_lock(session, *args, **kwargs):
+        session.rollback()
+        with h.engine.begin() as other:   # another transaction pauses the inbox and commits first
+            other.execute(text("UPDATE outreach_mailboxes SET pause_reason = 'held by owner' WHERE mailbox_id = :m"),
+                          {"m": BOX})
+        return real(session, *args, **kwargs)
+    monkeypatch.setattr(outreach_setup, "_authority", pause_then_lock)
+    with pytest.raises(Exception) as exc:
+        do_boost(h)
+    assert getattr(exc.value, "status_code", None) == 409 and level(h) == 20
+
+
+@pytest.mark.parametrize("quiet", ["no sends", "no genuine reply"])
+def test_a_fortnight_that_misses_any_measure_drops_a_step(h, quiet):
+    """P1 4: the volume and genuine-reply measures count too."""
+    stage20(h)
+    if quiet == "no genuine reply":
+        history(h, 150, days=14)
+    else:
+        replies(h, "interested")
+    set_level(h, 50, since_days=20)
+    review(h)
+    assert level(h) == 40
+
+
+def test_a_recorded_provider_limit_survives_the_daily_check(h):
+    """P1 5."""
+    qualified(h)
+    h.s.execute(text("UPDATE outreach_mailboxes SET health_evidence = :e WHERE mailbox_id = :m"),
+                {"e": json.dumps({"domain_control": True, "from_aligned": True, "spf": "pass", "dkim": "pass",
+                                  "dmarc": "pass", "provider_daily_cap": 25}), "m": BOX})
+    h.s.commit()
+    set_level(h, 50, since_days=1)
+    health_check(h, passed=True)           # the new evidence has no provider limit in it
+    assert cap(h) == 25
+
+
+def test_a_provider_limit_binds_replies_too(h):
+    """P1 5: it is the inbox's whole sending limit."""
+    qualified(h)
+    h.s.execute(text("UPDATE outreach_mailboxes SET health_evidence = :e WHERE mailbox_id = :m"),
+                {"e": json.dumps({"domain_control": True, "from_aligned": True, "spf": "pass", "dkim": "pass",
+                                  "dmarc": "pass", "provider_daily_cap": 25}), "m": BOX})
+    h.s.commit()
+    set_level(h, 50, since_days=1)
+    room = metering.reply_headroom(h.s, A, BOX, NOW)
+    h.s.rollback()
+    assert room["cap"] == 25 and room["ceiling"] == 25
+
+
+def test_research_and_sending_agree_for_a_brand_with_mixed_inboxes(h):
+    """P2 1: the brand's other inbox is boosted to 50 and has sent 25 today;
+    this inbox (unboosted) may still send, because the brand's limit follows
+    its highest sending boost, in research and in the send path alike."""
+    from test_outreach_send import DEFAULT
+    qualified(h)
+    if not h.s.execute(text("SELECT count(*) FROM outreach_mailboxes WHERE mailbox_id = :m"), {"m": DEFAULT}).scalar():
+        add(h.s, "mailboxes", mailbox_id=DEFAULT, enabled=True, daily_cap=20, warmup_stage=20, sending_days=40,
+            health_status="pass", health_checked_at=STAMP, health_reviewed_by=OWNER,
+            health_reviewed_at=(NOW - timedelta(days=60)).isoformat(),
+            health_evidence=json.dumps({"domain_control": True, "from_aligned": True, "spf": "pass", "dkim": "pass",
+                                        "dmarc": "pass"}))
+        h.s.commit()
+    raw = h.s.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"), {"b": A}).scalar()
+    doc = json.loads(raw or "{}")
+    doc.setdefault("outreach_boost", {})[DEFAULT] = {"level": 50, "since": STAMP}
+    h.s.execute(text("UPDATE business_settings SET settings = :s WHERE business_id = :b"), {"s": json.dumps(doc), "b": A})
+    h.s.commit()
+    sent_today(h, 25, BRAND)               # from the boosted inbox (DEFAULT)
+    assert boost().brand_level(h.s, A, BRAND) == 50
+    h.s.rollback()
+    assert approve(h, propose(h))["status"] == "done"
+
+
+def test_the_evidence_window_is_whole_uk_days_for_every_measure(h):
+    """P2 2: sends and replies on the window's first day are both counted."""
+    stage20(h)
+    first_day_morning = (NOW - timedelta(days=28)).astimezone(metering.LONDON).replace(hour=7)
+    others = add(h.s, "prospects", email_key=uuid.uuid4().hex)
+    message = add(h.s, "messages", campaign_id=CAMPAIGN, mailbox_id=BOX, prospect_id=others, direction="outbound",
+                  state="accepted", kind="initial")
+    add(h.s, "usage_events", operation_key=f"edge:{message}", kind="outreach_emails_sent", quantity=1,
+        state="committed", mailbox_id=BOX, local_send_date=first_day_morning.date().isoformat(), message_id=message,
+        period_start=STAMP, period_end=STAMP)
+    add(h.s, "replies", prospect_id=others, mailbox_id=BOX, inbound_email_id=str(uuid.uuid4()), category="bounce",
+        knowledge_refs="[]", resolution="pending", received_at=first_day_morning.isoformat())
+    h.s.commit()
+    out = boost().evidence(h.s, A, BOX, NOW, days=28)
+    h.s.rollback()
+    assert out["cold"] == 1 and out["bounces"] == 1
+
+
+def test_a_link_unsubscribe_counts_only_against_an_inbox_that_actually_sent(h):
+    """P2 3: a draft or failed attempt never ties a person to this inbox."""
+    stage20(h)
+    key = uuid.uuid4().hex
+    prospect = add(h.s, "prospects", email_key=key)
+    add(h.s, "messages", campaign_id=CAMPAIGN, mailbox_id=BOX, prospect_id=prospect, direction="outbound",
+        state="failed", kind="initial")
+    add(h.s, "suppressions", key_type="email", key_digest=key, digest_version=1, reason="unsubscribe",
+        suppressed_at=(NOW - timedelta(days=2)).isoformat())
+    h.s.commit()
+    out = boost().evidence(h.s, A, BOX, NOW, days=28)
+    h.s.rollback()
+    assert out["unsubscribes"] == 0
+
+
+def test_the_screen_is_told_what_the_inbox_can_actually_send(h):
+    """P2 4: a boost of 30 under an owner's limit of 15 sends 15."""
+    qualified(h)
+    h.s.execute(text("UPDATE outreach_mailboxes SET daily_cap = 15 WHERE mailbox_id = :m"), {"m": BOX})
+    h.s.commit()
+    set_level(h, 30, since_days=1)
+    out = eligibility(h)
+    assert out["level"] == 30 and out["effective"] == 15
 
 # --------------------------------------------------------------- endpoints ---
 

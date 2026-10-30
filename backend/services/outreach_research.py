@@ -724,7 +724,7 @@ def capacity(session, bid: str, brand_id, moment: datetime, audience_hash: Optio
     # OUT-19 G: a boosted inbox raises the brand's limit when left at 20 (as the send path).
     from services import outreach_boost
     boosts = {str(c["mailbox_id"]): outreach_boost.level(session, bid, c["mailbox_id"]) for c in campaigns}
-    brand_boost = max([20] + [boosts[str(c["mailbox_id"])] for c in mine])
+    brand_boost = outreach_boost.brand_level(session, bid, br)      # the send path's own policy
     brand_left = outreach_boost.follow(min(20, int(settings["business_daily_cap"])), brand_boost) \
         - sum(used(str(c["id"])) for c in mine)
     inbox_left = {}
