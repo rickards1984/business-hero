@@ -1,7 +1,7 @@
 """OUT-19 F on real PostgreSQL, through the real Stripe webhook endpoint
 (Codex review 1: behavioural webhook tests, and the transaction they share):
 an ordinary customer's event is accepted untouched; a paid brand goes live
-when Stripe has it paid; a top-up is credited once; and the webhook takes its
+when Stripe has its own line paid; a paid top-up page is credited once; and the webhook takes its
 locks in the same order as the owner's billing actions, so the two can't
 deadlock."""
 # ruff: noqa: F811 - the pg fixture is a parameter by design
@@ -20,6 +20,7 @@ from test_outreach_send import A, B, BRAND, NOW
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="RLS_LOCAL_DATABASE_URL is not set")
 
 PRICE_PRO, PRICE_ADDON, PRICE_EXTRA = "price_pg_pro", "price_outreach_addon", "price_extra_brand"
+OWN_PRICE = "price_brand_pg"              # the brand's own Stripe price (one line per brand)
 ENV = {"STRIPE_SECRET_KEY": "sk_test_not_a_real_key", "STRIPE_WEBHOOK_SECRET": "whsec_test", "APP_BASE_URL": "https://example.invalid",
        "STRIPE_PRICE_STARTER": "price_pg_starter", "STRIPE_PRICE_PRO": PRICE_PRO,
        "STRIPE_PRICE_BUSINESS": "price_pg_business",
@@ -30,7 +31,7 @@ def fake_stripe(paid):
     from test_outreach_billing import FakeStripe
     api = FakeStripe()
     if paid:
-        api._apply([{"price": PRICE_ADDON, "quantity": 1}])
+        api._apply([{"price": OWN_PRICE, "quantity": 1}])
     return api
 
 
@@ -46,7 +47,7 @@ def paid(pg, monkeypatch):
         raw = c.execute(text("SELECT settings::text FROM business_settings WHERE business_id = :b"), {"b": A}).scalar()
         doc = json.loads(raw or "{}")
         doc["outreach_brand_billing"] = {"brands": {BRAND: {"state": "pending", "price": 9900, "op": "op-pg",
-                                                             "requested_at": NOW.isoformat()}}}
+                                                             "price_id": OWN_PRICE, "requested_at": NOW.isoformat()}}}
         c.execute(text("UPDATE business_settings SET settings = CAST(:s AS jsonb) WHERE business_id = :b"),
                   {"s": json.dumps(doc), "b": A})
     yield pg
@@ -97,7 +98,7 @@ def test_a_paid_brand_goes_live_through_the_real_webhook(paid, monkeypatch):
     monkeypatch.setattr(outreach_billing, "_stripe", lambda: api)
     assert post(paid.engine, monkeypatch, event("evt_pg_1", "cus_pg")).status_code == 200
     assert live(paid.engine) is False, "Stripe doesn't have it paid yet"
-    api._apply([{"price": PRICE_ADDON, "quantity": 1}])
+    api._apply([{"price": OWN_PRICE, "quantity": 1}])
     assert post(paid.engine, monkeypatch, event("evt_pg_2", "cus_pg")).status_code == 200
     assert live(paid.engine) is True
     with paid.engine.connect() as c:
@@ -118,17 +119,28 @@ def test_when_stripe_cant_be_reached_the_event_is_retried_and_nothing_is_kept(pa
         assert c.execute(text("SELECT plan_tier FROM businesses WHERE id = :b"), {"b": A}).scalar() == "starter"
 
 
-def test_a_top_up_is_credited_once_on_postgres(paid):
-    from services import outreach_billing
-    intent = {"id": "pi_pg", "amount": 2500, "currency": "gbp", "customer": "cus_pg",
-              "metadata": {"kind": "outreach_topup", "business_id": A, "brand_id": BRAND, "reservation": "r-pg"}}
-    for _ in range(2):
-        with Session(paid.engine) as s:
-            outreach_billing.webhook(s, "payment_intent.succeeded", intent, created=NOW)
-            s.commit()
+def test_a_paid_top_up_page_is_credited_once_through_the_real_webhook(paid, monkeypatch):
+    """Codex review 2: end to end, not the service alone."""
+    with paid.engine.begin() as c:
+        raw = c.execute(text("SELECT settings::text FROM business_settings WHERE business_id = :b"), {"b": A}).scalar()
+        doc = json.loads(raw)
+        doc["outreach_brand_billing"]["purchases"] = {"r-pg": {"amount": 2500, "brand_id": BRAND, "checkout_id": "cs_pg",
+                                                               "at": NOW.isoformat(), "return_url": "https://x"}}
+        c.execute(text("UPDATE business_settings SET settings = CAST(:s AS jsonb) WHERE business_id = :b"),
+                  {"s": json.dumps(doc), "b": A})
+    page = {"id": "cs_pg", "object": "checkout.session", "status": "complete", "payment_status": "paid",
+            "customer": "cus_pg", "currency": "gbp", "amount_total": 2500,
+            "metadata": {"kind": "outreach_topup", "outreach_business_id": A, "brand_id": BRAND, "reservation": "r-pg"}}
+    for n in (1, 2):                      # two distinct deliveries of the same payment
+        body = {"id": f"evt_pg_page_{n}", "type": "checkout.session.completed", "created": int(NOW.timestamp()),
+                "data": {"object": page}}
+        assert post(paid.engine, monkeypatch, body).status_code == 200
     with paid.engine.connect() as c:
         assert float(c.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b "
                                     "AND meter = :m"), {"b": A, "m": f"outreach_topup_pence:{BRAND}"}).scalar()) == 2500
+        doc = json.loads(c.execute(text("SELECT settings::text FROM business_settings WHERE business_id = :b"),
+                                   {"b": A}).scalar())
+        assert doc["outreach_brand_billing"]["purchases"] == {}
 
 
 def test_the_webhook_and_the_owners_billing_lock_in_the_same_order(paid, monkeypatch):

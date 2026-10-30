@@ -185,10 +185,9 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
 2. **It goes live only once Stripe confirms the payment.**
    - `payment_behavior=pending_if_incomplete`: the subscription changes only when the invoice is paid, and the webhook then shows the new quantity.
    - Until then the brand can be set up, but research and cold sending are off. Replies are never stopped.
-3. **Top-ups (£10, £25 or £50) take two taps on the saved card.**
-   - Each is an off-session PaymentIntent on the subscription's saved payment method. If the bank requires 3-D Secure, the owner is sent to Stripe's hosted page to finish.
+3. **Top-ups (£10, £25 or £50) are paid on Stripe's own payment page** (Checkout). *Changed by Mike on 30 Oct 2026, after Codex review 2: previously "two taps on the saved card".*
    - Every charge passes the owner's budget (C), **reserved under the business lock** before Stripe is called, so two top-ups at once can't pass the budget.
-   - The top-up is credited only on Stripe's `payment_intent.succeeded`, once (keyed on the payment). A failure releases the reservation.
+   - The top-up is credited only when Stripe says the page was paid, once (keyed on the page). The reservation is released only when Stripe says the page expired (35 minutes).
 4. **Removing a paid brand stops billing at the end of the month already paid.** The quantity is reduced with no proration, and the brand stays live until the period ends. No refund.
 
 **Also decided:**
@@ -196,8 +195,8 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
 - **Free-month switch.** An admin flag, `outreach_brands_free`, keeps every brand of a business live without billing, for the free-month businesses.
 
 **Mike sets these in Stripe and Railway:**
-- two recurring prices: "Extra brand £79/month" (`STRIPE_PRICE_EXTRA_BRAND`) and "Outreach add-on £99/month" (`STRIPE_PRICE_OUTREACH_ADDON`);
-- the webhook events `payment_intent.succeeded`, `payment_intent.payment_failed`, `checkout.session.expired`, `customer.subscription.updated` and `invoice.paid` (the last two are usually already on).
+- two recurring monthly prices in GBP: "Extra brand £79/month" (`STRIPE_PRICE_EXTRA_BRAND`) and "Outreach add-on £99/month" (`STRIPE_PRICE_OUTREACH_ADDON`). Each paid brand gets its own price, made from the same product and amount; if the configured price isn't exactly that amount, monthly, in pounds, nothing is charged;
+- the webhook events `checkout.session.completed`, `checkout.session.expired`, `checkout.session.async_payment_succeeded`, `customer.subscription.updated` and `invoice.paid`.
 
 **Tests first:** `backend/tests/test_outreach_billing.py`, strict xfail until Mike approves. **Mike approved them on 29 Oct 2026.**
 
@@ -217,7 +216,7 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
 - **Screens.** On each brand's research card:
   - "Add for £79/month" (or £99);
   - "Waiting for Stripe…";
-  - the £10, £25 and £50 top-ups. When the bank asks for 3-D Secure, the owner goes to Stripe's page;
+  - the £10, £25 and £50 top-ups, each paid on Stripe's page;
   - "Stop paying for this brand", with a confirmation.
 
 
@@ -240,6 +239,33 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
   - `test_outreach_billing_pg.py` runs through the real webhook endpoint on PostgreSQL: an ordinary customer's event is accepted without asking Stripe; a brand goes live; Stripe being down gives a 503 with nothing kept; a top-up is credited once; and the lock order holds while the owner holds the lock.
   - Fixed in passing: that test and PROFIT-1's race test both polled `pg_stat_activity` inside one transaction, which is one snapshot, so they failed now and then when run together. They now take a fresh snapshot each poll: 12 of 12 clean, against 2 failures in 8 before.
 - **Backlog (Codex):** revenue reporting from real Stripe amounts (PROFIT-2).
+
+**Codex review 2 (`audits/OUT-19-F-CODEX-REVIEW-2.md`, 6 × P1, 2 × P2) → simplified, by Mike's decision (30 Oct 2026):**
+- **One brand, one line.** Each paid brand gets its own Stripe price, made for it (same product and amount as the configured price, idempotent on the addition's id), and its own subscription line. Brands never share a quantity: no brand can take another's paid place, and removing one can't touch another (P1 2).
+- **Top-ups on Stripe's page only.** There is no off-session charge and no cancel-then-fallback (P1 5).
+  - The page is created under the reservation's key, with every parameter taken from the stored purchase, so re-sending it is the same request. Stripe returns the page it made, if it made one.
+  - The reservation stays until Stripe says the page was paid (credited) or expired (released).
+  - A creation Stripe never confirmed is re-sent for 30 minutes. It is released only after 4 days, past Stripe's 3 days of webhook retries.
+- **One payment check (P1 6).** `_settle_page` is used by both the webhook and the scheduled check. It credits only against a purchase this business reserved, matching:
+  - its reservation and page;
+  - the business's Stripe customer;
+  - the brand;
+  - pounds, and the exact amount.
+  A paid page with no reservation credits nothing. A mismatch keeps the reservation and logs it for review.
+- **Answers applied only if nothing moved (P1 1).** `reconcile` asks Stripe with no lock held, then applies the answer only to records unchanged since they were read (a fingerprint per brand and per purchase).
+- **Removal (P1 3 and P1 4).**
+  - It asks Stripe for the paid period's end before recording anything; if Stripe can't be reached, nothing changes.
+  - It refuses while Stripe holds an unpaid update.
+  - An unconfirmed removal is re-sent by the scheduled check as the identical request.
+- **Identical requests (P2).** Every key is stored with its exact parameters: the brand's price id, the item id, and the page's stored purchase. The scheduled settle with an hourly key is gone. The fake Stripe now enforces Stripe's rule: the same key with different parameters is refused.
+- **Screens (P2):**
+  - the billing card refreshes after every answer, including failures;
+  - it checks every 10 seconds while a brand payment is pending or being checked, or while a top-up is waiting;
+  - it shows each waiting top-up.
+- **The flags:** a behavioural income test covers `complimentary` versus `outreach_brands_free` (`test_profit_guard.py`).
+- **Tests:**
+  - `test_outreach_billing.py`: 68 tests. Ten mutations, one per fix, are each caught.
+  - `test_outreach_billing_pg.py`: a paid page through the real webhook endpoint, delivered twice, is credited once.
 
 ### G — Boost eligibility and steps (decision 5)
 

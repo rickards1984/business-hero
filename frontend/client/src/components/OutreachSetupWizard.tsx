@@ -987,14 +987,16 @@ export function ResearchPanel({ businessId }: { businessId: string }) {
 }
 
 // OUT-19 F: paying for a brand, top-ups and stopping a brand's billing.
-interface BillingRow { brand_id: string; billing: string; price_pence: number; live: boolean; ends_at?: string | null; note?: string | null }
+interface BillingRow { brand_id: string; billing: string; price_pence: number; live: boolean; ends_at?: string | null; note?: string | null; checking?: boolean }
+interface BillingStatus { brands: BillingRow[]; topup_sizes: number[]; topups_in_progress: { brand_id: string; amount_pence: number }[] }
 function BrandBilling({ businessId, brandId, brandName }: { businessId: string; brandId: string; brandName: string }) {
   const client = useQueryClient();
   const api = useCall(businessId);
-  const q = useQuery<{ brands: BillingRow[]; topup_sizes: number[] }>({ queryKey: ['outreach-billing', businessId], retry: false,
+  const q = useQuery<BillingStatus>({ queryKey: ['outreach-billing', businessId], retry: false,
     staleTime: 15000, queryFn: async () => (await apiRequest('GET', setupPath('billing'))).json(),
-    // while Stripe is confirming a payment, check every 10 seconds so the brand goes live on screen
-    refetchInterval: query => (query.state.data?.brands.some(b => b.billing === 'pending') ? 10000 : false) });
+    // while Stripe is confirming a payment or a top-up, check every 10 seconds so the result shows on its own
+    refetchInterval: query => (query.state.data?.brands.some(b => b.billing === 'pending' || b.checking)
+      || (query.state.data?.topups_in_progress || []).length ? 10000 : false) });
   const [note, setNote] = useState('');
   const [confirmStop, setConfirmStop] = useState(false);
   const row = q.data?.brands.find(b => b.brand_id === brandId);
@@ -1006,13 +1008,13 @@ function BrandBilling({ businessId, brandId, brandName }: { businessId: string; 
     client.invalidateQueries({ queryKey: ['outreach-research', businessId] });
   };
   async function pay() {
-    if (await api.call('POST', `brands/${brandId}/billing`)) {
-      setNote(`Thanks. ${brandName} goes live as soon as Stripe confirms the payment, usually within a minute.`);
-      refresh();
-    }
+    const ok = await api.call('POST', `brands/${brandId}/billing`);
+    refresh();   // after a failure too: an unconfirmed payment shows as being checked
+    if (ok) setNote(`Thanks. ${brandName} goes live as soon as Stripe confirms the payment, usually within a minute.`);
   }
   async function stop() {
     const out = await api.call<{ ends_at?: string }>('DELETE', `brands/${brandId}/billing`);
+    refresh();
     if (out) {
       setConfirmStop(false);
       setNote(`Billing for ${brandName} stops. It stays live until ${out.ends_at ? new Date(out.ends_at).toLocaleDateString('en-GB') : 'the end of this month'}.`);
@@ -1021,8 +1023,8 @@ function BrandBilling({ businessId, brandId, brandName }: { businessId: string; 
   }
   async function topUp(amount: number) {
     const out = await api.call<{ status: string; checkout_url?: string }>('POST', 'topups', { brand_id: brandId, amount_pence: amount });
-    if (out?.checkout_url) { window.location.href = out.checkout_url; return; }   // the bank wants to confirm it: Stripe's secure page
-    if (out) { setNote(`Thanks. Your ${pounds(amount)} top-up applies as soon as Stripe confirms it.`); refresh(); }
+    refresh();
+    if (out?.checkout_url) window.location.href = out.checkout_url;   // paid on Stripe's own secure page
   }
   return (
     <Stack spacing={1}>
@@ -1030,10 +1032,12 @@ function BrandBilling({ businessId, brandId, brandName }: { businessId: string; 
         <Button size="small" variant="contained" disabled={api.busy} onClick={pay}>Add for {pounds(row.price_pence)}/month</Button>}>
         {row.note ? `${row.note} ` : ''}{brandName} costs {pounds(row.price_pence)} a month. It's added to your subscription now (charged pro-rata for the rest of this month) and goes live once paid.
       </Alert>}
-      {row.billing === 'pending' && <Alert severity="info">Waiting for Stripe to confirm the payment for {brandName}…</Alert>}
+      {row.billing === 'pending' && <Alert severity="info">{row.checking
+        ? `We're checking with Stripe whether the payment for ${brandName} went through. Please don't pay again.`
+        : `Waiting for Stripe to confirm the payment for ${brandName}…`}</Alert>}
       {row.billing === 'ending' && <Alert severity="warning">Billing stopped: {brandName} stays live until {row.ends_at ? new Date(row.ends_at).toLocaleDateString('en-GB') : 'the end of the month'}.</Alert>}
       {row.live && (q.data?.topup_sizes || []).length > 0 && <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="center">
-        <Typography variant="body2">Top up this month's research:</Typography>
+        <Typography variant="body2">Top up this month's research (you'll pay on Stripe's secure page):</Typography>
         {(q.data?.topup_sizes || []).map(a => <Button key={a} size="small" variant="outlined" disabled={api.busy} onClick={() => topUp(a)}>{pounds(a)}</Button>)}
       </Stack>}
       {row.billing === 'active' && (confirmStop
@@ -1043,6 +1047,8 @@ function BrandBilling({ businessId, brandId, brandName }: { businessId: string; 
             <Button size="small" onClick={() => setConfirmStop(false)}>Keep it</Button>
           </Stack>
         : <Button size="small" sx={{ alignSelf: 'flex-start' }} onClick={() => setConfirmStop(true)}>Stop paying for this brand</Button>)}
+      {(q.data?.topups_in_progress || []).filter(t => t.brand_id === brandId).map((t, i) =>
+        <Typography key={i} variant="body2">A {pounds(t.amount_pence)} top-up is waiting for Stripe. It's added once paid, or released if the payment page expires.</Typography>)}
       {note && <Alert severity="success" onClose={() => setNote('')}>{note}</Alert>}
       {api.error && <Alert severity="error">{api.error}</Alert>}
     </Stack>

@@ -1,23 +1,23 @@
 """OUT-19 F — Stripe for extra brands and top-ups (docs/OUT-19-TICKET.md, F).
 RED: money.
 
-Mike, 29 Oct 2026 ("Go with recommendations ... they also protect expenditure
-vs income"):
-  1. a new paid brand is added to the subscription and charged pro-rata now;
-  2. it goes live only once Stripe confirms the payment (until then research
+Mike, 29 Oct 2026, simplified with Mike on 30 Oct 2026 after Codex's review 2:
+  1. each new paid brand gets its own line on the subscription (its own Stripe
+     price), charged pro-rata now;
+  2. it goes live only once Stripe has that line paid (until then research
      and cold sending are off; replies are never stopped);
-  3. top-ups of £10, £25 or £50 are two taps on the saved card (3-D Secure:
-     Stripe's hosted page), reserved against the owner's budget under the
-     business lock first, credited only when Stripe confirms, once;
-  4. removing a paid brand stops billing at the end of the paid month.
+  3. top-ups of £10, £25 or £50 are paid on Stripe's own page, reserved
+     against the owner's budget first, credited when Stripe says the page was
+     paid (once), released only when Stripe says it expired;
+  4. removing a paid brand deletes its line, live until the end of the month
+     already paid.
 Brands that exist when F goes live stay live (grandfathered); an admin flag
 `outreach_brands_free` keeps a business's brands live for its free month.
 
-After Codex's review 1: every operation has a durable identity reused as
-Stripe's idempotency key; an outcome Stripe didn't confirm is kept and checked,
-never assumed failed; brand state is reconciled against Stripe's CURRENT
-subscription, never an event's copy. Stripe here is a stateful fake: nothing
-is charged, no network.
+Stripe here is a stateful fake that keeps idempotency the way Stripe does:
+the same key with different parameters is refused; with the same parameters
+it returns the first answer and changes nothing. Nothing is charged; no
+network.
 """
 # ruff: noqa: F811 - pytest fixtures imported from the research harness are parameters by design
 
@@ -36,7 +36,8 @@ from test_outreach_research import NOW, World, person, research, run, run_clock,
 EXTRA, ADDON, PLAN_PRO = "price_extra_brand", "price_outreach_addon", "price_plan_pro"
 PERIOD_END = int(datetime(2026, 11, 21, 14, tzinfo=timezone.utc).timestamp())
 AFTER_PERIOD = datetime.fromtimestamp(PERIOD_END, tz=timezone.utc) + timedelta(minutes=1)
-LATER = NOW + timedelta(hours=2)          # past the one-hour check-with-Stripe threshold
+LATER = NOW + timedelta(hours=2)          # past the one-hour "the addition failed" threshold
+SOON = NOW + timedelta(minutes=10)        # a page is checked with Stripe after 5 minutes
 
 
 def billing():
@@ -51,13 +52,16 @@ def prices(monkeypatch):
 
 
 class CardError(Exception):
-    def __init__(self, code, pi="pi_needs_auth"):
+    def __init__(self, code="card_declined"):
         super().__init__(code)
         self.code = code
-        self.error = SimpleNamespace(code=code, payment_intent={"id": pi, "status": "requires_action"})
 
 
 class InvalidRequestError(Exception):
+    pass
+
+
+class IdempotencyError(Exception):
     pass
 
 
@@ -66,76 +70,96 @@ class APIConnectionError(Exception):
 
 
 class FakeStripe:
-    """A stateful stand-in for Stripe. The subscription changes when a change
-    is made (or waits, unpaid, with `hold`); payments can be searched by their
-    reservation; every call is recorded."""
+    """A stateful stand-in for Stripe, with Stripe's idempotency rules.
 
-    CardError, InvalidRequestError, APIConnectionError = CardError, InvalidRequestError, APIConnectionError
+    `fail[name]` makes the next call to `name` fail: an exception raised before
+    anything happens, or ("lost", exc) — carried out, then the answer is lost.
+    """
 
-    def __init__(self, payment="succeeded", hold=False, modify_error=None):
-        self.calls, self.payment, self.hold, self.modify_error = [], payment, hold, modify_error
+    CardError, InvalidRequestError, IdempotencyError, APIConnectionError = (
+        CardError, InvalidRequestError, IdempotencyError, APIConnectionError)
+
+    def __init__(self, hold=False):
+        self.calls, self.hold, self.fail, self.keys = [], hold, {}, {}
         self.items = [{"id": "si_plan", "price": {"id": PLAN_PRO}, "quantity": 1, "current_period_end": PERIOD_END}]
-        self.pending_items, self.intents, self.sessions = None, {}, {}
+        self.pending_items, self.prices, self.pages, self.status = None, {}, {}, "active"
+        self.base = {EXTRA: 7900, ADDON: 9900}
         api = self
+
+        def idempotent(name, kw, act):
+            api.calls.append((name, kw))
+            key = kw.get("idempotency_key")
+            params = {k: v for k, v in kw.items() if k != "idempotency_key"}
+            if key in api.keys:
+                seen_name, seen_params, answer = api.keys[key]
+                if (seen_name, seen_params) != (name, params):
+                    raise IdempotencyError("Keys for idempotent requests can only be used with the same parameters")
+                return answer
+            failure = api.fail.pop(name, None)
+            if failure is not None and not isinstance(failure, tuple):
+                raise failure
+            answer = act()
+            if key:
+                api.keys[key] = (name, params, answer)
+            if failure is not None:
+                raise failure[1]
+            return answer
+
+        class Price:
+            @staticmethod
+            def retrieve(price_id, **kw):
+                api.calls.append(("Price.retrieve", price_id))
+                return {"id": price_id, "unit_amount": api.base[price_id], "currency": "gbp",
+                        "recurring": {"interval": "month"}, "product": f"prod_{price_id}"}
+
+            @staticmethod
+            def create(**kw):
+                def act():
+                    pid = f"price_brand_{len(api.prices) + 1}"
+                    api.prices[pid] = kw
+                    return {"id": pid}
+                return idempotent("Price.create", kw, act)
 
         class Subscription:
             @staticmethod
             def retrieve(sub_id, **kw):
-                api.calls.append(("Subscription.retrieve", sub_id, kw))
-                return {"id": sub_id, "customer": "cus_mike", "default_payment_method": "pm_saved", "status": "active",
+                api.calls.append(("Subscription.retrieve", sub_id))
+                failure = api.fail.pop("Subscription.retrieve", None)
+                if failure is not None:
+                    raise failure
+                return {"id": sub_id, "customer": "cus_mike", "status": api.status,
                         "items": {"data": [dict(i) for i in api.items]},
-                        "pending_update": {"subscription_items": api.pending_items} if api.pending_items else None}
+                        "pending_update": {"subscription_items": [{"price": {"id": i["price"]}} for i in api.pending_items]}
+                        if api.pending_items else None}
 
             @staticmethod
             def modify(sub_id, **kw):
-                api.calls.append(("Subscription.modify", sub_id, kw))
-                if api.modify_error:
-                    raise api.modify_error
-                if api.hold and kw.get("payment_behavior") == "pending_if_incomplete":
-                    api.pending_items = kw["items"]
-                else:
-                    api._apply(kw["items"])
-                return {"id": sub_id}
-
-        class PaymentIntent:
-            @staticmethod
-            def create(**kw):
-                api.calls.append(("PaymentIntent.create", None, kw))
-                if api.payment == "authentication_required":
-                    raise CardError("authentication_required")
-                if api.payment == "declined":
-                    raise CardError("card_declined")
-                if api.payment == "timeout":
-                    raise APIConnectionError("read timed out")
-                pi = f"pi_{len(api.intents) + 1}"
-                api.intents[pi] = {"id": pi, "status": "succeeded", "amount": kw["amount"], "currency": kw["currency"],
-                                   "customer": kw["customer"], "metadata": dict(kw["metadata"])}
-                return dict(api.intents[pi])
-
-            @staticmethod
-            def cancel(pi, **kw):
-                api.calls.append(("PaymentIntent.cancel", pi, kw))
-
-            @staticmethod
-            def search(query, **kw):
-                api.calls.append(("PaymentIntent.search", query, kw))
-                key = query.split("'")[3]
-                return {"data": [dict(i) for i in api.intents.values() if i["metadata"].get("reservation") == key]}
+                def act():
+                    if api.hold and kw.get("payment_behavior") == "pending_if_incomplete":
+                        api.pending_items = kw["items"]
+                    else:
+                        api._apply(kw["items"])
+                    return {"id": sub_id}
+                return idempotent("Subscription.modify", dict(kw, sub=sub_id), act)
 
         class CheckoutSession:
             @staticmethod
             def create(**kw):
-                api.calls.append(("checkout.Session.create", None, kw))
-                api.sessions["cs_1"] = {"id": "cs_1", "status": "open", "metadata": kw.get("metadata"),
-                                        "url": "https://checkout.stripe.example/cs_1", "customer": kw.get("customer")}
-                return dict(api.sessions["cs_1"])
+                def act():
+                    cs = f"cs_{len(api.pages) + 1}"
+                    line = kw["line_items"][0]["price_data"]
+                    api.pages[cs] = {"id": cs, "status": "open", "payment_status": "unpaid", "url": f"https://pay.example/{cs}",
+                                     "customer": kw["customer"], "metadata": dict(kw["metadata"]),
+                                     "amount_total": line["unit_amount"], "currency": line["currency"]}
+                    return dict(api.pages[cs])
+                return idempotent("checkout.Session.create", kw, act)
 
             @staticmethod
             def retrieve(cs, **kw):
-                api.calls.append(("checkout.Session.retrieve", cs, kw))
-                return dict(api.sessions[cs])
+                api.calls.append(("checkout.Session.retrieve", cs))
+                return dict(api.pages[cs])
 
-        self.Subscription, self.PaymentIntent = Subscription, PaymentIntent
+        self.Price, self.Subscription = Price, Subscription
         self.checkout = SimpleNamespace(Session=CheckoutSession)
 
     def _apply(self, changes):
@@ -145,10 +169,6 @@ class FakeStripe:
                                    "quantity": change["quantity"], "current_period_end": PERIOD_END})
             elif change.get("deleted"):
                 self.items = [i for i in self.items if i["id"] != change["id"]]
-            else:
-                for item in self.items:
-                    if item["id"] == change["id"]:
-                        item["quantity"] = change["quantity"]
 
     def pay(self):
         """The pending invoice is paid: Stripe applies the waiting change."""
@@ -156,11 +176,19 @@ class FakeStripe:
             self._apply(self.pending_items)
         self.pending_items = None
 
-    def quantity(self, price):
-        return sum(i["quantity"] for i in self.items if i["price"]["id"] == price)
+    def pay_page(self, cs):
+        self.pages[cs].update(status="complete", payment_status="paid")
+        return dict(self.pages[cs])
+
+    def expire_page(self, cs):
+        self.pages[cs].update(status="expired")
+        return dict(self.pages[cs])
+
+    def billed(self):
+        return [i["price"]["id"] for i in self.items if i["price"]["id"] != PLAN_PRO]
 
     def named(self, name):
-        return [c for c in self.calls if c[0] == name]
+        return [c[1] for c in self.calls if c[0] == name]
 
 
 def stripe_ids(db, customer="cus_mike", subscription="sub_mike", flags=None, bid=A):
@@ -190,8 +218,7 @@ def new_brand(db, biz, name="FitFutures", age=timedelta(minutes=30)):
         m.approve_audience(s, biz, OWNER, lia["id"], {})
         research().configure(s, biz, OWNER, {"brand_id": brand["id"], "enabled": True})
     with db.begin() as c:
-        c.execute(text("UPDATE outreach_brands SET created_at = :t WHERE id = :b"),
-                  {"t": NOW - age, "b": brand["id"]})
+        c.execute(text("UPDATE outreach_brands SET created_at = :t WHERE id = :b"), {"t": NOW - age, "b": brand["id"]})
     return brand, lia
 
 
@@ -209,6 +236,10 @@ def save_settings(db, doc):
 
 def entry(db, brand):
     return ((settings(db).get("outreach_brand_billing") or {}).get("brands") or {}).get(brand["id"])
+
+
+def purchases(db):
+    return (settings(db).get("outreach_brand_billing") or {}).get("purchases") or {}
 
 
 def grandfather(db, brand):
@@ -230,9 +261,10 @@ def committed(db, biz, moment=NOW):
         return outreach_allowance.budget_status(s, biz, moment=moment)["committed_pence"]
 
 
-def pending_topups(db):
-    with run_clock(), Session(db) as s:
-        return billing().pending_topup_pence(s, A)
+def topped_up(db, brand):
+    with db.connect() as c:
+        return int(c.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND meter = :m"),
+                             {"b": A, "m": f"outreach_topup_pence:{brand['id']}"}).scalar() or 0)
 
 
 def live(db, brand, moment=NOW):
@@ -263,20 +295,36 @@ def paid_brand_flow(db):
     return biz, brand, fit, fit_lia
 
 
-def add(db, biz, brand, api):
-    with run_clock(), Session(db) as s:
-        return billing().add_paid_brand(s, biz, OWNER, brand["id"], api=api)
-
-
 def refused(fn, *args, **kw):
     with run_clock(), pytest.raises(Exception) as exc:
         fn(*args, **kw)
     return exc.value
 
 
+def add(db, biz, brand, api):
+    with run_clock(), Session(db) as s:
+        return billing().add_paid_brand(s, biz, OWNER, brand["id"], api=api)
+
+
 def add_refused(db, biz, brand, api, user=OWNER):
     with Session(db) as s:
         return refused(billing().add_paid_brand, s, biz, user, brand["id"], api=api)
+
+
+def remove(db, biz, brand, api):
+    with run_clock(), Session(db) as s:
+        return billing().remove_paid_brand(s, biz, OWNER, brand["id"], api=api)
+
+
+def remove_refused(db, biz, brand, api):
+    with Session(db) as s:
+        return refused(billing().remove_paid_brand, s, biz, OWNER, brand["id"], api=api)
+
+
+def paid_for(db, biz, brand, api):
+    add(db, biz, brand, api)
+    webhook(db, api)
+    assert live(db, brand) is True
 
 
 def topup(db, biz, brand, amount, api):
@@ -288,6 +336,10 @@ def topup_refused(db, biz, brand, amount, api, user=OWNER):
     with Session(db) as s:
         return refused(billing().start_topup, s, biz, user, brand["id"], amount, api=api,
                        return_url="https://app.example/r")
+
+
+def code(exc):
+    return getattr(exc, "status_code", None)
 
 
 # --------------------------------------------------- who is live, and when ---
@@ -325,7 +377,6 @@ def test_the_free_month_switch_keeps_every_brand_live(db):
 
 @pytest.mark.parametrize("unset", ["STRIPE_PRICE_EXTRA_BRAND", "STRIPE_PRICE_OUTREACH_ADDON"])
 def test_until_both_stripe_prices_are_set_new_brands_change_nothing(db, monkeypatch, unset):
-    """Review 1 P2: billing switches on only when BOTH prices are set."""
     monkeypatch.delenv(unset)
     biz, brand, lia, campaign = started(db)
     stripe_ids(db)
@@ -336,32 +387,43 @@ def test_until_both_stripe_prices_are_set_new_brands_change_nothing(db, monkeypa
 def test_status_shows_each_brands_billing_and_price(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     with run_clock(), Session(db) as s:
-        rows = {r["brand_id"]: r for r in billing().status(s, biz)["brands"]}
+        out = billing().status(s, biz)
+    rows = {r["brand_id"]: r for r in out["brands"]}
     assert rows[brand["id"]]["billing"] == "grandfathered" and rows[brand["id"]]["live"] is True
     assert rows[fit["id"]]["billing"] == "awaiting_payment" and rows[fit["id"]]["price_pence"] == 7900
-    assert rows[fit["id"]]["live"] is False
+    assert rows[fit["id"]]["live"] is False and out["topups_in_progress"] == []
 
 
 # ------------------------------------------------------------- adding a brand ---
 
-def test_adding_a_paid_brand_charges_pro_rata_now_and_waits_for_stripe(db):
+def test_a_paid_brand_gets_its_own_line_charged_pro_rata_now(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     api = FakeStripe(hold=True)
     out = add(db, biz, fit, api)
+    made = api.named("Price.create")[0]
+    assert made["product"] == f"prod_{EXTRA}" and made["unit_amount"] == 7900 and made["currency"] == "gbp"
+    assert made["recurring"] == {"interval": "month"} and made["metadata"]["brand_id"] == fit["id"]
     call = api.named("Subscription.modify")[0]
-    assert call[1] == "sub_mike"
-    assert call[2]["proration_behavior"] == "always_invoice"
-    assert call[2]["payment_behavior"] == "pending_if_incomplete"
-    assert call[2]["items"] == [{"price": EXTRA, "quantity": 1}]
-    assert call[2]["idempotency_key"] == f"outreach-brand-{entry(db, fit)['op']}"
+    own = entry(db, fit)["price_id"]
+    assert call["sub"] == "sub_mike" and call["items"] == [{"price": own, "quantity": 1}]
+    assert call["proration_behavior"] == "always_invoice" and call["payment_behavior"] == "pending_if_incomplete"
+    assert call["idempotency_key"] == f"outreach-brand-{entry(db, fit)['op']}"
     assert out["billing"] == "pending" and live(db, fit) is False
     assert committed(db, biz) == 9900 + 7900, "counted in the budget while it may be charged"
+
+
+def test_a_misconfigured_stripe_price_charges_nothing(db):
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    api.base[EXTRA] = 7500                              # the Stripe price isn't £79
+    assert code(add_refused(db, biz, fit, api)) == 503
+    assert api.named("Subscription.modify") == [] and entry(db, fit)["state"] == "awaiting_payment"
 
 
 def test_only_the_owner_adds_a_paid_brand(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     api = FakeStripe()
-    assert getattr(add_refused(db, biz, fit, api, user=STAFF), "status_code", None) == 403 and api.calls == []
+    assert code(add_refused(db, biz, fit, api, user=STAFF)) == 403 and api.calls == []
 
 
 def test_a_brand_beyond_the_owners_budget_is_never_charged(db):
@@ -369,7 +431,7 @@ def test_a_brand_beyond_the_owners_budget_is_never_charged(db):
     budget(db, biz, 9900 + 7899)                      # £99 add-on committed; £79 more doesn't fit
     api = FakeStripe()
     exc = add_refused(db, biz, fit, api)
-    assert getattr(exc, "status_code", None) == 409 and "budget" in exc.detail and api.calls == []
+    assert code(exc) == 409 and "budget" in exc.detail and api.calls == []
 
 
 def test_without_a_subscription_a_brand_cannot_be_added(db):
@@ -377,54 +439,48 @@ def test_without_a_subscription_a_brand_cannot_be_added(db):
     stripe_ids(db, subscription=None)
     fit, fit_lia = new_brand(db, biz)
     budget(db, biz)
-    assert getattr(add_refused(db, biz, fit, FakeStripe()), "status_code", None) == 409
+    assert code(add_refused(db, biz, fit, FakeStripe())) == 409
 
 
 def test_without_the_stripe_prices_set_nothing_is_charged(db, monkeypatch):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     monkeypatch.delenv("STRIPE_PRICE_EXTRA_BRAND")
     api = FakeStripe()
-    assert getattr(add_refused(db, biz, fit, api), "status_code", None) == 503 and api.calls == []
+    assert code(add_refused(db, biz, fit, api)) == 503 and api.calls == []
 
 
-def test_quantities_are_set_to_what_is_paid_for_not_counted_up(db):
-    """Review 1 P1 5: absolute quantities, so changes converge."""
+def test_two_paid_brands_have_two_lines_and_neither_shares_the_others_place(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     second, second_lia = new_brand(db, biz, "Schools Outreach", age=timedelta(minutes=20))
     api = FakeStripe()
-    add(db, biz, fit, api)
-    webhook(db, api)
-    add(db, biz, second, api)
-    assert api.named("Subscription.modify")[1][2]["items"] == [{"id": f"si_{EXTRA}", "quantity": 2}]
-    assert api.quantity(EXTRA) == 2
+    paid_for(db, biz, fit, api)
+    paid_for(db, biz, second, api)
+    assert sorted(api.billed()) == sorted([entry(db, fit)["price_id"], entry(db, second)["price_id"]])
+    assert entry(db, fit)["price_id"] != entry(db, second)["price_id"]
 
 
 def test_a_second_change_waits_while_one_is_still_going_through(db):
-    """Review 1 P1 5: one subscription operation at a time per business."""
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     doc = settings(db)
     doc["outreach_brand_billing"]["op"] = {"token": "busy", "until": (NOW + timedelta(minutes=5)).isoformat()}
     save_settings(db, doc)
     api = FakeStripe()
-    exc = add_refused(db, biz, fit, api)
-    assert getattr(exc, "status_code", None) == 409 and api.calls == []
+    assert code(add_refused(db, biz, fit, api)) == 409 and api.calls == []
     assert entry(db, fit)["state"] == "awaiting_payment"
 
 
-def test_no_change_while_stripe_still_has_an_unpaid_update(db):
-    """Review 1 P1 5: a second update would replace the first's pending invoice."""
+def test_no_addition_while_stripe_holds_an_unpaid_update(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     second, second_lia = new_brand(db, biz, "Schools Outreach", age=timedelta(minutes=20))
     api = FakeStripe(hold=True)
     add(db, biz, fit, api)
-    exc = add_refused(db, biz, second, api)
-    assert getattr(exc, "status_code", None) == 409 and len(api.named("Subscription.modify")) == 1
+    assert code(add_refused(db, biz, second, api)) == 409 and len(api.named("Subscription.modify")) == 1
     assert entry(db, second)["state"] == "awaiting_payment" and entry(db, fit)["state"] == "pending"
 
 
 # --------------------------------------------------------- Stripe confirms ---
 
-def test_the_brand_goes_live_when_stripe_has_it_paid(db):
+def test_the_brand_goes_live_when_stripe_has_its_line_paid(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     api = FakeStripe(hold=True)
     add(db, biz, fit, api)
@@ -438,32 +494,35 @@ def test_the_brand_goes_live_when_stripe_has_it_paid(db):
 
 
 def test_an_old_event_cannot_switch_a_paid_brand_off(db):
-    """Review 1 P1 6: Stripe's CURRENT subscription decides, not the event's copy."""
+    """Stripe's CURRENT subscription decides, never the event's copy."""
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     api = FakeStripe()
-    add(db, biz, fit, api)
-    webhook(db, api)
+    paid_for(db, biz, fit, api)
     stale = {"id": "sub_mike", "customer": "cus_mike", "items": {"data": [{"price": {"id": PLAN_PRO}, "quantity": 1}]}}
     webhook(db, api, data=stale)
     assert live(db, fit) is True
 
 
-def test_paid_places_go_to_the_oldest_request_first(db):
+def test_an_answer_fetched_before_an_addition_finished_is_not_applied_over_it(db):
+    """Codex review 2 P1 1: the check fetched Stripe, the owner's addition was
+    paid and went live, then the check's older answer arrived."""
     biz, brand, fit, fit_lia = paid_brand_flow(db)
-    second, second_lia = new_brand(db, biz, "Schools Outreach", age=timedelta(minutes=20))
-    doc = settings(db)
-    brands = doc["outreach_brand_billing"]["brands"]
-    brands[second["id"]].update(state="pending", requested_at=NOW.isoformat(), op="b")
-    brands[fit["id"]].update(state="pending", requested_at=(NOW - timedelta(minutes=1)).isoformat(), op="a")
-    save_settings(db, doc)
     api = FakeStripe()
-    api._apply([{"price": EXTRA, "quantity": 1}])      # Stripe has one paid
-    webhook(db, api)
-    assert live(db, fit) is True and live(db, second) is False
+    real = api.Subscription.retrieve
+    state = {"done": False}
+
+    def stale_then_add(sub_id, **kw):
+        snapshot = real(sub_id)           # before the addition: no line for the brand
+        if not state["done"]:
+            state["done"] = True
+            paid_for(db, biz, fit, api)   # meanwhile: added, paid, live
+        return snapshot
+    api.Subscription.retrieve = staticmethod(stale_then_add)
+    reconcile(db, api, LATER)
+    assert entry(db, fit)["state"] == "active" and live(db, fit) is True
 
 
 def test_an_event_for_a_business_without_outreach_billing_touches_nothing(db):
-    """Review 1 P1 1: other customers' events never reach Stripe or fail."""
     started(db)
     stripe_ids(db, customer="cus_other", subscription="sub_other", bid=B)
     api = FakeStripe()
@@ -472,55 +531,56 @@ def test_an_event_for_a_business_without_outreach_billing_touches_nothing(db):
     assert api.calls == []
 
 
-def test_an_uncertain_addition_is_kept_and_retried_with_the_same_identity(db):
-    """Review 1 P1 2: a timeout may have been carried out; never 'nothing was charged'."""
-    biz, brand, fit, fit_lia = paid_brand_flow(db)
-    api = FakeStripe(modify_error=APIConnectionError("read timed out"))
-    exc = add_refused(db, biz, fit, api)
-    assert getattr(exc, "status_code", None) == 502 and "don't pay again" in exc.detail.lower()
-    assert entry(db, fit)["state"] == "pending" and entry(db, fit)["uncertain"] is True
-    assert committed(db, biz) == 9900 + 7900, "still counted: it may have been charged"
-    first_key = api.named("Subscription.modify")[0][2]["idempotency_key"]
-    api.modify_error = None
-    add(db, biz, fit, api)
-    assert api.named("Subscription.modify")[1][2]["idempotency_key"] == first_key
-    webhook(db, api)
-    assert live(db, fit) is True
-
-
-def test_an_uncertain_addition_that_did_go_through_is_found_by_the_check(db):
+def test_an_uncertain_addition_is_retried_as_the_identical_request(db):
+    """A timeout before Stripe acted: the retry sends the same price under the same key."""
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     api = FakeStripe()
-    real = api.Subscription.modify
+    api.fail["Subscription.modify"] = APIConnectionError("read timed out")
+    exc = add_refused(db, biz, fit, api)
+    assert code(exc) == 502 and "don't pay again" in exc.detail.lower()
+    assert entry(db, fit)["state"] == "pending" and entry(db, fit)["uncertain"] is True
+    assert committed(db, biz) == 9900 + 7900, "still counted: it may have been charged"
+    add(db, biz, fit, api)
+    first, second = api.named("Subscription.modify")
+    assert first == second, "same parameters, same key"
+    assert len(api.named("Price.create")) == 1
+    webhook(db, api)
+    assert live(db, fit) is True and len(api.billed()) == 1
 
-    def carried_out_then_dropped(sub_id, **kw):
-        real(sub_id, **kw)
-        raise APIConnectionError("connection reset")
-    api.Subscription.modify = staticmethod(carried_out_then_dropped)
+
+def test_an_addition_that_went_through_but_whose_answer_was_lost_is_never_sent_twice(db):
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    api.fail["Subscription.modify"] = ("lost", APIConnectionError("connection reset"))
     add_refused(db, biz, fit, api)
-    reconcile(db, api, LATER)
-    assert live(db, fit) is True and api.quantity(EXTRA) == 1
+    add(db, biz, fit, api)                             # the owner tries again
+    assert len(api.named("Subscription.modify")) == 1, "Stripe already has it: nothing re-sent"
+    reconcile(db, api, NOW)
+    assert live(db, fit) is True and len(api.billed()) == 1
 
 
 def test_a_declined_addition_goes_back_to_awaiting_payment(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
-    api = FakeStripe(modify_error=CardError("card_declined"))
-    assert getattr(add_refused(db, biz, fit, api), "status_code", None) == 402
+    api = FakeStripe()
+    api.fail["Subscription.modify"] = CardError()
+    assert code(add_refused(db, biz, fit, api)) == 402
     assert entry(db, fit)["state"] == "awaiting_payment" and committed(db, biz) == 9900
 
 
 def test_an_addition_whose_invoice_was_never_paid_can_be_tried_again(db):
-    """Review 1 P2: an abandoned or declined pending update is recovered."""
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     api = FakeStripe(hold=True)
     add(db, biz, fit, api)
     reconcile(db, api, LATER)
-    assert entry(db, fit)["state"] == "pending", "Stripe still has the update waiting for payment"
-    api.pending_items = None                           # Stripe dropped the unpaid update
+    assert entry(db, fit)["state"] == "pending", "Stripe still holds the update for payment"
+    api.pending_items = None                           # Stripe's pending update expired unpaid
     reconcile(db, api, LATER)
     assert entry(db, fit)["state"] == "awaiting_payment" and "didn't go through" in entry(db, fit)["note"]
     assert committed(db, biz) == 9900
-    add(db, biz, fit, FakeStripe())
+    api.hold = False
+    add(db, biz, fit, api)
+    webhook(db, api)
+    assert live(db, fit) is True
 
 
 def test_cold_sending_waits_for_payment_but_replies_never_do(db):
@@ -537,115 +597,189 @@ def test_cold_sending_waits_for_payment_but_replies_never_do(db):
 def test_removing_a_paid_brand_stops_billing_at_the_end_of_the_paid_month(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     api = FakeStripe()
-    add(db, biz, fit, api)
-    webhook(db, api)
-    with run_clock(), Session(db) as s:
-        out = billing().remove_paid_brand(s, biz, OWNER, fit["id"], api=api)
-    call = api.named("Subscription.modify")[-1][2]
-    assert call["proration_behavior"] == "none" and call["items"] == [{"id": f"si_{EXTRA}", "deleted": True}]
+    paid_for(db, biz, fit, api)
+    own = entry(db, fit)["price_id"]
+    out = remove(db, biz, fit, api)
+    call = api.named("Subscription.modify")[-1]
+    assert call["proration_behavior"] == "none" and call["items"] == [{"id": f"si_{own}", "deleted": True}]
     assert out["billing"] == "ending" and live(db, fit) is True, "paid until the end of the month"
-    assert live(db, fit, AFTER_PERIOD) is False
-    assert committed(db, biz, AFTER_PERIOD) == 9900, "a stopped brand stops counting in the budget (review 1 P2)"
+    assert live(db, fit, AFTER_PERIOD) is False and api.billed() == []
+    assert committed(db, biz, AFTER_PERIOD) == 9900, "a stopped brand stops counting in the budget"
 
 
-def test_removing_one_of_two_keeps_the_other_live(db):
-    """Review 1 P1 5: Stripe's event may land before its answer does."""
+def test_removing_one_brand_never_hands_its_place_to_another(db):
+    """Codex review 2 P1 2: remove A (Stripe's answer lost before it acted), then add B."""
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     second, second_lia = new_brand(db, biz, "Schools Outreach", age=timedelta(minutes=20))
     api = FakeStripe()
-    add(db, biz, fit, api)
-    webhook(db, api)
+    paid_for(db, biz, fit, api)
+    api.fail["Subscription.modify"] = APIConnectionError("read timed out")
+    assert code(remove_refused(db, biz, fit, api)) == 502
+    assert entry(db, fit)["state"] == "ending" and entry(db, fit)["ends_at"]
+    api.hold = True
     add(db, biz, second, api)
-    webhook(db, api)
-    real = api.Subscription.modify
+    assert api.named("Subscription.modify")[-1]["items"] == [{"price": entry(db, second)["price_id"], "quantity": 1}]
+    reconcile(db, api, NOW)
+    assert live(db, second) is False, "B waits for its own payment; A's paid line is A's"
+    api.pay()
+    reconcile(db, api, NOW + timedelta(minutes=11))    # the operation claim has lapsed: A's removal is re-sent
+    assert live(db, second) is True and api.billed() == [entry(db, second)["price_id"]]
+    assert live(db, fit, AFTER_PERIOD) is False
 
-    def modify_then_webhook(sub_id, **kw):
-        out = real(sub_id, **kw)
-        webhook(db, api)
-        return out
-    api.Subscription.modify = staticmethod(modify_then_webhook)
-    with run_clock(), Session(db) as s:
-        billing().remove_paid_brand(s, biz, OWNER, fit["id"], api=api)
-    assert api.quantity(EXTRA) == 1
-    assert live(db, second) is True and live(db, fit) is True      # fit: until its paid month ends
-    assert live(db, fit, AFTER_PERIOD) is False and live(db, second, AFTER_PERIOD) is True
+
+def test_a_removal_that_cant_reach_stripe_changes_nothing(db):
+    """Codex review 2 P1 3: the paid period's end is known before anything is recorded."""
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    paid_for(db, biz, fit, api)
+    api.fail["Subscription.retrieve"] = APIConnectionError("timed out")
+    assert code(remove_refused(db, biz, fit, api)) == 502
+    assert entry(db, fit)["state"] == "active" and len(api.billed()) == 1
+
+
+def test_an_unconfirmed_removal_is_re_sent_and_ends_on_time(db):
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    paid_for(db, biz, fit, api)
+    api.fail["Subscription.modify"] = APIConnectionError("read timed out")
+    remove_refused(db, biz, fit, api)
+    reconcile(db, api, NOW + timedelta(minutes=11))
+    first, again = api.named("Subscription.modify")[-2:]
+    assert first == again and api.billed() == []
+    assert live(db, fit) is True and live(db, fit, AFTER_PERIOD + timedelta(days=100)) is False
+
+
+def test_a_refused_removal_leaves_the_brand_paid_and_live(db):
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    paid_for(db, biz, fit, api)
+    api.fail["Subscription.modify"] = InvalidRequestError("no")
+    assert code(remove_refused(db, biz, fit, api)) == 409
+    assert entry(db, fit)["state"] == "active" and "ends_at" not in entry(db, fit)
+
+
+def test_no_removal_while_stripe_holds_an_unpaid_update(db):
+    """Codex review 2 P1 4: removing would replace the waiting update."""
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    second, second_lia = new_brand(db, biz, "Schools Outreach", age=timedelta(minutes=20))
+    api = FakeStripe()
+    paid_for(db, biz, fit, api)
+    api.hold = True
+    add(db, biz, second, api)
+    sent = len(api.named("Subscription.modify"))
+    assert code(remove_refused(db, biz, fit, api)) == 409
+    assert len(api.named("Subscription.modify")) == sent and api.pending_items
+    assert entry(db, fit)["state"] == "active"
 
 
 # ------------------------------------------------------------------ top-ups ---
 
-def test_a_top_up_is_two_taps_on_the_saved_card(db):
+def test_a_top_up_opens_stripes_payment_page_reserved_first(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     api = FakeStripe()
     out = topup(db, biz, brand, 2500, api)
-    call = api.named("PaymentIntent.create")[0][2]
-    assert call["amount"] == 2500 and call["currency"] == "gbp" and call["customer"] == "cus_mike"
-    assert call["payment_method"] == "pm_saved" and call["off_session"] is True and call["confirm"] is True
+    call = api.named("checkout.Session.create")[0]
     key = call["metadata"]["reservation"]
-    assert call["metadata"] == {"kind": "outreach_topup", "business_id": A, "brand_id": brand["id"], "reservation": key}
+    assert call["mode"] == "payment" and call["customer"] == "cus_mike"
+    assert call["line_items"][0]["price_data"]["unit_amount"] == 2500
+    assert call["line_items"][0]["price_data"]["currency"] == "gbp"
+    assert call["metadata"] == {"kind": "outreach_topup", "outreach_business_id": A, "brand_id": brand["id"],
+                                "reservation": key}
+    assert call["payment_intent_data"] == {"metadata": call["metadata"]}
+    assert call["expires_at"] == int((NOW + timedelta(minutes=35)).timestamp())
     assert call["idempotency_key"] == f"outreach-topup-{key}"
-    assert out["status"] == "processing", "credited only when Stripe confirms"
-    assert committed(db, biz) == 9900 + 2500, "reserved until Stripe settles it"
+    assert out == {"status": "checkout", "checkout_url": "https://pay.example/cs_1"}
+    assert committed(db, biz) == 9900 + 2500 and purchases(db)[key]["checkout_id"] == "cs_1"
 
 
 @pytest.mark.parametrize("amount", [999, 1500, 7500, 0, -1000])
 def test_only_the_three_top_up_sizes_are_offered(db, amount):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     api = FakeStripe()
-    assert getattr(topup_refused(db, biz, brand, amount, api), "status_code", None) == 422 and api.calls == []
+    assert code(topup_refused(db, biz, brand, amount, api)) == 422 and api.calls == []
 
 
-def test_when_the_bank_asks_for_3d_secure_the_owner_finishes_on_stripes_page(db):
+def test_a_paid_page_is_credited_once_and_raises_the_allowance(db):
+    from services import outreach_allowance
     biz, brand, fit, fit_lia = paid_brand_flow(db)
-    api = FakeStripe(payment="authentication_required")
-    out = topup(db, biz, brand, 1000, api)
-    assert out["checkout_url"] == "https://checkout.stripe.example/cs_1"
-    assert api.named("PaymentIntent.cancel")[0][1] == "pi_needs_auth", "the off-session attempt can never also succeed"
-    session_call = api.named("checkout.Session.create")[0][2]
-    key = api.named("PaymentIntent.create")[0][2]["metadata"]["reservation"]
-    assert session_call["mode"] == "payment" and session_call["payment_intent_data"]["metadata"]["reservation"] == key
+    api = FakeStripe()
+    with run_clock(), Session(db) as s:
+        before = outreach_allowance.allowance_pence(s, A, brand["id"], "2026-10")
+    topup(db, biz, brand, 2500, api)
+    page = api.pay_page("cs_1")
+    webhook(db, api, "checkout.session.completed", page)
+    webhook(db, api, "checkout.session.completed", page)     # a second delivery: never twice
+    reconcile(db, api, SOON)                                  # nor from the scheduled check
+    with run_clock(), Session(db) as s:
+        assert outreach_allowance.allowance_pence(s, A, brand["id"], "2026-10") == before + 2500 // 3
+    assert topped_up(db, brand) == 2500 and purchases(db) == {} and committed(db, biz) == 9900 + 2500
 
 
-def test_the_hosted_page_keeps_its_reservation_until_it_expires(db):
-    """Review 1 P1 4: the failed off-session attempt doesn't release a page still payable."""
+def test_a_paid_page_found_by_the_scheduled_check_is_credited(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
-    api = FakeStripe(payment="authentication_required")
+    api = FakeStripe()
     topup(db, biz, brand, 1000, api)
-    metadata = api.named("checkout.Session.create")[0][2]["metadata"]
-    failed = {"id": "pi_needs_auth", "amount": 1000, "currency": "gbp", "customer": "cus_mike", "metadata": metadata}
-    webhook(db, api, "payment_intent.payment_failed", failed)
-    assert committed(db, biz) == 9900 + 1000
-    webhook(db, api, "checkout.session.expired", {"id": "cs_1", "customer": "cus_mike", "metadata": metadata})
-    assert committed(db, biz) == 9900
+    api.pay_page("cs_1")                                      # the webhook never arrived
+    reconcile(db, api, SOON)
+    assert topped_up(db, brand) == 1000 and purchases(db) == {}
 
 
-def test_a_declined_card_charges_nothing_and_releases_the_reservation(db):
+def test_an_expired_page_releases_its_reservation(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
-    assert getattr(topup_refused(db, biz, brand, 5000, FakeStripe(payment="declined")), "status_code", None) == 402
-    assert committed(db, biz) == 9900
+    api = FakeStripe()
+    topup(db, biz, brand, 2500, api)
+    reconcile(db, api, SOON)
+    assert committed(db, biz) == 9900 + 2500, "an open page may still be paid"
+    webhook(db, api, "checkout.session.expired", api.expire_page("cs_1"))
+    assert committed(db, biz) == 9900 and topped_up(db, brand) == 0
 
 
-def test_an_uncertain_top_up_stays_reserved_and_is_credited_when_stripe_has_it(db):
-    """Review 1 P1 2: a timeout is checked later by the payment's own identity."""
+def test_one_paid_page_releases_only_its_own_reservation(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
-    api = FakeStripe(payment="timeout")
-    assert getattr(topup_refused(db, biz, brand, 2500, api), "status_code", None) == 502
+    api = FakeStripe()
+    topup(db, biz, brand, 2500, api)
+    topup(db, biz, brand, 2500, api)
+    webhook(db, api, "checkout.session.completed", api.pay_page("cs_1"))
+    assert len(purchases(db)) == 1 and committed(db, biz) == 9900 + 5000
+
+
+def test_a_page_stripe_refused_to_open_releases_its_reservation(db):
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    api.fail["checkout.Session.create"] = InvalidRequestError("no")
+    assert code(topup_refused(db, biz, brand, 5000, api)) == 409 and committed(db, biz) == 9900
+
+
+@pytest.mark.parametrize("lost", [False, True])
+def test_an_unconfirmed_page_is_recovered_with_the_same_request(db, lost):
+    """Codex review 2 P1 5: the page may exist; its reservation stays until Stripe settles it."""
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    failure = APIConnectionError("read timed out")
+    api.fail["checkout.Session.create"] = ("lost", failure) if lost else failure
+    assert code(topup_refused(db, biz, brand, 2500, api)) == 502
     assert committed(db, biz) == 9900 + 2500
-    sent = api.named("PaymentIntent.create")[0][2]
-    api.intents["pi_late"] = {"id": "pi_late", "status": "succeeded", "amount": 2500, "currency": "gbp",
-                              "customer": "cus_mike", "metadata": sent["metadata"]}
-    reconcile(db, api, NOW + timedelta(minutes=5))
-    assert api.named("PaymentIntent.search") == [], "checked only once it's had time to settle"
-    reconcile(db, api, LATER)
-    reconcile(db, api, LATER)
-    assert pending_topups(db) == 0 and committed(db, biz) == 9900 + 2500, "credited, once"
+    reconcile(db, api, SOON)
+    first, again = api.named("checkout.Session.create")
+    assert first == again and len(api.pages) == 1, "one page, ever"
+    (key, purchase), = purchases(db).items()
+    assert purchase["checkout_id"] == "cs_1"
+    api.pay_page("cs_1")
+    reconcile(db, api, SOON)
+    assert topped_up(db, brand) == 2500 and purchases(db) == {}
 
 
-def test_an_uncertain_top_up_that_never_reached_stripe_is_released(db):
+def test_a_page_never_confirmed_is_held_until_stripes_webhooks_have_had_their_chance(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
-    api = FakeStripe(payment="timeout")
+    api = FakeStripe()
+    api.fail["checkout.Session.create"] = APIConnectionError("read timed out")
     topup_refused(db, biz, brand, 2500, api)
-    reconcile(db, api, LATER)
-    assert committed(db, biz) == 9900
+    api.fail["checkout.Session.create"] = APIConnectionError("still down")
+    reconcile(db, api, SOON)
+    reconcile(db, api, NOW + timedelta(days=3))
+    assert committed(db, biz) == 9900 + 2500
+    reconcile(db, api, NOW + timedelta(days=4, minutes=1))
+    assert purchases(db) == {}
 
 
 def test_two_top_ups_never_pass_the_budget(db):
@@ -653,69 +787,53 @@ def test_two_top_ups_never_pass_the_budget(db):
     budget(db, biz, 9900 + 5000)                       # room for £50 of top-ups, once
     api = FakeStripe()
     topup(db, biz, brand, 5000, api)
-    assert getattr(topup_refused(db, biz, brand, 1000, api), "status_code", None) == 409
-    assert len(api.named("PaymentIntent.create")) == 1
+    assert code(topup_refused(db, biz, brand, 1000, api)) == 409
+    assert len(api.named("checkout.Session.create")) == 1
 
 
 def test_a_top_up_needs_a_live_brand_and_the_owner(db):
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     for user, target in ((STAFF, brand), (OWNER, fit)):   # not the owner; a brand not yet paid for
         api = FakeStripe()
-        assert getattr(topup_refused(db, biz, target, 1000, api, user=user), "status_code", None) in (403, 409)
-        assert api.calls == []
+        assert code(topup_refused(db, biz, target, 1000, api, user=user)) in (403, 409) and api.calls == []
 
 
-def test_a_confirmed_top_up_is_credited_once_and_raises_the_allowance(db):
-    from services import outreach_allowance
-    biz, brand, fit, fit_lia = paid_brand_flow(db)
-    api = FakeStripe()
-    with run_clock(), Session(db) as s:
-        before = outreach_allowance.allowance_pence(s, A, brand["id"], "2026-10")
-    topup(db, biz, brand, 2500, api)
-    webhook(db, api, "payment_intent.succeeded", dict(api.intents["pi_1"]))
-    webhook(db, api, "payment_intent.succeeded", dict(api.intents["pi_1"]))     # a second delivery: never twice
-    with run_clock(), Session(db) as s:
-        assert outreach_allowance.allowance_pence(s, A, brand["id"], "2026-10") == before + 2500 // 3
-    assert pending_topups(db) == 0 and committed(db, biz) == 9900 + 2500
-
-
-def test_one_confirmed_top_up_releases_only_its_own_reservation(db):
-    """Review 1 P1 3."""
+@pytest.mark.parametrize("change", [{"customer": "cus_someone_else"}, {"currency": "usd"}, {"amount_total": 5000},
+                                    {"id": "cs_other"}, {"metadata.brand_id": "not-a-brand"},
+                                    {"metadata.outreach_business_id": B}, {"metadata.reservation": "someone-else"}])
+@pytest.mark.parametrize("path", ["webhook", "scheduled check"])
+def test_a_page_that_isnt_this_reservations_is_never_credited(db, change, path):
+    """Codex review 2 P1 6: one check, on both paths, against the purchase reserved."""
     biz, brand, fit, fit_lia = paid_brand_flow(db)
     api = FakeStripe()
     topup(db, biz, brand, 2500, api)
-    topup(db, biz, brand, 2500, api)
-    webhook(db, api, "payment_intent.succeeded", dict(api.intents["pi_1"]))
-    assert pending_topups(db) == 2500, "the other £25 is still payable"
-    assert committed(db, biz) == 9900 + 5000
-
-
-def test_a_failed_payment_releases_its_reservation(db):
-    biz, brand, fit, fit_lia = paid_brand_flow(db)
-    api = FakeStripe()
-    topup(db, biz, brand, 2500, api)
-    webhook(db, api, "payment_intent.payment_failed", dict(api.intents["pi_1"], status="requires_payment_method"))
-    assert committed(db, biz) == 9900
-
-
-@pytest.mark.parametrize("change", [{"customer": "cus_someone_else"}, {"currency": "usd"}, {"amount": 9999},
-                                    {"metadata": {}}, {"brand_id": "not-a-brand"}])
-def test_a_payment_that_isnt_this_businesss_own_top_up_is_ignored(db, change):
-    """Review 1 P1 7: bound to the business's own Stripe customer, in pounds, a real size."""
-    biz, brand, fit, fit_lia = paid_brand_flow(db)
-    intent = {"id": "pi_x", "status": "succeeded", "amount": 2500, "currency": "gbp", "customer": "cus_mike",
-              "metadata": {"kind": "outreach_topup", "business_id": A, "brand_id": brand["id"], "reservation": "r"}}
-    if "brand_id" in change:
-        intent["metadata"]["brand_id"] = change["brand_id"]
+    page = api.pay_page("cs_1")
+    (field, value), = change.items()
+    if field.startswith("metadata."):
+        page["metadata"] = dict(page["metadata"], **{field.split(".")[1]: value})
     else:
-        intent.update(change)
-    webhook(db, FakeStripe(), "payment_intent.succeeded", intent)
-    assert committed(db, biz) == 9900
+        page[field] = value
+    if path == "webhook":
+        webhook(db, api, "checkout.session.completed", page)
+    else:
+        api.pages["cs_1"] = page
+        reconcile(db, api, SOON)
+    assert topped_up(db, brand) == 0 and committed(db, biz) == 9900 + 2500, "the reservation stays for review"
 
 
-# ----------------------------------------------------------- the webhook ---
+def test_a_paid_page_with_no_reservation_credits_nothing(db):
+    """Codex review 2 P1 6: never a fabricated purchase."""
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    page = {"id": "cs_x", "status": "complete", "payment_status": "paid", "customer": "cus_mike", "currency": "gbp",
+            "amount_total": 5000, "metadata": {"kind": "outreach_topup", "outreach_business_id": A,
+                                               "brand_id": brand["id"], "reservation": "made-up"}}
+    webhook(db, FakeStripe(), "checkout.session.completed", page)
+    assert topped_up(db, brand) == 0
 
-def test_the_stripe_webhook_hands_events_to_billing_inside_its_retry_boundary():
+
+# ----------------------------------------------------------- the wiring ---
+
+def test_the_stripe_webhook_hands_events_to_billing_first_inside_its_retry_boundary():
     import inspect
     import main
     source = inspect.getsource(main.stripe_webhook)
@@ -744,14 +862,13 @@ def test_the_scheduled_check_settles_every_business_with_billing(db, monkeypatch
 
 
 def test_stripe_returns_the_owner_to_the_page_with_billing_on_it():
-    """Review 1 P2: the research panel (and its billing) is on the settings tab."""
     import inspect
     import outreach_setup_api as api
     assert "/app/outreach/settings" in inspect.getsource(api._return_url)
 
 
-@pytest.mark.parametrize("who,code", [(OWNER, 200), (STAFF, 403)])
-def test_the_billing_endpoints(db, monkeypatch, who, code):
+@pytest.mark.parametrize("who,code_", [(OWNER, 200), (STAFF, 403)])
+def test_the_billing_endpoints(db, monkeypatch, who, code_):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     import auth
@@ -773,6 +890,7 @@ def test_the_billing_endpoints(db, monkeypatch, who, code):
         added = client.post(f"/v1/outreach/setup/brands/{fit['id']}/billing")
         topped = client.post("/v1/outreach/setup/topups", json={"brand_id": brand["id"], "amount_pence": 1000})
         bad = client.post("/v1/outreach/setup/topups", json={"brand_id": brand["id"], "amount_pence": "lots"})
-    assert (added.status_code, topped.status_code) == (code, code) and bad.status_code == 422
-    assert (len(fake.calls) > 0) == (code == 200)
-
+    assert (added.status_code, topped.status_code) == (code_, code_) and bad.status_code == 422
+    assert (len(fake.calls) > 0) == (code_ == 200)
+    if code_ == 200:
+        assert topped.json()["checkout_url"] == "https://pay.example/cs_1"
