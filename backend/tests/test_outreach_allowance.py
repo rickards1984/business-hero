@@ -112,7 +112,7 @@ def test_research_stops_at_the_allowance(db):
     out = run(db, biz, lia, world)
     assert world.briefs == [] and out["spend_pence"] == 0
     assert "allowance" in out["stopped"] and "next month" in out["stopped"]
-    assert "top up" not in out["stopped"].lower(), "top-ups don't exist until part F"
+    assert "top-up" in out["stopped"].lower(), "since part F a top-up is offered"
 
 
 def test_research_runs_while_the_allowance_has_room(db):

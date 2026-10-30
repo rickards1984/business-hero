@@ -369,6 +369,10 @@ def deliver(monkeypatch):
         main.stripe.Webhook, "construct_event",
         lambda payload, sig, secret: state["event"],
     )
+    # These tests are about BH-006's own rules, on a fake that understands only
+    # those queries; outreach billing (OUT-19 F) is tested on its own.
+    from services import outreach_billing
+    monkeypatch.setattr(outreach_billing, "webhook", lambda *a, **k: None)
 
     def _deliver(event, session):
         state["event"] = event
@@ -1437,6 +1441,8 @@ def test_a_real_signed_event_with_decimal_prices_is_stored_as_plain_json(monkeyp
     stamp = int(_time.time())
     signature = hmac.new(STRIPE_ENV["STRIPE_WEBHOOK_SECRET"].encode(), f"{stamp}.{raw}".encode(),
                          hashlib.sha256).hexdigest()
+    from services import outreach_billing
+    monkeypatch.setattr(outreach_billing, "webhook", lambda *a, **k: None)
     main.app.dependency_overrides[get_session] = lambda: session
     try:
         response = TestClient(main.app).post("/v1/billing/webhook", content=raw.encode(),
@@ -1446,3 +1452,20 @@ def test_a_real_signed_event_with_decimal_prices_is_stored_as_plain_json(monkeyp
     assert response.status_code == 200, response.text
     stored = session.committed_events[0].payload
     assert _json.dumps(stored) and stored == _json.loads(raw)
+
+
+
+def test_a_failure_in_outreach_billing_makes_stripe_retry(deliver, monkeypatch):
+    """OUT-19 F (Codex review 1): never a 500 or a silent swallow: a 503, and
+    nothing of the event is committed."""
+    from services import outreach_billing
+    business = a_business(plan_tier="starter")
+    session = WebhookSession(business)
+
+    def broken(*a, **k):
+        raise RuntimeError("Stripe unreachable")
+    response = None
+    monkeypatch.setattr(outreach_billing, "webhook", broken)
+    response = deliver(subscription_event("customer.subscription.updated", PRICE_PRO, event_id="evt_billing_down",
+                                          status="active"), session)
+    assert response.status_code == 503 and session.committed_events == []

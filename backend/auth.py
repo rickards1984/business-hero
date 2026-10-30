@@ -627,6 +627,8 @@ KNOWN_METADATA_FLAGS = (
                      # still carry the flag. Harmless either way.
     "industry",      # the onboarding wizard writes it; quoting_api.py reads it
                      # to build the AI quoting prompt
+    "outreach_brands_free",  # OUT-19 F: every outreach brand live with no billing (free months)
+    "complimentary",  # OUT-19 F / PROFIT-1: a non-paying business; the profit guard counts £0 income
 )
 
 _logger = logging.getLogger("auth.feature_flags")

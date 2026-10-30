@@ -707,6 +707,10 @@ def reserve_outreach_usage(session, business, *, operation_key, mailbox_id, pros
     reply = message['kind'] == 'bespoke'
     cold = "AND (m.kind IS NULL OR m.kind <> 'bespoke') "   # anything not known to be a reply is cold
     if not reply:
+        # OUT-19 F: a paid brand sends cold email only once paid for (replies never wait).
+        from services import outreach_billing
+        require(outreach_billing.brand_live(session, bid, campaign['brand_id'], moment),
+                'This brand is waiting for payment')
         _cold_limits(session, bid, campaign, settings, mailbox_id, cap, local, cold)
     for scope, scope_id, limit in (('business', bid, None), ('mailbox', mailbox_id, reply_ceiling(cap))):
         usage = rows(session, 'outreach_daily_usage', bid, 'AND scope_type=:s AND scope_id=:i AND local_date=:d',

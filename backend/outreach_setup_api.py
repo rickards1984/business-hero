@@ -15,6 +15,7 @@ import auth
 from auth import get_user_business_context
 from db import get_session
 from services import outreach_allowance as allowance
+from services import outreach_billing as billing
 from services import outreach_autopilot as autopilot
 from services import outreach_research as research
 from services import outreach_setup as setup
@@ -248,6 +249,49 @@ def budget_set(body: Budget, context=Depends(get_user_business_context), session
     business = auth._load_business(session, context["business_id"])
     auth.assert_feature_access(business, "outreach")
     return _run(allowance.set_budget, session, context, _body(body))
+
+
+class TopUp(Body):
+    brand_id: UUID
+    amount_pence: int = Field(strict=True)
+
+
+def _return_url(request: Request) -> str:
+    from app.billing.config import get_stripe_config
+    base = (get_stripe_config().get("app_base_url") or str(request.base_url)).rstrip("/")
+    return f"{base}/app/outreach/settings"     # the research panel (and its billing) lives there
+
+
+@router.get("/billing")
+def billing_status(context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    """OUT-19 F: each brand's billing, and the top-up sizes."""
+    business = auth._load_business(session, context["business_id"])
+    auth.assert_feature_access(business, "outreach")
+    return billing.status(session, business)
+
+
+@router.post("/brands/{brand_id}/billing")
+def billing_add(brand_id: UUID, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    business = auth._load_business(session, context["business_id"])
+    auth.assert_feature_access(business, "outreach")
+    return _run(billing.add_paid_brand, session, context, str(brand_id))
+
+
+@router.delete("/brands/{brand_id}/billing")
+def billing_remove(brand_id: UUID, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    business = auth._load_business(session, context["business_id"])
+    auth.assert_feature_access(business, "outreach")
+    return _run(billing.remove_paid_brand, session, context, str(brand_id))
+
+
+@router.post("/topups")
+@limiter.limit("10/minute")
+def topup(request: Request, body: TopUp, context=Depends(get_user_business_context),
+          session: Session = Depends(get_session)):
+    business = auth._load_business(session, context["business_id"])
+    auth.assert_feature_access(business, "outreach")
+    return _run(billing.start_topup, session, context, str(body.brand_id), body.amount_pence,
+                return_url=_return_url(request))
 
 
 class Grant(Body):

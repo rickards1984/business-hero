@@ -1059,6 +1059,26 @@ async def stripe_webhook(
             # already have.
             return {"received": True, "duplicate": True}
 
+    # OUT-19 F: paid outreach brands go live as Stripe shows them paid, and
+    # outreach top-ups are credited once Stripe confirms them. In this same
+    # transaction, so the event is applied and recorded together.
+    # Stripe's CURRENT subscription is fetched and reconciled (never an event's
+    # possibly stale copy); a business with no outreach billing is untouched.
+    # A failure here must be retried, like the commit below: 503 (Codex OUT-19 F review 1).
+    # FIRST, before this handler writes the business row: billing takes the
+    # business_settings lock, and the owner's billing actions lock
+    # business_settings before businesses, so the same order here can't
+    # deadlock; and no row lock is held while Stripe is asked.
+    from services import outreach_billing
+    try:
+        created = event_dict.get("created")
+        outreach_billing.webhook(session, event_type, event_data,
+                                 created=datetime.fromtimestamp(int(created), tz=timezone.utc) if created else None)
+    except Exception:
+        session.rollback()
+        logger.error("stripe webhook outreach billing failed for event %s", event_id, exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not record the event; Stripe should retry.")
+
     # Moved BELOW the de-duplication check. It used to sit above it and commit
     # on its own, so the handler's "de-duplicate before applying anything" and
     # "one transaction" claims were both false for this branch and a replayed

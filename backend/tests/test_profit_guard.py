@@ -16,6 +16,8 @@ import importlib.util
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import json
+
 import pytest
 from sqlalchemy import create_engine, text
 from sqlmodel import Session
@@ -96,6 +98,21 @@ def test_income_is_the_monthly_plan_price_of_every_active_subscription(engine):
     assert out["income_pence"] == 6900 + 12900 + 26900 and out["income_basis"] == "subscriptions"
     assert g.PLAN_PRICE_PENCE == {"starter": 6900, "pro": 12900, "business": 26900}
 
+
+
+def test_only_the_complimentary_flag_takes_a_business_out_of_income(engine):
+    """OUT-19 F (Codex review 2): `complimentary` means it pays nothing, so no
+    income; `outreach_brands_free` only waives brand billing, so its plan
+    still counts. MSC and New Body, free with everything, carry both."""
+    business(engine, "paying", "pro")
+    business(engine, "brands-free", "pro")
+    business(engine, "comp", "business")
+    business(engine, "both", "business")
+    with engine.begin() as c:
+        for bid, flags in (("brands-free", {"outreach_brands_free": True}), ("comp", {"complimentary": True}),
+                           ("both", {"complimentary": True, "outreach_brands_free": True})):
+            c.execute(text("UPDATE businesses SET feature_flags = :f WHERE id = :b"), {"f": json.dumps(flags), "b": bid})
+    assert status(engine)["income_pence"] == 12900 + 12900
 
 def test_before_launch_a_trial_budget_stands_in_for_income(engine, monkeypatch):
     business(engine, "mike", "business", status="trialing")

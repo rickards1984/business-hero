@@ -146,6 +146,7 @@ def test_a_scheduled_check_racing_a_cost_alerts_once(pg, clean):
                                         {"me": mine}).scalar()
                 if blocked:
                     break
+                watch.rollback()    # pg_stat_activity is one snapshot per transaction: a fresh one each poll
                 time.sleep(0.05)
     finally:
         first.commit()      # always release the writer and the worker, even when the assertion below fails

@@ -126,10 +126,11 @@ def hold_draft(session, bid: str, brand_id, moment: datetime, pence: int) -> Non
         outreach_research._add_meter(session, str(bid), f"{DRAFT_HOLD_METER}:{brand_id}", moment, int(pence))
 
 
-# Top-ups arrive with part F; until then nothing offers them (Codex B+C review 1).
-ALLOWANCE_USED = "This brand's AI allowance for the month is used, so research has stopped until next month."
-DRAFT_ALLOWANCE_USED = ("This brand's AI allowance for the month is used, so Aria can't draft this until next month. "
-                        "Write it yourself for now.")
+# Top-ups exist since part F (Outreach → Research, on the brand).
+ALLOWANCE_USED = ("This brand's AI allowance for the month is used, so research has stopped until next month. "
+                  "A top-up on the brand's research card carries it on now.")
+DRAFT_ALLOWANCE_USED = ("This brand's AI allowance for the month is used, so Aria can't draft this until next month "
+                        "or a top-up. Write it yourself for now.")
 
 
 # ------------------------------------------------------------- C: the budget ---
@@ -137,7 +138,10 @@ DRAFT_ALLOWANCE_USED = ("This brand's AI allowance for the month is used, so Ari
 def _committed(session, bid: str, moment: datetime) -> int:
     """What outreach already charges this month beyond the plan: paid brands
     and the top-ups bought this month."""
-    paid = sum(price for price, included in prices(session, bid).values() if not included)
+    # OUT-19 F: brands still awaiting payment, and a free business's brands,
+    # charge nothing; top-ups reserved but not yet confirmed already count.
+    from services import outreach_billing
+    paid = outreach_billing.charged_brand_pence(session, bid, moment) + outreach_billing.pending_topup_pence(session, bid, moment)
     topups = float(session.execute(text(
         "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND period = :p AND meter LIKE :m ESCAPE '\\'"),
         {"b": bid, "p": period_for(moment), "m": _like(f"{TOPUP_METER}:") + "%"}).scalar() or 0)
