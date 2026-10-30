@@ -96,7 +96,6 @@ Live state, verified status of every module, and the ten open risks are in
 `docs/CURRENT_STATE.md`. It supersedes the running "Current task" section
 this file used to carry — one place, kept honest, rather than two that drift.
 
-**One open RED item in production:** 033 STEP 21, removing the stopgap
-`receptionist: true` from MSC and New Body. Gated on STEP 20d passing against
-the deployed backend (`9826f61`). Details in
-`audits/033-PROD-RUNBOOK.md` and `docs/CURRENT_STATE.md` §8.
+**No open RED item from 033.** STEP 21, removing the stopgap
+`receptionist: true`, is closed: production state on 30 Oct 2026 matches its
+EXPECT (`docs/CURRENT_STATE.md` §8).
