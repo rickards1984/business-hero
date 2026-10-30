@@ -289,6 +289,18 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
   - Only the scheduled check re-sends an unconfirmed page creation (`reconcile(recover=True)`); the webhook only reads from Stripe.
 - **Tests:** `test_outreach_billing.py` has 80 tests. Four new mutations, plus the original ordering of the renewal bug, are each caught.
 
+**Codex review 5 (`audits/OUT-19-F-CODEX-REVIEW-5.md`, no P1, 1 × P2) → fixed.**
+- **Every addition attempt, first or retry, gets a new number in the brand's fingerprint.** A check whose answer from Stripe predates a retry can never clear it, even when the retry's own answer was lost and left the record otherwise unchanged. The mutation is caught.
+- **Also added (Codex's test-quality notes):**
+  - an active brand isn't paused by a check while a change is in progress;
+  - the renewal test asserts the exact renewed end.
+- **Backlog (Codex):**
+  - keep an audit record for unknown pages discarded after four days (needs three failures at once);
+  - operations that outlive the ten-minute claim;
+  - browser coverage of the billing states;
+  - revenue reporting from real Stripe amounts (PROFIT-2).
+- **Test-mode check before launch (Codex's suggestion):** in Stripe test mode, add a brand, buy one top-up and stop billing. Confirm one credit, and access until the paid end.
+
 ### G — Boost eligibility and steps (decision 5)
 
 ### H — AI routing and failover (decision 6)

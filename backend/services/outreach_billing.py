@@ -370,6 +370,10 @@ def add_paid_brand(session, business, user, brand_id, *, api=None) -> dict:
         entry.update(state="pending", requested_at=moment.isoformat(), op=uuid.uuid4().hex)
         for k in ("note", "price_id", "uncertain"):
             entry.pop(k, None)
+    # Every attempt, first or retry, gets a new number, so a check whose
+    # answer from Stripe predates an attempt can never apply over it
+    # (Codex review 5: a retry that leaves "uncertain" as it was is a change).
+    entry["attempt"] = int(entry.get("attempt") or 0) + 1
     billing["brands"][str(brand_id)] = entry
     op = entry["op"]
     _save(session, bid, billing)
@@ -557,7 +561,7 @@ def has_billing(session, bid: str) -> bool:
 
 
 def _fingerprint(entry: dict) -> tuple:
-    return tuple(entry.get(k) for k in ("state", "op", "price_id", "remove_op", "uncertain"))
+    return tuple(entry.get(k) for k in ("state", "op", "price_id", "remove_op", "uncertain", "attempt"))
 
 
 def reconcile(session, bid: str, *, api=None, moment: Optional[datetime] = None, recover: bool = False) -> None:

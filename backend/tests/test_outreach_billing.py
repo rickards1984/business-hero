@@ -992,6 +992,7 @@ def test_a_renewal_is_honoured_even_while_another_payment_is_pending(db):
     check(db, api, AFTER_PERIOD)
     assert len(api.named("Subscription.modify")) == sent, "no deletion while a payment is pending"
     assert live(db, fit, AFTER_PERIOD) is True, "the renewed month was paid for"
+    assert entry(db, fit)["ends_at"] == datetime.fromtimestamp(renewed, tz=timezone.utc).isoformat()
 
 
 @pytest.mark.parametrize("action", ["add", "remove"])
@@ -1041,6 +1042,52 @@ def test_the_webhook_never_creates_a_payment_page(db):
     assert len(api.named("checkout.Session.create")) == 1 and api.pages == {}
     reconcile(db, api, SOON)               # the scheduled check does recover it
     assert len(api.pages) == 1
+
+
+# ------------------------------------------------- Codex review 5 regressions ---
+
+def test_a_check_spanning_a_retry_whose_answer_was_lost_never_clears_it(db):
+    """P2: the check reads Stripe; a retry then adds the line but its answer
+    is lost (claim released, still "uncertain"); the check's older answer must
+    not clear the addition, or the next Add would charge a second line."""
+    from unittest import mock
+    from services import outreach_send
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    api.fail["Subscription.modify"] = APIConnectionError("never arrived")
+    add_refused(db, biz, fit, api)
+    real = api.Subscription.retrieve
+    once = []
+
+    def read_then_retry(sub_id, **kw):
+        snapshot = real(sub_id)            # before the line exists
+        if not once:
+            once.append(1)
+            api.fail["Subscription.modify"] = ("lost", APIConnectionError("connection reset"))
+            api.Subscription.retrieve = staticmethod(real)
+            with mock.patch.object(outreach_send, "now", lambda: LATER), Session(db) as s:
+                refused(billing().add_paid_brand, s, biz, OWNER, fit["id"], api=api)
+        return snapshot
+    api.Subscription.retrieve = staticmethod(read_then_retry)
+    with run_clock(), Session(db) as s:
+        billing().reconcile(s, A, api=api, moment=LATER)
+        s.commit()
+    assert entry(db, fit)["state"] == "pending" and entry(db, fit).get("price_id")
+    reconcile(db, api, LATER)
+    assert live(db, fit) is True and len(api.billed()) == 1
+    assert code(add_refused(db, biz, fit, api)) == 409, "nothing left to pay: no second line"
+
+
+def test_an_active_brand_is_never_paused_by_a_check_while_a_change_is_in_progress(db):
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    paid_for(db, biz, fit, api)
+    doc = settings(db)
+    doc["outreach_brand_billing"]["op"] = {"token": "busy", "until": (LATER + timedelta(minutes=5)).isoformat()}
+    save_settings(db, doc)
+    stale = FakeStripe()                   # an answer without the brand's line
+    reconcile(db, stale, LATER)
+    assert entry(db, fit)["state"] == "active" and live(db, fit) is True
 
 # ----------------------------------------------------------- the wiring ---
 
