@@ -386,6 +386,16 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
   - The health-check hooks are now tested through the real daily check (`_apply_health`), and the complaint through the real complaint path.
   - Eleven mutations, one per fix, are each caught.
 
+**Codex review 2 (`audits/OUT-19-G-CODEX-REVIEW-2.md`, no P1, 2 × P2) → fixed:**
+- **A level in its first fortnight is excused volume and the genuine-reply measure only.** Worsening deliverability (bounces, unsubscribes, a failed check) drops it at once; a complaint or pause still resets it.
+- **`effective` follows the send path's freshness rule:** 0 while paused, or without today's passing check (stale or future-dated).
+- **Tests strengthened, as Codex asked:**
+  - the grant-under-lock test now checks the real call order, and fails on review 1's check-release-relock shape;
+  - a reply is attempted and refused at a recorded provider limit;
+  - research capacity itself is tested for a brand with mixed inboxes;
+  - the bounce hold and retirement are tested through their real paths.
+- **Tests:** `test_outreach_boost.py` has 64 tests.
+
 ### H — AI routing and failover (decision 6)
 
 Built in `services/ai_router.py`. Research and Aria's setup drafts go through it.

@@ -30,6 +30,7 @@ from test_outreach_send import (  # noqa: F401 - fixtures are used by name
     A, BOX, BRAND, CAMPAIGN, NOW, OWNER, STAFF, STAMP, add, approve, database, h, propose, sent_today)
 from test_outreach_replies_ceiling import emails_today
 from test_outreach_replies import r  # noqa: F401 - the reply harness, for the real complaint path
+from test_outreach_setup import db  # noqa: F401 - the setup harness, for the real retirement path
 from services import metering
 
 
@@ -37,6 +38,12 @@ class MissingBoost(AssertionError):
     """Only the intentional absence of the module may be xfailed."""
 
 
+
+
+def mock_now(moment):
+    from unittest import mock
+    from services import outreach_send
+    return mock.patch.object(outreach_send, "now", lambda: moment)
 
 
 def boost():
@@ -487,23 +494,26 @@ def test_dropping_to_twenty_keeps_its_fourteen_day_hold(h):
     assert out["eligible"] is False and any("dropped back" in u for u in out["unmet"])
 
 
-def test_a_pause_landing_before_the_grant_is_seen(h, monkeypatch):
-    """P1 3: the decision is made under the lock that saves it."""
+def test_the_grant_is_decided_under_the_lock_that_saves_it(h, monkeypatch):
+    """P1 3 (review 2: a regression that the old code fails). The evaluation
+    runs after the business lock is taken, with no rollback (which would
+    release the lock) between it and the save."""
     from services import outreach_setup
     qualified(h)
-    real = outreach_setup._authority
-
-    def pause_then_lock(session, *args, **kwargs):
-        session.rollback()
-        with h.engine.begin() as other:   # another transaction pauses the inbox and commits first
-            other.execute(text("UPDATE outreach_mailboxes SET pause_reason = 'held by owner' WHERE mailbox_id = :m"),
-                          {"m": BOX})
-        return real(session, *args, **kwargs)
-    monkeypatch.setattr(outreach_setup, "_authority", pause_then_lock)
-    with pytest.raises(Exception) as exc:
-        do_boost(h)
-    assert getattr(exc.value, "status_code", None) == 409 and level(h) == 20
-
+    events = []
+    real_authority, real_evaluate, real_save = outreach_setup._authority, boost()._evaluate, boost()._save
+    real_rollback = h.s.rollback
+    def locked(*a, **k):
+        out = real_authority(*a, **k)      # (it rolls back, then takes the lock)
+        events.append("lock")              # recorded once the lock is held
+        return out
+    monkeypatch.setattr(outreach_setup, "_authority", locked)
+    monkeypatch.setattr(boost(), "_evaluate", lambda *a, **k: (events.append("evaluate"), real_evaluate(*a, **k))[1])
+    monkeypatch.setattr(boost(), "_save", lambda *a, **k: (events.append("save"), real_save(*a, **k))[1])
+    monkeypatch.setattr(h.s, "rollback", lambda: (events.append("rollback"), real_rollback())[1])
+    do_boost(h)
+    tail = events[len(events) - 1 - events[::-1].index("lock"):]
+    assert tail[:2] == ["lock", "evaluate"] and "save" in tail and "rollback" not in tail, events
 
 @pytest.mark.parametrize("quiet", ["no sends", "no genuine reply"])
 def test_a_fortnight_that_misses_any_measure_drops_a_step(h, quiet):
@@ -543,10 +553,8 @@ def test_a_provider_limit_binds_replies_too(h):
     assert room["cap"] == 25 and room["ceiling"] == 25
 
 
-def test_research_and_sending_agree_for_a_brand_with_mixed_inboxes(h):
-    """P2 1: the brand's other inbox is boosted to 50 and has sent 25 today;
-    this inbox (unboosted) may still send, because the brand's limit follows
-    its highest sending boost, in research and in the send path alike."""
+def mixed_brand(h):
+    """The brand's other inbox (DEFAULT) is boosted to 50 and has sent 25 today."""
     from test_outreach_send import DEFAULT
     qualified(h)
     if not h.s.execute(text("SELECT count(*) FROM outreach_mailboxes WHERE mailbox_id = :m"), {"m": DEFAULT}).scalar():
@@ -561,10 +569,30 @@ def test_research_and_sending_agree_for_a_brand_with_mixed_inboxes(h):
     doc.setdefault("outreach_boost", {})[DEFAULT] = {"level": 50, "since": STAMP}
     h.s.execute(text("UPDATE business_settings SET settings = :s WHERE business_id = :b"), {"s": json.dumps(doc), "b": A})
     h.s.commit()
-    sent_today(h, 25, BRAND)               # from the boosted inbox (DEFAULT)
+    sent_today(h, 25, BRAND)
+
+
+def test_research_and_sending_agree_for_a_brand_with_mixed_inboxes(h):
+    """P2 1: this inbox (unboosted) may still send, because the brand's limit
+    follows its highest sending boost."""
+    mixed_brand(h)
     assert boost().brand_level(h.s, A, BRAND) == 50
     h.s.rollback()
     assert approve(h, propose(h))["status"] == "done"
+
+
+@pytest.mark.parametrize("boosted", [True, False])
+def test_research_capacity_itself_follows_the_brands_boost(h, boosted):
+    """Review 2: research capacity, not only sending, for mixed-level inboxes."""
+    from services import outreach_research
+    mixed_brand(h)
+    if not boosted:
+        h.s.execute(text("UPDATE business_settings SET settings = '{}' WHERE business_id = :b"), {"b": A})
+        h.s.commit()
+    with mock_now(NOW):
+        room = outreach_research.capacity(h.s, A, BRAND, NOW)["room"]
+    h.s.rollback()
+    assert (room > 0) is boosted
 
 
 def test_the_evidence_window_is_whole_uk_days_for_every_measure(h):
@@ -608,6 +636,99 @@ def test_the_screen_is_told_what_the_inbox_can_actually_send(h):
     set_level(h, 30, since_days=1)
     out = eligibility(h)
     assert out["level"] == 30 and out["effective"] == 15
+
+
+# ------------------------------------------------- Codex review 2 regressions ---
+
+def test_a_new_level_with_worsening_deliverability_drops_at_once(h):
+    """P2 1: the fresh-level fortnight excuses volume, never bounces or unsubscribes."""
+    stage20(h)
+    history(h, 150, days=14)
+    replies(h, "interested")
+    replies(h, "unsubscribe", 2, days_ago=1)      # 2 of ~150: over 1%
+    set_level(h, 30, since_days=1)
+    review(h)
+    assert level(h) == 20
+
+
+def test_a_new_level_is_not_dropped_for_low_volume_in_its_first_fortnight(h):
+    stage20(h)
+    history(h, 40, days=14)                       # building up
+    set_level(h, 30, since_days=3)
+    review(h)
+    assert level(h) == 30
+
+
+@pytest.mark.parametrize("when", ["yesterday", "tomorrow"])
+def test_an_inbox_without_todays_passing_check_can_send_nothing(h, when):
+    """P2 2: effective capacity follows the send path's freshness rule."""
+    qualified(h)
+    checked = NOW - timedelta(days=1) if when == "yesterday" else NOW + timedelta(days=1)
+    h.s.execute(text("UPDATE outreach_mailboxes SET health_checked_at = :t WHERE mailbox_id = :m"),
+                {"t": checked.isoformat(), "m": BOX})
+    h.s.commit()
+    out = eligibility(h)
+    assert out["effective"] == 0 and any("Today's inbox check" in u for u in out["unmet"])
+
+
+def test_a_reply_is_refused_at_a_recorded_provider_limit(r):
+    """Review 2: an attempted send at the provider ceiling, not only headroom."""
+    from test_outreach_replies_ceiling import send_reply
+    stage20(r)                             # the level comes from the boost record below
+    r.s.execute(text("UPDATE outreach_mailboxes SET health_evidence = :e WHERE mailbox_id = :m"),
+                {"e": json.dumps({"domain_control": True, "from_aligned": True, "spf": "pass", "dkim": "pass",
+                                  "dmarc": "pass", "provider_daily_cap": 25}), "m": BOX})
+    r.s.commit()
+    set_level(r, 50, since_days=1)
+    emails_today(r, 20)
+    emails_today(r, 5, kind="bespoke")
+    with pytest.raises(r.a.ActionRefused) as exc:
+        send_reply(r)
+    assert "safety ceiling" in exc.value.detail and r.p.sends == []
+
+
+def test_a_bounce_hold_resets_a_boost_too(r):
+    """Review 2: the three-hard-bounce hold, through the real path."""
+    qualified(r)
+    set_level(r, 40, since_days=20)
+    if True:
+        from test_outreach_replies import EMAIL, incoming
+        for i in range(3):
+            message = add(r.s, "messages", prospect_id=r.s.execute(text("SELECT id FROM outreach_prospects LIMIT 1")).scalar(),
+                          campaign_id=CAMPAIGN, mailbox_id=BOX, kind="bespoke", origin="live", direction="outbound",
+                          to_emails=json.dumps([EMAIL]), cc_emails="[]", subject="Synthetic", body="Synthetic",
+                          payload_hash="hash", payload_version=1, state="accepted", provider="google",
+                          provider_message_id=f"boost-bounced-{i}", provider_thread_id=f"boost-thread-{i}",
+                          accepted_at=STAMP, idempotency_key=f"boost-bounced-{i}", authority_snapshot="{}")
+            inbound = incoming(r, ident=f"boost-bounce-{i}", sender="mailer-daemon@example.invalid")
+            r.replies.observe_health(r.s, r.b, inbound_email_id=inbound, message_id=message, kind="hard_bounce",
+                                     evidence={"authenticated": True, "mailbox_id": BOX, "provider": "google",
+                                               "provider_message_id": f"boost-bounced-{i}"}, moment=NOW)
+        r.s.commit()
+    assert level(r) == 20
+
+
+def test_retiring_an_inbox_resets_its_boost(db):
+    """Review 2: retirement through the real replace_mailbox path."""
+    from sqlmodel import Session
+    import test_outreach_setup as t
+    boost()
+    m = t.setup_module_or_missing()
+    biz = t.grant(db)
+    t.ready(m, db, biz)
+    records = t.second_mailbox(db)
+    with db.begin() as c:
+        raw = c.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"), {"b": t.A}).scalar()
+        doc = json.loads(raw or "{}")
+        doc["outreach_boost"] = {t.WORKSPACE: {"level": 40, "since": STAMP}}
+        c.execute(text("UPDATE business_settings SET settings = :s WHERE business_id = :b"), {"s": json.dumps(doc), "b": t.A})
+    with Session(db) as s:
+        m.register_mailbox(s, biz, t.OWNER, {"mailbox_id": t.NEW_BOX, "daily_cap": 5})
+        m.check_mailbox_health(s, biz, t.OWNER, t.NEW_BOX, resolve=t.dns(records))
+        m.replace_mailbox(s, biz, t.OWNER, {"old_mailbox_id": t.WORKSPACE, "new_mailbox_id": t.NEW_BOX,
+                                           "reason": "Reputation dropped", "retire_old": True})
+    with Session(db) as s:
+        assert boost().level(s, t.A, t.WORKSPACE) == 20
 
 # --------------------------------------------------------------- endpoints ---
 

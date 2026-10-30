@@ -208,11 +208,13 @@ def _rate(n: int, cold: int) -> float:
     return n / cold if cold else (1.0 if n else 0.0)
 
 
-def _misses(ev: dict, minimum: int) -> list:
+def _misses(ev: dict, minimum: int, *, quality_only: bool = False) -> list:
     """Every measure the window's record fails: the same list decides a step
-    up and a drop back (Codex review 1: "miss ANY measure")."""
+    up and a drop back (Codex review 1: "miss ANY measure"). `quality_only`:
+    the deliverability measures alone (bounces, unsubscribes, complaints,
+    failed checks), for a level still in its first fortnight."""
     out = []
-    if ev["cold"] < minimum:
+    if ev["cold"] < minimum and not quality_only:
         out.append(f"At least {minimum} cold emails in {ev['days']} days ({ev['cold']} so far)")
     if _rate(ev["bounces"], ev["cold"]) >= BOUNCE_LIMIT:
         out.append(f"Bounces must stay under 2% ({ev['bounces']} of {ev['cold']} cold emails)")
@@ -223,7 +225,7 @@ def _misses(ev: dict, minimum: int) -> list:
     if ev["failed_check_days"]:
         out.append(f"No failed daily inbox check (failed on {ev['failed_check_days']} day"
                    f"{'' if ev['failed_check_days'] == 1 else 's'} in the last {ev['days']})")
-    if not ev["genuine_replies"]:
+    if not ev["genuine_replies"] and not quality_only:
         out.append(f"At least one genuine reply in {ev['days']} days")
     return out
 
@@ -251,7 +253,9 @@ def _evaluate(session, bid: str, mailbox_id, moment: datetime) -> dict:
     if box is None:
         unmet.append("This isn't one of this business's campaign inboxes")
     else:
-        effective = metering.mailbox_daily_cap(box, boost=lvl)
+        # What it can send TODAY: nothing while paused or without today's
+        # passing check, as the send path (Codex review 2).
+        effective = metering.mailbox_daily_cap(box, boost=lvl) if _passing_today(box, moment) else 0
         reviewed = _parse(box.get("health_reviewed_at"))
         if box.get("warmup_stage") != BASE or not box.get("health_reviewed_by") or reviewed is None:
             unmet.append("The inbox is still warming up: it must reach 20 a day first")
@@ -325,10 +329,13 @@ def review(session, bid: str, mailbox_id, moment: datetime) -> int:
         reset(session, bid, mailbox_id, moment, "complaint" if ev["complaints"] else "paused")
         return BASE
     dropped = _parse(entry.get("dropped_at"))
+    if dropped is not None and moment - dropped < HOLD:
+        return int(entry["level"])        # at most one step per 14 days
     since = _parse(entry.get("since"))
-    if (dropped is not None and moment - dropped < HOLD) or (since is not None and moment - since < HOLD):
-        return int(entry["level"])        # at most one step per 14 days; a fresh level gets its fortnight
-    misses = _misses(ev, LATER_MINIMUM)
+    fresh = since is not None and moment - since < HOLD
+    # A level in its first fortnight hasn't had time to build volume or draw a
+    # reply, but worsening deliverability drops it at once (Codex review 2).
+    misses = _misses(ev, LATER_MINIMUM, quality_only=fresh)
     if not misses:
         return int(entry["level"])
     lowered = max(BASE, int(entry["level"]) - 10)
