@@ -28,7 +28,7 @@ interface Dashboard {
   spend?: { period: string; brands: { brand_id: string; name: string; allowance_pence: number; spent_pence: number; topups_pence: number; billing: string; live: boolean }[];
     budget: { budget_pence: number | null; committed_pence: number } };
 }
-interface StagePage { stage: string; total: number; items: { id: string; company?: string; name?: string; role?: string; last_activity_at?: string }[] }
+interface StagePage { stage: string; total: number; items: { id: string; company?: string | null; name?: string | null; role?: string | null; details_withheld?: boolean; last_activity_at?: string }[] }
 
 const pounds = (p: number) => `£${(p / 100).toFixed(2)}`;
 const rate = (r: number | null) => (r === null ? 'unavailable' : `${(r * 100).toFixed(1)}%`);
@@ -111,9 +111,9 @@ export default function OutreachDashboard({ businessId, owner }: { businessId: s
       {d.spend && <Section title="Spend this month" note="Only you see this.">
         <Stack spacing={1}>
           {d.spend.brands.map(b => <Paper key={b.brand_id} variant="outlined" sx={{ p: 1.5 }}>
-            <Typography fontWeight={600}>{b.name}{!b.live ? ' · waiting for payment' : ''}</Typography>
-            <Typography variant="body2">AI research and drafting: {pounds(b.spent_pence)} of {pounds(b.allowance_pence)}
-              {b.topups_pence ? ` (including ${pounds(b.topups_pence)} of top-ups)` : ''}</Typography>
+            <Typography fontWeight={600}>{b.name} · {b.billing}</Typography>
+            <Typography variant="body2">AI research and drafting: {pounds(b.spent_pence)} of its {pounds(b.allowance_pence)} allowance.</Typography>
+            {b.topups_pence > 0 && <Typography variant="body2">Top-ups paid this month: {pounds(b.topups_pence)} (each adds a third of its price to the allowance).</Typography>}
           </Paper>)}
           <Typography variant="body2">Outreach budget: {pounds(d.spend.budget.committed_pence)} committed
             {d.spend.budget.budget_pence !== null ? ` of ${pounds(d.spend.budget.budget_pence)}` : ' (no budget set)'} this month.</Typography>
@@ -147,6 +147,7 @@ function StageDialog({ businessId, brand, stage, owner, close }: { businessId: s
   const [error, setError] = useState('');
   const brandParam = brand === 'all' ? '' : `&brand_id=${brand}`;
   const q = useQuery<StagePage>({ queryKey: ['outreach-dashboard-stage', businessId, brand, stage, offset], enabled: !!stage, retry: false,
+    // (loading and error are shown below: an empty dialog never stands for "nobody")
     queryFn: async () => (await apiRequest('GET', `/v1/outreach/dashboard/stage/${stage}?limit=20&offset=${offset}${brandParam}`)).json() });
   async function mark(id: string, outcome: string | null) {
     setError('');
@@ -163,10 +164,12 @@ function StageDialog({ businessId, brand, stage, owner, close }: { businessId: s
     <DialogContent>
       <Stack spacing={1} sx={{ pt: 1 }}>
         {error && <Alert severity="error">{error}</Alert>}
+        {q.isLoading && <Typography variant="body2">Loading…</Typography>}
+        {q.isError && <Alert severity="warning">This list couldn't load just now. Please try again.</Alert>}
         {q.data?.items.length === 0 && <Typography variant="body2">Nobody is at this stage.</Typography>}
         {q.data?.items.map(p => <Paper key={p.id} variant="outlined" sx={{ p: 1.5 }}>
-          <Typography fontWeight={600}>{p.name || 'Unnamed'}{p.role ? `, ${p.role}` : ''}</Typography>
-          <Typography variant="body2">{p.company || ''}{p.last_activity_at ? ` · last activity ${new Date(p.last_activity_at).toLocaleDateString('en-GB')}` : ''}</Typography>
+          <Typography fontWeight={600}>{p.details_withheld ? 'Details removed after the retention period' : `${p.name || 'Unnamed'}${p.role ? `, ${p.role}` : ''}`}</Typography>
+          <Typography variant="body2">{p.details_withheld ? '' : p.company || ''}{p.last_activity_at ? ` · last activity ${new Date(p.last_activity_at).toLocaleDateString('en-GB')}` : ''}</Typography>
           {owner && <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
             {marked
               ? <Button size="small" onClick={() => mark(p.id, null)}>Undo mark</Button>

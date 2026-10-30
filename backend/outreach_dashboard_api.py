@@ -48,7 +48,7 @@ def dashboard_stage(stage: str, brand_id: Optional[UUID] = None, limit: int = 20
     business = _business(session, context)
     try:
         return dashboard.stage_list(session, str(business.id), stage, brand_id=str(brand_id) if brand_id else None,
-                                    limit=limit, offset=offset)
+                                    limit=limit, offset=offset, moment=dashboard.now())
     except ActionRefused as exc:
         raise _refused(session, exc) from None
 

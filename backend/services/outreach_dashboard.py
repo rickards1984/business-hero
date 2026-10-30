@@ -74,7 +74,14 @@ def _doc(session, bid: str) -> dict:
 
 
 def _outcomes(session, bid: str) -> dict:
-    return {k: v for k, v in (_doc(session, bid).get(OUTCOMES_KEY) or {}).items() if isinstance(v, dict)}
+    """{prospect_id: {"events": [{"outcome", "by", "at"}, ...]}}: each mark is
+    a dated event, so marking Won after a Meeting keeps the meeting (Codex
+    review 1). Undo removes the latest event only."""
+    out = {}
+    for k, v in (_doc(session, bid).get(OUTCOMES_KEY) or {}).items():
+        if isinstance(v, dict) and isinstance(v.get("events"), list):
+            out[k] = {"events": [e for e in v["events"] if isinstance(e, dict) and e.get("outcome") in OUTCOMES]}
+    return out
 
 
 def _records(session, bid: str) -> dict:
@@ -85,7 +92,7 @@ def _records(session, bid: str) -> dict:
         "SELECT id, brand_id FROM outreach_compliance WHERE business_id = :b")}
     campaigns = {str(r["id"]): r for r in q(
         "SELECT id, brand_id, mailbox_id FROM outreach_campaigns WHERE business_id = :b")}
-    prospects = q("SELECT id, company, name, role, eligibility, lia_id, stage, captured_at "
+    prospects = q("SELECT id, company, name, role, eligibility, lia_id, stage, captured_at, retention_due_at "
                   "FROM outreach_prospects WHERE business_id = :b")
     messages = q("SELECT prospect_id, campaign_id, origin, direction, state, kind, accepted_at, created_at "
                  "FROM outreach_messages WHERE business_id = :b AND direction = 'outbound'")
@@ -176,8 +183,12 @@ def build(session, business, *, brand_id=None, period: str = "week", moment: Opt
     replied = {str(r["prospect_id"]) for r in replies if r["category"] in HUMAN and str(r["prospect_id"]) in cohort}
     positive = {str(r["prospect_id"]) for r in replies if r["category"] in POSITIVE and str(r["prospect_id"]) in cohort}
     outcomes = _outcomes(session, bid)
-    marked = {pid: o for pid, o in outcomes.items()
-              if pid in people and people[pid].get("stage") == o.get("outcome") and _in(o.get("at"), start, moment)}
+
+    def marked(kind: str) -> int:
+        """People with a `kind` mark dated in the period (still standing:
+        undone marks are removed; a prospect deleted by retention drops out)."""
+        return sum(1 for pid, o in outcomes.items() if pid in people
+                   and any(e["outcome"] == kind and _in(e.get("at"), start, moment) for e in o["events"]))
     contacted = len(cohort)
     results = {
         "contacted": contacted,
@@ -188,8 +199,8 @@ def build(session, business, *, brand_id=None, period: str = "week", moment: Opt
         "positive_rate": len(positive) / contacted if contacted else None,
         "objections": sum(1 for r in replies if r["category"] == "objection" and _in(r["received_at"], start, moment)),
         "bounces": sum(1 for r in replies if r["category"] == "bounce" and _in(r["received_at"], start, moment)),
-        "meetings": sum(1 for o in marked.values() if o.get("outcome") == "meeting"),
-        "wins": sum(1 for o in marked.values() if o.get("outcome") == "won"),
+        "meetings": marked("meeting"),
+        "wins": marked("won"),
     }
 
     needs = _needs_you(session, bid, rec, brand, replies, sends, moment)
@@ -233,8 +244,12 @@ def _needs_you(session, bid: str, rec: dict, brand: Optional[str], replies: list
             "SELECT mailbox_id, pause_reason, enabled FROM outreach_mailboxes WHERE business_id = :b"), {"b": bid}):
         if str(mailbox_id) in inboxes and reason:
             paused += 1
-    awaiting = sum(1 for b in rec["brands"] if (brand is None or str(b["id"]) == brand)
-                   and not outreach_billing.brand_live(session, bid, b["id"], moment))
+    # Only brands actually waiting for a payment (Codex review 1): a brand the
+    # owner stopped, whose paid month has ended, isn't a payment problem.
+    billing = outreach_billing._billing(outreach_billing._doc(session, bid))["brands"]
+    awaiting = 0 if outreach_billing.free(session, bid) else sum(
+        1 for b in rec["brands"] if (brand is None or str(b["id"]) == brand)
+        and (billing.get(str(b["id"])) or {}).get("state") in ("awaiting_payment", "pending"))
     return {"replies_waiting": waiting, "approvals": approvals,
             "failures": {"emails": failed, "paused_inboxes": paused, "awaiting_payment": awaiting}}
 
@@ -249,13 +264,15 @@ def _summary(period: str, results: dict, needs: dict) -> str:
     parts = [f"{_plural(results['contacted'], 'person', 'people')} contacted {when}"]
     if results["contacted"]:
         parts.append(f"{results['replied']} replied")
-        parts.append(f"{results['positive']} interested")
+        parts.append(f"{results['positive']} interested or referred you on")
     sentence = ", ".join(parts) + "."
     waiting = needs["replies_waiting"]
     if waiting:
         sentence += f" {_plural(waiting, 'reply needs', 'replies need')} you."
     elif needs["approvals"]:
         sentence += f" {_plural(needs['approvals'], 'email is', 'emails are')} waiting for your approval."
+    elif sum(needs["failures"].values()):
+        sentence += f" {_plural(sum(needs['failures'].values()), 'problem needs', 'problems need')} a look."
     else:
         sentence += " Nothing needs you right now."
     return sentence
@@ -280,14 +297,29 @@ def _spend(session, business, rec: dict, brand: Optional[str], moment: datetime)
                      "allowance_pence": outreach_allowance.allowance_pence(session, bid, brand_id, period),
                      "spent_pence": outreach_allowance.spent_pence(session, bid, brand_id, period),
                      "topups_pence": int(topups),
-                     "billing": (billing.get(brand_id) or {}).get("state") or "included or existing",
+                     "billing": _billing_label(billing.get(brand_id), moment),
                      "live": outreach_billing.brand_live(session, bid, brand_id, moment)})
     return {"period": period, "brands": rows,
             "budget": outreach_allowance.budget_status(session, business, moment=moment)}
 
 
-def stage_list(session, bid: str, stage: str, *, brand_id=None, limit: int = 20, offset: int = 0) -> dict:
-    """The people at one pipeline stage, most recent activity first."""
+def _billing_label(entry: Optional[dict], moment: datetime) -> str:
+    if not entry:
+        return "included"
+    state = entry.get("state")
+    if state == "ending":
+        ends = _parse(entry.get("ends_at"))
+        return "stopped" if ends is not None and moment >= ends else "stopping at the end of the paid month"
+    return {"awaiting_payment": "waiting for payment", "pending": "payment being confirmed",
+            "active": "paid"}.get(state, str(state))
+
+
+def stage_list(session, bid: str, stage: str, *, brand_id=None, limit: int = 20, offset: int = 0,
+               moment: Optional[datetime] = None) -> dict:
+    """The people at one pipeline stage, most recent activity first. Past a
+    prospect's retention date their details are withheld, as everywhere else
+    (outreach_read._project; Codex review 1)."""
+    moment = moment or now()
     if stage not in STAGES:
         refuse(422, "Unknown pipeline stage.")
     if not (1 <= int(limit) <= 50) or int(offset) < 0:
@@ -307,11 +339,21 @@ def stage_list(session, bid: str, stage: str, *, brand_id=None, limit: int = 20,
         when, pid = _parse(r["received_at"]), str(r["prospect_id"])
         if pid in last and when and (last[pid] is None or when > last[pid]):
             last[pid] = when
+    for pid, o in _outcomes(session, bid).items():
+        for e in o["events"]:
+            when = _parse(e.get("at"))
+            if pid in last and when and (last[pid] is None or when > last[pid]):
+                last[pid] = when
     chosen = sorted((pid for pid, s in stages.items() if s == stage),
                     key=lambda pid: (last[pid].isoformat() if last[pid] else "", pid), reverse=True)
-    items = [{"id": pid, "company": people[pid].get("company"), "name": people[pid].get("name"),
-              "role": people[pid].get("role"), "last_activity_at": last[pid].isoformat() if last[pid] else None}
-             for pid in chosen[int(offset):int(offset) + int(limit)]]
+    items = []
+    for pid in chosen[int(offset):int(offset) + int(limit)]:
+        due = _parse(people[pid].get("retention_due_at"))
+        expired = due is not None and due <= moment
+        items.append({"id": pid, "company": None if expired else people[pid].get("company"),
+                      "name": None if expired else people[pid].get("name"),
+                      "role": None if expired else people[pid].get("role"), "details_withheld": expired,
+                      "last_activity_at": last[pid].isoformat() if last[pid] else None})
     return {"stage": stage, "items": items, "total": len(chosen)}
 
 
@@ -335,20 +377,27 @@ def mark_outcome(session, business, user, prospect_id, outcome, *, moment: Optio
         refuse(403, "Only the business owner can mark meetings and wins.")
     _lock(session, bid)
     prospect = send.one(session, "outreach_prospects", bid, prospect_id, True)   # 404 for another business's
-    stage = outcome or ("ready" if prospect.get("eligibility") == "eligible" else "new")
+    doc = _doc(session, bid)
+    marks = dict(doc.get(OUTCOMES_KEY) or {})
+    events = list(((marks.get(str(prospect_id)) or {}).get("events")) or [])
+    if outcome is None:
+        if events:
+            events.pop()                  # undo the latest mark; an earlier one stands
+    elif not events or events[-1].get("outcome") != outcome:
+        events.append({"outcome": outcome, "by": str(user), "at": moment.isoformat()})
+    current = events[-1]["outcome"] if events else None
+    stage = current or ("ready" if prospect.get("eligibility") == "eligible" else "new")
     session.execute(text("UPDATE outreach_prospects SET stage = :s, updated_at = :at "
                          "WHERE business_id = :b AND id = :p"),
                     {"s": stage, "at": moment, "b": bid, "p": str(prospect_id)})
-    doc = _doc(session, bid)
-    marks = dict(doc.get(OUTCOMES_KEY) or {})
-    if outcome is None:
-        marks.pop(str(prospect_id), None)
+    if events:
+        marks[str(prospect_id)] = {"events": events}
     else:
-        marks[str(prospect_id)] = {"outcome": outcome, "by": str(user), "at": moment.isoformat()}
+        marks.pop(str(prospect_id), None)
     doc[OUTCOMES_KEY] = marks
     setup._save_settings_doc(session, bid, doc)
     session.commit()
-    return {"prospect_id": str(prospect_id), "outcome": outcome}
+    return {"prospect_id": str(prospect_id), "outcome": current}
 
 
 # ------------------------------------------------------------------ Aria ---

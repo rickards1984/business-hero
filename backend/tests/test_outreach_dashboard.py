@@ -276,10 +276,26 @@ def test_needs_you_counts_waiting_replies_approvals_and_failures(h):
     assert n["failures"]["emails"] == 1 and n["failures"]["paused_inboxes"] == 1
 
 
-def test_a_brand_waiting_for_payment_needs_the_owner(h, monkeypatch):
-    from services import outreach_billing
-    monkeypatch.setattr(outreach_billing, "brand_live", lambda session, bid, brand_id, moment=None: False)
+def billing_state(h, brand, entry):
+    raw = h.s.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"), {"b": A}).scalar()
+    doc = json.loads(raw or "{}")
+    doc.setdefault("outreach_brand_billing", {}).setdefault("brands", {})[brand] = entry
+    h.s.execute(text("UPDATE business_settings SET settings = :s WHERE business_id = :b"), {"s": json.dumps(doc), "b": A})
+    h.s.commit()
+
+
+@pytest.mark.parametrize("state", ["awaiting_payment", "pending"])
+def test_a_brand_waiting_for_payment_needs_the_owner(h, state):
+    billing_state(h, BRAND, {"state": state, "price": 7900})
     assert board(h)["needs_you"]["failures"]["awaiting_payment"] == 1
+
+
+def test_a_brand_the_owner_stopped_is_not_a_payment_problem(h):
+    """Codex review 1: its paid month has ended; nothing is owed."""
+    billing_state(h, BRAND, {"state": "ending", "price": 7900, "ends_at": (NOW - timedelta(days=3)).isoformat()})
+    out = board(h, spend=True)
+    assert out["needs_you"]["failures"]["awaiting_payment"] == 0
+    assert next(b for b in out["spend"]["brands"] if b["brand_id"] == BRAND)["billing"] == "stopped"
 
 
 # ------------------------------------------------------------------- spend ---
@@ -297,6 +313,14 @@ def test_spend_is_given_only_when_asked_for_the_owner(h):
 
 
 # --------------------------------------------------- the summary and Aria ---
+
+def test_arias_summary_never_gives_the_all_clear_with_a_problem(h):
+    """Codex review 1: a failure is something that needs the owner."""
+    who = person(h)
+    sent(h, who, days_ago=1, state="failed")
+    s = board(h)["summary"]
+    assert "Nothing needs you" not in s and "1 problem needs a look" in s
+
 
 def test_arias_summary_is_built_from_the_numbers(h):
     who = person(h)
@@ -346,13 +370,29 @@ def test_another_businesss_prospect_cannot_be_marked(h):
     assert h.s.execute(text("SELECT stage FROM outreach_prospects WHERE id = :p"), {"p": other}).scalar() == "ready"
 
 
-def test_a_mark_counts_only_while_the_prospect_is_still_at_it(h):
+def test_a_meeting_that_becomes_a_win_keeps_its_meeting(h):
+    """Codex review 1: marking Won after a meeting doesn't erase the meeting."""
+    who = person(h)
+    mark(h, who, "meeting", moment=NOW - timedelta(days=2))
+    mark(h, who, "won")
+    out = board(h)
+    assert (out["results"]["meetings"], out["results"]["wins"]) == (1, 1)
+    assert out["pipeline"]["won"] == 1 and out["pipeline"]["meeting"] == 0
+    mark(h, who, None)                     # undo the win: back to the meeting
+    out = board(h)
+    assert (out["results"]["meetings"], out["results"]["wins"]) == (1, 0) and out["pipeline"]["meeting"] == 1
+    mark(h, who, None)                     # and undo the meeting
+    out = board(h)
+    assert out["results"]["meetings"] == 0 and out["pipeline"]["ready"] == 2
+
+
+def test_a_mark_on_a_deleted_prospect_drops_out(h):
+    """Retention deletes the prospect; its marks no longer count."""
     who = person(h)
     mark(h, who, "won")
-    assert board(h)["results"]["wins"] == 1
-    h.s.execute(text("UPDATE outreach_prospects SET stage = 'ready' WHERE id = :p"), {"p": who})
+    h.s.execute(text("DELETE FROM outreach_prospects WHERE id = :p"), {"p": who})
     h.s.commit()
-    assert board(h)["results"]["wins"] == 0
+    assert board(h, period="all")["results"]["wins"] == 0
 
 
 def test_a_mark_records_who_and_when_and_nothing_else(h):
@@ -360,10 +400,53 @@ def test_a_mark_records_who_and_when_and_nothing_else(h):
     mark(h, who, "meeting")
     doc = json.loads(h.s.execute(text("SELECT settings FROM business_settings WHERE business_id = :b"),
                                  {"b": A}).scalar())
-    assert doc["outreach_outcomes"][who] == {"outcome": "meeting", "by": OWNER, "at": NOW.isoformat()}
+    assert doc["outreach_outcomes"][who] == {"events": [{"outcome": "meeting", "by": OWNER, "at": NOW.isoformat()}]}
 
 
 # ------------------------------------------------------------- stage lists ---
+
+def test_past_retention_a_persons_details_are_withheld_from_the_list(h):
+    """Codex review 1 (P1): as the prospect reader does."""
+    expired = person(h)
+    h.s.execute(text("UPDATE outreach_prospects SET retention_due_at = :t WHERE id = :p"),
+                {"t": (NOW - timedelta(days=1)).isoformat(), "p": expired})
+    h.s.commit()
+    out = dash().stage_list(h.s, A, "ready", brand_id=None, limit=20, offset=0, moment=NOW)
+    h.s.rollback()
+    row = next(i for i in out["items"] if i["id"] == expired)
+    assert row["details_withheld"] is True and row["company"] is None and row["name"] is None and row["role"] is None
+    kept = next(i for i in out["items"] if i["id"] == PROSPECT)
+    assert kept["details_withheld"] is False and kept["name"] == "Person"
+
+
+def test_a_mark_is_the_latest_activity(h):
+    who = person(h)
+    sent(h, who, days_ago=5)
+    mark(h, who, "meeting", moment=NOW - timedelta(days=1))
+    out = dash().stage_list(h.s, A, "meeting", brand_id=None, limit=20, offset=0, moment=NOW)
+    h.s.rollback()
+    assert out["items"][0]["last_activity_at"] == (NOW - timedelta(days=1)).isoformat()
+
+
+def test_approvals_follow_the_brand_chosen(h):
+    second_brand(h)
+    for campaign in (CAMPAIGN, CAMPAIGN2, CAMPAIGN2):
+        h.s.execute(text("INSERT INTO aria_actions (id, business_id, action_type, status, payload, created_at) "
+                         "VALUES (:i, :b, 'send_outreach', 'proposed', :p, :t)"),
+                    {"i": str(uuid.uuid4()), "b": A, "p": json.dumps({"campaign_id": campaign}), "t": STAMP})
+    h.s.commit()
+    assert board(h)["needs_you"]["approvals"] == 3
+    assert board(h, brand=BRAND)["needs_you"]["approvals"] == 1
+    assert board(h, brand=BRAND2)["needs_you"]["approvals"] == 2
+
+
+def test_paid_top_ups_are_reported_as_paid(h):
+    from services import outreach_research
+    outreach_research._add_meter(h.s, A, f"outreach_topup_pence:{BRAND}", NOW, 2500)
+    h.s.commit()
+    row = next(b for b in board(h, spend=True)["spend"]["brands"] if b["brand_id"] == BRAND)
+    assert row["topups_pence"] == 2500
+
 
 def test_a_stage_opens_the_people_in_it(h):
     keen = person(h)
@@ -372,7 +455,7 @@ def test_a_stage_opens_the_people_in_it(h):
     out = dash().stage_list(h.s, A, "interested", brand_id=None, limit=20, offset=0)
     h.s.rollback()
     assert out["total"] == 1 and out["items"][0]["id"] == keen
-    assert set(out["items"][0]) == {"id", "company", "name", "role", "last_activity_at"}
+    assert set(out["items"][0]) == {"id", "company", "name", "role", "details_withheld", "last_activity_at"}
 
 
 def test_stage_lists_page_and_refuse_unknown_stages(h):
@@ -415,3 +498,43 @@ def test_the_endpoints(h, monkeypatch, who, code, spend):
     assert seen.status_code == 200 and listed.status_code == 200 and bad.status_code == 422
     assert ("spend" in seen.json()) is spend
     assert marked.status_code == code
+
+
+
+def test_without_outreach_access_the_dashboard_is_refused(h, monkeypatch):
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+    from sqlmodel import Session
+    import auth
+    import outreach_dashboard_api as api
+    from auth import get_user_business_context
+    from db import get_session
+
+    def denied(business, feature, **kw):
+        raise HTTPException(403, "Outreach isn't on this plan")
+    monkeypatch.setattr(auth, "_load_business", lambda session, bid: h.b)
+    monkeypatch.setattr(auth, "assert_feature_access", denied)
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[get_user_business_context] = lambda: {"business_id": A, "user_id": OWNER}
+    app.dependency_overrides[get_session] = lambda: Session(h.engine)
+    with TestClient(app) as client:
+        assert client.get("/v1/outreach/dashboard").status_code == 403
+        assert client.get("/v1/outreach/dashboard/stage/ready").status_code == 403
+        assert client.post(f"/v1/outreach/dashboard/prospects/{PROSPECT}/outcome", json={"outcome": "won"}).status_code == 403
+
+
+def test_arias_tool_checks_outreach_access(monkeypatch):
+    from fastapi import HTTPException
+    import auth
+    from services import outreach_setup
+
+    class Row:
+        feature_flags = {}
+    monkeypatch.setattr(outreach_setup, "load_business_row", lambda session, bid: Row())
+
+    def denied(business, feature, **kw):
+        raise HTTPException(403, "Outreach isn't on this plan")
+    monkeypatch.setattr(auth, "assert_feature_access", denied)
+    out = dash().aria(A, {"period": "week"})
+    assert out["status_code"] == 403 and "pipeline" not in out

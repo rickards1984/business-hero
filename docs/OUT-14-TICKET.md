@@ -107,3 +107,18 @@ Each figure is labelled on screen with how it's counted.
   - Pipeline stages open a list of the people at that stage. There the owner can mark "Meeting booked", "Won" or "Closed", or undo a mark.
   - Results switch between this week, this month and all time, and each figure shows how it's counted.
 - **Tests:** `backend/tests/test_outreach_dashboard.py`, 41 tests. Thirteen mutations are each caught, including tenant scoping on every table and the brand filter.
+
+## Codex review 1 (`audits/OUT-14-CODEX-REVIEW-1.md`, 1 × P1, 4 × P2) → fixed
+- **P1: retention.** Stage lists withhold a person's company, name and role past their retention date (`details_withheld`), as the prospect reader does.
+- **Marks are dated events.** Marking Won after a meeting keeps the meeting. Undo removes the latest mark and restores the one before. Results count each kind of mark dated in the period; the pipeline shows the current mark. A deleted prospect's marks drop out.
+- **Aria's summary never gives the all-clear while there's a problem.**
+- **"Waiting for payment" counts only brands actually waiting for a payment.** A brand the owner stopped isn't a payment problem, and its real billing state is shown.
+- **Top-ups are shown as amounts paid**, not as AI allowance (each adds a third of its price).
+- **Also done (Codex backlog):**
+  - the stage list shows loading and error states;
+  - marks count as the latest activity;
+  - positive replies are described as "interested or referred you on".
+- **Tests:** 51, including:
+  - brand-filtered approvals;
+  - non-zero top-ups;
+  - outreach access refused at the API and in Aria's tool.
