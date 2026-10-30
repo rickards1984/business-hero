@@ -693,8 +693,14 @@ def _apply_health(session, bid: str, row: dict, result: dict, moment: datetime, 
     reason = str(row.get("pause_reason") or "")
     held = bool(reason) and not reason.startswith(DNS_PAUSE)
     passed = result["status"] == "pass"
+    evidence = dict(result["evidence"] or {})
+    # A provider's recorded sending limit isn't DNS evidence: it survives each
+    # check (OUT-19 G, Codex review 1: a boost must never outrun it).
+    previous = send.loads(row.get("health_evidence")) or {}
+    if previous.get("provider_daily_cap") is not None and "provider_daily_cap" not in evidence:
+        evidence["provider_daily_cap"] = previous["provider_daily_cap"]
     fields = dict(health_status=result["status"], health_checked_at=moment,
-                  health_evidence=json.dumps(result["evidence"]), updated_at=moment)
+                  health_evidence=json.dumps(evidence), updated_at=moment)
     if passed and not held:
         fields.update(enabled=True, pause_reason=None)
     elif not passed:
@@ -707,6 +713,14 @@ def _apply_health(session, bid: str, row: dict, result: dict, moment: datetime, 
         "UPDATE outreach_mailboxes SET " + ", ".join(
             f"{k} = {expr}" if k == "health_evidence" else f"{k} = :{k}" for k in fields) +
         " WHERE business_id = :b AND id = :id"), {**fields, "b": bid, "id": str(row["id"])})
+    # OUT-19 G: the check's own history (a failure, per inbox per day), and
+    # the boost's daily review: drop back if the record has worsened.
+    from services import outreach_boost
+    outreach_boost.record_check(session, bid, row["mailbox_id"], moment, passed=passed)
+    if not passed:
+        outreach_boost.reset(session, bid, row["mailbox_id"], moment, "failed daily check")   # a pause: back to 20
+    else:
+        outreach_boost.review(session, bid, row["mailbox_id"], moment)
 
 
 def check_mailbox_health(session, business, user, mailbox_id, *, resolve: Callable = dns_txt) -> dict:
@@ -1282,6 +1296,8 @@ def replace_mailbox(session, business, user, data: dict) -> dict:
         if boxes:
             send.update(session, "outreach_mailboxes", bid, boxes[0]["id"], enabled=False,
                         pause_reason=f"Retired by owner: {reason}"[:1000], updated_at=moment)
+            from services import outreach_boost
+            outreach_boost.reset(session, bid, old_id, moment, "retired")   # OUT-19 G: any pause, back to 20
         for cid in out["kept_on_old"]:
             paused = session.execute(text(
                 "UPDATE outreach_enrolments SET state = 'paused', stop_reason = 'sending mailbox retired', "

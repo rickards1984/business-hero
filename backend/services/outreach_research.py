@@ -721,11 +721,16 @@ def capacity(session, bid: str, brand_id, moment: datetime, audience_hash: Optio
     out.update(sent_today=sum(sent.get(str(c["id"]), 0) for c in mine),
                followups_due=sum(queued.get(str(c["id"]), [0, 0])[0] for c in mine),
                waiting=sum(queued.get(str(c["id"]), [0, 0])[1] for c in mine))
-    brand_left = min(20, int(settings["business_daily_cap"])) - sum(used(str(c["id"])) for c in mine)
+    # OUT-19 G: a boosted inbox raises the brand's limit when left at 20 (as the send path).
+    from services import outreach_boost
+    boosts = {str(c["mailbox_id"]): outreach_boost.level(session, bid, c["mailbox_id"]) for c in campaigns}
+    brand_boost = outreach_boost.brand_level(session, bid, br)      # the send path's own policy
+    brand_left = outreach_boost.follow(min(20, int(settings["business_daily_cap"])), brand_boost) \
+        - sum(used(str(c["id"])) for c in mine)
     inbox_left = {}
     for mailbox_id in {str(c["mailbox_id"]) for c in campaigns}:
         boxes = send.rows(session, "outreach_mailboxes", bid, "AND mailbox_id = :m", {"m": mailbox_id})
-        cap = metering.mailbox_daily_cap(boxes[0]) if len(boxes) == 1 else 0
+        cap = metering.mailbox_daily_cap(boxes[0], boost=boosts[mailbox_id]) if len(boxes) == 1 else 0
         queued_here = sum(sum(queued.get(cid, [0, 0])) for cid, c in by_id.items() if str(c["mailbox_id"]) == mailbox_id)
         inbox_left[mailbox_id] = max(0, cap - sent_on_box.get(mailbox_id, 0) - queued_here)
     # Contacts kept today that hold no place (held for the owner's review), of
@@ -755,7 +760,7 @@ def capacity(session, bid: str, brand_id, moment: datetime, audience_hash: Optio
     for c in matching:
         cid, mailbox_id = str(c["id"]), str(c["mailbox_id"])
         held = on_campaign.get(cid, 0)
-        free = max(0, int(c["daily_cap"]) - used(cid) - held)
+        free = max(0, outreach_boost.follow(int(c["daily_cap"]), boosts[mailbox_id]) - used(cid) - held)
         if limit:
             free = min(free, max(0, limit - members.get(cid, 0) - held))
         free = min(free, inbox_left[mailbox_id])

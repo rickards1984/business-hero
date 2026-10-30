@@ -491,6 +491,10 @@ def observe_health(session, business, *, inbound_email_id, message_id, kind, evi
             send.update(session, 'outreach_mailboxes', bid, mailbox['id'], enabled=False, health_status='fail',
                         pause_reason='complaint' if kind == 'complaint' else 'Three distinct hard bounces in latest 50 sends',
                         health_checked_at=moment, updated_at=moment)
+            # OUT-19 G: a complaint or a pause puts a boosted inbox back to 20 at once.
+            from services import outreach_boost
+            outreach_boost.reset(session, bid, message['mailbox_id'], moment,
+                                 'complaint' if kind == 'complaint' else 'hard bounces')
         session.execute(text("UPDATE outreach_dispatch_jobs SET status='cancelled' WHERE business_id=:b AND status='pending' AND message_id IN (SELECT id FROM outreach_messages WHERE business_id=:b AND mailbox_id=:m)"), {'b': bid, 'm': str(message['mailbox_id'])})
         # Cancel only work bound to the affected mailbox. Suppression above
         # independently covers this recipient across every campaign.

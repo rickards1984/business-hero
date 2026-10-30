@@ -167,7 +167,8 @@ def test_research_plans_with_the_send_paths_own_warm_up_limit(db):
     """One number for the warm-up limit: the send path asserts it agrees."""
     import inspect
     from services import metering
-    assert "mailbox_daily_cap(box, health)" in inspect.getsource(metering.reserve_outreach_usage)
+    # OUT-19 G: the same function, now given the inbox's boost as well.
+    assert "mailbox_daily_cap(box, health, boost=boost)" in inspect.getsource(metering.reserve_outreach_usage)
     biz, brand, lia, campaign = started(db, full=False)
     with Session(db) as s:
         box = s.execute(text("SELECT * FROM outreach_mailboxes WHERE mailbox_id = :m"), {"m": WORKSPACE}).mappings().one()
