@@ -75,8 +75,8 @@ def board(h, *, brand=None, period="week", spend=False):
     return out
 
 
-def mark(h, prospect, outcome, user=OWNER, moment=NOW):
-    out = dash().mark_outcome(h.s, h.b, user, prospect, outcome, moment=moment)
+def mark(h, prospect, outcome, user=OWNER, moment=NOW, expected=None):
+    out = dash().mark_outcome(h.s, h.b, user, prospect, outcome, moment=moment, expected=expected)
     h.s.commit()
     return out
 
@@ -538,3 +538,43 @@ def test_arias_tool_checks_outreach_access(monkeypatch):
     monkeypatch.setattr(auth, "assert_feature_access", denied)
     out = dash().aria(A, {"period": "week"})
     assert out["status_code"] == 403 and "pipeline" not in out
+
+
+# ------------------------------------------------- Codex review 2 regressions ---
+
+def test_a_meeting_moves_straight_to_won_keeping_the_meeting(h):
+    """The screen offers Won and Closed on a meeting (no undo needed first)."""
+    who = person(h)
+    mark(h, who, "meeting", moment=NOW - timedelta(days=1), expected="none")
+    mark(h, who, "won", expected="meeting")
+    r = board(h)["results"]
+    assert (r["meetings"], r["wins"]) == (1, 1)
+
+
+def test_a_second_undo_of_the_same_mark_changes_nothing(h):
+    """A double click (or another tab) undoes one mark, never two."""
+    who = person(h)
+    mark(h, who, "meeting", moment=NOW - timedelta(days=1))
+    mark(h, who, "won")
+    mark(h, who, None, expected="won")
+    with pytest.raises(Exception) as exc:
+        mark(h, who, None, expected="won")
+    assert getattr(exc.value, "status_code", None) == 409
+    out = board(h)
+    assert out["pipeline"]["meeting"] == 1 and out["results"]["meetings"] == 1
+
+
+def test_an_existing_paid_brand_is_labelled_as_paid(h, monkeypatch):
+    """No billing record (it existed before billing) but not included: paid."""
+    from services import outreach_allowance
+    monkeypatch.setattr(outreach_allowance, "prices", lambda session, bid: {BRAND: (7900, False)})
+    row = next(b for b in board(h, spend=True)["spend"]["brands"] if b["brand_id"] == BRAND)
+    assert row["billing"].startswith("paid") and "79" in row["billing"]
+
+
+@pytest.mark.parametrize("prices,label", [({BRAND: (0, True)}, "included in the plan")])
+def test_an_included_brand_is_labelled_included(h, monkeypatch, prices, label):
+    from services import outreach_allowance
+    monkeypatch.setattr(outreach_allowance, "prices", lambda session, bid: prices)
+    row = next(b for b in board(h, spend=True)["spend"]["brands"] if b["brand_id"] == BRAND)
+    assert row["billing"] == label

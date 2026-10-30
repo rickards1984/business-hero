@@ -122,3 +122,14 @@ Each figure is labelled on screen with how it's counted.
   - brand-filtered approvals;
   - non-zero top-ups;
   - outreach access refused at the API and in Aria's tool.
+
+## Codex review 2 (`audits/OUT-14-CODEX-REVIEW-2.md`, no P1, 3 × P2) → fixed
+- **A meeting moves straight to Won or Closed** in the stage list, keeping the meeting. Undo is offered only for the current mark.
+- **One click changes one mark.** Each request names the mark on screen (`expected`); if it has already changed (a double click, another tab), the server refuses with 409. The buttons are also disabled while a change is saving.
+- **Billing labels match the billing service:**
+  - free;
+  - the billing record's state;
+  - included in the plan;
+  - or "paid (existing brand, £79 a month)" for a paid brand that existed before billing.
+- **The results say "People with a meeting" and "People won",** matching the distinct-person count.
+- **Backlog:** rendered-copy tests need a frontend test runner, which the project doesn't have yet; DST and repeated-mark period tests.

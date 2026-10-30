@@ -285,6 +285,8 @@ def _spend(session, business, rec: dict, brand: Optional[str], moment: datetime)
     bid = str(business.id)
     period = metering.period_for(moment)
     billing = outreach_billing._billing(outreach_billing._doc(session, bid))["brands"]
+    prices = outreach_allowance.prices(session, bid)
+    is_free = outreach_billing.free(session, bid)
     rows = []
     for b in rec["brands"]:
         brand_id = str(b["id"])
@@ -297,15 +299,21 @@ def _spend(session, business, rec: dict, brand: Optional[str], moment: datetime)
                      "allowance_pence": outreach_allowance.allowance_pence(session, bid, brand_id, period),
                      "spent_pence": outreach_allowance.spent_pence(session, bid, brand_id, period),
                      "topups_pence": int(topups),
-                     "billing": _billing_label(billing.get(brand_id), moment),
+                     "billing": _billing_label(billing.get(brand_id), moment, prices.get(brand_id), is_free),
                      "live": outreach_billing.brand_live(session, bid, brand_id, moment)})
     return {"period": period, "brands": rows,
             "budget": outreach_allowance.budget_status(session, business, moment=moment)}
 
 
-def _billing_label(entry: Optional[dict], moment: datetime) -> str:
-    if not entry:
-        return "included"
+def _billing_label(entry: Optional[dict], moment: datetime, price: Optional[tuple] = None, free: bool = False) -> str:
+    """As the billing service sees it (Codex review 2): free, included in the
+    plan, an existing paid brand with no billing record, or its record."""
+    if free:
+        return "free"
+    if not entry:                         # only brands outside the plan get a billing record
+        if price and price[1]:
+            return "included in the plan"
+        return f"paid (existing brand, £{price[0] / 100:.0f} a month)" if price and price[0] else "existing brand"
     state = entry.get("state")
     if state == "ending":
         ends = _parse(entry.get("ends_at"))
@@ -364,9 +372,12 @@ def _lock(session, bid: str) -> None:
         session.execute(text("UPDATE business_settings SET business_id = business_id WHERE business_id = :b"), {"b": bid})
 
 
-def mark_outcome(session, business, user, prospect_id, outcome, *, moment: Optional[datetime] = None) -> dict:
+def mark_outcome(session, business, user, prospect_id, outcome, *, moment: Optional[datetime] = None,
+                 expected: Optional[str] = None) -> dict:
     """The owner marks a meeting, a win or a close, or undoes it (None).
-    Who and when are recorded; no free text is kept."""
+    Who and when are recorded; no free text is kept. `expected` names the mark
+    the owner is looking at; if it has changed (a second click, another tab),
+    nothing happens (Codex review 2: one click undoes one mark)."""
     from services import aria_actions, outreach_setup as setup
     bid = str(business.id)
     moment = moment or now()
@@ -380,6 +391,9 @@ def mark_outcome(session, business, user, prospect_id, outcome, *, moment: Optio
     doc = _doc(session, bid)
     marks = dict(doc.get(OUTCOMES_KEY) or {})
     events = list(((marks.get(str(prospect_id)) or {}).get("events")) or [])
+    if expected is not None and (events[-1]["outcome"] if events else "none") != expected:
+        session.rollback()
+        refuse(409, "This person's mark changed just now. Please refresh and try again.")
     if outcome is None:
         if events:
             events.pop()                  # undo the latest mark; an earlier one stands

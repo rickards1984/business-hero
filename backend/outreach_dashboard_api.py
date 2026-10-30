@@ -55,6 +55,7 @@ def dashboard_stage(stage: str, brand_id: Optional[UUID] = None, limit: int = 20
 
 class Outcome(BaseModel):
     outcome: Optional[str] = None
+    expected: Optional[str] = None    # the mark the owner is looking at ("none" for no mark)
 
 
 @router.post("/prospects/{prospect_id}/outcome")
@@ -65,6 +66,6 @@ def dashboard_outcome(request: Request, prospect_id: UUID, body: Outcome,
     business = _business(session, context)
     try:
         return dashboard.mark_outcome(session, business, context["user_id"], str(prospect_id), body.outcome,
-                                      moment=dashboard.now())
+                                      moment=dashboard.now(), expected=body.expected)
     except ActionRefused as exc:
         raise _refused(session, exc) from None

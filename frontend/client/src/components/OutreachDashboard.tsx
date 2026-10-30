@@ -103,8 +103,8 @@ export default function OutreachDashboard({ businessId, owner }: { businessId: s
           <Metric label="Positive" value={r.positive} hint={`${d.definitions.positive} (${rate(r.positive_rate)})`} />
           <Metric label="Objections" value={r.objections} />
           <Metric label="Bounces" value={r.bounces} />
-          <Metric label="Meetings" value={r.meetings} hint={d.definitions.meetings} />
-          <Metric label="Wins" value={r.wins} hint={d.definitions.wins} />
+          <Metric label="People with a meeting" value={r.meetings} hint={d.definitions.meetings} />
+          <Metric label="People won" value={r.wins} hint={d.definitions.wins} />
         </Box>
       </Section>
 
@@ -145,17 +145,23 @@ function StageDialog({ businessId, brand, stage, owner, close }: { businessId: s
   const client = useQueryClient();
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState('');
+  const [saving, setSaving] = useState('');   // the person being saved: one click, one change
   const brandParam = brand === 'all' ? '' : `&brand_id=${brand}`;
   const q = useQuery<StagePage>({ queryKey: ['outreach-dashboard-stage', businessId, brand, stage, offset], enabled: !!stage, retry: false,
     // (loading and error are shown below: an empty dialog never stands for "nobody")
     queryFn: async () => (await apiRequest('GET', `/v1/outreach/dashboard/stage/${stage}?limit=20&offset=${offset}${brandParam}`)).json() });
   async function mark(id: string, outcome: string | null) {
-    setError('');
+    if (saving) return;
+    setError(''); setSaving(id);
     try {
-      await apiRequest('POST', `/v1/outreach/dashboard/prospects/${id}/outcome`, { outcome });
-      client.invalidateQueries({ queryKey: ['outreach-dashboard', businessId] });
-      client.invalidateQueries({ queryKey: ['outreach-dashboard-stage', businessId] });
-    } catch { setError("That couldn't be saved just now. Please try again."); }
+      // `expected` is the mark on screen: if it already changed, the server refuses.
+      await apiRequest('POST', `/v1/outreach/dashboard/prospects/${id}/outcome`,
+        { outcome, expected: ['meeting', 'won', 'closed'].includes(stage) ? stage : 'none' });
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['outreach-dashboard', businessId] }),
+        client.invalidateQueries({ queryKey: ['outreach-dashboard-stage', businessId] })]);
+    } catch { setError("That couldn't be saved. Please refresh and try again."); }
+    finally { setSaving(''); }
   }
   const label = STAGES.find(s => s[0] === stage)?.[1] || '';
   const marked = ['meeting', 'won', 'closed'].includes(stage);
@@ -171,13 +177,10 @@ function StageDialog({ businessId, brand, stage, owner, close }: { businessId: s
           <Typography fontWeight={600}>{p.details_withheld ? 'Details removed after the retention period' : `${p.name || 'Unnamed'}${p.role ? `, ${p.role}` : ''}`}</Typography>
           <Typography variant="body2">{p.details_withheld ? '' : p.company || ''}{p.last_activity_at ? ` · last activity ${new Date(p.last_activity_at).toLocaleDateString('en-GB')}` : ''}</Typography>
           {owner && <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
-            {marked
-              ? <Button size="small" onClick={() => mark(p.id, null)}>Undo mark</Button>
-              : <>
-                  <Button size="small" variant="outlined" onClick={() => mark(p.id, 'meeting')}>Meeting booked</Button>
-                  <Button size="small" variant="outlined" onClick={() => mark(p.id, 'won')}>Won</Button>
-                  <Button size="small" onClick={() => mark(p.id, 'closed')}>Closed</Button>
-                </>}
+            {!marked && <Button size="small" variant="outlined" disabled={!!saving} onClick={() => mark(p.id, 'meeting')}>Meeting booked</Button>}
+            {stage !== 'won' && <Button size="small" variant="outlined" disabled={!!saving} onClick={() => mark(p.id, 'won')}>Won</Button>}
+            {stage !== 'closed' && <Button size="small" disabled={!!saving} onClick={() => mark(p.id, 'closed')}>Closed</Button>}
+            {marked && <Button size="small" disabled={!!saving} onClick={() => mark(p.id, null)}>Undo {label.toLowerCase()}</Button>}
           </Stack>}
         </Paper>)}
       </Stack>
