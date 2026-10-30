@@ -16,7 +16,7 @@ Michael adopted `docs/NORTH_STAR.md` as the end goal on **28 September
 business. All work is judged against it from that date (`AGENTS.md`
 § North Star; `docs/DEFINITION_OF_DONE.md` Gate 7). The security sequence is
 unchanged. **030b Release 2 was already applied on 27 Sep 2026 (PR #13)**; the
-next security items are 033 STEP 21 (§8) and the BH-001 §6 follow-ups.
+next security items are the BH-001 §6 follow-ups (033 STEP 21 is closed: §8).
 The North Star work of 28 Sep began from a stale local `main` and wrongly
 repeated "030b Release 2 is still next"; corrected 30 Sep 2026.
 
@@ -182,7 +182,7 @@ grants) and **never** columns.
 | `030a` pre-billing security | **complete and verified** | `audits/030a-PROD-RUNBOOK.md`, rehearsed |
 | `031` money engine schema | **complete and verified** | `audits/031-PROD-RUNBOOK.md`, rehearsed |
 | `033` entitlement, **through Section 7** | **complete and verified** | Mike confirmed post-strip flag state; schema dump shows `usage_meters` (7 cols) and both Section 4 columns present |
-| `033` STEP 21 — remove stopgap flags | **absent** | Blocked; see §8 |
+| `033` STEP 21 — remove stopgap flags | **applied** (inferred from prod state, 30 Oct 2026) | See §8 |
 | `030b` Release 2 — the revoke | **applied 27 Sep 2026** | `audits/030b-PROD-RUNBOOK.md`, before/after snapshots in `audits/030b-prod-{before,after}.txt` |
 
 ### Schema truth
@@ -551,12 +551,19 @@ patterns. **No secret rotation policy exists.**
 
 ## 8 · Outstanding production action
 
-**033 STEP 21 — RED, blocked.** MSC and New Body carry a manual
-`receptionist: true`, added as a stopgap when the raw reader 403'd after the
-Section 7 strip and locked the owner out of the only switch that stops the
-receptionist answering. The reader is fixed but **not yet verified in prod**.
-STEP 21 is gated on STEP 20d passing against the deployed backend
-(commit `9826f61`, pushed 2026-09-03).
+**033 STEP 21: closed, 30 Oct 2026.** Production shows the strip has run. A read-only query of `businesses` on 30 Oct 2026, run by Mike for OUT-19 F, matches STEP 21's EXPECT exactly:
+- MSC (`pro`) carries `{}`. Its stopgap `receptionist: true` equalled the `pro` default, so the strip removed it.
+- New Body carried only `{"outreach": true}` before it moved to `business`.
+- The four `starter` test businesses carry `{}`.
+- Business Hero keeps only its deliberate denials and `industry`.
+
+Mike doesn't remember the run itself, but confirms he runs every runbook step. Nothing was lost: on `pro` and `business` the receptionist is on by plan default.
+
+**Since then (OUT-19 F, 30 Oct 2026):** MSC and New Body are on `business` with `complimentary` and `outreach_brands_free`, which makes them free with every feature, permanently.
+- New Body keeps its active £1.50 Stripe subscription. Cancelling it would make it read-only.
+- MSC has no subscription, so `trial_ends_at` is set to 2099-12-31. That is the admin path for a business without Stripe.
+
+There is no outstanding production action from 033.
 
 ---
 
