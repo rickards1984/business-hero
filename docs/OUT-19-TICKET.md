@@ -303,6 +303,45 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
 
 ### G — Boost eligibility and steps (decision 5)
 
+**Decided (Mike, 30 Oct 2026):** a boost is **free**, and the **owner opts in** when an inbox qualifies. Dropping back is always automatic.
+- A boost raises how many cold emails the inbox may send; it adds no spending money. The brand's hidden AI ceiling (C: 25% of its price) still caps our cost, so the margin holds.
+- If the extra volume uses up the month's research budget early, the owner buys a top-up (F, at cost ×3).
+
+**The steps:** 20 → 30 → 40 → 50 cold emails a day per inbox. **50 is the ceiling.** Replies keep their own safety ceiling (E): the cold limit plus 20, never above 70.
+
+**Qualifying for the first step (20 → 30)**, judged from our own evidence over the last **28 days**:
+- the inbox has been at warm-up stage 20 for at least 28 days, counted from the owner's stage-20 review;
+- at least **200** cold emails sent;
+- bounces **under 2%** of them;
+- unsubscribes **under 1%** (by reply or by link);
+- **no** complaints;
+- **no** failed daily inbox check (SPF/DKIM/DMARC, domain control, alignment);
+- at least **one genuine reply**: interested, question, not now, objection, referral or wrong person;
+- not paused, and passing today's check.
+
+**Each later step (30 → 40, 40 → 50):** at least **14 days** at the current level, and the same measures over the last 14 days, with at least **150** cold emails.
+
+**Dropping back (automatic, checked daily with the inbox check):**
+- If the last 14 days miss any measure, the inbox drops one step. It must then hold **14 days** before the owner can step it up again.
+- A complaint, or any pause, puts it back to 20 at once; it must qualify again from the start.
+
+**What a boost changes:**
+- **The inbox's daily limit.** The owner's own limits are respected: any limit the owner set *below* 20 (campaign, brand, inbox) still binds. A limit left at the maximum of 20 follows the boost.
+- **The brand's monthly allowance** (the daily limit × the month's weekdays) and **research sizing** (D) use the boosted limit. Research never finds more contacts than the inbox can email.
+- **A provider's own sending limit,** if one is recorded, always binds.
+
+**Storage, no migration.**
+- Boost levels live in the business settings document. The database's 1–20 checks on the mailbox and campaign columns are untouched, because the boost is applied on top of them.
+- Failed daily checks are counted per inbox per day in `usage_meters`.
+- Unsubscribes are traced to the inbox that emailed the person, read-only. The unsubscribe path is unchanged.
+
+**Screens:**
+- The "Boost this inbox" choice on the replies banner (E) becomes live. When the inbox qualifies, it offers the next step in one click. When it doesn't, it shows which measures aren't met yet and the numbers behind them.
+- The boost screen says: "Reputation is judged from our own evidence. Business Hero can't see Google's or Microsoft's internal score."
+- Rotating inboxes to get round limits is never offered (OUT-2). More volume beyond 50 comes from a properly warmed second inbox.
+
+**Tests first:** `backend/tests/test_outreach_boost.py`, strict xfail until Mike approves.
+
 ### H — AI routing and failover (decision 6)
 
 Built in `services/ai_router.py`. Research and Aria's setup drafts go through it.
