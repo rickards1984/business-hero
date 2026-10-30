@@ -56,7 +56,9 @@ FREE_FLAG = "outreach_brands_free"
 PRICE_ENV = {9900: "STRIPE_PRICE_OUTREACH_ADDON", 7900: "STRIPE_PRICE_EXTRA_BRAND"}
 OP_LIFE = timedelta(minutes=10)                 # a subscription operation's claim
 STALE = timedelta(hours=1)                      # an addition with no line and no pending update has failed
-PAGE_LIFE = timedelta(minutes=35)               # a top-up page's expiry (Stripe's minimum is 30 minutes)
+PAGE_LIFE = timedelta(minutes=60)               # a top-up page's expiry, fixed when reserved
+# Stripe requires a page to expire at least 30 minutes after it is CREATED: a
+# re-send up to 30 minutes after reserving still leaves 30 (Codex review 3).
 PAGE_CHECK_AFTER = timedelta(minutes=5)         # the scheduled check asks Stripe about a page after this
 PAGE_REBUILD_UNTIL = timedelta(minutes=30)      # an unconfirmed page creation is re-sent, same key, until then
 PAGE_GIVE_UP = timedelta(days=4)                # past Stripe's 3 days of webhook retries: nothing was paid
@@ -397,10 +399,13 @@ def add_paid_brand(session, business, user, brand_id, *, api=None) -> dict:
         _back_to_awaiting(session, bid, brand_id, mine, token, keep=retry)
         raise
     except Exception as exc:
-        if _definite(api, exc):
+        if _definite(api, exc) and not retry:
             _back_to_awaiting(session, bid, brand_id, mine, token, keep=False)
             refuse(402 if _code(exc) else 409, "Stripe couldn't add this brand, so nothing was charged. "
                    "Check the card on your subscription in Billing and try again.")
+        # Codex review 3: on a retry, even a definite refusal (a rate limit on
+        # the read, say) says nothing about the FIRST attempt, which may have
+        # been charged. Its identity is kept until Stripe shows the outcome.
         _update(session, bid, brand_id, mine, token, uncertain=True)
         refuse(502, "We couldn't confirm this with Stripe just now. We'll check automatically. Please don't pay "
                     "again: if it went through, the brand goes live on its own.")
@@ -418,8 +423,10 @@ def _back_to_awaiting(session, bid, brand_id, mine, token, *, keep) -> None:
 
 def remove_paid_brand(session, business, user, brand_id, *, api=None) -> dict:
     """Delete the brand's own subscription line with no proration; it stays
-    live until the end of the period already paid. Stripe is asked for that
-    period BEFORE anything is recorded, so an ending brand always has its end."""
+    live until the end of the period already paid. The subscription operation
+    is claimed BEFORE Stripe is read (Codex review 3: no other change can slip
+    in between the read and the deletion), and the paid period's end is known
+    before anything is recorded."""
     bid = str(business.id)
     _owner(session, business, user)
     if not billing_on():
@@ -428,37 +435,36 @@ def remove_paid_brand(session, business, user, brand_id, *, api=None) -> dict:
     entry = billing["brands"].get(str(brand_id))
     if not entry or entry.get("state") != "active":
         refuse(409, "Only a paid, live brand can be removed from billing.")
-    if _op_held(billing, send.now()):
+    token = _claim_op(billing, send.now())
+    if token is None:
         refuse(409, "Another change to your subscription is still going through. Try again in a minute.")
+    price_id = entry.get("price_id")
     row = _business_row(session, bid)
-    session.commit()                       # no lock held while Stripe is asked
+    _save(session, bid, billing)
+    session.commit()                       # claimed; no lock held while Stripe is asked
+
+    def unchanged(e):
+        return e.get("state") == "active" and e.get("price_id") == price_id
     api = api or _stripe()
     try:
         sub = api.Subscription.retrieve(row["stripe_subscription_id"])
     except Exception:
+        _update(session, bid, brand_id, lambda e: False, token)
         refuse(502, "We couldn't reach Stripe just now, so nothing changed. Please try again in a minute.")
     if _get(sub, "pending_update"):
+        _update(session, bid, brand_id, lambda e: False, token)
         refuse(409, "A payment on your subscription is still being confirmed. Try again in a few minutes.")
-    item = next((i for i in _items(sub) if _item_price(i) == entry.get("price_id")), None)
+    item = next((i for i in _items(sub) if _item_price(i) == price_id), None)
     moment = send.now()
     ends = _get(item, "current_period_end") or _get(sub, "current_period_end")
     ends_at = datetime.fromtimestamp(int(ends), tz=timezone.utc).isoformat() if item and ends else moment.isoformat()
-    _lock(session, bid)
-    billing = _billing(_doc(session, bid))
-    current = billing["brands"].get(str(brand_id))
-    if not current or current.get("state") != "active" or current.get("price_id") != entry.get("price_id"):
-        session.rollback()
-        refuse(409, "This brand's billing changed just now. Please refresh and try again.")
-    token = _claim_op(billing, moment)
-    if token is None:
-        session.rollback()
-        refuse(409, "Another change to your subscription is still going through. Try again in a minute.")
     remove_op = uuid.uuid4().hex
-    current.update(state="ending", ends_at=ends_at, remove_op=remove_op)
-    if item is not None:
-        current["item_id"] = _get(item, "id")
-    _save(session, bid, billing)
-    session.commit()                       # stopped locally, with its end, before Stripe is asked to stop it
+    fields = {"state": "ending", "ends_at": ends_at, "remove_op": remove_op, "item_id": _get(item, "id"),
+              "uncertain": True if item is not None else None}
+    if not _update(session, bid, brand_id, unchanged, None, **fields).get("remove_op") == remove_op:
+        _update(session, bid, brand_id, lambda e: False, token)
+        refuse(409, "This brand's billing changed just now. Please refresh and try again.")
+    # stopped locally, with its end, before Stripe is asked to stop it; "uncertain" until Stripe confirms
 
     def mine(e):
         return e.get("remove_op") == remove_op and e.get("state") == "ending"
@@ -470,13 +476,65 @@ def remove_paid_brand(session, business, user, brand_id, *, api=None) -> dict:
                                 proration_behavior="none", idempotency_key=f"outreach-brand-remove-{remove_op}")
     except Exception as exc:
         if _definite(api, exc):
-            _update(session, bid, brand_id, mine, token, state="active", ends_at=None, remove_op=None, item_id=None)
+            _update(session, bid, brand_id, mine, token, state="active", ends_at=None, remove_op=None, item_id=None,
+                    uncertain=None)
             refuse(409, "Stripe couldn't stop this brand's billing, so nothing changed. Please try again.")
-        _update(session, bid, brand_id, mine, token)   # kept: the scheduled check re-sends the same request
-        refuse(502, "We couldn't confirm this with Stripe just now; billing for this brand will be stopped "
-                    "automatically. It stays live until the end of the month already paid.")
-    _update(session, bid, brand_id, mine, token)
+        _update(session, bid, brand_id, mine, token)   # kept, marked uncertain: the scheduled check finishes it
+        refuse(502, "We couldn't confirm this with Stripe just now. We'll keep trying to stop this brand's billing; "
+                    "it stays live until the end of the month already paid.")
+    _update(session, bid, brand_id, mine, token, uncertain=None)
     return {"brand_id": str(brand_id), "billing": "ending", "ends_at": ends_at}
+
+
+def resend_removals(session, bid: str, *, api=None, moment: Optional[datetime] = None) -> None:
+    """From the scheduled check, in its own session: finish removals Stripe
+    didn't confirm. Each is the same request under the same key, made under a
+    claimed subscription operation with a fresh read of Stripe (Codex review
+    3), and never while Stripe holds an unpaid update. If the line has renewed
+    into a new paid period meanwhile, the brand stays live to that period's
+    end: it was paid for."""
+    moment = moment or send.now()
+    _lock(session, bid)
+    billing = _billing(_doc(session, bid))
+    waiting = {k: e for k, e in billing["brands"].items()
+               if e.get("state") == "ending" and e.get("uncertain") and e.get("remove_op") and e.get("item_id")}
+    row = _business_row(session, bid)
+    if not waiting or not row.get("stripe_subscription_id"):
+        session.rollback()
+        return
+    token = _claim_op(billing, moment)
+    if token is None:
+        session.rollback()
+        return
+    _save(session, bid, billing)
+    session.commit()
+    api = api or _stripe()
+    try:
+        sub = api.Subscription.retrieve(row["stripe_subscription_id"])
+        if _get(sub, "pending_update"):
+            return
+        items = {_get(i, "id"): i for i in _items(sub)}
+        for brand_id, entry in waiting.items():
+            def mine(e, op=entry["remove_op"]):
+                return e.get("remove_op") == op and e.get("state") == "ending"
+            item = items.get(entry["item_id"])
+            if item is None:               # already gone: Stripe carried it out
+                _update(session, bid, brand_id, mine, None, uncertain=None)
+                continue
+            renewed = _get(item, "current_period_end")
+            if renewed and (_parse(entry.get("ends_at")) is None or
+                            datetime.fromtimestamp(int(renewed), tz=timezone.utc) > _parse(entry["ends_at"])):
+                _update(session, bid, brand_id, mine, None,
+                        ends_at=datetime.fromtimestamp(int(renewed), tz=timezone.utc).isoformat())
+            try:
+                api.Subscription.modify(row["stripe_subscription_id"], items=[{"id": entry["item_id"], "deleted": True}],
+                                        proration_behavior="none",
+                                        idempotency_key=f"outreach-brand-remove-{entry['remove_op']}")
+                _update(session, bid, brand_id, mine, None, uncertain=None)
+            except Exception:
+                logger.exception("Outreach billing: re-sending a brand removal failed")
+    finally:
+        _update(session, bid, None, lambda e: False, token)
 
 
 # ----------------------------------------------------------- reconciliation ---
@@ -515,8 +573,6 @@ def reconcile(session, bid: str, *, api=None, moment: Optional[datetime] = None)
     purchases_before = {k: dict(p) for k, p in billing["purchases"].items()}
     api = api or _stripe()                 # plain reads so far: no lock is held while Stripe is asked
     sub = api.Subscription.retrieve(row["stripe_subscription_id"])
-    if not _op_held(billing, moment):
-        _resend_removals(api, row["stripe_subscription_id"], billing, sub)
     pages = _ask_about_pages(api, bid, row, billing, moment)
     _lock(session, bid)
     billing = _billing(_doc(session, bid))
@@ -532,21 +588,6 @@ def reconcile(session, bid: str, *, api=None, moment: Optional[datetime] = None)
             # nothing was paid.
             billing["purchases"].pop(key)
     _save(session, bid, billing)
-
-
-def _resend_removals(api, sub_id, billing: dict, sub) -> None:
-    """A removal Stripe didn't confirm: the same request, with the same key."""
-    if _get(sub, "pending_update"):
-        return
-    billed = {_get(i, "id") for i in _items(sub)}
-    for entry in billing["brands"].values():
-        if entry.get("state") == "ending" and entry.get("remove_op") and entry.get("item_id") in billed:
-            try:
-                api.Subscription.modify(sub_id, items=[{"id": entry["item_id"], "deleted": True}],
-                                        proration_behavior="none",
-                                        idempotency_key=f"outreach-brand-remove-{entry['remove_op']}")
-            except Exception:
-                logger.exception("Outreach billing: re-sending a brand removal failed")
 
 
 def _apply_brands(billing: dict, sub, moment: datetime, before: dict) -> None:
@@ -593,6 +634,7 @@ def _create_page(api, bid: str, customer: str, purchase: dict, key: str):
     at = _parse(purchase["at"])
     return api.checkout.Session.create(
         mode="payment", customer=customer, metadata=metadata, payment_intent_data={"metadata": metadata},
+        payment_method_types=["card"],     # settles at once: no delayed payment can hold the budget
         line_items=[{"quantity": 1, "price_data": {"currency": "gbp", "unit_amount": int(purchase["amount"]),
                                                   "product_data": {"name": "Outreach top-up"}}}],
         success_url=purchase["return_url"], cancel_url=purchase["return_url"],
@@ -663,7 +705,8 @@ def _ask_about_pages(api, bid: str, row: dict, billing: dict, moment: datetime) 
     return out
 
 
-def _settle_page(session, bid: str, row: dict, billing: dict, key: str, page, moment: datetime) -> None:
+def _settle_page(session, bid: str, row: dict, billing: dict, key: str, page, moment: datetime, *,
+                 failed: bool = False) -> None:
     """The one check for a top-up page, from the webhook and the scheduled
     check alike: it must be the page for a purchase this business reserved —
     its reservation, its Stripe customer, the brand, pounds, the exact amount.
@@ -679,7 +722,7 @@ def _settle_page(session, bid: str, row: dict, billing: dict, key: str, page, mo
             or _get(page, "customer") != row.get("stripe_customer_id")):
         logger.warning("Outreach top-up page %s ignored: not this business's reservation %s", page_id, key)
         return
-    if _get(page, "status") == "expired":
+    if _get(page, "status") == "expired" or failed:   # expired unpaid, or Stripe says its payment failed
         billing["purchases"].pop(key)
         return
     if _get(page, "status") == "complete" and _get(page, "payment_status") == "paid":
@@ -700,10 +743,11 @@ def _settle_page(session, bid: str, row: dict, billing: dict, key: str, page, mo
         purchase["checkout_id"] = page_id
 
 
-PAGE_EVENTS = ("checkout.session.completed", "checkout.session.async_payment_succeeded", "checkout.session.expired")
+PAGE_EVENTS = ("checkout.session.completed", "checkout.session.async_payment_succeeded",
+               "checkout.session.async_payment_failed", "checkout.session.expired")
 
 
-def apply_page_event(session, page, *, created: Optional[datetime] = None) -> None:
+def apply_page_event(session, page, *, created: Optional[datetime] = None, failed: bool = False) -> None:
     """A top-up page's event, in the webhook's transaction."""
     metadata = _get(page, "metadata") or {}
     if _get(metadata, "kind") != "outreach_topup":
@@ -718,7 +762,7 @@ def apply_page_event(session, page, *, created: Optional[datetime] = None) -> No
     _lock(session, bid)
     billing = _billing(_doc(session, bid))
     if key in billing["purchases"]:
-        _settle_page(session, bid, row, billing, key, page, created or send.now())
+        _settle_page(session, bid, row, billing, key, page, created or send.now(), failed=failed)
         _save(session, bid, billing)
 
 
@@ -726,7 +770,8 @@ def webhook(session, event_type: str, event_data, *, created: Optional[datetime]
     """Everything outreach billing does on a Stripe event, in the webhook's
     transaction. A business with no outreach billing is left untouched."""
     if event_type in PAGE_EVENTS:
-        apply_page_event(session, event_data, created=created)
+        apply_page_event(session, event_data, created=created,
+                         failed=event_type == "checkout.session.async_payment_failed")
         return
     if event_type.startswith("customer.subscription.") or event_type.startswith("invoice."):
         sub_id = (_get(event_data, "id") if event_type.startswith("customer.subscription.")
@@ -752,7 +797,9 @@ def scheduled_check(*, api=None) -> int:
                 with Session(engine) as s:
                     reconcile(s, bid, api=api)
                     s.commit()
-                    done += 1
+                with Session(engine) as s:
+                    resend_removals(s, bid, api=api)
+                done += 1
             except Exception:
                 logger.exception("Outreach billing: scheduled check failed for %s", bid)
     except Exception:

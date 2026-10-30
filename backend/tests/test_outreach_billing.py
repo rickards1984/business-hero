@@ -84,6 +84,7 @@ class FakeStripe:
         self.items = [{"id": "si_plan", "price": {"id": PLAN_PRO}, "quantity": 1, "current_period_end": PERIOD_END}]
         self.pending_items, self.prices, self.pages, self.status = None, {}, {}, "active"
         self.base = {EXTRA: 7900, ADDON: 9900}
+        self.now = NOW                     # Stripe's clock, for the page-expiry rule
         api = self
 
         def idempotent(name, kw, act):
@@ -146,6 +147,8 @@ class FakeStripe:
             @staticmethod
             def create(**kw):
                 def act():
+                    if kw["expires_at"] - api.now.timestamp() < 30 * 60:
+                        raise InvalidRequestError("expires_at must be at least 30 minutes after creation")
                     cs = f"cs_{len(api.pages) + 1}"
                     line = kw["line_items"][0]["price_data"]
                     api.pages[cs] = {"id": cs, "status": "open", "payment_status": "unpaid", "url": f"https://pay.example/{cs}",
@@ -281,9 +284,17 @@ def webhook(db, api, event_type="customer.subscription.updated", data=None, mome
 
 
 def reconcile(db, api, moment):
+    api.now = moment
     with run_clock(), Session(db) as s:
         billing().reconcile(s, A, api=api, moment=moment)
         s.commit()
+
+
+def check(db, api, moment):
+    """The scheduled check: reconcile, then finish unconfirmed removals."""
+    reconcile(db, api, moment)
+    with run_clock(), Session(db) as s:
+        billing().resend_removals(s, A, api=api, moment=moment)
 
 
 def paid_brand_flow(db):
@@ -622,7 +633,7 @@ def test_removing_one_brand_never_hands_its_place_to_another(db):
     reconcile(db, api, NOW)
     assert live(db, second) is False, "B waits for its own payment; A's paid line is A's"
     api.pay()
-    reconcile(db, api, NOW + timedelta(minutes=11))    # the operation claim has lapsed: A's removal is re-sent
+    check(db, api, NOW + timedelta(minutes=11))        # the operation claim has lapsed: A's removal is re-sent
     assert live(db, second) is True and api.billed() == [entry(db, second)["price_id"]]
     assert live(db, fit, AFTER_PERIOD) is False
 
@@ -643,7 +654,9 @@ def test_an_unconfirmed_removal_is_re_sent_and_ends_on_time(db):
     paid_for(db, biz, fit, api)
     api.fail["Subscription.modify"] = APIConnectionError("read timed out")
     remove_refused(db, biz, fit, api)
-    reconcile(db, api, NOW + timedelta(minutes=11))
+    with run_clock(), Session(db) as s:
+        assert {r["brand_id"]: r for r in billing().status(s, biz)["brands"]}[fit["id"]]["checking"] is True
+    check(db, api, NOW + timedelta(minutes=11))
     first, again = api.named("Subscription.modify")[-2:]
     assert first == again and api.billed() == []
     assert live(db, fit) is True and live(db, fit, AFTER_PERIOD + timedelta(days=100)) is False
@@ -686,7 +699,8 @@ def test_a_top_up_opens_stripes_payment_page_reserved_first(db):
     assert call["metadata"] == {"kind": "outreach_topup", "outreach_business_id": A, "brand_id": brand["id"],
                                 "reservation": key}
     assert call["payment_intent_data"] == {"metadata": call["metadata"]}
-    assert call["expires_at"] == int((NOW + timedelta(minutes=35)).timestamp())
+    assert call["expires_at"] == int((NOW + timedelta(minutes=60)).timestamp())
+    assert call["payment_method_types"] == ["card"], "settles at once: nothing delayed holds the budget"
     assert call["idempotency_key"] == f"outreach-topup-{key}"
     assert out == {"status": "checkout", "checkout_url": "https://pay.example/cs_1"}
     assert committed(db, biz) == 9900 + 2500 and purchases(db)[key]["checkout_id"] == "cs_1"
@@ -830,6 +844,100 @@ def test_a_paid_page_with_no_reservation_credits_nothing(db):
     webhook(db, FakeStripe(), "checkout.session.completed", page)
     assert topped_up(db, brand) == 0
 
+
+
+# ------------------------------------------------- Codex review 3 regressions ---
+
+def test_a_failed_retry_never_forgets_an_addition_that_may_have_been_charged(db):
+    """P1 1: the first attempt was carried out (answer lost); the retry's read
+    is then refused by Stripe. The first attempt's identity must survive."""
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    api.fail["Subscription.modify"] = ("lost", APIConnectionError("connection reset"))
+    add_refused(db, biz, fit, api)
+    first = dict(entry(db, fit))
+    api.fail["Subscription.retrieve"] = InvalidRequestError("rate limited")
+    exc = add_refused(db, biz, fit, api)
+    assert code(exc) == 502 and "don't pay again" in exc.detail.lower()
+    kept = entry(db, fit)
+    assert (kept["state"], kept["op"], kept["price_id"], kept["uncertain"]) == ("pending", first["op"], first["price_id"], True)
+    add(db, biz, fit, api)
+    reconcile(db, api, NOW)
+    assert live(db, fit) is True and len(api.billed()) == 1, "one line, charged once"
+
+
+def test_no_other_change_can_slip_between_a_removals_read_and_its_deletion(db):
+    """P1 2: the removal claims the subscription before reading it, so an
+    addition arriving in between waits rather than leaving a payment pending."""
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    second, second_lia = new_brand(db, biz, "Schools Outreach", age=timedelta(minutes=20))
+    api = FakeStripe()
+    paid_for(db, biz, fit, api)
+    real = api.Subscription.retrieve
+    seen = {}
+
+    def read_then_someone_adds(sub_id, **kw):
+        snapshot = real(sub_id)
+        if "added" not in seen:
+            api.hold = True
+            seen["added"] = add_refused(db, biz, second, api)
+        return snapshot
+    api.Subscription.retrieve = staticmethod(read_then_someone_adds)
+    remove(db, biz, fit, api)
+    assert code(seen["added"]) == 409, "the addition waited for the removal"
+    assert api.pending_items is None and entry(db, second)["state"] == "awaiting_payment"
+
+
+def test_the_scheduled_check_never_removes_while_another_change_holds_the_subscription(db):
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    paid_for(db, biz, fit, api)
+    api.fail["Subscription.modify"] = APIConnectionError("read timed out")
+    remove_refused(db, biz, fit, api)
+    doc = settings(db)
+    doc["outreach_brand_billing"]["op"] = {"token": "busy", "until": (NOW + timedelta(hours=1)).isoformat()}
+    save_settings(db, doc)
+    sent = len(api.named("Subscription.modify"))
+    check(db, api, NOW + timedelta(minutes=11))
+    assert len(api.named("Subscription.modify")) == sent and len(api.billed()) == 1
+
+
+def test_a_removal_finished_after_a_renewal_keeps_the_brand_for_the_month_paid(db):
+    """P1 3: the deletion never reached Stripe; the line renewed (and was paid)
+    before the scheduled check finished the removal."""
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    paid_for(db, biz, fit, api)
+    api.fail["Subscription.modify"] = APIConnectionError("read timed out")
+    remove_refused(db, biz, fit, api)
+    renewed = PERIOD_END + 30 * 24 * 3600
+    for item in api.items:
+        item["current_period_end"] = renewed
+    check(db, api, AFTER_PERIOD)
+    assert api.billed() == [], "billing stopped"
+    assert live(db, fit, AFTER_PERIOD) is True, "the renewed month was paid for"
+    assert live(db, fit, datetime.fromtimestamp(renewed, tz=timezone.utc) + timedelta(minutes=1)) is False
+    assert entry(db, fit).get("uncertain") is None
+
+
+def test_a_page_re_sent_ten_minutes_on_still_meets_stripes_expiry_rule(db):
+    """P2 1: Stripe needs 30 minutes from creation; the fake now enforces it."""
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    api.fail["checkout.Session.create"] = APIConnectionError("never arrived")
+    topup_refused(db, biz, brand, 2500, api)
+    reconcile(db, api, NOW + timedelta(minutes=29))
+    assert len(api.pages) == 1 and list(purchases(db).values())[0]["checkout_id"] == "cs_1"
+
+
+def test_a_failed_delayed_payment_releases_its_reservation(db):
+    """P2 2 (cards settle at once; this is the backstop)."""
+    biz, brand, fit, fit_lia = paid_brand_flow(db)
+    api = FakeStripe()
+    topup(db, biz, brand, 2500, api)
+    page = dict(api.pages["cs_1"], status="complete", payment_status="unpaid")
+    webhook(db, api, "checkout.session.async_payment_failed", page)
+    assert committed(db, biz) == 9900 and topped_up(db, brand) == 0
 
 # ----------------------------------------------------------- the wiring ---
 

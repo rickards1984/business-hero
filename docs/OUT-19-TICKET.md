@@ -187,7 +187,7 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
    - Until then the brand can be set up, but research and cold sending are off. Replies are never stopped.
 3. **Top-ups (£10, £25 or £50) are paid on Stripe's own payment page** (Checkout). *Changed by Mike on 30 Oct 2026, after Codex review 2: previously "two taps on the saved card".*
    - Every charge passes the owner's budget (C), **reserved under the business lock** before Stripe is called, so two top-ups at once can't pass the budget.
-   - The top-up is credited only when Stripe says the page was paid, once (keyed on the page). The reservation is released only when Stripe says the page expired (35 minutes).
+   - The top-up is credited only when Stripe says the page was paid, once (keyed on the page). The reservation is released only when Stripe says the page expired (60 minutes) or its payment failed.
 4. **Removing a paid brand stops billing at the end of the month already paid.** The quantity is reduced with no proration, and the brand stays live until the period ends. No refund.
 
 **Also decided:**
@@ -196,7 +196,7 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
 
 **Mike sets these in Stripe and Railway:**
 - two recurring monthly prices in GBP: "Extra brand £79/month" (`STRIPE_PRICE_EXTRA_BRAND`) and "Outreach add-on £99/month" (`STRIPE_PRICE_OUTREACH_ADDON`). Each paid brand gets its own price, made from the same product and amount; if the configured price isn't exactly that amount, monthly, in pounds, nothing is charged;
-- the webhook events `checkout.session.completed`, `checkout.session.expired`, `checkout.session.async_payment_succeeded`, `customer.subscription.updated` and `invoice.paid`.
+- the webhook events `checkout.session.completed`, `checkout.session.expired`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `customer.subscription.updated` and `invoice.paid`.
 
 **Tests first:** `backend/tests/test_outreach_billing.py`, strict xfail until Mike approves. **Mike approved them on 29 Oct 2026.**
 
@@ -266,6 +266,20 @@ Built on branch `ticket/OUT-19-E-replies-outside-cap`, stacked on D. Tests are i
 - **Tests:**
   - `test_outreach_billing.py`: 68 tests. Ten mutations, one per fix, are each caught.
   - `test_outreach_billing_pg.py`: a paid page through the real webhook endpoint, delivered twice, is credited once.
+
+**Codex review 3 (`audits/OUT-19-F-CODEX-REVIEW-3.md`, 3 × P1, 3 × P2) → fixed in a 4th cycle, authorised by Mike (30 Oct 2026):**
+1. **A retry never forgets an addition that may have been charged.** On a retry of an unconfirmed addition, any failure, even a definite refusal of the retry's own read, keeps the first attempt's identity and price. The scheduled check settles it from Stripe's current state.
+2. **No change can slip between a removal's read and its deletion.**
+   - A removal claims the subscription operation before reading Stripe.
+   - An unconfirmed removal is finished by `resend_removals`, run by the scheduled check in its own session. It also claims first, reads Stripe fresh, and never acts while Stripe holds an unpaid update.
+   - The webhook no longer sends anything to Stripe.
+3. **Renewal.** If the line renewed into a new paid period before an unconfirmed removal finished, the brand stays live to the end of that period: it was paid for.
+- **P2s:**
+  - Top-up pages expire 60 minutes after reservation, so a re-send within 30 minutes still meets Stripe's 30-minutes-from-creation rule. The fake now enforces that rule.
+  - Pages are card-only, so payments settle at once. `checkout.session.async_payment_failed` releases the reservation as a backstop.
+  - An unconfirmed removal is marked as being checked; the screen says so and polls until Stripe confirms.
+- **Tests:** `test_outreach_billing.py` has 74 tests. Seven new mutations, one per fix, are each caught.
+- **Mike adds the webhook event** `checkout.session.async_payment_failed`.
 
 ### G — Boost eligibility and steps (decision 5)
 

@@ -1035,7 +1035,9 @@ function BrandBilling({ businessId, brandId, brandName }: { businessId: string; 
       {row.billing === 'pending' && <Alert severity="info">{row.checking
         ? `We're checking with Stripe whether the payment for ${brandName} went through. Please don't pay again.`
         : `Waiting for Stripe to confirm the payment for ${brandName}…`}</Alert>}
-      {row.billing === 'ending' && <Alert severity="warning">Billing stopped: {brandName} stays live until {row.ends_at ? new Date(row.ends_at).toLocaleDateString('en-GB') : 'the end of the month'}.</Alert>}
+      {row.billing === 'ending' && <Alert severity="warning">{row.checking
+        ? `We're asking Stripe to stop billing for ${brandName} and will keep trying until it confirms. `
+        : 'Billing stopped: '}{brandName} stays live until {row.ends_at ? new Date(row.ends_at).toLocaleDateString('en-GB') : 'the end of the month'}.</Alert>}
       {row.live && (q.data?.topup_sizes || []).length > 0 && <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="center">
         <Typography variant="body2">Top up this month's research (you'll pay on Stripe's secure page):</Typography>
         {(q.data?.topup_sizes || []).map(a => <Button key={a} size="small" variant="outlined" disabled={api.busy} onClick={() => topUp(a)}>{pounds(a)}</Button>)}
