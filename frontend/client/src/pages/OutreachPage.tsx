@@ -1,3 +1,4 @@
+import OutreachDashboard from '@/components/OutreachDashboard';
 import { useState, type ReactNode } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -5,14 +6,13 @@ import { Alert, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent, Di
 import { useMe } from '@/hooks/useMe';
 import { useShellMobile } from '@/hooks/useShellMobile';
 import { apiRequest } from '@/lib/queryClient';
-import { OutreachRecord, outreachError, useOutreachData, useOutreachOwner, useOutreachSummary, useRefreshOutreach } from '@/hooks/useOutreachData';
+import { OutreachRecord, outreachError, useOutreachData, useOutreachOwner, useRefreshOutreach } from '@/hooks/useOutreachData';
 import ApprovalCard, { Proposal } from '@/components/ApprovalCard';
 import OutreachReplyCard from '@/components/OutreachReplyCard';
 import ReplyCeilingBanner from '@/components/ReplyCeilingBanner';
 import OutreachSetupWizard, { AutopilotSwitch, ChangeSendingMailbox, CopyCampaign, OutreachMailboxes, ResearchPanel, ResearchSummary, useSetupStatus } from '@/components/OutreachSetupWizard';
 const sections = ['overview', 'prospects', 'campaigns', 'replies', 'suppression', 'settings'];
 const href = (section: string) => `/app/outreach${section === 'overview' ? '' : '/' + section}`;
-const labels: Record<string, string> = { prospects: 'Prospects', campaigns: 'Campaigns', accepted_live: 'Provider-accepted live messages (not delivery)', unknown_live: 'Unknown send outcomes', imported_messages: 'Imported messages', human_replies: 'Human replies', stage_meeting: 'Recorded meeting stage', stage_won: 'Recorded won stage', unresolved_replies: 'Unresolved replies' };
 function RecordText({ item }: { item: OutreachRecord }) { return <Stack spacing={.5}>{Object.entries(item).map(([key, value]) => <Typography key={key} variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}><strong>{key.replace(/_/g, ' ')}:</strong> {value == null ? 'Unknown / unavailable' : typeof value === 'object' ? JSON.stringify(value) : String(value)}</Typography>)}</Stack>; }
 function QueryState({ query }: { query: ReturnType<typeof useOutreachData> }) {
   return query.isLoading ? <Typography>Loading…</Typography> : query.isError ? <Alert severity="warning">{outreachError(query.error)} <Button onClick={() => query.refetch()}>Reload</Button></Alert> : query.data?.data_quality === 'stale' ? <Alert severity="warning">Some records are stale or expired. Expired knowledge cannot support a reply.</Alert> : query.data?.data_quality === 'none' ? <Typography>None recorded.</Typography> : null;
@@ -45,7 +45,7 @@ function OutreachDepartment({ businessId }: { businessId: string }) {
     {!owner.data && <Alert severity="info">Inspection only. Write controls require an active owner. The server checks account access on every request.</Alert>}
     {error && <Alert severity="error">{error}</Alert>}{notice && <Alert severity="success">{notice}</Alert>}
     <Tabs value={sections.includes(section) ? section : 'overview'} variant="scrollable" scrollButtons="auto" aria-label="Outreach sections">{sections.map(s => <Tab key={s} value={s} label={s} component={Link} to={href(s)} />)}</Tabs>
-    {section === 'overview' && <><ResearchSummary businessId={businessId} />{owner.data && <BrandsPanel businessId={businessId} />}<Overview businessId={businessId} /></>}
+    {section === 'overview' && <><OutreachDashboard businessId={businessId} owner={!!owner.data} /><ResearchSummary businessId={businessId} />{owner.data && <BrandsPanel businessId={businessId} />}</>}
     {section === 'prospects' && <Prospects {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
     {section === 'campaigns' && <Campaigns {...controls} offset={offset} setOffset={n => setParams({ offset: String(n) })} />}
     {section === 'replies' && <Replies businessId={businessId} offset={offset} mailbox={mailbox} setParams={setParams} />}
@@ -76,10 +76,6 @@ function BrandsPanel({ businessId }: { businessId: string }) {
       {brands.some(b => !b.ready) && <Button onClick={() => setMode('continue')}>Continue setup</Button>}
     </Stack>
   </Stack></Paper>;
-}
-function Overview({ businessId }: { businessId: string }) {
-  const q = useOutreachSummary(businessId);
-  return <><QueryState query={q} />{q.data && !q.isError && <><Typography>Aria's stored overview · loaded {new Date(q.dataUpdatedAt).toLocaleString('en-GB')}</Typography>{Object.entries(q.data.totals || {}).map(([key, value]) => <Paper variant="outlined" sx={{ p: 2 }} key={key}><Typography>{labels[key] || key}: {value}</Typography><Button component={Link} to={href((q.data?.sources?.[key] || '').includes('replies') ? 'replies' : key === 'campaigns' ? 'campaigns' : 'prospects')}>View source records</Button></Paper>)}</>}{sections.slice(1).map(s => <Button key={s} component={Link} to={href(s)}>{s}</Button>)}</>;
 }
 function RecordDialog({ title, open, close, children }: { title: string; open: boolean; close: () => void; children: ReactNode }) { const mobile = useShellMobile(); return <Dialog open={open} onClose={close} fullScreen={mobile} fullWidth maxWidth="md"><DialogTitle>{title}</DialogTitle><DialogContent><Stack spacing={2} sx={{ pt: 1, overflowWrap: 'anywhere' }}>{children}</Stack></DialogContent><DialogActions><Button onClick={close}>Close</Button></DialogActions></Dialog>; }
 function Prospects(c: Controls & Paging) {

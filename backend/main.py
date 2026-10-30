@@ -470,6 +470,8 @@ from outreach_unsubscribe_api import router as outreach_unsubscribe_router  # no
 app.include_router(outreach_setup_router)
 app.include_router(outreach_unsubscribe_router)
 app.include_router(outreach_public_router)
+from outreach_dashboard_api import router as outreach_dashboard_router  # noqa: E402
+app.include_router(outreach_dashboard_router)
 
 
 

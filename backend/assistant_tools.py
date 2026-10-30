@@ -561,6 +561,18 @@ TOOL_DEFINITIONS.append({"type": "function", "function": {
     "name": "get_outreach_research",
     "description": "Aria's outreach research for this business, per brand (each brand has its own daily target of 20 contacts, monthly budget and switch): each brand's spend against its budget, the latest research summary, and the lessons learned from the business's own results.",
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}})
+TOOL_DEFINITIONS.append({"type": "function", "function": {
+    "name": "get_outreach_dashboard",
+    "description": ("The outreach dashboard's own numbers (OUT-14), for one brand or all: the pipeline (each person "
+                    "once, at their furthest stage), results for this week, this month or all time, and what needs "
+                    "the owner. 'Contacted' is people first emailed in the period; 'accepted' means the provider "
+                    "accepted an email, not that it was delivered; a rate is null when nobody was contacted. "
+                    "Meetings and wins are only those the owner marked; never infer revenue from interest. "
+                    "Spend is not included (see get_outreach_research)."),
+    "parameters": {"type": "object", "properties": {
+        "brand_id": {"type": "string", "format": "uuid"},
+        "period": {"type": "string", "enum": ["week", "month", "all"], "default": "week"}},
+        "additionalProperties": False}}})
 TOOL_DEFINITIONS.extend(_outreach_definition(name, *inputs)
                         for name, inputs in OUTREACH_READ_TOOLS.items())
 
@@ -662,6 +674,9 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return execute_read_tool(tool_name, arguments, business_id)
     if tool_name == "get_outreach_research":
         return _outreach_research_status(business_id)
+    if tool_name == "get_outreach_dashboard":
+        from services import outreach_dashboard
+        return outreach_dashboard.aria(business_id, arguments)
 
     if tool_name == "list_tasks":
         return _list_tasks(engine, business_id, arguments)
