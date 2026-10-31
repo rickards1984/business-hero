@@ -416,6 +416,7 @@ def test_a_rolled_back_recording_leaves_nothing_and_a_retry_records_it_once(engi
         assert income().record_invoice(s, invoice("in_rollback", paid=12900)) is True
         s.rollback()                       # e.g. the webhook failed later and returned 503
     assert meter(engine, "a", "stripe_invoice:in_rollback") is None and meter(engine, "a", "stripe_paid_pence") is None
+    assert meter(engine, "a", "stripe_recurring_pence") is None and meter(engine, "a", "stripe_recurring_at") is None
     assert record(engine, invoice("in_rollback", paid=12900)) is True
     assert record(engine, invoice("in_rollback", paid=12900)) is False
     assert meter(engine, "a", "stripe_paid_pence") == 12900 and status(engine)["income_pence"] == 12900

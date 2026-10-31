@@ -117,9 +117,12 @@ def test_a_rolled_back_recording_leaves_nothing_on_postgres(pg):
     with Session(pg) as s:
         assert stripe_income.record_invoice(s, inv) is True
         s.rollback()
-    with Session(pg) as s:
-        assert stripe_income.record_invoice(s, inv) is True
-        s.commit()
+    with pg.connect() as c:
+        assert c.execute(text("SELECT count(*) FROM usage_meters WHERE business_id = :b"), {"b": BID}).scalar() == 0
+    for expected in (True, False):         # recorded once; a replay counts nothing
+        with Session(pg) as s:
+            assert stripe_income.record_invoice(s, inv) is expected
+            s.commit()
     with pg.connect() as c:
         assert float(c.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND "
                                     "meter = 'stripe_paid_pence'"), {"b": BID}).scalar()) == 12900
