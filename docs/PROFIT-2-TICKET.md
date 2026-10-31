@@ -63,3 +63,18 @@ The "costs more than it pays" list uses the same real amount.
 - `POST /v1/admin/profit/refresh-income`.
 
 **Tests first:** `backend/tests/test_profit_income_costs.py`.
+
+**Mike approved the rules and tests on 31 Oct 2026.**
+
+## As built
+
+- **New modules:** `services/stripe_income.py` and `services/running_costs.py`.
+- **`profit_guard`:**
+  - `income_detail`, used by `income` and `_losing`, gives real recurring income or an estimate;
+  - `costs` takes its fixed costs from the list, falling back to the Railway figure;
+  - `history`;
+  - the status adds `income_detail`, `history` and `fixed_costs_source`.
+- **Webhook:** `main.py` calls `stripe_income.webhook` next to outreach billing, in the same 503 boundary, before the business row is written.
+- **`admin_profit_api.py`:** `/costs` (GET, PUT, DELETE) and `/refresh-income`, all platform admin only.
+- **Screen:** `components/AdminRunningCosts.tsx`, under the profit banner on the admin dashboard.
+- **Tests:** `test_profit_income_costs.py` has 32 tests; every PROFIT-1 test still passes. Nine mutations are each caught, including a write slipped into the cost read path.

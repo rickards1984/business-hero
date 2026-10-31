@@ -52,6 +52,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type BusinessMember } from '@/lib/supabase';
 import { apiRequest } from '@/lib/queryClient';
 import DebugPanel from '@/components/DebugPanel';
+import AdminRunningCosts from '@/components/AdminRunningCosts';
 import { ReceptionistStatusChip } from '@/components/AdminReceptionistSection';
 import { fetchAdminWhatsAppOverview } from '@/lib/whatsappApi';
 import AdminBoardMeetingOverviewCard from '@/components/board-meeting/AdminBoardMeetingOverviewCard';
@@ -777,6 +778,7 @@ export default function AdminDashboard() {
         <Container maxWidth="xl" sx={{ px: { xs: 1, sm: 2, md: 3 } }}>
           {user && isAdmin && <StripeReconciliationBanner />}
           {user && isAdmin && <ProfitPanel />}
+          {user && isAdmin && <AdminRunningCosts />}
           {user && isAdmin && <OutreachEconomicsPanel />}
           {error && (
             <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')} data-testid="alert-error">

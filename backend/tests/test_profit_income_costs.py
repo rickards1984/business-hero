@@ -28,8 +28,7 @@ class Missing(AssertionError):
     """Only the intentional absence of the modules may be xfailed."""
 
 
-pytestmark = pytest.mark.xfail(strict=True, raises=Missing,
-                               reason="PROFIT-2: tests first, until Mike approves and the modules exist")
+# Mike approved these tests on 31 Oct 2026; the strict-xfail marker is removed.
 
 
 def module(name):
@@ -270,6 +269,10 @@ def test_the_list_carries_forward_without_writing_and_a_month_can_be_corrected(e
     with engine.connect() as c:
         before = c.execute(text("SELECT count(*) FROM platform_meters")).scalar()
     assert items(engine) == {"Railway": 2000, "Vercel": 1600}   # October shows September's bills
+    with Session(engine) as s:            # a reader whose caller commits (as the AI path does) still writes nothing
+        costs().items(s, PERIOD)
+        guard().costs(s, PERIOD)
+        s.commit()
     assert status(engine)["costs"]["fixed_pence"] == 3600
     with engine.connect() as c:
         assert c.execute(text("SELECT count(*) FROM platform_meters")).scalar() == before, "reading never writes"
