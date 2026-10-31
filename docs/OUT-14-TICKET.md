@@ -133,3 +133,6 @@ Each figure is labelled on screen with how it's counted.
   - or "paid (existing brand, £79 a month)" for a paid brand that existed before billing.
 - **The results say "People with a meeting" and "People won",** matching the distinct-person count.
 - **Backlog:** rendered-copy tests need a frontend test runner, which the project doesn't have yet; DST and repeated-mark period tests.
+
+## Codex review 3 (`audits/OUT-14-CODEX-REVIEW-3.md`, no P1, 1 × P2) → fixed
+- **Inclusion in the plan wins over an old billing record,** as in the billing service. This applies to the label and to "waiting for payment": an included brand never waits for payment. Regression added.

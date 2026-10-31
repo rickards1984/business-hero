@@ -284,14 +284,21 @@ def billing_state(h, brand, entry):
     h.s.commit()
 
 
+def paid_brand(monkeypatch):
+    from services import outreach_allowance
+    monkeypatch.setattr(outreach_allowance, "prices", lambda session, bid: {BRAND: (7900, False)})
+
+
 @pytest.mark.parametrize("state", ["awaiting_payment", "pending"])
-def test_a_brand_waiting_for_payment_needs_the_owner(h, state):
+def test_a_brand_waiting_for_payment_needs_the_owner(h, monkeypatch, state):
+    paid_brand(monkeypatch)
     billing_state(h, BRAND, {"state": state, "price": 7900})
     assert board(h)["needs_you"]["failures"]["awaiting_payment"] == 1
 
 
-def test_a_brand_the_owner_stopped_is_not_a_payment_problem(h):
+def test_a_brand_the_owner_stopped_is_not_a_payment_problem(h, monkeypatch):
     """Codex review 1: its paid month has ended; nothing is owed."""
+    paid_brand(monkeypatch)
     billing_state(h, BRAND, {"state": "ending", "price": 7900, "ends_at": (NOW - timedelta(days=3)).isoformat()})
     out = board(h, spend=True)
     assert out["needs_you"]["failures"]["awaiting_payment"] == 0
@@ -578,3 +585,14 @@ def test_an_included_brand_is_labelled_included(h, monkeypatch, prices, label):
     monkeypatch.setattr(outreach_allowance, "prices", lambda session, bid: prices)
     row = next(b for b in board(h, spend=True)["spend"]["brands"] if b["brand_id"] == BRAND)
     assert row["billing"] == label
+
+
+
+def test_an_included_brand_with_an_old_billing_record_is_included(h, monkeypatch):
+    """Codex review 3: inclusion wins, as in the billing service (brand_live)."""
+    from services import outreach_allowance
+    monkeypatch.setattr(outreach_allowance, "prices", lambda session, bid: {BRAND: (0, True)})
+    billing_state(h, BRAND, {"state": "awaiting_payment", "price": 7900})
+    out = board(h, spend=True)
+    assert out["needs_you"]["failures"]["awaiting_payment"] == 0
+    assert next(b for b in out["spend"]["brands"] if b["brand_id"] == BRAND)["billing"] == "included in the plan"

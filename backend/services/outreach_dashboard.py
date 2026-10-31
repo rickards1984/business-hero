@@ -246,9 +246,12 @@ def _needs_you(session, bid: str, rec: dict, brand: Optional[str], replies: list
             paused += 1
     # Only brands actually waiting for a payment (Codex review 1): a brand the
     # owner stopped, whose paid month has ended, isn't a payment problem.
+    from services import outreach_allowance
     billing = outreach_billing._billing(outreach_billing._doc(session, bid))["brands"]
+    prices = outreach_allowance.prices(session, bid)
     awaiting = 0 if outreach_billing.free(session, bid) else sum(
         1 for b in rec["brands"] if (brand is None or str(b["id"]) == brand)
+        and not (prices.get(str(b["id"])) or (0, False))[1]          # an included brand never waits for payment
         and (billing.get(str(b["id"])) or {}).get("state") in ("awaiting_payment", "pending"))
     return {"replies_waiting": waiting, "approvals": approvals,
             "failures": {"emails": failed, "paused_inboxes": paused, "awaiting_payment": awaiting}}
@@ -310,9 +313,9 @@ def _billing_label(entry: Optional[dict], moment: datetime, price: Optional[tupl
     plan, an existing paid brand with no billing record, or its record."""
     if free:
         return "free"
-    if not entry:                         # only brands outside the plan get a billing record
-        if price and price[1]:
-            return "included in the plan"
+    if price and price[1]:                # inclusion wins over an old billing record (as brand_live; review 3)
+        return "included in the plan"
+    if not entry:
         return f"paid (existing brand, £{price[0] / 100:.0f} a month)" if price and price[0] else "existing brand"
     state = entry.get("state")
     if state == "ending":
