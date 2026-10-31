@@ -3,8 +3,10 @@
 Mike, 31 Oct 2026: a business's income is its REAL monthly charge, the net
 amount (after discounts, before VAT) of its last full monthly Stripe invoice.
 A proration (a brand added mid-month) is cash received, never next month's
-charge, so recurring income is never overstated. Cash received is recorded
-per UK month but never drives the alarm.
+charge. Cash received is recorded per UK month but never drives the alarm.
+(A full monthly invoice can itself carry adjustments; the approved rule takes
+its net amount as the charge. Refunds and credit notes aren't reconciled yet:
+backlog.)
 
 Recorded per business in usage_meters (no migration):
   stripe_paid_pence       cash received in the month
@@ -40,12 +42,30 @@ def _period(moment: datetime) -> str:
     return period_for(moment)
 
 
+def _subscription_of(invoice) -> Optional[str]:
+    """The invoice's subscription: `parent.subscription_details.subscription`
+    on current Stripe API versions, `subscription` on older ones (Codex
+    review 1)."""
+    current = _get(_get(_get(invoice, "parent"), "subscription_details"), "subscription")
+    value = current or _get(invoice, "subscription")
+    return value if isinstance(value, str) or value is None else _get(value, "id")
+
+
 def _business_for(session, customer, subscription) -> Optional[str]:
-    for column, value in (("stripe_subscription_id", subscription), ("stripe_customer_id", customer)):
-        if value:
-            found = session.execute(text(f"SELECT id FROM businesses WHERE {column} = :v"), {"v": value}).first()
-            if found:
-                return str(found[0])
+    """By subscription first; by customer only when exactly one business has
+    it (a shared customer is ambiguous: never guessed)."""
+    if subscription:
+        found = session.execute(text("SELECT id FROM businesses WHERE stripe_subscription_id = :v"),
+                                {"v": subscription}).all()
+        if len(found) == 1:
+            return str(found[0][0])
+    if customer:
+        found = session.execute(text("SELECT id FROM businesses WHERE stripe_customer_id = :v"), {"v": customer}).all()
+        if len(found) == 1:
+            return str(found[0][0])
+        if len(found) > 1:
+            logger.warning("Stripe income: customer %s belongs to %d businesses; invoice not attributed",
+                           customer, len(found))
     return None
 
 
@@ -63,6 +83,25 @@ def _set(session, bid: str, meter: str, period: str, value: float, at: datetime)
                                 "WHERE business_id = :b AND meter = :m AND period = :p"), params).rowcount:
         session.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) "
                              "VALUES (:b, :m, :p, :v, :at)"), params)
+
+
+def _claim(session, bid: str, meter: str, period: str, at: datetime) -> bool:
+    """Claim an invoice atomically: the marker row is INSERTED before anything
+    is counted. usage_meters is unique on (business, meter, period) and an
+    invoice's period never changes, so a concurrent second claim waits, then
+    fails, and counts nothing (Codex review 1)."""
+    from sqlalchemy.exc import IntegrityError
+    if session.execute(text("SELECT 1 FROM usage_meters WHERE business_id = :b AND meter = :m"),
+                       {"b": bid, "m": meter}).first():
+        return False
+    try:
+        with session.begin_nested():
+            session.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) "
+                                 "VALUES (:b, :m, :p, 1, :at)"),
+                            {"b": bid, "m": meter, "p": period, "at": at.isoformat()})
+    except IntegrityError:
+        return False
+    return True
 
 
 def _value(session, bid: str, meter: str, period: str) -> Optional[float]:
@@ -93,17 +132,15 @@ def record_invoice(session, invoice) -> bool:
     if (_get(invoice, "currency") or "").lower() != "gbp":
         logger.warning("Stripe income: invoice %s is not in pounds; not counted", ident)
         return False
-    bid = _business_for(session, _get(invoice, "customer"), _get(invoice, "subscription"))
+    bid = _business_for(session, _get(invoice, "customer"), _subscription_of(invoice))
     if bid is None:
-        return False
-    if session.execute(text("SELECT 1 FROM usage_meters WHERE business_id = :b AND meter = :m"),
-                       {"b": bid, "m": SEEN + str(ident)}).first():
         return False
     net = max(0, int(_get(invoice, "amount_paid") or 0) - _tax(invoice))
     paid_at = _paid_at(invoice)
     period = _period(paid_at)
+    if not _claim(session, bid, SEEN + str(ident), period, paid_at):
+        return False                      # recorded already (or by a concurrent transaction)
     _add(session, bid, PAID, period, net, paid_at)
-    _add(session, bid, SEEN + str(ident), period, 1, paid_at)
     if _get(invoice, "billing_reason") in FULL_MONTH:
         latest = _value(session, bid, RECURRING_AT, period)
         if latest is None or paid_at.timestamp() >= latest:      # an older invoice arriving late never wins

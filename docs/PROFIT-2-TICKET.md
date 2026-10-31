@@ -23,7 +23,7 @@
 - **Pounds only:** an invoice in another currency is logged and ignored.
 - **Net amount:** `amount_paid` less its tax (VAT), never below 0.
 - **Cash:** every paid invoice adds its net amount to the business's `stripe_paid_pence` for the UK month it was paid.
-- **Recurring:** a full monthly invoice (`billing_reason` = `subscription_cycle` or `subscription_create`) sets the business's `stripe_recurring_pence` for that month. The latest paid one wins. A proration (for example a brand added mid-month) is cash, not recurring, so recurring is never overstated.
+- **Recurring:** a full monthly invoice (`billing_reason` = `subscription_cycle` or `subscription_create`) sets the business's `stripe_recurring_pence` for that month. The latest paid one wins. A proration (for example a brand added mid-month) is cash, not recurring.
 
 **Recurring income for a month:**
 - **Which businesses:** every active, non-complimentary business.
@@ -78,3 +78,19 @@ The "costs more than it pays" list uses the same real amount.
 - **`admin_profit_api.py`:** `/costs` (GET, PUT, DELETE) and `/refresh-income`, all platform admin only.
 - **Screen:** `components/AdminRunningCosts.tsx`, under the profit banner on the admin dashboard.
 - **Tests:** `test_profit_income_costs.py` has 32 tests; every PROFIT-1 test still passes. Nine mutations are each caught, including a write slipped into the cost read path.
+
+## Codex review 1 (`audits/PROFIT-2-CODEX-REVIEW-1.md`, 1 × P1, 5 × P2) → fixed
+1. **P1, attribution.** An invoice's subscription is read from `parent.subscription_details.subscription` (current Stripe), falling back to `subscription`. A customer shared by two businesses is never guessed: the invoice isn't attributed, and this is logged.
+2. **History is what was received each month,** from that month's own records (paid invoices and top-ups). It never applies today's businesses or estimates to past months, so a past month doesn't change when a business leaves.
+3. **Each invoice is claimed atomically.** Its marker row is inserted, in a savepoint, before anything is counted. A concurrent second claim waits, then counts nothing. PostgreSQL regression added.
+4. **Edits to the bills are serialised** with a PostgreSQL transaction advisory lock, so two first edits of a month never overwrite each other. PostgreSQL regression added.
+5. **The screen** binds every save and remove to the month whose bills are shown. Editing is disabled while a month loads, and a failed load is never reported as saved.
+6. **"Received this month" includes top-ups,** which are paid on Checkout pages, not invoices.
+- **Also (backlog):**
+  - the guard's own income never reads cash;
+  - fixed costs take one source lookup;
+  - the API takes whole pence only (no strings or booleans);
+  - a failed refresh is logged;
+  - a blank amount is refused on screen;
+  - the "never overstated" claim is withdrawn: a full monthly invoice can carry adjustments.
+- **Backlog:** refunds and credit notes aren't reconciled yet; multiple subscriptions on one customer for one business.

@@ -21,16 +21,21 @@ export default function AdminRunningCosts() {
   const [name, setName] = useState('');
   const [amount, setAmount] = useState('');
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);   // a month is loading: no edits until its bills are shown
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
-  async function load(month?: string) {
+  async function load(month?: string): Promise<boolean> {
+    setLoading(true);
     try {
       const s: Status = await (await apiRequest('GET', '/v1/admin/profit')).json();
       setStatus(s);
-      const which = month || period || s.period;
-      setPeriod(which);
+      const which = month || bills?.period || s.period;
       setBills(await (await apiRequest('GET', `/v1/admin/profit/costs?period=${which}`)).json());
-    } catch { setMessage({ ok: false, text: "Running costs couldn't be loaded." }); }
+      return true;
+    } catch {
+      setMessage({ ok: false, text: "Running costs couldn't be loaded. Please refresh the page." });
+      return false;
+    } finally { setLoading(false); }
   }
   useEffect(() => { load(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -38,8 +43,7 @@ export default function AdminRunningCosts() {
     setBusy(true); setMessage(null);
     try {
       const out = await (await apiRequest(method, path, body)).json();
-      await load(period);
-      setMessage({ ok: true, text: done || 'Saved.' });
+      if (await load(bills?.period)) setMessage({ ok: true, text: done || 'Saved.' });
       return out;
     } catch (e) {
       const text = e instanceof Error ? e.message.replace(/^\d{3}:\s*/, '').replace(/^\{"detail":"?|"?\}$/g, '') : '';
@@ -49,13 +53,15 @@ export default function AdminRunningCosts() {
   }
   async function save(billName: string, pounds: string) {
     const pence = Math.round(Number(pounds) * 100);
-    if (!billName.trim() || !Number.isFinite(pence)) { setMessage({ ok: false, text: 'Give the bill a name and an amount in pounds.' }); return; }
-    if (await call('PUT', '/v1/admin/profit/costs', { period, name: billName.trim(), pence }, `${billName.trim()} saved for ${period}.`)) {
+    if (!billName.trim() || pounds.trim() === '' || !Number.isFinite(pence) || pence < 0) { setMessage({ ok: false, text: 'Give the bill a name and an amount in pounds.' }); return; }
+    if (!bills || loading) return;
+    if (await call('PUT', '/v1/admin/profit/costs', { period: bills.period, name: billName.trim(), pence }, `${billName.trim()} saved for ${bills.period}.`)) {
       setName(''); setAmount('');
     }
   }
 
-  if (!status || !bills) return message ? <Alert severity="warning" sx={{ mb: 3 }}>{message.text}</Alert> : null;
+  if (!status) return message ? <Alert severity="warning" sx={{ mb: 3 }}>{message.text}</Alert> : null;
+  if (!bills) return <Paper variant="outlined" sx={{ p: 2, mb: 3, borderRadius: 2 }}><Typography variant="body2">Loading running costs…</Typography>{message && <Alert severity="error" sx={{ mt: 1 }}>{message.text}</Alert>}</Paper>;
   const d = status.income_detail;
   return (
     <Paper variant="outlined" sx={{ p: 2, mb: 3, borderRadius: 2, overflowWrap: 'anywhere' }} data-testid="running-costs">
@@ -67,7 +73,7 @@ export default function AdminRunningCosts() {
             {d.estimated_businesses > 0 && ` + ${gbp(d.recurring_estimated_pence)} estimated from plan prices for ${d.estimated_businesses} business${d.estimated_businesses === 1 ? '' : 'es'} with no invoice recorded yet`}
             {d.topups_pence > 0 && ` + ${gbp(d.topups_pence)} top-ups`} = {gbp(d.total_pence)}.
           </Typography>
-          <Typography variant="body2" color="text.secondary">Cash received so far this month: {gbp(d.cash_received_pence)} (shown only; the alarm uses monthly charges).</Typography>
+          <Typography variant="body2" color="text.secondary">Received so far this month (paid invoices and top-ups): {gbp(d.cash_received_pence)}. Shown only: the alarm uses monthly charges.</Typography>
           <Button size="small" sx={{ mt: 1 }} disabled={busy}
             onClick={() => call('POST', '/v1/admin/profit/refresh-income', undefined, 'Income refreshed from Stripe.')}>Refresh income from Stripe</Button>
         </Box>
@@ -75,20 +81,21 @@ export default function AdminRunningCosts() {
         <Box>
           <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
             <Typography variant="subtitle2">Running costs for</Typography>
-            <TextField size="small" type="month" value={period} onChange={e => { setPeriod(e.target.value); load(e.target.value); }}
+            <TextField size="small" type="month" value={period || bills.period} disabled={loading || busy}
+              onChange={e => { setPeriod(e.target.value); setBills(null); load(e.target.value); }}
               inputProps={{ max: status.period, 'aria-label': 'Month' }} />
           </Stack>
           {bills.source !== 'list' && <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
             {bills.source === 'railway setting' ? `No bills listed yet: the Railway figure (${gbp(bills.total_pence)}) is used until you add them.` : 'No bills listed yet.'}</Typography>}
           <Stack spacing={0.75} sx={{ mt: 1 }}>
-            {bills.source === 'list' && bills.items.map(i => <BillRow key={i.name} name={i.name} pence={i.pence} busy={busy}
-              save={v => save(i.name, v)} remove={() => call('DELETE', '/v1/admin/profit/costs', { period, name: i.name }, `${i.name} removed from ${period}.`)} />)}
+            {bills.source === 'list' && bills.items.map(i => <BillRow key={`${bills.period}:${i.name}`} name={i.name} pence={i.pence} busy={busy || loading}
+              save={v => save(i.name, v)} remove={() => call('DELETE', '/v1/admin/profit/costs', { period: bills.period, name: i.name }, `${i.name} removed from ${bills.period}.`)} />)}
           </Stack>
           {bills.source === 'list' && <Typography variant="body2" sx={{ mt: 1 }}><strong>Total {gbp(bills.total_pence)}</strong> a month. Each month starts with the previous month's bills; correct any to the actual amount.</Typography>}
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mt: 1.5 }}>
             <TextField size="small" label="Bill (e.g. Railway)" value={name} onChange={e => setName(e.target.value)} inputProps={{ maxLength: 60 }} />
             <TextField size="small" label="£ a month" type="number" value={amount} onChange={e => setAmount(e.target.value)} inputProps={{ min: 0, step: '0.01' }} />
-            <Button variant="outlined" disabled={busy} onClick={() => save(name, amount)}>Add bill</Button>
+            <Button variant="outlined" disabled={busy || loading} onClick={() => save(name, amount)}>Add bill</Button>
           </Stack>
         </Box>
 
@@ -103,7 +110,7 @@ export default function AdminRunningCosts() {
               </tr>)}</tbody>
             </Box>
           </Box>
-          <Typography variant="caption" color="text.secondary">Income here is what came in (no pre-launch trial budget); costs are AI, voice and the bills listed.</Typography>
+          <Typography variant="caption" color="text.secondary">Income here is what was received each month (paid invoices and top-ups, refunds not yet deducted); costs are AI, voice and the bills listed.</Typography>
         </Box>
         {message && <Alert severity={message.ok ? 'success' : 'error'} onClose={() => setMessage(null)}>{message.text}</Alert>}
       </Stack>

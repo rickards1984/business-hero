@@ -337,3 +337,70 @@ def test_only_platform_admins_reach_costs_and_refresh():
     for path in ('"/costs"', '"/refresh-income"'):
         assert path in source
     assert source.count("get_platform_admin_context") >= 5
+
+
+# ------------------------------------------------- Codex review 1 regressions ---
+
+def test_a_current_api_invoice_is_attributed_by_its_parent_subscription(engine):
+    """P1: Stripe now puts the subscription under parent.subscription_details."""
+    business(engine, "a", customer="cus_shared", subscription="sub_a")
+    business(engine, "b", "business", customer="cus_shared", subscription="sub_b")
+    inv = invoice("in_b", customer="cus_shared", subscription=None, paid=26900)
+    inv["parent"] = {"type": "subscription_details", "subscription_details": {"subscription": "sub_b"}}
+    assert record(engine, inv) is True
+    assert meter(engine, "b", "stripe_paid_pence") == 26900 and meter(engine, "a", "stripe_paid_pence") is None
+
+
+def test_a_customer_shared_by_two_businesses_is_never_guessed(engine):
+    business(engine, "a", customer="cus_shared")
+    business(engine, "b", customer="cus_shared")
+    assert record(engine, invoice("in_x", customer="cus_shared", subscription="sub_unknown")) is False
+    assert meter(engine, "a", "stripe_paid_pence") is None and meter(engine, "b", "stripe_paid_pence") is None
+
+
+def test_history_is_what_was_received_and_never_changes_when_a_business_leaves(engine):
+    """P2: no estimates or today's businesses applied to past months."""
+    business(engine, "a", customer="cus_a", subscription="sub_a")
+    business(engine, "b", "business")                    # never invoiced: estimated now, nothing received
+    record(engine, invoice("in_oct", paid=12900))
+    before = {h["period"]: h["income_pence"] for h in status(engine)["history"]}
+    assert before["2026-05"] == 0 and before["2026-10"] == 12900
+    with engine.begin() as c:
+        c.execute(text("UPDATE businesses SET subscription_status = 'canceled'"))
+    after = {h["period"]: h["income_pence"] for h in status(engine)["history"]}
+    assert after == before
+
+
+def test_received_this_month_includes_top_ups(engine):
+    """P2: top-ups are paid on Checkout pages, not invoices."""
+    business(engine, "a", customer="cus_a", subscription="sub_a")
+    record(engine, invoice("in_1", paid=12900))
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO usage_meters VALUES ('a', 'outreach_topup_pence:brand', :p, 2500, :t)"),
+                  {"p": PERIOD, "t": NOW.isoformat()})
+    assert status(engine)["income_detail"]["cash_received_pence"] == 12900 + 2500
+
+
+def test_the_guards_own_income_never_reads_cash(engine, monkeypatch):
+    """Backlog: one fewer query on every AI call."""
+    business(engine, "a")
+    monkeypatch.setattr(income(), "cash_pence", lambda *a, **k: pytest.fail("cash isn't the guard's business"))
+    with Session(engine) as s:
+        assert guard().income(s, PERIOD)[0] == 12900
+
+
+@pytest.mark.parametrize("pence", ["1200", True, 12.5])
+def test_the_api_accepts_only_whole_pence(engine, pence):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import admin_profit_api as api
+    from auth import get_platform_admin_context
+    from db import get_session
+    module("running_costs")
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[get_platform_admin_context] = lambda: {"user_id": "admin"}
+    app.dependency_overrides[get_session] = lambda: Session(engine)
+    with TestClient(app) as client:
+        r = client.put("/v1/admin/profit/costs", json={"period": PERIOD, "name": "Railway", "pence": pence})
+    assert r.status_code == 422

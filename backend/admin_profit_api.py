@@ -2,11 +2,12 @@
 alarm and the kill switch, and which businesses cost more than they pay.
 PROFIT-2: the itemised running costs and real Stripe income.
 Platform admins only."""
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 from sqlmodel import Session
 
 from auth import get_platform_admin_context
@@ -43,7 +44,7 @@ def cost_items(period: Optional[str] = None, auth_ctx: dict = Depends(get_platfo
 class Bill(BaseModel):
     period: str
     name: str
-    pence: Optional[int] = None
+    pence: Optional[StrictInt] = None     # whole pence; never a string or a boolean
 
 
 def _write(session, fn, *args):
@@ -77,4 +78,5 @@ def refresh_income(auth_ctx: dict = Depends(get_platform_admin_context), session
         return out
     except Exception:
         session.rollback()
+        logging.getLogger(__name__).exception("Refresh income from Stripe failed")
         raise HTTPException(502, "Stripe couldn't be read just now. Please try again.") from None

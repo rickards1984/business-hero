@@ -73,7 +73,7 @@ def _sum(session, sql: str, params: dict) -> float:
     return float(session.execute(text(sql), params).scalar() or 0)
 
 
-def income_detail(session, period: str) -> dict:
+def income_detail(session, period: str, *, cash: bool = True) -> dict:
     """PROFIT-2 (Mike, 31 Oct 2026): each active, paying business's REAL
     monthly charge (its last full monthly Stripe invoice, net of VAT), or its
     plan price marked estimated until one is recorded; plus top-ups paid.
@@ -94,14 +94,17 @@ def income_detail(session, period: str) -> dict:
     out["topups_pence"] = int(_sum(session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE period = :p "
                                             "AND meter LIKE :m ESCAPE '\\'",
                                    {"p": period, "m": TOPUP_METER.replace("_", "\\_") + ":%"}))
-    out["cash_received_pence"] = stripe_income.cash_pence(session, period)
+    if cash:                              # display only: the guard's own path skips it
+        # Received this month: paid invoices plus top-ups (top-ups are paid on
+        # Checkout pages, not invoices, so nothing is counted twice).
+        out["cash_received_pence"] = stripe_income.cash_pence(session, period) + out["topups_pence"]
     out["total_pence"] = out["recurring_real_pence"] + out["recurring_estimated_pence"] + out["topups_pence"]
     return out
 
 
 def income(session, period: str) -> tuple:
     """(pence, basis) for the month."""
-    total = income_detail(session, period)["total_pence"]
+    total = income_detail(session, period, cash=False)["total_pence"]
     # Before launch the trial budget is a FLOOR, not only a stand-in for zero:
     # Mike's own (or a trial business's) subscription must not replace a
     # larger pre-launch budget (seen 28 Oct 2026: one Pro subscription, £129,
@@ -191,11 +194,16 @@ def _months(period: str, count: int) -> list:
 
 
 def history(session, period: str, months: int = 6) -> list:
-    """The last six months: income (real and estimated recurring, top-ups),
-    running costs and margin. No trial-budget floor: what actually came in."""
+    """The last six months: what was RECEIVED each month (paid invoices and
+    top-ups, from that month's own records), running costs and margin. Never
+    today's businesses or estimates applied to the past, so a past month
+    doesn't change when a business leaves (Codex review 1)."""
+    from services import stripe_income
     rows = []
     for month in _months(period, months):
-        earned = income_detail(session, month)["total_pence"]
+        earned = stripe_income.cash_pence(session, month) + int(_sum(
+            session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE period = :p AND meter LIKE :m ESCAPE '\\'",
+            {"p": month, "m": TOPUP_METER.replace("_", "\\_") + ":%"}))
         spent = costs(session, month)["total_pence"]
         rows.append({"period": month, "income_pence": earned, "costs_pence": spent, "margin_pence": earned - spent})
     return rows

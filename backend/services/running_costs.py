@@ -42,8 +42,8 @@ def _source(session, period: str) -> Optional[str]:
     return str(found) if found else None
 
 
-def items(session, period: str) -> list:
-    source = _source(session, period)
+def items(session, period: str, source: Optional[str] = "") -> list:
+    source = _source(session, period) if source == "" else source
     if source is None:
         return []
     rows = session.execute(text("SELECT meter, value FROM platform_meters WHERE period = :p AND meter LIKE :m"),
@@ -54,8 +54,9 @@ def items(session, period: str) -> list:
 
 def fixed_total(session, period: str) -> tuple:
     """(pence, source) for the month: the list, else the Railway setting."""
-    if _source(session, period) is not None:
-        return sum(i["pence"] for i in items(session, period)), "list"
+    source = _source(session, period)                 # one lookup on the AI path
+    if source is not None:
+        return sum(i["pence"] for i in items(session, period, source)), "list"
     try:
         fixed = int(os.environ.get("PLATFORM_FIXED_COSTS_PENCE", "0") or 0)
     except ValueError:
@@ -87,6 +88,15 @@ def _check_name(name) -> str:
     return name
 
 
+def _serialise(session) -> None:
+    """One edit at a time (Codex review 1: two first edits could each copy the
+    carried list and overwrite the other's bill). PostgreSQL: a transaction
+    advisory lock; SQLite has one writer already."""
+    from services import outreach_send as send
+    if send.pg(session):
+        session.execute(text("SELECT pg_advisory_xact_lock(hashtext('running_costs'))"))
+
+
 def _materialise(session, period: str, moment: datetime) -> None:
     """Give the month its own list (a copy of what it was showing)."""
     if session.execute(text("SELECT 1 FROM platform_meters WHERE period = :p AND meter = :m"),
@@ -109,6 +119,7 @@ def set_item(session, period, name, pence, *, moment: datetime) -> dict:
     period, name = _check_period(period, moment), _check_name(name)
     if isinstance(pence, bool) or not isinstance(pence, int) or not 0 <= pence <= MAX_PENCE:
         refuse("A bill's amount is whole pence, from 0 to £100,000.")
+    _serialise(session)
     _materialise(session, period, moment)
     _put(session, period, PREFIX + name, pence, moment)
     return {"period": period, "name": name, "pence": pence}
@@ -116,6 +127,7 @@ def set_item(session, period, name, pence, *, moment: datetime) -> dict:
 
 def remove_item(session, period, name, *, moment: datetime) -> dict:
     period, name = _check_period(period, moment), _check_name(name)
+    _serialise(session)
     _materialise(session, period, moment)
     session.execute(text("DELETE FROM platform_meters WHERE period = :p AND meter = :m"),
                     {"p": period, "m": PREFIX + name})
