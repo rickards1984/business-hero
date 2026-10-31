@@ -73,17 +73,38 @@ def _sum(session, sql: str, params: dict) -> float:
     return float(session.execute(text(sql), params).scalar() or 0)
 
 
-def income(session, period: str) -> tuple:
-    """(pence, basis) for the month."""
-    total = 0
-    for plan, flags in session.execute(text(
-            "SELECT plan_tier, feature_flags FROM businesses WHERE subscription_status = 'active' AND is_active = :t"),
+def income_detail(session, period: str, *, cash: bool = True) -> dict:
+    """PROFIT-2 (Mike, 31 Oct 2026): each active, paying business's REAL
+    monthly charge (its last full monthly Stripe invoice, net of VAT), or its
+    plan price marked estimated until one is recorded; plus top-ups paid.
+    Cash received is reported but never drives the alarm."""
+    from services import stripe_income
+    real = stripe_income.recurring_all(session, period)
+    out = {"recurring_real_pence": 0, "recurring_estimated_pence": 0, "estimated_businesses": 0}
+    for bid, plan, flags in session.execute(text(
+            "SELECT id, plan_tier, feature_flags FROM businesses WHERE subscription_status = 'active' AND is_active = :t"),
             {"t": True}):
         if _complimentary(flags):
             continue                       # free by Mike's choice: no income (OUT-19 F)
-        total += PLAN_PRICE_PENCE.get((plan or "").lower(), 0)
-    total += int(_sum(session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE period = :p "
-                               "AND meter LIKE :m ESCAPE '\\'", {"p": period, "m": TOPUP_METER.replace("_", "\\_") + ":%"}))
+        if str(bid) in real:
+            out["recurring_real_pence"] += real[str(bid)]
+        else:
+            out["recurring_estimated_pence"] += PLAN_PRICE_PENCE.get((plan or "").lower(), 0)
+            out["estimated_businesses"] += 1
+    out["topups_pence"] = int(_sum(session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE period = :p "
+                                            "AND meter LIKE :m ESCAPE '\\'",
+                                   {"p": period, "m": TOPUP_METER.replace("_", "\\_") + ":%"}))
+    if cash:                              # display only: the guard's own path skips it
+        # Received this month: paid invoices plus top-ups (top-ups are paid on
+        # Checkout pages, not invoices, so nothing is counted twice).
+        out["cash_received_pence"] = stripe_income.cash_pence(session, period) + out["topups_pence"]
+    out["total_pence"] = out["recurring_real_pence"] + out["recurring_estimated_pence"] + out["topups_pence"]
+    return out
+
+
+def income(session, period: str) -> tuple:
+    """(pence, basis) for the month."""
+    total = income_detail(session, period, cash=False)["total_pence"]
     # Before launch the trial budget is a FLOOR, not only a stand-in for zero:
     # Mike's own (or a trial business's) subscription must not replace a
     # larger pre-launch budget (seen 28 Oct 2026: one Pro subscription, £129,
@@ -122,10 +143,16 @@ def costs(session, period: str) -> dict:
     ai = ai_costs.platform_total(session, period)    # every business's AI and the platform's own
     voice_minutes = _voice_minutes(session, period)
     voice = voice_minutes * _int_env("VOICE_COST_PENCE_PER_MINUTE", VOICE_DEFAULT_PENCE)
-    fixed = _int_env("PLATFORM_FIXED_COSTS_PENCE", 0)
+    from services import running_costs
+    fixed, _source = running_costs.fixed_total(session, period)     # PROFIT-2: the itemised list, else Railway
     out = {"ai_pence": int(round(ai)), "voice_pence": int(round(voice)), "fixed_pence": int(fixed)}
     out["total_pence"] = out["ai_pence"] + out["voice_pence"] + out["fixed_pence"]
     return out
+
+
+def _fixed_source(session, period: str) -> str:
+    from services import running_costs
+    return running_costs.fixed_total(session, period)[1]
 
 
 def _percent(spent: int, earned: int) -> Optional[int]:
@@ -143,6 +170,8 @@ def status(session, *, moment: Optional[datetime] = None) -> dict:
            "alarm": pct is not None and pct >= alarm_percent(), "kill": pct is not None and pct >= kill_percent(),
            "losing": _losing(session, period),
            "alerts": {"email": bool(os.environ.get("PROFIT_ALERT_FROM_ACCOUNT") and os.environ.get("PROFIT_ALERT_TO"))},
+           "income_detail": income_detail(session, period), "history": history(session, period),
+           "fixed_costs_source": _fixed_source(session, period),
            "note": ""}
     if basis == "none":
         out["note"] = ("No income yet and no trial budget set: only the absolute AI limit (AI_MONTHLY_KILL_PENCE) "
@@ -155,13 +184,40 @@ def status(session, *, moment: Optional[datetime] = None) -> dict:
     return out
 
 
+def _months(period: str, count: int) -> list:
+    year, month = map(int, period.split("-"))
+    out = []
+    for _ in range(count):
+        out.append(f"{year:04d}-{month:02d}")
+        year, month = (year, month - 1) if month > 1 else (year - 1, 12)
+    return list(reversed(out))
+
+
+def history(session, period: str, months: int = 6) -> list:
+    """The last six months: what was RECEIVED each month (paid invoices and
+    top-ups, from that month's own records), running costs and margin. Never
+    today's businesses or estimates applied to the past, so a past month
+    doesn't change when a business leaves (Codex review 1)."""
+    from services import stripe_income
+    rows = []
+    for month in _months(period, months):
+        earned = stripe_income.cash_pence(session, month) + int(_sum(
+            session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE period = :p AND meter LIKE :m ESCAPE '\\'",
+            {"p": month, "m": TOPUP_METER.replace("_", "\\_") + ":%"}))
+        spent = costs(session, month)["total_pence"]
+        rows.append({"period": month, "income_pence": earned, "costs_pence": spent, "margin_pence": earned - spent})
+    return rows
+
+
 def _losing(session, period: str) -> list:
+    from services import stripe_income
     rate = _int_env("VOICE_COST_PENCE_PER_MINUTE", VOICE_DEFAULT_PENCE)
+    real = stripe_income.recurring_all(session, period)
     rows = []
     for bid, name, plan, sub, active, flags in session.execute(text(
             "SELECT id, name, plan_tier, subscription_status, is_active, feature_flags FROM businesses")):
         paying = sub == "active" and bool(active) and not _complimentary(flags)
-        price = PLAN_PRICE_PENCE.get((plan or "").lower(), 0) if paying else 0
+        price = (real.get(str(bid), PLAN_PRICE_PENCE.get((plan or "").lower(), 0))) if paying else 0
         ai = _sum(session, "SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND period = :p "
                            "AND meter = 'ai_pence'", {"b": str(bid), "p": period})
         voice = _voice_minutes(session, period, bid) * rate
