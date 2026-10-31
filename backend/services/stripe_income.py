@@ -94,11 +94,18 @@ def _claim(session, bid: str, meter: str, period: str, at: datetime) -> bool:
     if session.execute(text("SELECT 1 FROM usage_meters WHERE business_id = :b AND meter = :m"),
                        {"b": bid, "m": meter}).first():
         return False
+    from services import outreach_send as send
+    insert = text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) VALUES (:b, :m, :p, 1, :at)")
+    params = {"b": bid, "m": meter, "p": period, "at": at.isoformat()}
+    if not send.pg(session):
+        # SQLite (tests) has one writer, and a savepoint there can start
+        # outside the outer transaction and outlive its rollback (Codex
+        # review 2): a plain insert in the caller's transaction instead.
+        session.execute(insert, params)
+        return True
     try:
-        with session.begin_nested():
-            session.execute(text("INSERT INTO usage_meters (business_id, meter, period, value, updated_at) "
-                                 "VALUES (:b, :m, :p, 1, :at)"),
-                            {"b": bid, "m": meter, "p": period, "at": at.isoformat()})
+        with session.begin_nested():   # PostgreSQL: a concurrent claim waits, then fails here
+            session.execute(insert, params)
     except IntegrityError:
         return False
     return True

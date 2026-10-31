@@ -107,3 +107,19 @@ def test_two_first_edits_of_a_month_never_overwrite_each_other(pg):
     assert done.get("ok")
     with Session(pg) as s:
         assert {i["name"]: i["pence"] for i in running_costs.items(s, "2026-10")} == {"Railway": 2350, "Vercel": 1700}
+
+
+def test_a_rolled_back_recording_leaves_nothing_on_postgres(pg):
+    from services import stripe_income
+    inv = {"id": "in_p2_rollback", "customer": "cus_p2", "subscription": "sub_p2", "amount_paid": 12900, "tax": 0,
+           "currency": "gbp", "billing_reason": "subscription_cycle", "status": "paid",
+           "status_transitions": {"paid_at": int(NOW.timestamp())}}
+    with Session(pg) as s:
+        assert stripe_income.record_invoice(s, inv) is True
+        s.rollback()
+    with Session(pg) as s:
+        assert stripe_income.record_invoice(s, inv) is True
+        s.commit()
+    with pg.connect() as c:
+        assert float(c.execute(text("SELECT coalesce(sum(value), 0) FROM usage_meters WHERE business_id = :b AND "
+                                    "meter = 'stripe_paid_pence'"), {"b": BID}).scalar()) == 12900

@@ -404,3 +404,18 @@ def test_the_api_accepts_only_whole_pence(engine, pence):
     with TestClient(app) as client:
         r = client.put("/v1/admin/profit/costs", json={"period": PERIOD, "name": "Railway", "pence": pence})
     assert r.status_code == 422
+
+
+
+# ------------------------------------------------- Codex review 2 regression ---
+
+def test_a_rolled_back_recording_leaves_nothing_and_a_retry_records_it_once(engine):
+    """The claim and the income go, or stay, together (Codex review 2)."""
+    business(engine, "a", customer="cus_a", subscription="sub_a")
+    with Session(engine) as s:
+        assert income().record_invoice(s, invoice("in_rollback", paid=12900)) is True
+        s.rollback()                       # e.g. the webhook failed later and returned 503
+    assert meter(engine, "a", "stripe_invoice:in_rollback") is None and meter(engine, "a", "stripe_paid_pence") is None
+    assert record(engine, invoice("in_rollback", paid=12900)) is True
+    assert record(engine, invoice("in_rollback", paid=12900)) is False
+    assert meter(engine, "a", "stripe_paid_pence") == 12900 and status(engine)["income_pence"] == 12900

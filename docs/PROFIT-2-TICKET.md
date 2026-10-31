@@ -94,3 +94,8 @@ The "costs more than it pays" list uses the same real amount.
   - a blank amount is refused on screen;
   - the "never overstated" claim is withdrawn: a full monthly invoice can carry adjustments.
 - **Backlog:** refunds and credit notes aren't reconciled yet; multiple subscriptions on one customer for one business.
+
+## Codex review 2 (`audits/PROFIT-2-CODEX-REVIEW-2.md`, no P1, 1 × P2) → fixed
+- **On SQLite (tests only), the invoice claim is now a plain insert in the caller's transaction.** A savepoint there could start outside the outer transaction and outlive its rollback. PostgreSQL keeps the savepoint.
+- **Regressions on both databases:** a rolled-back recording leaves nothing, and a retry records the invoice once.
+- **Backlog:** frontend tests for slow and failed month loads (the project has no frontend test runner yet).
