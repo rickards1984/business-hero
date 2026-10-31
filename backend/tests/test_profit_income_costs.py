@@ -308,8 +308,9 @@ def test_without_a_list_the_railway_figure_is_used(engine, monkeypatch):
     ("Railway", 10_000_001, PERIOD), ("Railway", 1.5, PERIOD), ("Railway", 100, "2026-11"),   # a future month
     ("Railway", 100, "2024-09"), ("Railway", 100, "2026-13")])
 def test_bad_bills_are_refused(engine, name, pence, period):
+    running = costs()
     with Session(engine) as s, pytest.raises(Exception) as exc:
-        costs().set_item(s, period, name, pence, moment=NOW)
+        running.set_item(s, period, name, pence, moment=NOW)
     assert getattr(exc.value, "status_code", None) == 422
 
 
