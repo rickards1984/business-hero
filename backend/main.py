@@ -96,7 +96,7 @@ from accounting import router as accounting_router
 from realtime_voice import router as realtime_voice_router
 from dependencies import get_current_user_business, get_current_user_and_business
 from providers.xero import (
-    XeroProvider, get_tenant_connections, map_xero_transaction_to_business_hero,
+    XeroProvider, get_tenant_connections,
     map_xero_invoice_to_business_hero, XeroAuthError,
 )
 from providers.xero_oauth import get_xero_auth_url, exchange_code_for_tokens
@@ -4123,7 +4123,6 @@ async def sync_xero_transactions(
     tenant_name = row[2]
     token_ciphertext = row[3]
     token_expires_at = row[5]
-    last_sync_at = row[6]
 
     # 2. Get valid access token (refresh if expired)
     try:

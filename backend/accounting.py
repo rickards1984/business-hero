@@ -1314,8 +1314,9 @@ async def _detect_column_mapping(headers: List[str], sample_rows: List[List[str]
 # ============== ACC-1: possible duplicates (Mike, 1 Nov 2026) ==============
 
 class DuplicateDecision(BaseModel):
-    upload_id: str
-    action: str
+    # Optional so the plan gate answers first (a refused business never sees a 422).
+    upload_id: Optional[str] = None
+    action: Optional[str] = None
 
 
 @router.get("/duplicates")
@@ -1335,6 +1336,8 @@ async def resolve_duplicate(body: DuplicateDecision, user_business=Depends(get_c
     assert_feature_access(business, "accounting")
     from services import xero_sync
     from services.aria_actions import ActionRefused
+    if not body.upload_id or body.action not in ("hide", "keep"):
+        raise HTTPException(status_code=422, detail="Give the uploaded transaction and hide or keep.")
     try:
         out = xero_sync.resolve(session, business.id, body.upload_id, body.action)
         session.commit()

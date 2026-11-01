@@ -231,7 +231,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
   const [snackbar, setSnackbar] = useState<{
     open: boolean;
     message: string;
-    severity: 'success' | 'error' | 'info';
+    severity: 'success' | 'error' | 'info' | 'warning';
   }>({ open: false, message: '', severity: 'info' });
   const [financialSummary, setFinancialSummary] = useState<{
     bank_accounts: Array<{ name: string; balance: number; account_id?: string }>;
