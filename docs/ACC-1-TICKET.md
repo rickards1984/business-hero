@@ -114,3 +114,31 @@ The code shows several faults, any of which can lose data, and together they exp
 - **Two test fixtures** for the existing accounting isolation tests gain the live columns, and the expected rows gain `source`.
 
 **After deploy:** the first sync, from the page or the next scheduled run, re-reads everything from Xero. Expect a few minutes; it runs in the background.
+
+## Codex review 1 (`audits/ACC-1-CODEX-REVIEW-1.md`, 1 × P1, 8 × P2) → fixed
+
+Codex confirmed the root cause and the fix, and all eight payment-type directions against Xero's documentation.
+
+**P1. The books are cash in and out of BANK accounts only.**
+- With a card processor, invoice payments go to a *clearing* account, and the bank receipt that settles it (net of fees) is the cash. Counting both doubled the income.
+- A payment counts only when its account is a Xero `BANK` account. The bank accounts are read with the chart of accounts, at most once a day.
+- A payment into any other account is skipped, and any row stored for it earlier is archived. If the bank accounts can't be read, no payment is recorded and the run is incomplete, so the marker holds.
+
+**P2 fixes:**
+1. **Token refresh is serialised across event loops and threads.** The shared lock is now a threading lock, awaited politely. Workers never refresh: they report a refused token, and the server's loop refreshes and retries once. The scheduled job hands its provider, already refreshed on the server's loop, to the worker.
+2. **A business with no settings row gets one** with `id`, `created_at` and `updated_at`, as the live table requires.
+3. **A failed row can't poison the next.** Categories created inside a row's savepoint are published to the cache only if it succeeds. Tallies and duplicate changes are applied only on success, and restored on rollback.
+4. **Duplicate decisions are per pair.** A "keep" is remembered for that upload and that Xero row only; the upload can still match another Xero row. Keeping one candidate leaves the others for review. Hiding one settles that Xero row and frees its other candidates. The review list leaves out anything no longer a visible upload.
+5. **One writer per business:** a sync's write phase and every decision lock the settings row first.
+6. **"Last synced" moves only on a complete sync,** on screen and in the scheduled job. `success` means it ran; `complete` means nothing was missed. A partial sync now says so.
+7. **The duplicates panel reloads after every sync,** and a decision refreshes the totals too.
+8. **Speed: the page's invoice sync is incremental.**
+   - One paged stream of invoices changed since the last complete sync: open, paid, voided and deleted together, with no silent 20-page cap.
+   - Each customer's email is asked of Xero once, ever.
+   - Each invoice is written in its own savepoint.
+   - **New: an invoice voided or deleted in Xero is archived here,** so it's never chased.
+- **Also:**
+  - the invoice worker in sync-all has its own session;
+  - `IDs` requests carry `page=1`, so Xero returns line items;
+  - the run's ceiling message is honest.
+- **Tests:** 42. Eight more mutations, one per fix, are each caught. The per-business lock is checked from the source.

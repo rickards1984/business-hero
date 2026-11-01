@@ -13,19 +13,23 @@ freshly-saved token instead of refreshing again.
 
 import asyncio
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
-_refresh_locks: dict[str, asyncio.Lock] = {}
+# ACC-1 (Codex review 1): a threading lock, awaited politely, so callers on
+# any event loop or worker thread are serialised (an asyncio.Lock is bound to
+# one loop, and syncs now run in worker threads with their own loops).
+_refresh_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
 _last_refresh_times: dict[str, datetime] = {}
 
 
-def _get_lock(business_id: str) -> asyncio.Lock:
-    if business_id not in _refresh_locks:
-        _refresh_locks[business_id] = asyncio.Lock()
-    return _refresh_locks[business_id]
+def _get_lock(business_id: str) -> threading.Lock:
+    with _locks_guard:
+        return _refresh_locks.setdefault(business_id, threading.Lock())
 
 
 async def coordinated_token_refresh(
@@ -58,8 +62,9 @@ async def coordinated_token_refresh(
         4. If stale -> refresh, save with timestamp, update in-memory cache
     """
     lock = _get_lock(business_id)
-
-    async with lock:
+    while not lock.acquire(blocking=False):
+        await asyncio.sleep(0.05)
+    try:
         now = datetime.now(timezone.utc)
 
         # In-memory staleness check (works even if DB write of
@@ -119,3 +124,5 @@ async def coordinated_token_refresh(
                 f"[{provider_name}] Token refresh FAILED for business {business_id}: {e}"
             )
             raise
+    finally:
+        lock.release()

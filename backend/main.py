@@ -4168,39 +4168,44 @@ async def sync_xero_transactions(
     import asyncio as _asyncio
     started = datetime.now(timezone.utc)
 
-    def _work():
+    def _work():   # reads access_token when called, so a retry uses the refreshed one
         return _asyncio.run(_xero_sync_work(business_id, connection_id, tenant_id, access_token, started))
 
     result = await _asyncio.to_thread(_work)
     if result.get("auth_failed"):
-        raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
+        # Refresh on this (the server's) event loop, where the shared refresh
+        # lock lives, then retry once in a worker (Codex review 1).
+        new_access, _ = await _refresh_xero_token_and_retry(session, connection_id, tenant_id, business_id, _sync_logger)
+        if not new_access:
+            raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
+        access_token = new_access
+        result = await _asyncio.to_thread(_work)
+        if result.get("auth_failed"):
+            raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
     _sync_logger.info(f"Xero sync for {tenant_name}: {result}")
-    return {"success": result["complete"], "tenant_name": tenant_name, **result,
+    # success: the sync ran (it may still be partial); complete: nothing was missed.
+    return {"success": True, "tenant_name": tenant_name, **result,
             "new_transactions": result["new"], "updated_transactions": result["updated"],
-            "synced_at": started.isoformat()}
+            "synced_at": started.isoformat() if result["complete"] else None}
 
 
 async def _xero_sync_work(business_id, connection_id, tenant_id, access_token, started):
-    """In the worker thread: one session, one provider; refresh the token once
-    if Xero refuses it; record the run; move last_sync_at only when complete."""
+    """In the worker thread: its own session and provider. A refused token is
+    reported back (never refreshed here: the refresh lock belongs to the
+    server's loop). last_sync_at moves only when the run was complete."""
     import logging
     from db import engine as _engine
     from services import xero_sync
     log = logging.getLogger("xero_sync")
     with Session(_engine) as s:
         provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
-        for attempt in (1, 2):
-            try:
-                lookup = await xero_sync.cached_accounts(s, business_id, provider, started)
-                result = await xero_sync.run(s, business_id, provider, moment=started, account_lookup=lookup)
-                break
-            except XeroAuthError:
-                s.rollback()
-                if attempt == 2:
-                    return {"auth_failed": True}
-                _, provider = await _refresh_xero_token_and_retry(s, connection_id, tenant_id, business_id, log)
-                if provider is None:
-                    return {"auth_failed": True}
+        try:
+            chart = await xero_sync.cached_chart(s, business_id, provider, started)
+            result = await xero_sync.run(s, business_id, provider, moment=started, account_lookup=chart["lookup"],
+                                         bank_accounts=chart["bank"])
+        except XeroAuthError:
+            s.rollback()
+            return {"auth_failed": True}
         if result["complete"]:
             for table, where in (("xero_connections", "id = :conn"), ("accounting_connections",
                                                                      "business_id = :b AND provider = 'xero'")):
@@ -4279,15 +4284,14 @@ async def sync_xero_invoices(
         _reset_xero_sync_cursor(session, business_id, connection_id, _inv_sync_logger)
         raise HTTPException(status_code=401, detail=f"Xero authentication failed: {str(e)}")
 
+    # ACC-1: incremental (only invoices changed since the last complete sync),
+    # one paged stream with no silent cap, voided/deleted included.
+    from services import xero_sync
+    inv_started = datetime.now(timezone.utc)
     try:
         provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
-        outstanding = await provider.get_all_invoices(statuses="AUTHORISED,SUBMITTED")
-        paid = await provider.get_all_invoices(statuses="PAID")
-        all_invoices = outstanding + paid
-        _inv_sync_logger.info(
-            f"Fetched {len(outstanding)} outstanding + {len(paid)} paid invoices "
-            f"from Xero for {tenant_name}"
-        )
+        all_invoices, inv_complete = await xero_sync.fetch_invoices(session, business_id, provider)
+        _inv_sync_logger.info(f"Fetched {len(all_invoices)} changed invoices from Xero for {tenant_name}")
     except (XeroAuthError, Exception) as e:
         is_auth_error = isinstance(e, XeroAuthError) or any(
             s in str(e) for s in ("401", "403", "Forbidden", "Unauthorized")
@@ -4298,9 +4302,8 @@ async def sync_xero_invoices(
                 session, connection_id, tenant_id, business_id, _inv_sync_logger
             )
             if new_provider:
-                outstanding = await new_provider.get_all_invoices(statuses="AUTHORISED,SUBMITTED")
-                paid = await new_provider.get_all_invoices(statuses="PAID")
-                all_invoices = outstanding + paid
+                provider = new_provider
+                all_invoices, inv_complete = await xero_sync.fetch_invoices(session, business_id, provider)
                 _inv_sync_logger.info(f"Retry succeeded: fetched {len(all_invoices)} invoices")
             else:
                 _reset_xero_sync_cursor(session, business_id, connection_id, _inv_sync_logger)
@@ -4312,6 +4315,7 @@ async def sync_xero_invoices(
     new_count = 0
     updated_count = 0
     skipped_count = 0
+    failed_invoices = 0
 
     for xero_inv in all_invoices:
         contact_data = xero_inv.get("Contact", {})
@@ -4328,13 +4332,28 @@ async def sync_xero_invoices(
             skipped_count += 1
             continue
 
+        if xero_inv.get("Status") in ("VOIDED", "DELETED"):
+            # ACC-1: voided or deleted in Xero: never chased or counted here again.
+            try:
+                with session.begin_nested():
+                    session.execute(text("UPDATE invoices SET archived = true, status = :st, updated_at = NOW() "
+                                         "WHERE business_id = :b AND external_source = 'xero' AND external_id = :e"),
+                                    {"st": str(xero_inv.get("Status")).lower(), "b": business_id,
+                                     "e": xero_inv.get("InvoiceID")})
+            except Exception as e:
+                _inv_sync_logger.warning(f"Could not archive voided invoice {xero_inv.get('InvoiceNumber')}: {e}")
+                failed_invoices += 1
+            skipped_count += 1
+            continue
+
         if not mapped.get("due_date"):
             skipped_count += 1
             continue
 
         if not mapped.get("customer_email") and contact_data.get("ContactID"):
             try:
-                contact_email = await provider.get_contact_email(contact_data["ContactID"])
+                contact_email = await xero_sync.contact_email(session, business_id, provider,
+                                                              contact_data["ContactID"])   # asked once per contact
                 if contact_email:
                     mapped["customer_email"] = contact_email
                     _inv_sync_logger.info(
@@ -4344,6 +4363,8 @@ async def sync_xero_invoices(
             except Exception as e:
                 _inv_sync_logger.warning(f"Contact email lookup failed: {e}")
 
+        # ACC-1: each invoice in its own savepoint, so one bad row never fails the rest.
+        savepoint = session.begin_nested()
         try:
             upsert_result = session.execute(
                 text("""
@@ -4397,15 +4418,20 @@ async def sync_xero_invoices(
             )
 
             row = upsert_result.fetchone()
+            savepoint.commit()
             if row and row[0] == 0:
                 new_count += 1
             else:
                 updated_count += 1
 
         except Exception as e:
+            savepoint.rollback()
             _inv_sync_logger.warning(f"Failed to upsert invoice {mapped.get('invoice_number')}: {e}")
             skipped_count += 1
+            failed_invoices += 1
 
+    if inv_complete and not failed_invoices:
+        xero_sync.invoices_done(session, business_id, inv_started)   # the cursor moves only when nothing was missed
     session.commit()
 
     _inv_sync_logger.info(
@@ -4415,6 +4441,7 @@ async def sync_xero_invoices(
 
     return {
         "success": True,
+        "complete": bool(inv_complete and not failed_invoices),
         "new_invoices": new_count,
         "updated_invoices": updated_count,
         "skipped": skipped_count,
@@ -4493,8 +4520,12 @@ async def sync_all_accounting(
         try:
             # ACC-1: off the event loop too (the invoice sync does blocking work).
             import asyncio as _asyncio
-            inv_result = await _asyncio.to_thread(lambda: _asyncio.run(
-                sync_xero_invoices.__wrapped__(request=request, user_business=user_business, session=session)))
+            def _invoices():   # its own session: never the request's, from another thread
+                from db import engine as _engine
+                with Session(_engine) as inv_session:
+                    return _asyncio.run(sync_xero_invoices.__wrapped__(request=request, user_business=user_business,
+                                                                        session=inv_session))
+            inv_result = await _asyncio.to_thread(_invoices)
         except HTTPException as e:
             _sync_all_logger.warning(f"Invoice sync failed: {e.detail}")
             inv_result = {"success": False, "error": e.detail}
@@ -4517,11 +4548,15 @@ async def sync_all_accounting(
     # ACC-1: the real outcome, never a blanket success (a failed transaction
     # sync looked like "nothing new" before).
     all_ok = bool((txn_result or {}).get("success")) and (inv_result is None or bool(inv_result.get("success", True)))
+    # complete: nothing was missed by either part; only then is "last synced" moved.
+    complete = all_ok and (txn_result or {}).get("complete") is not False \
+        and (inv_result is None or inv_result.get("complete") is not False)
     return {
         "success": all_ok,
+        "complete": complete,
         "transactions": txn_result,
         "invoices": inv_result,
-        "synced_at": sync_time.isoformat(),
+        "synced_at": sync_time.isoformat() if complete else None,
         "new_transactions": (txn_result or {}).get("new_transactions", 0),
         "updated_transactions": (txn_result or {}).get("updated_transactions", 0),
     }

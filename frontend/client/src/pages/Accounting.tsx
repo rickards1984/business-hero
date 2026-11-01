@@ -102,7 +102,7 @@ function syncMessage(result: any, provider: string): { message: string; severity
                  t?.needs_review ? `${t.needs_review} possible duplicate${t.needs_review === 1 ? '' : 's'} to check` : '']
     .filter(Boolean).join(', ');
   const counts = `${result?.new_transactions ?? t?.new ?? 0} new, ${result?.updated_transactions ?? t?.updated ?? 0} updated`;
-  if (t?.complete === false) {
+  if (t?.complete === false || result?.complete === false) {
     return { message: `${provider} sync partly done (${counts}); the rest follows on the next sync.${extra ? ' ' + extra + '.' : ''}`, severity: 'warning' };
   }
   const nothing = !(result?.new_transactions || result?.updated_transactions || t?.new || t?.updated);
@@ -218,6 +218,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
     connected_at?: string;
   } | null>(null);
   const [xeroSyncing, setXeroSyncing] = useState(false);
+  const [dupRefresh, setDupRefresh] = useState(0);   // ACC-1: bumps after each sync to reload the duplicates panel
   const [xeroSyncResult, setXeroSyncResult] = useState<{
     new_transactions: number;
     updated_transactions: number;
@@ -599,7 +600,8 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
           setXeroSyncResult(result);
           localStorage.setItem(SYNC_KEY, new Date().toISOString());
 
-          setXeroStatus(prev => prev ? { ...prev, last_sync_at: result.synced_at } : prev);
+          if (result.synced_at) setXeroStatus(prev => prev ? { ...prev, last_sync_at: result.synced_at } : prev);
+          setDupRefresh(n => n + 1);
           fetchFinancialSummary();
 
           const said = syncMessage(result, providerLabel);
@@ -722,10 +724,10 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
         const result = await response.json();
         setXeroSyncResult(result);
 
-        setXeroStatus(prev => prev ? {
-          ...prev,
-          last_sync_at: result.synced_at,
-        } : prev);
+        if (result.synced_at) {   // ACC-1: only a complete sync moves "last synced"
+          setXeroStatus(prev => prev ? { ...prev, last_sync_at: result.synced_at } : prev);
+        }
+        setDupRefresh(n => n + 1);
 
         fetchFinancialSummary();
 
@@ -1524,7 +1526,8 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
             selectedCategory={selectedCategory}
             setSelectedCategory={setSelectedCategory}
             onDelete={handleDeleteTransaction}
-            onRefresh={fetchTransactions}
+            onRefresh={() => { fetchTransactions(); fetchSummary(); }}   // totals too (ACC-1)
+            dupRefreshKey={dupRefresh}
             currentPage={currentPage}
             totalPages={totalPages}
             totalTransactions={totalTransactions}
@@ -1898,6 +1901,7 @@ interface TransactionsTabProps {
   setSelectedCategory: (id: string) => void;
   onDelete: (id: string) => void;
   onRefresh: () => void;
+  dupRefreshKey?: number;
   currentPage: number;
   totalPages: number;
   totalTransactions: number;
@@ -1909,20 +1913,20 @@ interface TransactionsTabProps {
 // ACC-1 (Mike, 1 Nov 2026): uploads hidden because Xero has the same
 // transaction, and possible duplicates left for the owner to decide.
 interface DupRow { id: string; date: string; description: string; amount: number; type: string; archived: boolean }
-function DuplicatesPanel({ onChanged }: { onChanged: () => void }) {
+function DuplicatesPanel({ onChanged, refreshKey }: { onChanged: () => void; refreshKey?: number }) {
   const [data, setData] = useState<{ review: { xero: DupRow | null; uploads: DupRow[] }[]; hidden: { upload: DupRow | null; xero: DupRow | null }[] } | null>(null);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const load = useCallback(() => {
     apiRequest('GET', '/v1/accounting/duplicates').then(r => r.json()).then(setData).catch(() => setData(null));
   }, []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, refreshKey]);   // ACC-1: reloads after every sync
   if (!data || (data.review.length === 0 && data.hidden.length === 0)) return null;
   const gbp = (n: number) => `£${Math.abs(n).toLocaleString('en-GB', { minimumFractionDigits: 2 })}`;
   const line = (r: DupRow | null) => r ? `${new Date(r.date).toLocaleDateString('en-GB')} · ${r.description} · ${r.type === 'income' ? '+' : '-'}${gbp(r.amount)}` : '(no longer present)';
-  async function decide(id: string, action: 'hide' | 'keep') {
+  async function decide(id: string, action: 'hide' | 'keep', xeroId?: string) {
     setBusy(true);
-    try { await apiRequest('POST', '/v1/accounting/duplicates/resolve', { upload_id: id, action }); load(); onChanged(); }
+    try { await apiRequest('POST', '/v1/accounting/duplicates/resolve', { upload_id: id, action, xero_id: xeroId }); load(); onChanged(); }
     finally { setBusy(false); }
   }
   return (
@@ -1935,13 +1939,13 @@ function DuplicatesPanel({ onChanged }: { onChanged: () => void }) {
           <Typography variant="body2"><strong>Xero:</strong> {line(r.xero)}</Typography>
           {r.uploads.map(u => <Box key={u.id} sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
             <Typography variant="body2">Uploaded: {line(u)}</Typography>
-            <Button size="small" disabled={busy} onClick={() => decide(u.id, 'hide')}>Hide (duplicate)</Button>
-            <Button size="small" disabled={busy} onClick={() => decide(u.id, 'keep')}>Keep (different)</Button>
+            <Button size="small" disabled={busy} onClick={() => decide(u.id, 'hide', r.xero?.id)}>Hide (duplicate)</Button>
+            <Button size="small" disabled={busy} onClick={() => decide(u.id, 'keep', r.xero?.id)}>Keep (different)</Button>
           </Box>)}
         </Box>)}
         {data.hidden.map(h => h.upload && <Box key={h.upload.id} sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
           <Typography variant="body2">Hidden upload: {line(h.upload)} — same as Xero: {line(h.xero)}</Typography>
-          <Button size="small" disabled={busy} onClick={() => decide(h.upload!.id, 'keep')}>Restore</Button>
+          <Button size="small" disabled={busy} onClick={() => decide(h.upload!.id, 'keep', h.xero?.id)}>Restore</Button>
         </Box>)}
       </Box>}
     </Alert>
@@ -1949,6 +1953,7 @@ function DuplicatesPanel({ onChanged }: { onChanged: () => void }) {
 }
 
 const TransactionsTab: React.FC<TransactionsTabProps> = ({
+  dupRefreshKey,
   transactions,
   categories,
   transactionType,
@@ -2042,7 +2047,7 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
 
   return (
     <Box>
-      <DuplicatesPanel onChanged={onRefresh} />
+      <DuplicatesPanel onChanged={onRefresh} refreshKey={dupRefreshKey} />
       {/* Filters */}
       <Card sx={{ mb: 3, p: 2 }}>
         <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>

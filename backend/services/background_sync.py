@@ -334,7 +334,9 @@ async def _sync_financial_for_connection(conn: dict):
                 # path used to treat Xero's dicts as Transaction objects, so every
                 # row failed silently.
                 import asyncio as _asyncio
-                result = await _asyncio.to_thread(lambda: _asyncio.run(_xero_transactions(bid, conn_id)))
+                # The provider (and any token refresh) was obtained on this loop; the
+                # worker only uses it (the refresh lock belongs to this loop).
+                result = await _asyncio.to_thread(lambda: _asyncio.run(_xero_transactions(bid, conn_id, provider)))
                 logger.info(f"[BackgroundSync] Xero transactions for {tenant_name}: {result}")
             else:
                 try:
@@ -468,13 +470,17 @@ async def _sync_financial_for_connection(conn: dict):
                 except Exception:
                     pass
 
-            # Update last_sync_at
+            # Update last_sync_at (Xero: the worker stamps it, only when complete)
             try:
+                if provider_name == "xero":
+                    raise _AlreadyStamped()
                 session.execute(
                     text("UPDATE accounting_connections SET last_sync_at = NOW() WHERE id = :cid"),
                     {"cid": conn_id},
                 )
                 session.commit()
+            except _AlreadyStamped:
+                pass
             except Exception as e:
                 logger.debug(f"[BackgroundSync] Failed to update last_sync_at: {e}")
                 try:
@@ -576,22 +582,23 @@ async def _refresh_financial_summary_cache(session, business_id: str, provider, 
     logger.info(f"[BackgroundSync] Financial summary cached for business {business_id}")
 
 
-async def _xero_transactions(business_id: str, connection_id: str) -> dict:
+class _AlreadyStamped(Exception):
+    pass
+
+
+async def _xero_transactions(business_id: str, connection_id: str, provider) -> dict:
     """ACC-1: the scheduled Xero transaction sync, in its own worker thread,
     session and event loop, through the one sync (services/xero_sync.py)."""
     from datetime import datetime, timezone
     from db import get_session_context
-    from providers.accounting_service import AccountingService
     from providers.xero import XeroAuthError
     from services import xero_sync
     started = datetime.now(timezone.utc)
     with get_session_context() as session:
-        provider = await AccountingService(business_id, session).get_provider()
-        if not provider:
-            return {"skipped": "no provider"}
         try:
-            lookup = await xero_sync.cached_accounts(session, business_id, provider, started)
-            result = await xero_sync.run(session, business_id, provider, moment=started, account_lookup=lookup)
+            chart = await xero_sync.cached_chart(session, business_id, provider, started)
+            result = await xero_sync.run(session, business_id, provider, moment=started,
+                                         account_lookup=chart["lookup"], bank_accounts=chart["bank"])
         except XeroAuthError:
             session.rollback()
             return {"skipped": "Xero refused the token; the next run refreshes it"}

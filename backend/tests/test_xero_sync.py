@@ -54,9 +54,11 @@ def engine(tmp_path):
                        "(business_id, external_source, external_id) WHERE external_id IS NOT NULL"))
         c.execute(text("CREATE TABLE accounting_categories (id TEXT PRIMARY KEY, business_id TEXT, name TEXT, "
                        "type TEXT, color TEXT, created_at TEXT, updated_at TEXT)"))
-        c.execute(text("CREATE TABLE business_settings (business_id TEXT PRIMARY KEY, settings TEXT)"))
+        # as live (audits/live-schema-public.txt): id, created_at, updated_at required, no defaults
+        c.execute(text("CREATE TABLE business_settings (id TEXT NOT NULL, business_id TEXT PRIMARY KEY, "
+                       "settings TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"))
         for b in (BIZ, OTHER):
-            c.execute(text("INSERT INTO business_settings VALUES (:b, '{}')"), {"b": b})
+            c.execute(text("INSERT INTO business_settings VALUES (:i, :b, '{}', 'x', 'x')"), {"i": str(uuid.uuid4()), "b": b})
     yield e
     e.dispose()
 
@@ -72,8 +74,9 @@ def bank(i, *, kind="SPEND", total=10.0, on=date(2026, 9, 1), status="AUTHORISED
 
 
 def payment(i, *, kind="ACCRECPAYMENT", amount=100.0, on=date(2026, 10, 2), invoice="inv-1", status="AUTHORISED",
-            bank_amount=None):
+            bank_amount=None, account="bank-1"):
     p = {"PaymentID": f"pay-{i}", "PaymentType": kind, "Status": status, "Amount": amount, "Date": xdate(on),
+         "Account": {"AccountID": account},
          "Invoice": {"InvoiceID": invoice, "InvoiceNumber": f"INV-{invoice}", "Contact": {"Name": "Client Ltd"}}}
     if bank_amount is not None:
         p["BankAmount"] = bank_amount
@@ -110,9 +113,10 @@ class FakeXero:
 LOOKUP = {"200": {"name": "Sales", "type": "income"}, "400": {"name": "Advertising", "type": "expense"}}
 
 
-def run(engine, xero, *, moment=NOW, business=BIZ):
+def run(engine, xero, *, moment=NOW, business=BIZ, banks=("bank-1",)):
     with Session(engine) as s:
-        out = asyncio.run(sync().run(s, business, xero, moment=moment, account_lookup=LOOKUP))
+        out = asyncio.run(sync().run(s, business, xero, moment=moment, account_lookup=LOOKUP,
+                                     bank_accounts=None if banks is None else list(banks)))
         s.commit()
         return out
 
@@ -376,6 +380,9 @@ def test_the_chart_of_accounts_is_read_from_xero_at_most_once_a_day(engine):
     class Chart:
         calls = 0
 
+        async def get_accounts(self):
+            return [{"AccountID": "bank-1", "Type": "BANK"}, {"AccountID": "clear-1", "Type": "CURRLIAB"}]
+
         async def get_trial_balance(self):
             Chart.calls += 1
             return {"Reports": [{"Rows": [{"RowType": "Section", "Title": "Revenue", "Rows": [
@@ -390,3 +397,153 @@ def test_the_chart_of_accounts_is_read_from_xero_at_most_once_a_day(engine):
         asyncio.run(sync().cached_accounts(s, BIZ, chart, NOW + timedelta(hours=25)))
         s.commit()
     assert Chart.calls == 2
+
+
+# ------------------------------------------------- Codex review 1 regressions ---
+
+def test_a_clearing_account_settlement_is_counted_once(engine):
+    """P1: a card processor's workflow. Invoice payments go to a CLEARING
+    account (not cash yet); the bank receipt settling it, net of the fee, is
+    the cash. £100 of sales, a £2 fee, £98 into the bank: income is £98, once."""
+    xero = FakeXero(
+        payments=[payment(1, amount=60.0, account="clear-1"), payment(2, amount=40.0, account="clear-1")],
+        bank_rows=[bank(1, kind="RECEIVE", total=98.0, on=date(2026, 10, 3))])
+    run(engine, xero)
+    visible = rows(engine, archived=False)
+    assert [(r["external_id"], float(r["amount"])) for r in visible] == [("bt-1", 98.0)]
+
+
+def test_without_knowing_the_bank_accounts_no_payment_is_counted_and_the_run_is_incomplete(engine):
+    out = run(engine, FakeXero(payments=[payment(1)]), banks=None)
+    assert rows(engine) == [] and out["complete"] is False
+    assert "cursor" not in doc(engine).get("xero_sync", {})
+
+
+def test_a_business_without_a_settings_row_gets_one_and_its_cursor(engine):
+    """P2: the live table requires id, created_at and updated_at."""
+    with engine.begin() as c:
+        c.execute(text("DELETE FROM business_settings WHERE business_id = :b"), {"b": BIZ})
+    out = run(engine, FakeXero(bank_rows=[bank(1)]))
+    assert out["complete"] is True and doc(engine)["xero_sync"]["cursor"]
+
+
+def test_a_failed_row_never_leaves_a_dead_category_for_the_next(engine, monkeypatch):
+    """P2: the category created inside a rolled-back savepoint must not be reused."""
+    real = sync()._write
+    calls = {"n": 0}
+
+    def fail_first(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("the first write fails after its category was created")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(sync(), "_write", fail_first)
+    out = run(engine, FakeXero(bank_rows=[bank(1, code="400"), bank(2, code="400")]))
+    second = next(r for r in rows(engine) if r["external_id"] == "bt-2")
+    with engine.connect() as c:
+        assert c.execute(text("SELECT count(*) FROM accounting_categories WHERE id = :i"),
+                         {"i": second["category_id"]}).scalar() == 1, "a live category, not a rolled-back one"
+    assert len(out["errors"]) == 1
+
+
+def test_keeping_one_candidate_leaves_the_others_for_review(engine):
+    """P2: decisions are per pair."""
+    a = upload(engine, amount=-9.99, kind="expense", on=date(2026, 6, 30))
+    b = upload(engine, amount=-9.99, kind="expense", on=date(2026, 7, 1))
+    run(engine, FakeXero(bank_rows=[bank(1, total=9.99, on=date(2026, 7, 1))]))
+    with Session(engine) as s:
+        sync().resolve(s, BIZ, a, "keep")
+        s.commit()
+    review = doc(engine)["accounting_duplicates"]["review"]
+    assert len(review) == 1 and review[0]["uploads"] == [b]
+    with Session(engine) as s:
+        listed = sync().duplicates(s, BIZ)
+    assert [u["id"] for u in listed["review"][0]["uploads"]] == [b]
+
+
+def test_a_kept_pair_doesnt_stop_the_upload_matching_another_xero_row(engine):
+    """P2: keeping an upload against Xero row A says nothing about Xero row B."""
+    up = upload(engine, amount=-20.0, kind="expense", on=date(2026, 6, 30))
+    run(engine, FakeXero(bank_rows=[bank(1, total=20.0, on=date(2026, 6, 30))]))
+    first = doc(engine)["accounting_duplicates"]["hidden"][up]
+    with Session(engine) as s:
+        sync().resolve(s, BIZ, up, "keep", first)
+        s.commit()
+    assert doc(engine)["accounting_duplicates"]["kept_pairs"] == [[up, first]]
+    run(engine, FakeXero(bank_rows=[bank(2, total=20.0, on=date(2026, 7, 1))]), moment=NOW + timedelta(hours=1))
+    assert up not in {r["id"] for r in rows(engine, archived=False)}, "hidden against the other Xero row"
+
+
+def test_hiding_one_upload_settles_that_xero_row_and_frees_the_others(engine):
+    a = upload(engine, amount=-9.99, kind="expense", on=date(2026, 6, 30))
+    b = upload(engine, amount=-9.99, kind="expense", on=date(2026, 7, 1))
+    run(engine, FakeXero(bank_rows=[bank(1, total=9.99, on=date(2026, 7, 1))]))
+    with Session(engine) as s:
+        sync().resolve(s, BIZ, b, "hide")
+        s.commit()
+    d = doc(engine)["accounting_duplicates"]
+    assert d["review"] == [] and b in d["hidden"] and a in {r["id"] for r in rows(engine, archived=False)}
+
+
+def test_a_sync_and_a_decision_take_the_businesss_lock():
+    """P2: one writer per business (the settings row lock)."""
+    import inspect
+    source = inspect.getsource(sync().run) + inspect.getsource(sync().resolve)
+    assert source.count("_lock(session, bid)") == 2
+
+
+def test_the_refresh_lock_serialises_callers_on_different_event_loops():
+    """P2: worker threads run their own loops; one refresh at a time across all."""
+    import threading
+    from providers import token_refresh_lock as trl
+    trl._last_refresh_times.clear()
+    refreshes = []
+
+    async def current():
+        return {"access_token": "old", "refresh_token": "r", "token_refreshed_at": None}
+
+    async def refresh(_token):
+        refreshes.append(1)
+        await asyncio.sleep(0.2)
+        return {"access_token": "new", "refresh_token": "r2"}
+
+    async def save(*_args):
+        return None
+
+    def caller(results):
+        results.append(asyncio.run(trl.coordinated_token_refresh("biz-lock", "xero", current, refresh, save)))
+    results = []
+    threads = [threading.Thread(target=caller, args=(results,)) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert len(refreshes) == 1 and len(results) == 3
+
+
+def test_a_routine_invoice_sync_is_one_request_and_emails_are_asked_once(engine):
+    """P2 (speed): the page's invoice sync is incremental, one stream."""
+    class Inv:
+        def __init__(self, invoices):
+            self.invoices, self.calls, self.emails = invoices, [], 0
+
+        async def get_invoices(self, modified_since=None, status=None, page=1):
+            self.calls.append((modified_since, status, page))
+            return {"Invoices": self.invoices[(page - 1) * 100: page * 100]}
+
+        async def get_contact_email(self, contact_id):
+            self.emails += 1
+            return "client@example.invalid"
+    first = Inv([{"InvoiceID": f"i{n}"} for n in range(150)])
+    with Session(engine) as s:
+        got, complete = asyncio.run(sync().fetch_invoices(s, BIZ, first))
+        sync().invoices_done(s, BIZ, NOW)
+        for _ in range(3):
+            asyncio.run(sync().contact_email(s, BIZ, first, "contact-1"))
+        s.commit()
+    assert len(got) == 150 and complete and first.calls[0][0] is None and first.emails == 1
+    assert "VOIDED" in first.calls[0][1] and "PAID" in first.calls[0][1]
+    quiet = Inv([])
+    with Session(engine) as s:
+        asyncio.run(sync().fetch_invoices(s, BIZ, quiet))
+    assert len(quiet.calls) == 1 and quiet.calls[0][0] == "2026-11-01T09:55:00"

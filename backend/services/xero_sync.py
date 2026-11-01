@@ -59,14 +59,36 @@ def _save(session, bid: str, doc: dict) -> None:
     params = {"s": json.dumps(doc), "b": bid}
     if not session.execute(text(f"UPDATE business_settings SET settings = {expr} WHERE business_id = :b"),
                            params).rowcount:
-        session.execute(text(f"INSERT INTO business_settings (business_id, settings) VALUES (:b, {expr})"), params)
+        # The live table requires id, created_at and updated_at, with no defaults (Codex review 1).
+        stamp = datetime.now(timezone.utc).replace(tzinfo=None)
+        session.execute(text(f"INSERT INTO business_settings (id, business_id, settings, created_at, updated_at) "
+                             f"VALUES (:i, :b, {expr}, :at, :at)"), {**params, "i": str(uuid.uuid4()), "at": stamp})
+
+
+def _lock(session, bid: str) -> None:
+    """One sync or duplicate decision at a time per business (Codex review 1):
+    the settings row, locked for the rest of the caller's transaction."""
+    from services import outreach_send as send
+    try:
+        is_pg = send.pg(session)
+    except Exception:                       # a session without a bind (test stand-ins): the portable form
+        is_pg = False
+    if is_pg:
+        session.execute(text("SELECT 1 FROM business_settings WHERE business_id = :b FOR UPDATE"), {"b": bid})
+    else:
+        session.execute(text("UPDATE business_settings SET business_id = business_id WHERE business_id = :b"),
+                        {"b": bid})
 
 
 def _dups(doc: dict) -> dict:
+    """hidden {upload: xero row}; review [{"xero", "uploads"}]; kept_pairs
+    [[upload, xero row]]: Mike kept that upload as NOT a copy of that Xero row
+    (only that pair: the upload can still match another Xero row)."""
     d = dict(doc.get("accounting_duplicates") or {})
     d["hidden"] = dict(d.get("hidden") or {})
-    d["review"] = list(d.get("review") or [])
-    d["kept"] = list(d.get("kept") or [])
+    d["review"] = [dict(r, uploads=list(r.get("uploads") or [])) for r in (d.get("review") or [])]
+    d["kept_pairs"] = [list(p) for p in (d.get("kept_pairs") or [])]
+    d.pop("kept", None)
     return d
 
 
@@ -120,23 +142,35 @@ def accounts_from_trial_balance(tb_data) -> dict:
     return lookup
 
 
-async def cached_accounts(session, bid: str, provider, moment: datetime) -> dict:
-    """The chart of accounts, read from Xero at most once a day."""
+async def cached_chart(session, bid: str, provider, moment: datetime) -> dict:
+    """{"lookup": {code: {name, type}}, "bank": [bank account ids] or None},
+    read from Xero at most once a day."""
     doc = _doc(session, bid)
     held = doc.get("xero_accounts") or {}
     at = _parse_moment(held.get("at"))
-    if at is not None and moment - at < ACCOUNTS_FRESH and held.get("lookup"):
-        return dict(held["lookup"])
+    if at is not None and moment - at < ACCOUNTS_FRESH and held.get("lookup") and held.get("bank") is not None:
+        return {"lookup": dict(held["lookup"]), "bank": list(held["bank"])}
     try:
         lookup = accounts_from_trial_balance(await provider.get_trial_balance())
     except Exception as exc:                # a missing chart only costs categories, never rows
         logger.warning("Xero chart of accounts unavailable: %s", exc)
-        return dict(held.get("lookup") or {})
-    if lookup:
+        lookup = dict(held.get("lookup") or {})
+    try:
+        bank = sorted(str(a.get("AccountID")) for a in (await provider.get_accounts() or [])
+                      if a.get("Type") == "BANK" and a.get("AccountID"))
+    except Exception as exc:
+        logger.warning("Xero bank accounts unavailable: %s", exc)
+        bank = held.get("bank")
+    if lookup or bank is not None:
         doc = _doc(session, bid)
-        doc["xero_accounts"] = {"at": moment.isoformat(), "lookup": lookup}
+        doc["xero_accounts"] = {"at": moment.isoformat(), "lookup": lookup, "bank": bank}
         _save(session, bid, doc)
-    return lookup
+    return {"lookup": lookup, "bank": bank}
+
+
+async def cached_accounts(session, bid: str, provider, moment: datetime) -> dict:
+    """The chart of accounts alone (see cached_chart)."""
+    return (await cached_chart(session, bid, provider, moment))["lookup"]
 
 
 def _parse_moment(value) -> Optional[datetime]:
@@ -198,24 +232,31 @@ def _payment_row(p: dict, invoice_codes: dict) -> dict:
 
 # -------------------------------------------------------------- writing ---
 
-def _category(session, bid: str, code: Optional[str], kind: str, lookup: dict, cache: dict) -> Optional[str]:
+def _category(session, bid: str, code: Optional[str], kind: str, lookup: dict, cache: dict,
+              pending: Optional[dict] = None) -> Optional[str]:
+    """The category id for an account; created if needed. New ids go to
+    `pending`, published to `cache` only once the row's savepoint succeeds
+    (Codex review 1: a rolled-back category must never be reused)."""
+    pending = cache if pending is None else pending
     info = lookup.get(code or "") or {}
     name = info.get("name")
     if not name or name.strip().isdigit():
         return None
     if name in cache:
         return cache[name]
+    if name in pending:
+        return pending[name]
     found = session.execute(text("SELECT id FROM accounting_categories WHERE business_id = :b AND LOWER(name) = LOWER(:n)"),
                             {"b": bid, "n": name}).first()
     if found:
-        cache[name] = str(found[0])
-        return cache[name]
+        pending[name] = str(found[0])
+        return pending[name]
     ident = str(uuid.uuid4())
     session.execute(text("INSERT INTO accounting_categories (id, business_id, name, type, color, created_at, updated_at) "
                          "VALUES (:i, :b, :n, :t, '#6B7280', :at, :at)"),
                     {"i": ident, "b": bid, "n": name, "t": info.get("type") or kind,
                      "at": datetime.now(timezone.utc).isoformat()})
-    cache[name] = ident
+    pending[name] = ident
     return ident
 
 
@@ -254,7 +295,8 @@ def _archive_external(session, bid: str, external_id: str, moment: datetime) -> 
 
 def _dedupe(session, bid: str, xero_id: str, row: dict, dups: dict, moment: datetime) -> str:
     """Hide the one upload this Xero row duplicates; list an ambiguous match.
-    Returns "hidden", "review" or ""."""
+    One-to-one: an upload is hidden against one Xero row at most, and a pair
+    Mike kept is never matched again. Returns "hidden", "review" or ""."""
     if xero_id in dups["hidden"].values() or any(r.get("xero") == xero_id for r in dups["review"]):
         return ""
     d = date.fromisoformat(row["transaction_date"])
@@ -264,12 +306,9 @@ def _dedupe(session, bid: str, xero_id: str, row: dict, dups: dict, moment: date
         "AND transaction_date >= :lo AND transaction_date <= :hi ORDER BY transaction_date, id"),
         {"b": bid, "no": False, "t": row["type"], "a": row["amount"],
          "lo": (d - timedelta(days=MATCH_DAYS)).isoformat(), "hi": (d + timedelta(days=MATCH_DAYS)).isoformat()})]
-    candidates = [c for c in candidates if c not in dups["kept"]]
+    candidates = [c for c in candidates if [c, xero_id] not in dups["kept_pairs"]]
     if len(candidates) == 1:
-        session.execute(text("UPDATE accounting_transactions SET is_archived = :yes, updated_at = :at "
-                             "WHERE business_id = :b AND id = :i"),
-                        {"yes": True, "at": moment.isoformat(), "b": bid, "i": candidates[0]})
-        dups["hidden"][candidates[0]] = xero_id
+        _hide(session, bid, candidates[0], xero_id, dups, moment)
         return "hidden"
     if len(candidates) > 1:
         dups["review"].append({"xero": xero_id, "uploads": candidates})
@@ -277,11 +316,30 @@ def _dedupe(session, bid: str, xero_id: str, row: dict, dups: dict, moment: date
     return ""
 
 
+def _hide(session, bid: str, upload_id: str, xero_id: Optional[str], dups: dict, moment: datetime) -> None:
+    session.execute(text("UPDATE accounting_transactions SET is_archived = :yes, updated_at = :at "
+                         "WHERE business_id = :b AND id = :i"),
+                    {"yes": True, "at": moment.isoformat(), "b": bid, "i": upload_id})
+    if xero_id:
+        dups["hidden"][upload_id] = xero_id
+    # one-to-one: that Xero row is matched, and this upload is spoken for
+    dups["review"] = [dict(r, uploads=[u for u in r["uploads"] if u != upload_id]) for r in dups["review"]
+                      if r.get("xero") != xero_id]
+    dups["review"] = [r for r in dups["review"] if r["uploads"]]
+
+
 # ------------------------------------------------------------------ run ---
 
-async def run(session, business_id, provider, *, moment: datetime, account_lookup: Optional[dict] = None) -> dict:
-    """One sync. The caller commits. Fetching happens first, then every row in
-    its own savepoint; the marker moves only when nothing was missed."""
+async def run(session, business_id, provider, *, moment: datetime, account_lookup: Optional[dict] = None,
+              bank_accounts: Optional[list] = None) -> dict:
+    """One sync. The caller commits. Fetching happens first, with no lock;
+    then, under the business's lock, every row in its own savepoint. The
+    marker moves only when nothing was missed.
+
+    Cash basis, bank movements only (Codex review 1): a payment counts only
+    when it was made from or into a BANK account. A payment into a clearing
+    account (card processors) is not cash yet; the bank receipt that settles
+    the clearing account is, so nothing is counted twice."""
     bid = str(business_id)
     doc = _doc(session, bid)
     state = dict(doc.get("xero_sync") or {})
@@ -294,47 +352,45 @@ async def run(session, business_id, provider, *, moment: datetime, account_looku
     bank, bank_done = await _all(provider.get_bank_transactions, "BankTransactions", since)
     payments, pay_done = await _all(provider.get_payments, "Payments", since)
     if not (bank_done and pay_done):
-        out["errors"].append("Xero returned more records than one run reads; the next sync carries on.")
+        out["errors"].append(f"Xero has more than {MAX_PAGES * PAGE:,} changed records for one sync, so it "
+                             "can't finish. Please contact support.")
         return out
+    if payments and bank_accounts is None:
+        out["errors"].append("Xero's bank accounts couldn't be read, so payments weren't recorded this time.")
+        payments = []
+    banks = set(bank_accounts or [])
     wanted = sorted({str((p.get("Invoice") or {}).get("InvoiceID")) for p in payments
-                     if p.get("Status") not in GONE and (p.get("Invoice") or {}).get("InvoiceID")})
+                     if p.get("Status") not in GONE and (p.get("Invoice") or {}).get("InvoiceID")
+                     and str((p.get("Account") or {}).get("AccountID")) in banks})
     invoice_codes = {}
     for start in range(0, len(wanted), INVOICE_BATCH):
         for inv in await provider.get_invoices_by_ids(wanted[start:start + INVOICE_BATCH]) or []:
             invoice_codes[str(inv.get("InvoiceID"))] = _largest_code(inv.get("LineItems"))
 
+    _lock(session, bid)                       # from here, one writer per business
     dups = _dups(_doc(session, bid))
     cache: dict = {}
     work = [("bank", t) for t in bank] + [("payment", p) for p in payments]
     for kind, record in work:
         ident = record.get("BankTransactionID") if kind == "bank" else record.get("PaymentID")
+        tally: dict = {}
+        pending_cache: dict = {}
+        snapshot = {"hidden": dict(dups["hidden"]), "review": [dict(r, uploads=list(r["uploads"])) for r in dups["review"]],
+                    "kept_pairs": [list(p) for p in dups["kept_pairs"]]}
         try:
             with session.begin_nested():
-                external = str(ident) if kind == "bank" else PAYMENT_PREFIX + str(ident)
-                if record.get("Status") in GONE or (kind == "bank" and record.get("Type") in BANK_TRANSFER):
-                    out["archived"] += _archive_external(session, bid, external, moment)
-                    out["skipped"] += 1
-                    continue
-                if kind == "bank" and record.get("Type") not in BANK_INCOME + BANK_EXPENSE:
-                    logger.warning("Xero bank transaction %s: unknown type %r skipped", ident, record.get("Type"))
-                    out["skipped"] += 1
-                    continue
-                if kind == "payment" and record.get("PaymentType") not in PAY_IN + PAY_OUT:
-                    logger.warning("Xero payment %s: unknown type %r skipped", ident, record.get("PaymentType"))
-                    out["skipped"] += 1
-                    continue
-                row = _bank_row(record) if kind == "bank" else _payment_row(record, invoice_codes)
-                category = _category(session, bid, row["code"], row["type"], lookup, cache)
-                row_id, how = _write(session, bid, row, category, moment)
-                out[how] += 1
-                outcome = _dedupe(session, bid, row_id, row, dups, moment)
-                if outcome == "hidden":
-                    out["duplicates_hidden"] += 1
-                elif outcome == "review":
-                    out["needs_review"] += 1
+                tally = _one(session, bid, kind, record, ident, banks, invoice_codes, lookup, cache, pending_cache,
+                             dups, moment)
         except Exception as exc:
+            # the savepoint rolled back: so do this row's cache entries, tallies and duplicate changes
+            dups.clear()
+            dups.update(snapshot)
             out["errors"].append(f"Xero {kind} {ident}: {exc}")
             logger.warning("Xero %s %s not recorded: %s", kind, ident, exc)
+            continue
+        cache.update(pending_cache)
+        for key, value in tally.items():
+            out[key] += value
 
     doc = _doc(session, bid)
     doc["accounting_duplicates"] = dups
@@ -347,46 +403,79 @@ async def run(session, business_id, provider, *, moment: datetime, account_looku
     return out
 
 
+def _one(session, bid, kind, record, ident, banks, invoice_codes, lookup, cache, pending_cache, dups, moment) -> dict:
+    """One Xero record, inside its savepoint. Returns what it did."""
+    external = str(ident) if kind == "bank" else PAYMENT_PREFIX + str(ident)
+    if record.get("Status") in GONE or (kind == "bank" and record.get("Type") in BANK_TRANSFER):
+        return {"archived": _archive_external(session, bid, external, moment), "skipped": 1}
+    if kind == "bank" and record.get("Type") not in BANK_INCOME + BANK_EXPENSE:
+        logger.warning("Xero bank transaction %s: unknown type %r skipped", ident, record.get("Type"))
+        return {"skipped": 1}
+    if kind == "payment" and record.get("PaymentType") not in PAY_IN + PAY_OUT:
+        logger.warning("Xero payment %s: unknown type %r skipped", ident, record.get("PaymentType"))
+        return {"skipped": 1}
+    if kind == "payment" and str((record.get("Account") or {}).get("AccountID")) not in banks:
+        # not into or out of a bank account (a clearing account): not cash yet;
+        # any row stored for it earlier is archived
+        return {"archived": _archive_external(session, bid, external, moment), "skipped": 1}
+    row = _bank_row(record) if kind == "bank" else _payment_row(record, invoice_codes)
+    category = _category(session, bid, row["code"], row["type"], lookup, cache, pending_cache)
+    row_id, how = _write(session, bid, row, category, moment)
+    tally = {how: 1}
+    outcome = _dedupe(session, bid, row_id, row, dups, moment)
+    if outcome == "hidden":
+        tally["duplicates_hidden"] = 1
+    elif outcome == "review":
+        tally["needs_review"] = 1
+    return tally
+
+
 # ---------------------------------------------------------- Mike decides ---
 
-def resolve(session, business_id, upload_id, action: str) -> dict:
-    """Mike's call on a possible duplicate: "hide" the upload, or "keep" it
-    (restored, and never hidden as a duplicate again). The caller commits."""
+def resolve(session, business_id, upload_id, action: str, xero_id: Optional[str] = None) -> dict:
+    """Mike's call on one pair: "hide" the upload as a copy of that Xero row,
+    or "keep" it (restored; never matched against that Xero row again; any
+    other candidates for the same Xero row stay for review). The caller commits."""
     from services.aria_actions import ActionRefused
     if action not in ("hide", "keep"):
         raise ActionRefused(422, "Choose hide or keep.")
     bid, upload_id = str(business_id), str(upload_id)
+    _lock(session, bid)
     found = session.execute(text("SELECT id FROM accounting_transactions WHERE business_id = :b AND id = :i "
                                  "AND import_id IS NOT NULL AND external_id IS NULL"), {"b": bid, "i": upload_id}).first()
     if not found:
         raise ActionRefused(404, "That uploaded transaction wasn't found.")
     doc = _doc(session, bid)
     dups = _dups(doc)
-    pair = next((r for r in dups["review"] if upload_id in r.get("uploads", [])), None)
-    xero_id = dups["hidden"].get(upload_id) or (pair or {}).get("xero")
-    now_ = datetime.now(timezone.utc).isoformat()
+    groups = [r for r in dups["review"] if upload_id in r["uploads"]]
+    if xero_id is None:
+        xero_id = dups["hidden"].get(upload_id) or (groups[0]["xero"] if len(groups) == 1 else None)
+    if xero_id is None and action == "hide":
+        raise ActionRefused(409, "Say which Xero transaction this upload duplicates.")
+    now_ = datetime.now(timezone.utc)
     if action == "hide":
-        session.execute(text("UPDATE accounting_transactions SET is_archived = :yes, updated_at = :at "
-                             "WHERE business_id = :b AND id = :i"), {"yes": True, "at": now_, "b": bid, "i": upload_id})
-        if xero_id:
-            dups["hidden"][upload_id] = xero_id
-        if upload_id in dups["kept"]:
-            dups["kept"].remove(upload_id)
+        _hide(session, bid, upload_id, xero_id, dups, now_)
+        dups["kept_pairs"] = [p for p in dups["kept_pairs"] if p != [upload_id, xero_id]]
     else:
         session.execute(text("UPDATE accounting_transactions SET is_archived = :no, updated_at = :at "
-                             "WHERE business_id = :b AND id = :i"), {"no": False, "at": now_, "b": bid, "i": upload_id})
-        dups["hidden"].pop(upload_id, None)
-        if upload_id not in dups["kept"]:
-            dups["kept"].append(upload_id)
-    if pair is not None:
-        dups["review"] = [r for r in dups["review"] if r is not pair]
+                             "WHERE business_id = :b AND id = :i"),
+                        {"no": False, "at": now_.isoformat(), "b": bid, "i": upload_id})
+        if dups["hidden"].get(upload_id) == xero_id:
+            dups["hidden"].pop(upload_id)
+        if xero_id and [upload_id, xero_id] not in dups["kept_pairs"]:
+            dups["kept_pairs"].append([upload_id, xero_id])
+        # only this pair is settled: other candidates for the same Xero row stay
+        dups["review"] = [dict(r, uploads=[u for u in r["uploads"] if not (u == upload_id and r["xero"] == xero_id)])
+                          for r in dups["review"]]
+        dups["review"] = [r for r in dups["review"] if r["uploads"]]
     doc["accounting_duplicates"] = dups
     _save(session, bid, doc)
-    return {"upload_id": upload_id, "action": action}
+    return {"upload_id": upload_id, "xero_id": xero_id, "action": action}
 
 
 def duplicates(session, business_id) -> dict:
-    """The review list and the uploads hidden as duplicates, with their rows."""
+    """The review list and the uploads hidden as duplicates, with their rows.
+    A candidate that is no longer a visible upload is left out."""
     bid = str(business_id)
     dups = _dups(_doc(session, bid))
     ids = set(dups["hidden"]) | set(dups["hidden"].values())
@@ -402,6 +491,54 @@ def duplicates(session, business_id) -> dict:
             rows[ident] = {"id": str(found["id"]), "date": str(found["transaction_date"])[:10],
                            "description": found["description"], "amount": float(found["amount"]),
                            "type": found["type"], "archived": bool(found["is_archived"])}
-    return {"review": [{"xero": rows.get(r.get("xero")), "uploads": [rows[u] for u in r.get("uploads", []) if u in rows]}
-                       for r in dups["review"]],
+    review = []
+    for r in dups["review"]:
+        uploads = [rows[u] for u in r.get("uploads", []) if u in rows and not rows[u]["archived"]]
+        if uploads and r.get("xero") in rows:
+            review.append({"xero": rows[r["xero"]], "uploads": uploads})
+    return {"review": review,
             "hidden": [{"upload": rows.get(u), "xero": rows.get(x)} for u, x in dups["hidden"].items() if u in rows]}
+
+
+# ------------------------------------------------- invoices (the page's sync) ---
+
+INVOICE_STATUSES = "AUTHORISED,SUBMITTED,PAID,VOIDED,DELETED"
+
+
+async def fetch_invoices(session, business_id, provider) -> tuple:
+    """Invoices changed since the last complete invoice sync, in ONE paged
+    stream (open, paid, voided and deleted together). The first run after
+    ACC-1 is full. (invoices, complete)"""
+    bid = str(business_id)
+    state = dict(_doc(session, bid).get("xero_invoice_sync") or {})
+    since = state.get("cursor") if state.get("version") == VERSION else None
+
+    async def page_of(modified_since=None, page=1):
+        return await provider.get_invoices(modified_since=modified_since, status=INVOICE_STATUSES, page=page)
+    return await _all(page_of, "Invoices", since)
+
+
+def invoices_done(session, business_id, started: datetime) -> None:
+    """Move the invoice cursor: only after a complete invoice sync."""
+    bid = str(business_id)
+    doc = _doc(session, bid)
+    doc["xero_invoice_sync"] = {"version": VERSION, "cursor": (started - CURSOR_MARGIN).astimezone(timezone.utc)
+                                .strftime("%Y-%m-%dT%H:%M:%S")}
+    _save(session, bid, doc)
+
+
+async def contact_email(session, business_id, provider, contact_id: str) -> Optional[str]:
+    """A contact's email, asked of Xero once ever per contact (an empty answer
+    is remembered too)."""
+    bid = str(business_id)
+    doc = _doc(session, bid)
+    known = dict(doc.get("xero_contact_emails") or {})
+    if contact_id in known:
+        return known[contact_id] or None
+    email = await provider.get_contact_email(contact_id)
+    doc = _doc(session, bid)
+    known = dict(doc.get("xero_contact_emails") or {})
+    known[contact_id] = email or ""
+    doc["xero_contact_emails"] = known
+    _save(session, bid, doc)
+    return email or None

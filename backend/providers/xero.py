@@ -118,7 +118,8 @@ class XeroProvider:
         category). Up to 50 ids a call. Read only."""
         if not ids:
             return []
-        data = await self._get_list("Invoices", {"IDs": ",".join(ids)}, None)
+        # page=1: Xero returns line items for paged collection requests
+        data = await self._get_list("Invoices", {"IDs": ",".join(ids), "page": 1}, None)
         return data.get("Invoices", [])
 
     async def _get_list(self, resource: str, params: Dict[str, Any], modified_since: Optional[str]) -> Dict[str, Any]:

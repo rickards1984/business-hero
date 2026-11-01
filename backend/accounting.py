@@ -1317,6 +1317,7 @@ class DuplicateDecision(BaseModel):
     # Optional so the plan gate answers first (a refused business never sees a 422).
     upload_id: Optional[str] = None
     action: Optional[str] = None
+    xero_id: Optional[str] = None     # the Xero row the decision is about (decisions are per pair)
 
 
 @router.get("/duplicates")
@@ -1339,7 +1340,7 @@ async def resolve_duplicate(body: DuplicateDecision, user_business=Depends(get_c
     if not body.upload_id or body.action not in ("hide", "keep"):
         raise HTTPException(status_code=422, detail="Give the uploaded transaction and hide or keep.")
     try:
-        out = xero_sync.resolve(session, business.id, body.upload_id, body.action)
+        out = xero_sync.resolve(session, business.id, body.upload_id, body.action, body.xero_id)
         session.commit()
         return out
     except ActionRefused as exc:
