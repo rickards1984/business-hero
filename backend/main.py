@@ -1076,6 +1076,9 @@ async def stripe_webhook(
         created = event_dict.get("created")
         outreach_billing.webhook(session, event_type, event_data,
                                  created=datetime.fromtimestamp(int(created), tz=timezone.utc) if created else None)
+        # PROFIT-2: real income, from each paid invoice, once (same transaction, same retry boundary).
+        from services import stripe_income
+        stripe_income.webhook(session, event_type, event_data)
     except Exception:
         session.rollback()
         logger.error("stripe webhook outreach billing failed for event %s", event_id, exc_info=True)
