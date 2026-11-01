@@ -206,3 +206,7 @@ Codex confirmed the root cause and the fix, and all eight payment-type direction
 - foreign-currency amounts;
 - net settlements;
 - no PostgreSQL race test.
+
+## Codex review 4 (`audits/ACC-1-CODEX-REVIEW-4.md`, quick targeted) → APPROVE
+
+No P1 or P2. It confirmed all three review-3 fixes, the smaller items, and that sync-all can no longer hit the slowapi `request` error that production still logs on main.
