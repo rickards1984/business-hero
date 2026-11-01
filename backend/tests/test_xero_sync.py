@@ -636,4 +636,67 @@ def test_last_synced_means_the_transactions_synced():
     sync()
     import main
     source = inspect.getsource(main.sync_all_accounting)
-    assert '"synced_at": sync_time.isoformat() if (txn_result or {}).get("complete") else None' in source
+    # the transaction run's own start: the same moment the connection is stamped with (Codex review 3)
+    assert '"synced_at": (txn_result or {}).get("synced_at") if (txn_result or {}).get("complete") else None' in source
+
+
+# ------------------------------------------------- Codex review 3 regressions ---
+
+def test_creating_a_missing_settings_row_never_blanks_one_made_in_between(engine):
+    """P2: the absence check, then another writer creates the row, then ours: insert-only."""
+    with engine.begin() as c:
+        c.execute(text("DELETE FROM business_settings WHERE business_id = :b"), {"b": BIZ})
+
+    class Racing:
+        """The first look finds nothing; another writer then commits its row."""
+        def __init__(self, session):
+            self.s, self.looked = session, False
+
+        def __getattr__(self, name):
+            return getattr(self.s, name)
+
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            if not self.looked and sql.startswith("SELECT 1 FROM business_settings WHERE business_id"):
+                self.looked = True
+                with engine.begin() as c:
+                    c.execute(text("INSERT INTO business_settings VALUES (:i, :b, :s, 'x', 'x')"),
+                              {"i": str(uuid.uuid4()), "b": BIZ, "s": json.dumps({"theirs": True})})
+                return self.s.execute(text("SELECT 1 WHERE 0"))
+            return self.s.execute(statement, params)
+    with Session(engine) as s:
+        sync()._lock(Racing(s), BIZ)
+        s.commit()
+    assert doc(engine) == {"theirs": True}
+
+
+def test_a_failed_email_lookup_holds_the_invoice_cursor():
+    """P2: so the unchanged invoice is fetched, and its contact asked, again."""
+    import inspect
+    sync()
+    import main
+    source = inspect.getsource(main.sync_xero_invoices)
+    assert "if email_failures:\n        inv_complete = False" in source
+
+
+def test_a_failed_lookup_is_counted(engine):
+    class Down:
+        async def get_contact_email_checked(self, contact_id):
+            raise RuntimeError("HTTP 429")
+    with Session(engine) as s:
+        found, failed = asyncio.run(sync().lookup_emails(s, BIZ, Down(), ["c-1", "c-2"]))
+    assert found == {} and failed == 2
+
+
+def test_a_stale_hide_against_a_since_voided_xero_row_is_refused(engine):
+    """P2: hide only against a live Xero transaction; restoring stays possible."""
+    a = upload(engine, amount=-9.99, kind="expense", on=date(2026, 6, 30))
+    upload(engine, amount=-9.99, kind="expense", on=date(2026, 7, 1))
+    run(engine, FakeXero(bank_rows=[bank(1, total=9.99, on=date(2026, 7, 1))]))
+    xero_row = doc(engine)["accounting_duplicates"]["review"][0]["xero"]
+    run(engine, FakeXero(bank_rows=[bank(1, total=9.99, on=date(2026, 7, 1), status="VOIDED")]),
+        moment=NOW + timedelta(hours=1))
+    with Session(engine) as s, pytest.raises(Exception) as exc:
+        sync().resolve(s, BIZ, a, "hide", xero_row)
+    assert getattr(exc.value, "status_code", None) == 409
+    assert a in {r["id"] for r in rows(engine, archived=False)}

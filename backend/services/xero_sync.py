@@ -71,22 +71,32 @@ def _lock(session, bid: str) -> None:
     caller's transaction. Settings are always locked FIRST (before invoice or
     transaction rows), the order outreach and billing use too."""
     from sqlalchemy.exc import IntegrityError
-    from services import outreach_send as send
     if session.execute(text("SELECT 1 FROM business_settings WHERE business_id = :b"), {"b": bid}).first() is None:
+        # Insert only, never update (Codex review 3: an UPDATE here could blank a
+        # row another writer created and committed in between).
+        expr = "CAST(:s AS jsonb)" if _is_pg(session) else ":s"
+        stamp = datetime.now(timezone.utc).replace(tzinfo=None)
         try:
             with session.begin_nested():
-                _save(session, bid, {})
+                session.execute(text(f"INSERT INTO business_settings (id, business_id, settings, created_at, updated_at) "
+                                     f"SELECT :i, :b, {expr}, :at, :at WHERE NOT EXISTS "
+                                     f"(SELECT 1 FROM business_settings WHERE business_id = :b)"),
+                                {"i": str(uuid.uuid4()), "b": bid, "s": "{}", "at": stamp})
         except IntegrityError:
             pass                            # created at the same moment by another writer
-    try:
-        is_pg = send.pg(session)
-    except Exception:                       # a session without a bind (test stand-ins): the portable form
-        is_pg = False
-    if is_pg:
+    if _is_pg(session):
         session.execute(text("SELECT 1 FROM business_settings WHERE business_id = :b FOR UPDATE"), {"b": bid})
     else:
         session.execute(text("UPDATE business_settings SET business_id = business_id WHERE business_id = :b"),
                         {"b": bid})
+
+
+def _is_pg(session) -> bool:
+    from services import outreach_send as send
+    try:
+        return send.pg(session)
+    except Exception:                       # a session without a bind (test stand-ins): the portable form
+        return False
 
 
 def _update_doc(session, bid: str, change) -> dict:
@@ -501,10 +511,14 @@ def resolve(session, business_id, upload_id, action: str, xero_id: Optional[str]
     if xero_id is None:
         raise ActionRefused(409, "Say which Xero transaction this upload is being compared with.")
     xero_id = str(xero_id)
-    if not session.execute(text("SELECT 1 FROM accounting_transactions WHERE business_id = :b AND id = :i "
-                                "AND external_source = :src AND external_id IS NOT NULL"),
-                           {"b": bid, "i": xero_id, "src": SOURCE}).first():
+    counterpart = session.execute(text("SELECT is_archived FROM accounting_transactions WHERE business_id = :b "
+                                       "AND id = :i AND external_source = :src AND external_id IS NOT NULL"),
+                                  {"b": bid, "i": xero_id, "src": SOURCE}).first()
+    if counterpart is None:
         raise ActionRefused(404, "That Xero transaction wasn't found.")
+    if action == "hide" and counterpart[0]:
+        # Codex review 3: voided or deleted in Xero since the screen loaded.
+        raise ActionRefused(409, "That Xero transaction has been voided or deleted since. Please refresh.")
     pending = any(r["xero"] == xero_id and upload_id in r["uploads"] for r in dups["review"])
     hidden_here = dups["hidden"].get(upload_id) == xero_id
     # Codex review 2: a decision from a stale screen (another tab decided first) is refused.
@@ -588,18 +602,20 @@ def invoices_done(session, business_id, started: datetime) -> None:
                 lambda doc: doc.__setitem__("xero_invoice_sync", {"version": VERSION, "cursor": cursor}))
 
 
-async def lookup_emails(session, business_id, provider, contact_ids) -> dict:
+async def lookup_emails(session, business_id, provider, contact_ids) -> tuple:
     """Emails for contacts not yet known, asked of Xero (network only, no
-    lock). A failed lookup is left out, so it is asked again next time
-    (Codex review 2); a confirmed empty answer is kept as ""."""
+    lock). (found, failed). A failed lookup is left out of `found`, and the
+    caller holds its cursor, so the invoice is fetched and the contact asked
+    again next sync (Codex reviews 2, 3). A confirmed empty answer is kept as ""."""
     known = dict(_doc(session, str(business_id)).get("xero_contact_emails") or {})
-    found = {}
+    found, failed = {}, 0
     for cid in sorted({c for c in contact_ids if c and c not in known}):
         try:
             found[cid] = await provider.get_contact_email_checked(cid) or ""
         except Exception as exc:
+            failed += 1
             logger.warning("Xero contact %s: email lookup failed (%s); asked again next sync", cid, exc)
-    return found
+    return found, failed
 
 
 def remember_emails(session, business_id, found: dict) -> dict:
@@ -613,7 +629,7 @@ def remember_emails(session, business_id, found: dict) -> dict:
 
 async def contact_email(session, business_id, provider, contact_id: str) -> Optional[str]:
     """One contact's email, asked of Xero once ever (a failure is retried)."""
-    found = await lookup_emails(session, business_id, provider, [contact_id])
+    found, _failed = await lookup_emails(session, business_id, provider, [contact_id])
     known = remember_emails(session, business_id, found) if found else \
         dict(_doc(session, str(business_id)).get("xero_contact_emails") or {})
     return known.get(contact_id) or None

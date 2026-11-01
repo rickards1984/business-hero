@@ -605,8 +605,9 @@ async def _xero_transactions(business_id: str, connection_id: str, provider) -> 
             session.rollback()
             return {"skipped": "Xero refused the token; the next run refreshes it"}
         if result["complete"]:
-            for table, where in (("accounting_connections", "id = :c"),
-                                 ("xero_connections", "business_id = :b AND is_active = true")):
+            # the same order as the token refresh writes them (Codex review 3)
+            for table, where in (("xero_connections", "business_id = :b AND is_active = true"),
+                                 ("accounting_connections", "id = :c")):
                 try:
                     with session.begin_nested():
                         session.execute(text(f"UPDATE {table} SET last_sync_at = :t, updated_at = NOW() WHERE {where}"),

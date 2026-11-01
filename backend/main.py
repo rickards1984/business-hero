@@ -1497,7 +1497,9 @@ def preserve_automations(incoming: dict, existing: dict) -> dict:
     client sends."""
     # OUT-15: the outreach setup's privacy notices and approved audiences are
     # written only by the setup wizard, never replaced by this save.
-    protected = lambda k: k == "automations" or k.startswith("outreach_")
+    # ACC-1: the Xero sync's server-owned state (cursors, chart, emails, duplicate decisions) too.
+    protected = lambda k: (k == "automations" or k.startswith("outreach_") or k.startswith("xero_")
+                           or k == "accounting_duplicates")
     out = {k: v for k, v in (incoming or {}).items() if not protected(k)}
     if isinstance(existing, dict):
         out.update({k: v for k, v in existing.items() if protected(k)})
@@ -4323,8 +4325,10 @@ async def sync_xero_invoices(
     # settings writer uses), and each contact is asked of Xero once, ever.
     needing = [(inv.get("Contact") or {}).get("ContactID") for inv in all_invoices
                if not (inv.get("Contact") or {}).get("EmailAddress")]
-    found_emails = await xero_sync.lookup_emails(session, business_id, provider, needing)
+    found_emails, email_failures = await xero_sync.lookup_emails(session, business_id, provider, needing)
     known_emails = xero_sync.remember_emails(session, business_id, found_emails)
+    if email_failures:
+        inv_complete = False                     # hold the cursor: those invoices are fetched again next sync
 
     for xero_inv in all_invoices:
         contact_data = xero_inv.get("Contact", {})
@@ -4473,8 +4477,6 @@ async def sync_all_accounting(
     _, business = user_business
     business_id = str(business.id)
 
-    from datetime import timezone
-
     result = session.execute(
         text("""
             SELECT provider FROM accounting_connections
@@ -4548,7 +4550,6 @@ async def sync_all_accounting(
             _sync_all_logger.warning(f"Provider-agnostic sync failed: {e}")
             txn_result = {"success": False, "error": str(e)}
 
-    sync_time = datetime.now(timezone.utc)
     # ACC-1: the real outcome, never a blanket success (a failed transaction
     # sync looked like "nothing new" before).
     all_ok = bool((txn_result or {}).get("success")) and (inv_result is None or bool(inv_result.get("success", True)))
@@ -4562,7 +4563,7 @@ async def sync_all_accounting(
         "invoices": inv_result,
         # "last synced" means the transactions (the ledger) fully synced: the same
         # moment the worker stamps on the connection (Codex review 2).
-        "synced_at": sync_time.isoformat() if (txn_result or {}).get("complete") else None,
+        "synced_at": (txn_result or {}).get("synced_at") if (txn_result or {}).get("complete") else None,
         "new_transactions": (txn_result or {}).get("new_transactions", 0),
         "updated_transactions": (txn_result or {}).get("updated_transactions", 0),
     }

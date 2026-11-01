@@ -388,7 +388,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
       `Covers ${period} period`,
     ];
     if (xeroStatus?.last_sync_at) {
-      dataQuality.push(`Last synced: ${new Date(xeroStatus.last_sync_at).toLocaleString('en-GB')}`);
+      dataQuality.push(`Transactions last synced: ${new Date(xeroStatus.last_sync_at).toLocaleString('en-GB')}`);
     }
 
     return { summary: summaryText, overview, spending, suggestions, dataQuality, period, dataSource: providerLabel };
@@ -992,7 +992,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                       {xeroSyncing 
                         ? 'Syncing transactions...' 
                         : xeroStatus.last_sync_at 
-                          ? `Last synced: ${new Date(xeroStatus.last_sync_at).toLocaleString()}`
+                          ? `Transactions last synced: ${new Date(xeroStatus.last_sync_at).toLocaleString()}`
                           : 'Not yet synced'
                       }
                       {xeroSyncResult && !xeroSyncing && xeroSyncResult.new_transactions > 0 && (

@@ -178,3 +178,31 @@ Codex confirmed the root cause and the fix, and all eight payment-type direction
   - foreign-currency bank amounts;
   - net settlements mean processor fees aren't shown separately;
   - concurrency is checked by tests that inspect the code, not by a PostgreSQL race test.
+
+## Codex review 3 (`audits/ACC-1-CODEX-REVIEW-3.md`, 0 × P1, 3 × P2) → fixed
+
+**P2 fixes:**
+1. **Creating a missing settings row never overwrites one.**
+   - `_lock` inserts the row only if it is absent (`INSERT … SELECT … WHERE NOT EXISTS`), then locks it and reads it.
+   - It never updates, so another writer's committed settings can't be replaced with `{}`.
+   - The race regression fails on the old code.
+2. **A failed contact-email lookup holds the invoice cursor.**
+   - `lookup_emails` returns `(found, failed)`, and any failure makes the invoice run incomplete.
+   - The marker stays put, so the next sync fetches that invoice again and asks for the email again.
+3. **"Hide" against an archived Xero transaction gets 409.**
+   - A voided Xero row can't swallow an upload from a stale screen.
+   - "Keep", which restores a hidden upload, still works.
+
+**Lower-severity items, also fixed:**
+- Connection stamps are written `xero_connections` first, then `accounting_connections`: the order token refresh uses, so the two can't deadlock.
+- sync-all's `synced_at` is the transaction run's own timestamp, and the Accounting page says "Transactions last synced".
+- The generic settings PUT now preserves the `xero_*` keys and `accounting_duplicates`, as it already did for automations and outreach.
+
+**Tests:** 52 in `test_xero_sync.py`. `./check.sh full` is green (4045 passed).
+
+**Backlog, unchanged:**
+- the scheduled invoice sync's old path;
+- cached emails never expire;
+- foreign-currency amounts;
+- net settlements;
+- no PostgreSQL race test.
