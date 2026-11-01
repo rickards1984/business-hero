@@ -85,3 +85,32 @@ The code shows several faults, any of which can lose data, and together they exp
 - FreeAgent and QuickBooks, which are unchanged.
 
 **Tests first:** `backend/tests/test_xero_sync.py`.
+
+**Mike approved the rules and tests on 1 Nov 2026,** and added a requirement: after the first full sync it must be fast, with no needless calls to Xero or OpenAI.
+
+## Root cause found while building
+
+**From 6 July 2026, no sync from the page ever ran.** That day's security work (commit `a84796f`) added a rate limit to the Xero sync endpoints. `POST /v1/accounting/sync-all`, which the page uses, called those decorated functions without a `request`. slowapi refuses that before any work is done, and sync-all swallowed the error and reported success. Mike's transactions stop on **4 July**.
+- `sync-all` now calls the undecorated functions, passing the request. sync-all is itself rate-limited, so each click counts once.
+- A regression proves the decorated call fails without a request, and that sync-all no longer makes it.
+
+**A second, scheduled path** (`services/background_sync.py`) treated Xero's records as objects of another type, so every Xero row failed silently. It also did its database work on the server's event loop. For Xero it now goes through the same `xero_sync.run`, in a worker thread.
+
+## As built
+
+- **`services/xero_sync.py`:** `run`, `resolve`, `duplicates`, `source_of`, `cached_accounts` and `accounts_from_trial_balance`.
+- **Provider (`providers/xero.py`):** `get_payments` and `get_invoices_by_ids`, both read only.
+- **`main.py`:**
+  - `sync_xero_transactions` keeps its token handling and runs `_xero_sync_work` in a worker thread, with its own session and event loop.
+  - `sync-all` reports `success` from each part's real result, and its invoice sync is also off the event loop.
+- **`accounting.py`:** the list returns `source`; `GET /duplicates` and `POST /duplicates/resolve`.
+- **Screen (`Accounting.tsx`):**
+  - "Checking connection…" while the connection is checked;
+  - honest sync messages: done, partly done, didn't finish, duplicates hidden or to check;
+  - each row's source;
+  - the "Possible duplicates" panel: Review, Hide, Keep, Restore.
+- **Speed:** after the first full run, a sync with nothing new makes **two** Xero requests. The chart of accounts is read at most once a day. The page reads only Business Hero's own data, and the profit and loss figures use the existing 8-hour cache.
+- **Tests:** `test_xero_sync.py` has 32 tests. Ten mutations, one per fix including the root cause, are each caught.
+- **Two test fixtures** for the existing accounting isolation tests gain the live columns, and the expected rows gain `source`.
+
+**After deploy:** the first sync, from the page or the next scheduled run, re-reads everything from Xero. Expect a few minutes; it runs in the background.

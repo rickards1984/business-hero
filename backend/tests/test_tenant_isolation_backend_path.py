@@ -91,7 +91,8 @@ CREATE TABLE accounting_transactions (
     transaction_date DATE, description TEXT, amount NUMERIC, type TEXT,
     reference TEXT, payee_payer TEXT, account TEXT, notes TEXT,
     is_reconciled BOOLEAN DEFAULT 0, is_archived BOOLEAN DEFAULT 0,
-    created_at TIMESTAMP, updated_at TIMESTAMP, import_id TEXT
+    created_at TIMESTAMP, updated_at TIMESTAMP, import_id TEXT,
+    external_id TEXT, external_source TEXT   -- live columns (audits/live-schema-public.txt)
 );
 """
 
@@ -414,6 +415,7 @@ class TestAccountingReadsAreScopedToTheCaller(TenantIsolationCase):
                     "notes": "A-NOTE",
                     "is_reconciled": False,
                     "created_at": stamp.isoformat(),
+                    "source": "manual",   # ACC-1: typed in
                     "category": {
                         "id": self.db.a_category,
                         "name": "A Office Costs",
@@ -432,6 +434,7 @@ class TestAccountingReadsAreScopedToTheCaller(TenantIsolationCase):
                     "notes": "A-NOTE-2",
                     "is_reconciled": False,
                     "created_at": (stamp - timedelta(minutes=1)).isoformat(),
+                    "source": "manual",   # ACC-1: typed in
                     "category": None,
                 },
                 {
@@ -446,6 +449,7 @@ class TestAccountingReadsAreScopedToTheCaller(TenantIsolationCase):
                     "notes": "A-NOTE-3",
                     "is_reconciled": False,
                     "created_at": (stamp - timedelta(minutes=2)).isoformat(),
+                    "source": "manual",   # ACC-1: typed in
                     "category": {
                         "id": self.db.a_income_category,
                         "name": "A Sales",

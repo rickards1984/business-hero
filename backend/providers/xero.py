@@ -108,6 +108,34 @@ class XeroProvider:
         _logger.info(f"Total Xero transactions fetched: {len(all_transactions)} across {page} page(s)")
         return all_transactions
 
+    async def get_payments(self, modified_since: Optional[str] = None, page: int = 1) -> Dict[str, Any]:
+        """ACC-1: payments (bank lines reconciled by matching an invoice or a
+        bill), 100 a page. Read only."""
+        return await self._get_list("Payments", {"page": page, "order": "Date DESC"}, modified_since)
+
+    async def get_invoices_by_ids(self, ids: List[str]) -> List[Dict[str, Any]]:
+        """ACC-1: the given invoices/bills with their lines (for a payment's
+        category). Up to 50 ids a call. Read only."""
+        if not ids:
+            return []
+        data = await self._get_list("Invoices", {"IDs": ",".join(ids)}, None)
+        return data.get("Invoices", [])
+
+    async def _get_list(self, resource: str, params: Dict[str, Any], modified_since: Optional[str]) -> Dict[str, Any]:
+        headers = {**self.headers}
+        if modified_since:
+            headers["If-Modified-Since"] = modified_since
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(f"{XERO_API_BASE}/{resource}", headers=headers, params=params)
+            if resp.status_code == 304:
+                return {resource: []}
+            if resp.status_code in (401, 403):
+                raise XeroAuthError("Xero access token is expired or invalid")
+            if resp.status_code == 429:
+                raise XeroRateLimitError("Xero API rate limit exceeded")
+            resp.raise_for_status()
+            return resp.json()
+
     async def get_accounts(self) -> List[Dict[str, Any]]:
         """Fetch chart of accounts from Xero. Useful for category mapping."""
         url = f"{XERO_API_BASE}/Accounts"

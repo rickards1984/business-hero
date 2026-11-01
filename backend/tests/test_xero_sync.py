@@ -30,8 +30,7 @@ class Missing(AssertionError):
     """Only the intentional absence of the module may be xfailed."""
 
 
-pytestmark = pytest.mark.xfail(strict=True, raises=Missing,
-                               reason="ACC-1: tests first, until Mike approves and the module exists")
+# Mike approved these rules and tests on 1 Nov 2026; the strict-xfail marker is removed.
 
 
 def sync():
@@ -342,3 +341,52 @@ def test_each_listed_transaction_says_where_it_came_from():
     import accounting
     source = inspect.getsource(accounting.list_transactions)
     assert '"source"' in source and "xero_payment" in inspect.getsource(sync())
+
+
+
+def test_sync_all_can_actually_run_the_syncs_it_wraps():
+    """THE ROOT CAUSE (6 July 2026): the rate limiter raises unless called with
+    a request; sync-all called the decorated functions without one, so every
+    sync from the page failed before doing anything, silently."""
+    import asyncio
+    import inspect
+    sync()
+    import main
+    assert hasattr(main.sync_xero_transactions, "__wrapped__") and hasattr(main.sync_xero_invoices, "__wrapped__")
+    with pytest.raises(Exception, match="request"):
+        asyncio.run(main.sync_xero_transactions(user_business=None, session=None))   # what sync-all used to do
+    source = inspect.getsource(main.sync_all_accounting)
+    assert "sync_xero_transactions.__wrapped__(request=request" in source
+    assert "sync_xero_invoices.__wrapped__(request=request" in source
+
+
+# ------------------------------------------------- speed (Mike, 1 Nov 2026) ---
+
+def test_a_routine_sync_after_the_first_asks_xero_twice(engine):
+    """After the first full run, a sync with nothing new is two requests:
+    one page of bank transactions, one of payments. No invoices, nothing else."""
+    run(engine, FakeXero(bank_rows=[bank(i) for i in range(250)], payments=[payment(1)]))
+    quiet = FakeXero()
+    out = run(engine, quiet, moment=NOW + timedelta(hours=4))
+    assert out["complete"] and len(quiet.calls) == 2
+    assert {k for k, _, _ in quiet.calls} == {"bank", "payments"}
+
+
+def test_the_chart_of_accounts_is_read_from_xero_at_most_once_a_day(engine):
+    class Chart:
+        calls = 0
+
+        async def get_trial_balance(self):
+            Chart.calls += 1
+            return {"Reports": [{"Rows": [{"RowType": "Section", "Title": "Revenue", "Rows": [
+                {"Cells": [{"Value": "Sales (200)", "Attributes": [{"Value": "uuid-200"}]}, {"Value": "1"}]}]}]}]}
+    chart = Chart()
+    for hours in (0, 6, 23):
+        with Session(engine) as s:
+            lookup = asyncio.run(sync().cached_accounts(s, BIZ, chart, NOW + timedelta(hours=hours)))
+            s.commit()
+    assert Chart.calls == 1 and lookup["200"] == {"name": "Sales", "type": "income"}
+    with Session(engine) as s:
+        asyncio.run(sync().cached_accounts(s, BIZ, chart, NOW + timedelta(hours=25)))
+        s.commit()
+    assert Chart.calls == 2
