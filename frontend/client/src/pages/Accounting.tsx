@@ -94,7 +94,8 @@ const SOURCE_LABEL: Record<string, string> = { xero: 'From Xero', xero_payment: 
 
 function syncMessage(result: any, provider: string): { message: string; severity: 'success' | 'warning' | 'error' } {
   const t = result?.transactions ?? result;
-  if (result?.success === false || t?.success === false) {
+  const inv = result?.invoices;
+  if (t?.success === false) {
     const why = t?.error || (Array.isArray(t?.errors) && t.errors[0]) || 'Please try again.';
     return { message: `${provider} sync didn't finish: ${why}`, severity: 'error' };
   }
@@ -102,8 +103,12 @@ function syncMessage(result: any, provider: string): { message: string; severity
                  t?.needs_review ? `${t.needs_review} possible duplicate${t.needs_review === 1 ? '' : 's'} to check` : '']
     .filter(Boolean).join(', ');
   const counts = `${result?.new_transactions ?? t?.new ?? 0} new, ${result?.updated_transactions ?? t?.updated ?? 0} updated`;
-  if (t?.complete === false || result?.complete === false) {
-    return { message: `${provider} sync partly done (${counts}); the rest follows on the next sync.${extra ? ' ' + extra + '.' : ''}`, severity: 'warning' };
+  if (inv && inv.success === false) {
+    return { message: `Transactions synced (${counts}), but invoices didn't: ${inv.error || 'please try again.'}`, severity: 'warning' };
+  }
+  if (t?.complete === false || inv?.complete === false) {
+    const why = (Array.isArray(t?.errors) && t.errors[0]) || 'some invoices could not be saved';
+    return { message: `${provider} sync: ${counts}, but not everything came through (${why}).${extra ? ' ' + extra + '.' : ''}`, severity: 'warning' };
   }
   const nothing = !(result?.new_transactions || result?.updated_transactions || t?.new || t?.updated);
   return { message: nothing && !extra ? `Everything is up to date with ${provider}.` : `${provider} sync complete: ${counts}.${extra ? ' ' + extra + '.' : ''}`,

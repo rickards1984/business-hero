@@ -91,6 +91,15 @@ class FakeXero:
         self.invoices = invoices or {"inv-1": {"InvoiceID": "inv-1", "InvoiceNumber": "INV-1",
                                                 "LineItems": [{"AccountCode": "200", "LineAmount": 100}]}}
         self.always_full, self.fail_on, self.calls = always_full, fail_on, []
+        self.accounts = [{"AccountID": "bank-1", "Type": "BANK"}, {"AccountID": "clear-1", "Type": "CURRLIAB"}]
+
+    async def get_accounts(self):
+        self.calls.append(("accounts", None, None))
+        return self.accounts
+
+    async def get_trial_balance(self):
+        self.calls.append(("chart", None, None))
+        return {"Reports": []}
 
     def _page(self, rows, page):
         if self.always_full:
@@ -113,10 +122,11 @@ class FakeXero:
 LOOKUP = {"200": {"name": "Sales", "type": "income"}, "400": {"name": "Advertising", "type": "expense"}}
 
 
-def run(engine, xero, *, moment=NOW, business=BIZ, banks=("bank-1",)):
+def run(engine, xero, *, moment=NOW, business=BIZ, banks=("bank-1",), others=("clear-1",)):
     with Session(engine) as s:
         out = asyncio.run(sync().run(s, business, xero, moment=moment, account_lookup=LOOKUP,
-                                     bank_accounts=None if banks is None else list(banks)))
+                                     bank_accounts=None if banks is None else list(banks),
+                                     other_accounts=None if others is None else list(others)))
         s.commit()
         return out
 
@@ -413,10 +423,11 @@ def test_a_clearing_account_settlement_is_counted_once(engine):
     assert [(r["external_id"], float(r["amount"])) for r in visible] == [("bt-1", 98.0)]
 
 
-def test_without_knowing_the_bank_accounts_no_payment_is_counted_and_the_run_is_incomplete(engine):
-    out = run(engine, FakeXero(payments=[payment(1)]), banks=None)
+def test_a_payment_to_an_account_xero_still_cannot_identify_is_held_back(engine):
+    xero = FakeXero(payments=[payment(1, account="mystery")])
+    out = run(engine, xero)
     assert rows(engine) == [] and out["complete"] is False
-    assert "cursor" not in doc(engine).get("xero_sync", {})
+    assert "cursor" not in doc(engine).get("xero_sync", {}), "tried again next sync, never lost"
 
 
 def test_a_business_without_a_settings_row_gets_one_and_its_cursor(engine):
@@ -531,7 +542,7 @@ def test_a_routine_invoice_sync_is_one_request_and_emails_are_asked_once(engine)
             self.calls.append((modified_since, status, page))
             return {"Invoices": self.invoices[(page - 1) * 100: page * 100]}
 
-        async def get_contact_email(self, contact_id):
+        async def get_contact_email_checked(self, contact_id):
             self.emails += 1
             return "client@example.invalid"
     first = Inv([{"InvoiceID": f"i{n}"} for n in range(150)])
@@ -547,3 +558,82 @@ def test_a_routine_invoice_sync_is_one_request_and_emails_are_asked_once(engine)
     with Session(engine) as s:
         asyncio.run(sync().fetch_invoices(s, BIZ, quiet))
     assert len(quiet.calls) == 1 and quiet.calls[0][0] == "2026-11-01T09:55:00"
+
+
+
+# ------------------------------------------------- Codex review 2 regressions ---
+
+def test_a_payment_into_a_bank_added_today_is_counted(engine):
+    """P1: an account the cached list doesn't know is checked with Xero, never assumed not a bank."""
+    xero = FakeXero(payments=[payment(1, account="bank-2")])
+    xero.accounts.append({"AccountID": "bank-2", "Type": "BANK"})
+    out = run(engine, xero)
+    assert out["complete"] is True and [r["external_id"] for r in rows(engine)] == ["payment:pay-1"]
+    assert "bank-2" in doc(engine)["xero_accounts"]["bank"]
+
+
+def test_credit_card_and_paypal_accounts_count_as_bank(engine):
+    """Xero: Type BANK with BankAccountType CREDITCARD / PAYPAL."""
+    xero = FakeXero(payments=[payment(1, kind="ACCPAYPAYMENT", account="card-1", invoice="bill-9")],
+                    invoices={"bill-9": {"InvoiceID": "bill-9", "LineItems": [{"AccountCode": "400", "LineAmount": 1}]}})
+    xero.accounts.append({"AccountID": "card-1", "Type": "BANK", "BankAccountType": "CREDITCARD"})
+    run(engine, xero, banks=("bank-1",), others=("clear-1",))
+    assert [r["type"] for r in rows(engine)] == ["expense"]
+
+
+def test_a_failed_chart_refresh_is_never_marked_fresh(engine):
+    class Broken:
+        async def get_trial_balance(self):
+            return {"Reports": []}
+
+        async def get_accounts(self):
+            raise RuntimeError("Xero is down")
+    with Session(engine) as s:
+        asyncio.run(sync().cached_chart(s, BIZ, Broken(), NOW))
+        s.commit()
+    assert "at" not in doc(engine).get("xero_accounts", {})
+
+
+def test_a_stale_second_tab_cannot_hide_another_upload_against_the_same_xero_row(engine):
+    """P2: one-to-one holds even when two screens decide."""
+    a = upload(engine, amount=-9.99, kind="expense", on=date(2026, 6, 30))
+    b = upload(engine, amount=-9.99, kind="expense", on=date(2026, 7, 1))
+    run(engine, FakeXero(bank_rows=[bank(1, total=9.99, on=date(2026, 7, 1))]))
+    xero_row = doc(engine)["accounting_duplicates"]["review"][0]["xero"]
+    with Session(engine) as s:
+        sync().resolve(s, BIZ, a, "hide", xero_row)
+        s.commit()
+    with Session(engine) as s, pytest.raises(Exception) as exc:
+        sync().resolve(s, BIZ, b, "hide", xero_row)
+    assert getattr(exc.value, "status_code", None) == 409
+    assert b in {r["id"] for r in rows(engine, archived=False)}
+    with Session(engine) as s, pytest.raises(Exception) as exc:
+        sync().resolve(s, BIZ, b, "keep", "not-a-row")
+    assert getattr(exc.value, "status_code", None) == 404
+
+
+def test_a_failed_email_lookup_is_asked_again(engine):
+    """P2: a 429 is not "no email"."""
+    class Flaky:
+        calls = 0
+
+        async def get_contact_email_checked(self, contact_id):
+            Flaky.calls += 1
+            if Flaky.calls == 1:
+                raise RuntimeError("HTTP 429")
+            return "client@example.invalid"
+    with Session(engine) as s:
+        first = asyncio.run(sync().contact_email(s, BIZ, Flaky(), "c-1"))
+        second = asyncio.run(sync().contact_email(s, BIZ, Flaky(), "c-1"))
+        third = asyncio.run(sync().contact_email(s, BIZ, Flaky(), "c-1"))
+        s.commit()
+    assert (first, second, third) == (None, "client@example.invalid", "client@example.invalid") and Flaky.calls == 2
+
+
+def test_last_synced_means_the_transactions_synced():
+    """P2: one meaning everywhere: the ledger's transactions fully synced."""
+    import inspect
+    sync()
+    import main
+    source = inspect.getsource(main.sync_all_accounting)
+    assert '"synced_at": sync_time.isoformat() if (txn_result or {}).get("complete") else None' in source

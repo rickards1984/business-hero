@@ -125,7 +125,10 @@ Codex confirmed the root cause and the fix, and all eight payment-type direction
 - A payment into any other account is skipped, and any row stored for it earlier is archived. If the bank accounts can't be read, no payment is recorded and the run is incomplete, so the marker holds.
 
 **P2 fixes:**
-1. **Token refresh is serialised across event loops and threads.** The shared lock is now a threading lock, awaited politely. Workers never refresh: they report a refused token, and the server's loop refreshes and retries once. The scheduled job hands its provider, already refreshed on the server's loop, to the worker.
+1. **Token refresh is serialised across event loops and threads.** The shared lock is now a threading lock, awaited politely.
+   - The transaction worker reports a refused token; the server's loop refreshes and retries once.
+   - The scheduled job hands its provider, already refreshed on the server's loop, to the worker, and defers a refused token to its next run.
+   - The invoice sync may still refresh inside its worker, which the thread-safe lock now permits.
 2. **A business with no settings row gets one** with `id`, `created_at` and `updated_at`, as the live table requires.
 3. **A failed row can't poison the next.** Categories created inside a row's savepoint are published to the cache only if it succeeds. Tallies and duplicate changes are applied only on success, and restored on rollback.
 4. **Duplicate decisions are per pair.** A "keep" is remembered for that upload and that Xero row only; the upload can still match another Xero row. Keeping one candidate leaves the others for review. Hiding one settles that Xero row and frees its other candidates. The review list leaves out anything no longer a visible upload.
@@ -142,3 +145,36 @@ Codex confirmed the root cause and the fix, and all eight payment-type direction
   - `IDs` requests carry `page=1`, so Xero returns line items;
   - the run's ceiling message is honest.
 - **Tests:** 42. Eight more mutations, one per fix, are each caught. The per-business lock is checked from the source.
+
+## Codex review 2 (`audits/ACC-1-CODEX-REVIEW-2.md`, 1 × P1, 4 × P2) → fixed
+
+**P1. An account Business Hero doesn't recognise is never assumed not to be a bank.**
+- Accounts are cached by kind: bank (including credit cards and PayPal, which Xero types as BANK) and other.
+- A payment to an account in neither list makes the run read Xero's accounts again, before any writing.
+- If it's still unknown, the payment isn't recorded: the run is incomplete, so the marker holds and it is tried again.
+- A chart refresh that partly failed is never marked fresh.
+
+**P2 fixes:**
+1. **Duplicate decisions are checked under the lock.**
+   - The Xero row must exist.
+   - "Hide" needs the pair to be pending and that Xero row not already matched.
+   - "Keep" needs the pair to be pending or currently hidden.
+   - A decision from a stale screen gets 409.
+2. **Every settings write locks first** (`_update_doc`): the chart, contact emails, cursors and duplicates.
+   - A missing settings row is created, then locked.
+   - Settings are always locked before invoice or transaction rows, the order outreach and billing use too.
+   - Missing contact emails are looked up before the invoice writes begin.
+   - The chart is written and committed before the run's paging, so no settings lock is held across network calls.
+3. **A failed contact lookup is never remembered as "no email";** it is asked again. A confirmed empty answer is kept.
+4. **"Last synced" has one meaning everywhere: the transactions (the ledger) fully synced.** That is what the worker stamps, and what sync-all returns. An invoice failure is reported separately on screen: "Transactions synced, but invoices didn't…".
+- **Also:**
+  - a malformed invoice is reported and skipped, never ending the run;
+  - review groups whose Xero row is archived are left out;
+  - the partial-sync message quotes the real reason.
+- **Tests:** 48. The new mutations are caught, apart from the one-to-one guard, which is redundant behind the pending-pair check; the stale-tab regression covers the scenario.
+- **Backlog:**
+  - the scheduled invoice sync still uses the old path (it writes nothing for Xero, so does no harm);
+  - cached contact emails never expire;
+  - foreign-currency bank amounts;
+  - net settlements mean processor fees aren't shown separately;
+  - concurrency is checked by tests that inspect the code, not by a PostgreSQL race test.

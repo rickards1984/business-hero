@@ -66,9 +66,18 @@ def _save(session, bid: str, doc: dict) -> None:
 
 
 def _lock(session, bid: str) -> None:
-    """One sync or duplicate decision at a time per business (Codex review 1):
-    the settings row, locked for the rest of the caller's transaction."""
+    """One settings writer at a time per business (Codex reviews 1, 2): the
+    settings row, created first if missing, then locked for the rest of the
+    caller's transaction. Settings are always locked FIRST (before invoice or
+    transaction rows), the order outreach and billing use too."""
+    from sqlalchemy.exc import IntegrityError
     from services import outreach_send as send
+    if session.execute(text("SELECT 1 FROM business_settings WHERE business_id = :b"), {"b": bid}).first() is None:
+        try:
+            with session.begin_nested():
+                _save(session, bid, {})
+        except IntegrityError:
+            pass                            # created at the same moment by another writer
     try:
         is_pg = send.pg(session)
     except Exception:                       # a session without a bind (test stand-ins): the portable form
@@ -79,6 +88,14 @@ def _lock(session, bid: str) -> None:
         session.execute(text("UPDATE business_settings SET business_id = business_id WHERE business_id = :b"),
                         {"b": bid})
 
+
+def _update_doc(session, bid: str, change) -> dict:
+    """Lock, read, change, save: the only way this module writes settings."""
+    _lock(session, bid)
+    doc = _doc(session, bid)
+    change(doc)
+    _save(session, bid, doc)
+    return doc
 
 def _dups(doc: dict) -> dict:
     """hidden {upload: xero row}; review [{"xero", "uploads"}]; kept_pairs
@@ -142,30 +159,48 @@ def accounts_from_trial_balance(tb_data) -> dict:
     return lookup
 
 
-async def cached_chart(session, bid: str, provider, moment: datetime) -> dict:
-    """{"lookup": {code: {name, type}}, "bank": [bank account ids] or None},
-    read from Xero at most once a day."""
-    doc = _doc(session, bid)
-    held = doc.get("xero_accounts") or {}
-    at = _parse_moment(held.get("at"))
-    if at is not None and moment - at < ACCOUNTS_FRESH and held.get("lookup") and held.get("bank") is not None:
-        return {"lookup": dict(held["lookup"]), "bank": list(held["bank"])}
+async def fetch_chart(provider) -> dict:
+    """The chart and the account types, from Xero (network only, no lock).
+    ok: both were read, so the result may be called fresh."""
+    out = {"lookup": None, "bank": None, "other": None, "ok": False}
     try:
-        lookup = accounts_from_trial_balance(await provider.get_trial_balance())
+        out["lookup"] = accounts_from_trial_balance(await provider.get_trial_balance())
     except Exception as exc:                # a missing chart only costs categories, never rows
         logger.warning("Xero chart of accounts unavailable: %s", exc)
-        lookup = dict(held.get("lookup") or {})
     try:
-        bank = sorted(str(a.get("AccountID")) for a in (await provider.get_accounts() or [])
-                      if a.get("Type") == "BANK" and a.get("AccountID"))
+        accounts = await provider.get_accounts() or []
+        # Xero: credit cards and PayPal are Type BANK (BankAccountType CREDITCARD / PAYPAL): they count.
+        out["bank"] = sorted(str(a.get("AccountID")) for a in accounts if a.get("Type") == "BANK" and a.get("AccountID"))
+        out["other"] = sorted(str(a.get("AccountID")) for a in accounts if a.get("Type") != "BANK" and a.get("AccountID"))
     except Exception as exc:
-        logger.warning("Xero bank accounts unavailable: %s", exc)
-        bank = held.get("bank")
-    if lookup or bank is not None:
-        doc = _doc(session, bid)
-        doc["xero_accounts"] = {"at": moment.isoformat(), "lookup": lookup, "bank": bank}
-        _save(session, bid, doc)
-    return {"lookup": lookup, "bank": bank}
+        logger.warning("Xero accounts unavailable: %s", exc)
+    out["ok"] = out["lookup"] is not None and out["bank"] is not None
+    return out
+
+
+def store_chart(session, bid: str, fetched: dict, moment: datetime) -> dict:
+    """Keep what was read; mark it fresh only if all of it was (Codex review 2)."""
+    def change(doc):
+        held = dict(doc.get("xero_accounts") or {})
+        for key in ("lookup", "bank", "other"):
+            if fetched.get(key) is not None:
+                held[key] = fetched[key]
+        if fetched.get("ok"):
+            held["at"] = moment.isoformat()
+        doc["xero_accounts"] = held
+    return dict(_update_doc(session, bid, change).get("xero_accounts") or {})
+
+
+async def cached_chart(session, bid: str, provider, moment: datetime, *, force: bool = False) -> dict:
+    """{"lookup", "bank", "other"}, read from Xero at most once a day (or now,
+    when forced). The caller commits soon after: the write locks settings."""
+    held = dict(_doc(session, bid).get("xero_accounts") or {})
+    at = _parse_moment(held.get("at"))
+    if (not force and at is not None and moment - at < ACCOUNTS_FRESH and held.get("lookup") is not None
+            and held.get("bank") is not None and held.get("other") is not None):
+        return {"lookup": dict(held["lookup"]), "bank": list(held["bank"]), "other": list(held["other"])}
+    held = store_chart(session, bid, await fetch_chart(provider), moment)
+    return {"lookup": dict(held.get("lookup") or {}), "bank": held.get("bank"), "other": held.get("other")}
 
 
 async def cached_accounts(session, bid: str, provider, moment: datetime) -> dict:
@@ -331,7 +366,7 @@ def _hide(session, bid: str, upload_id: str, xero_id: Optional[str], dups: dict,
 # ------------------------------------------------------------------ run ---
 
 async def run(session, business_id, provider, *, moment: datetime, account_lookup: Optional[dict] = None,
-              bank_accounts: Optional[list] = None) -> dict:
+              bank_accounts: Optional[list] = None, other_accounts: Optional[list] = None) -> dict:
     """One sync. The caller commits. Fetching happens first, with no lock;
     then, under the business's lock, every row in its own savepoint. The
     marker moves only when nothing was missed.
@@ -355,10 +390,21 @@ async def run(session, business_id, provider, *, moment: datetime, account_looku
         out["errors"].append(f"Xero has more than {MAX_PAGES * PAGE:,} changed records for one sync, so it "
                              "can't finish. Please contact support.")
         return out
-    if payments and bank_accounts is None:
-        out["errors"].append("Xero's bank accounts couldn't be read, so payments weren't recorded this time.")
-        payments = []
-    banks = set(bank_accounts or [])
+    banks, others = set(bank_accounts or []), set(other_accounts or [])
+    fresh_chart = None
+    accounts_of = {str((p.get("Account") or {}).get("AccountID")) for p in payments if p.get("Status") not in GONE}
+    if accounts_of - banks - others:
+        # An account the cached list doesn't know (a bank added today?): read the
+        # accounts again now, before deciding (Codex review 2), never assume.
+        fresh_chart = await fetch_chart(provider)
+        if fresh_chart.get("bank") is not None:
+            banks, others = set(fresh_chart["bank"]), set(fresh_chart["other"] or [])
+    unknown = accounts_of - banks - others
+    if unknown:
+        held_back = [p for p in payments if str((p.get("Account") or {}).get("AccountID")) in unknown]
+        payments = [p for p in payments if p not in held_back]
+        out["errors"].append(f"{len(held_back)} Xero payment(s) went to an account Business Hero couldn't identify; "
+                             "they weren't recorded and will be tried again on the next sync.")
     wanted = sorted({str((p.get("Invoice") or {}).get("InvoiceID")) for p in payments
                      if p.get("Status") not in GONE and (p.get("Invoice") or {}).get("InvoiceID")
                      and str((p.get("Account") or {}).get("AccountID")) in banks})
@@ -368,6 +414,8 @@ async def run(session, business_id, provider, *, moment: datetime, account_looku
             invoice_codes[str(inv.get("InvoiceID"))] = _largest_code(inv.get("LineItems"))
 
     _lock(session, bid)                       # from here, one writer per business
+    if fresh_chart is not None:
+        store_chart(session, bid, fresh_chart, moment)
     dups = _dups(_doc(session, bid))
     cache: dict = {}
     work = [("bank", t) for t in bank] + [("payment", p) for p in payments]
@@ -450,8 +498,23 @@ def resolve(session, business_id, upload_id, action: str, xero_id: Optional[str]
     groups = [r for r in dups["review"] if upload_id in r["uploads"]]
     if xero_id is None:
         xero_id = dups["hidden"].get(upload_id) or (groups[0]["xero"] if len(groups) == 1 else None)
-    if xero_id is None and action == "hide":
-        raise ActionRefused(409, "Say which Xero transaction this upload duplicates.")
+    if xero_id is None:
+        raise ActionRefused(409, "Say which Xero transaction this upload is being compared with.")
+    xero_id = str(xero_id)
+    if not session.execute(text("SELECT 1 FROM accounting_transactions WHERE business_id = :b AND id = :i "
+                                "AND external_source = :src AND external_id IS NOT NULL"),
+                           {"b": bid, "i": xero_id, "src": SOURCE}).first():
+        raise ActionRefused(404, "That Xero transaction wasn't found.")
+    pending = any(r["xero"] == xero_id and upload_id in r["uploads"] for r in dups["review"])
+    hidden_here = dups["hidden"].get(upload_id) == xero_id
+    # Codex review 2: a decision from a stale screen (another tab decided first) is refused.
+    if action == "hide":
+        if not pending:
+            raise ActionRefused(409, "This pair was already decided. Please refresh.")
+        if xero_id in dups["hidden"].values():
+            raise ActionRefused(409, "That Xero transaction already has its uploaded copy hidden. Please refresh.")
+    elif not (pending or hidden_here):
+        raise ActionRefused(409, "This pair was already decided. Please refresh.")
     now_ = datetime.now(timezone.utc)
     if action == "hide":
         _hide(session, bid, upload_id, xero_id, dups, now_)
@@ -494,7 +557,7 @@ def duplicates(session, business_id) -> dict:
     review = []
     for r in dups["review"]:
         uploads = [rows[u] for u in r.get("uploads", []) if u in rows and not rows[u]["archived"]]
-        if uploads and r.get("xero") in rows:
+        if uploads and r.get("xero") in rows and not rows[r["xero"]]["archived"]:
             review.append({"xero": rows[r["xero"]], "uploads": uploads})
     return {"review": review,
             "hidden": [{"upload": rows.get(u), "xero": rows.get(x)} for u, x in dups["hidden"].items() if u in rows]}
@@ -520,25 +583,37 @@ async def fetch_invoices(session, business_id, provider) -> tuple:
 
 def invoices_done(session, business_id, started: datetime) -> None:
     """Move the invoice cursor: only after a complete invoice sync."""
-    bid = str(business_id)
-    doc = _doc(session, bid)
-    doc["xero_invoice_sync"] = {"version": VERSION, "cursor": (started - CURSOR_MARGIN).astimezone(timezone.utc)
-                                .strftime("%Y-%m-%dT%H:%M:%S")}
-    _save(session, bid, doc)
+    cursor = (started - CURSOR_MARGIN).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    _update_doc(session, str(business_id),
+                lambda doc: doc.__setitem__("xero_invoice_sync", {"version": VERSION, "cursor": cursor}))
+
+
+async def lookup_emails(session, business_id, provider, contact_ids) -> dict:
+    """Emails for contacts not yet known, asked of Xero (network only, no
+    lock). A failed lookup is left out, so it is asked again next time
+    (Codex review 2); a confirmed empty answer is kept as ""."""
+    known = dict(_doc(session, str(business_id)).get("xero_contact_emails") or {})
+    found = {}
+    for cid in sorted({c for c in contact_ids if c and c not in known}):
+        try:
+            found[cid] = await provider.get_contact_email_checked(cid) or ""
+        except Exception as exc:
+            logger.warning("Xero contact %s: email lookup failed (%s); asked again next sync", cid, exc)
+    return found
+
+
+def remember_emails(session, business_id, found: dict) -> dict:
+    """Keep looked-up emails (locks settings). Returns every known email."""
+    def change(doc):
+        known = dict(doc.get("xero_contact_emails") or {})
+        known.update(found)
+        doc["xero_contact_emails"] = known
+    return dict(_update_doc(session, str(business_id), change).get("xero_contact_emails") or {})
 
 
 async def contact_email(session, business_id, provider, contact_id: str) -> Optional[str]:
-    """A contact's email, asked of Xero once ever per contact (an empty answer
-    is remembered too)."""
-    bid = str(business_id)
-    doc = _doc(session, bid)
-    known = dict(doc.get("xero_contact_emails") or {})
-    if contact_id in known:
-        return known[contact_id] or None
-    email = await provider.get_contact_email(contact_id)
-    doc = _doc(session, bid)
-    known = dict(doc.get("xero_contact_emails") or {})
-    known[contact_id] = email or ""
-    doc["xero_contact_emails"] = known
-    _save(session, bid, doc)
-    return email or None
+    """One contact's email, asked of Xero once ever (a failure is retried)."""
+    found = await lookup_emails(session, business_id, provider, [contact_id])
+    known = remember_emails(session, business_id, found) if found else \
+        dict(_doc(session, str(business_id)).get("xero_contact_emails") or {})
+    return known.get(contact_id) or None

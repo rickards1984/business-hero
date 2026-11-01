@@ -4201,8 +4201,9 @@ async def _xero_sync_work(business_id, connection_id, tenant_id, access_token, s
         provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
         try:
             chart = await xero_sync.cached_chart(s, business_id, provider, started)
+            s.commit()                     # the chart write locked settings: never held across the run's paging
             result = await xero_sync.run(s, business_id, provider, moment=started, account_lookup=chart["lookup"],
-                                         bank_accounts=chart["bank"])
+                                         bank_accounts=chart["bank"], other_accounts=chart["other"])
         except XeroAuthError:
             s.rollback()
             return {"auth_failed": True}
@@ -4317,6 +4318,14 @@ async def sync_xero_invoices(
     skipped_count = 0
     failed_invoices = 0
 
+    # ACC-1: missing customer emails are looked up FIRST (network, no lock),
+    # then settings are locked before any invoice row (the order every
+    # settings writer uses), and each contact is asked of Xero once, ever.
+    needing = [(inv.get("Contact") or {}).get("ContactID") for inv in all_invoices
+               if not (inv.get("Contact") or {}).get("EmailAddress")]
+    found_emails = await xero_sync.lookup_emails(session, business_id, provider, needing)
+    known_emails = xero_sync.remember_emails(session, business_id, found_emails)
+
     for xero_inv in all_invoices:
         contact_data = xero_inv.get("Contact", {})
         _inv_sync_logger.info(
@@ -4326,7 +4335,12 @@ async def sync_xero_invoices(
             f"Email={contact_data.get('EmailAddress')}}}"
         )
 
-        mapped = map_xero_invoice_to_business_hero(xero_inv)
+        try:
+            mapped = map_xero_invoice_to_business_hero(xero_inv)
+        except Exception as e:                   # a malformed invoice is reported, never the end of the run
+            _inv_sync_logger.warning(f"Could not read Xero invoice {xero_inv.get('InvoiceNumber')}: {e}")
+            failed_invoices += 1
+            continue
 
         if mapped["invoice_type"] != "ACCREC":
             skipped_count += 1
@@ -4351,17 +4365,7 @@ async def sync_xero_invoices(
             continue
 
         if not mapped.get("customer_email") and contact_data.get("ContactID"):
-            try:
-                contact_email = await xero_sync.contact_email(session, business_id, provider,
-                                                              contact_data["ContactID"])   # asked once per contact
-                if contact_email:
-                    mapped["customer_email"] = contact_email
-                    _inv_sync_logger.info(
-                        f"Fetched email {contact_email} from Contacts API "
-                        f"for {xero_inv.get('InvoiceNumber')}"
-                    )
-            except Exception as e:
-                _inv_sync_logger.warning(f"Contact email lookup failed: {e}")
+            mapped["customer_email"] = known_emails.get(contact_data["ContactID"]) or None
 
         # ACC-1: each invoice in its own savepoint, so one bad row never fails the rest.
         savepoint = session.begin_nested()
@@ -4556,7 +4560,9 @@ async def sync_all_accounting(
         "complete": complete,
         "transactions": txn_result,
         "invoices": inv_result,
-        "synced_at": sync_time.isoformat() if complete else None,
+        # "last synced" means the transactions (the ledger) fully synced: the same
+        # moment the worker stamps on the connection (Codex review 2).
+        "synced_at": sync_time.isoformat() if (txn_result or {}).get("complete") else None,
         "new_transactions": (txn_result or {}).get("new_transactions", 0),
         "updated_transactions": (txn_result or {}).get("updated_transactions", 0),
     }

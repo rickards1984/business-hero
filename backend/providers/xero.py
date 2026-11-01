@@ -158,6 +158,21 @@ class XeroProvider:
             resp.raise_for_status()
             return resp.json().get("Contacts", [])
 
+    async def get_contact_email_checked(self, contact_id: str) -> Optional[str]:
+        """ACC-1: a contact's email, or None when Xero confirms there is none.
+        Any failed request RAISES (so a temporary failure is never remembered
+        as "no email")."""
+        url = f"{XERO_API_BASE}/Contacts/{contact_id}"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=self.headers)
+            if resp.status_code in (401, 403):
+                raise XeroAuthError("Xero access token is expired or invalid")
+            if resp.status_code == 429:
+                raise XeroRateLimitError("Xero API rate limit exceeded")
+            resp.raise_for_status()
+            contacts = resp.json().get("Contacts", [])
+            return (contacts[0].get("EmailAddress") or None) if contacts else None
+
     async def get_contact_email(self, contact_id: str) -> Optional[str]:
         """Fetch a single contact's email address from the Contacts API."""
         url = f"{XERO_API_BASE}/Contacts/{contact_id}"

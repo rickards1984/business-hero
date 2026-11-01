@@ -597,8 +597,10 @@ async def _xero_transactions(business_id: str, connection_id: str, provider) -> 
     with get_session_context() as session:
         try:
             chart = await xero_sync.cached_chart(session, business_id, provider, started)
+            session.commit()               # no settings lock held across the run's paging
             result = await xero_sync.run(session, business_id, provider, moment=started,
-                                         account_lookup=chart["lookup"], bank_accounts=chart["bank"])
+                                         account_lookup=chart["lookup"], bank_accounts=chart["bank"],
+                                         other_accounts=chart["other"])
         except XeroAuthError:
             session.rollback()
             return {"skipped": "Xero refused the token; the next run refreshes it"}
