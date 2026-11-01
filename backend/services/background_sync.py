@@ -328,65 +328,76 @@ async def _sync_financial_for_connection(conn: dict):
             modified_since = last_sync.isoformat() if last_sync and hasattr(last_sync, "isoformat") else None
 
             # Sync transactions
-            try:
-                txns = await provider.get_all_bank_transactions(modified_since=modified_since)
-                for txn in txns:
-                    try:
-                        cat_name = getattr(txn, "provider_category_name", None) or txn.category
-                        category_id = None
-                        if cat_name and not str(cat_name).strip().isdigit():
-                            existing = session.execute(
-                                text("SELECT id FROM accounting_categories WHERE business_id = :bid AND LOWER(name) = LOWER(:name)"),
-                                {"bid": bid, "name": cat_name},
-                            ).fetchone()
-                            category_id = str(existing[0]) if existing else None
-
-                        session.execute(
-                            text("""
-                                INSERT INTO accounting_transactions
-                                    (business_id, transaction_date, description, amount, type,
-                                     reference, payee_payer, external_id, external_source, category_id)
-                                VALUES
-                                    (:bid, :txn_date, :desc, :amt, :type,
-                                     :ref, :payee, :eid, :esrc, :category_id)
-                                ON CONFLICT (business_id, external_source, external_id)
-                                WHERE external_id IS NOT NULL
-                                DO UPDATE SET
-                                    description = EXCLUDED.description,
-                                    amount = EXCLUDED.amount,
-                                    type = EXCLUDED.type,
-                                    reference = EXCLUDED.reference,
-                                    payee_payer = EXCLUDED.payee_payer,
-                                    category_id = COALESCE(EXCLUDED.category_id, accounting_transactions.category_id),
-                                    updated_at = NOW()
-                            """),
-                            {
-                                "bid": bid,
-                                "txn_date": txn.date,
-                                "desc": txn.description,
-                                "amt": txn.amount,
-                                "type": txn.transaction_type,
-                                "ref": txn.reference,
-                                "payee": txn.contact_name,
-                                "eid": txn.external_id,
-                                "esrc": provider_name,
-                                "category_id": category_id,
-                            },
-                        )
-                        session.commit()
-                    except Exception as e:
-                        logger.debug(f"[BackgroundSync] Failed to upsert transaction: {e}")
-                        try:
-                            session.rollback()
-                        except Exception:
-                            pass
-                logger.info(f"[BackgroundSync] Synced {len(txns)} transactions for {tenant_name}")
-            except Exception as e:
-                logger.warning(f"[BackgroundSync] Transaction sync failed for {tenant_name}: {e}")
+            if provider_name == "xero":
+                # ACC-1: Xero goes through the one sync (services/xero_sync.py), in
+                # a worker thread so the server's event loop is never held. This
+                # path used to treat Xero's dicts as Transaction objects, so every
+                # row failed silently.
+                import asyncio as _asyncio
+                # The provider (and any token refresh) was obtained on this loop; the
+                # worker only uses it (the refresh lock belongs to this loop).
+                result = await _asyncio.to_thread(lambda: _asyncio.run(_xero_transactions(bid, conn_id, provider)))
+                logger.info(f"[BackgroundSync] Xero transactions for {tenant_name}: {result}")
+            else:
                 try:
-                    session.rollback()
-                except Exception:
-                    pass
+                    txns = await provider.get_all_bank_transactions(modified_since=modified_since)
+                    for txn in txns:
+                        try:
+                            cat_name = getattr(txn, "provider_category_name", None) or txn.category
+                            category_id = None
+                            if cat_name and not str(cat_name).strip().isdigit():
+                                existing = session.execute(
+                                    text("SELECT id FROM accounting_categories WHERE business_id = :bid AND LOWER(name) = LOWER(:name)"),
+                                    {"bid": bid, "name": cat_name},
+                                ).fetchone()
+                                category_id = str(existing[0]) if existing else None
+
+                            session.execute(
+                                text("""
+                                    INSERT INTO accounting_transactions
+                                        (business_id, transaction_date, description, amount, type,
+                                         reference, payee_payer, external_id, external_source, category_id)
+                                    VALUES
+                                        (:bid, :txn_date, :desc, :amt, :type,
+                                         :ref, :payee, :eid, :esrc, :category_id)
+                                    ON CONFLICT (business_id, external_source, external_id)
+                                    WHERE external_id IS NOT NULL
+                                    DO UPDATE SET
+                                        description = EXCLUDED.description,
+                                        amount = EXCLUDED.amount,
+                                        type = EXCLUDED.type,
+                                        reference = EXCLUDED.reference,
+                                        payee_payer = EXCLUDED.payee_payer,
+                                        category_id = COALESCE(EXCLUDED.category_id, accounting_transactions.category_id),
+                                        updated_at = NOW()
+                                """),
+                                {
+                                    "bid": bid,
+                                    "txn_date": txn.date,
+                                    "desc": txn.description,
+                                    "amt": txn.amount,
+                                    "type": txn.transaction_type,
+                                    "ref": txn.reference,
+                                    "payee": txn.contact_name,
+                                    "eid": txn.external_id,
+                                    "esrc": provider_name,
+                                    "category_id": category_id,
+                                },
+                            )
+                            session.commit()
+                        except Exception as e:
+                            logger.debug(f"[BackgroundSync] Failed to upsert transaction: {e}")
+                            try:
+                                session.rollback()
+                            except Exception:
+                                pass
+                    logger.info(f"[BackgroundSync] Synced {len(txns)} transactions for {tenant_name}")
+                except Exception as e:
+                    logger.warning(f"[BackgroundSync] Transaction sync failed for {tenant_name}: {e}")
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
 
             # Sync invoices
             try:
@@ -459,13 +470,17 @@ async def _sync_financial_for_connection(conn: dict):
                 except Exception:
                     pass
 
-            # Update last_sync_at
+            # Update last_sync_at (Xero: the worker stamps it, only when complete)
             try:
+                if provider_name == "xero":
+                    raise _AlreadyStamped()
                 session.execute(
                     text("UPDATE accounting_connections SET last_sync_at = NOW() WHERE id = :cid"),
                     {"cid": conn_id},
                 )
                 session.commit()
+            except _AlreadyStamped:
+                pass
             except Exception as e:
                 logger.debug(f"[BackgroundSync] Failed to update last_sync_at: {e}")
                 try:
@@ -565,3 +580,39 @@ async def _refresh_financial_summary_cache(session, business_id: str, provider, 
     )
     session.commit()
     logger.info(f"[BackgroundSync] Financial summary cached for business {business_id}")
+
+
+class _AlreadyStamped(Exception):
+    pass
+
+
+async def _xero_transactions(business_id: str, connection_id: str, provider) -> dict:
+    """ACC-1: the scheduled Xero transaction sync, in its own worker thread,
+    session and event loop, through the one sync (services/xero_sync.py)."""
+    from datetime import datetime, timezone
+    from db import get_session_context
+    from providers.xero import XeroAuthError
+    from services import xero_sync
+    started = datetime.now(timezone.utc)
+    with get_session_context() as session:
+        try:
+            chart = await xero_sync.cached_chart(session, business_id, provider, started)
+            session.commit()               # no settings lock held across the run's paging
+            result = await xero_sync.run(session, business_id, provider, moment=started,
+                                         account_lookup=chart["lookup"], bank_accounts=chart["bank"],
+                                         other_accounts=chart["other"])
+        except XeroAuthError:
+            session.rollback()
+            return {"skipped": "Xero refused the token; the next run refreshes it"}
+        if result["complete"]:
+            # the same order as the token refresh writes them (Codex review 3)
+            for table, where in (("xero_connections", "business_id = :b AND is_active = true"),
+                                 ("accounting_connections", "id = :c")):
+                try:
+                    with session.begin_nested():
+                        session.execute(text(f"UPDATE {table} SET last_sync_at = :t, updated_at = NOW() WHERE {where}"),
+                                        {"t": started, "c": connection_id, "b": business_id})
+                except Exception as exc:
+                    logger.warning(f"[BackgroundSync] Could not stamp {table}.last_sync_at: {exc}")
+        session.commit()
+        return result

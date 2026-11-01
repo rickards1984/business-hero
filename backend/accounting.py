@@ -225,6 +225,7 @@ async def list_transactions(
     # page param takes precedence; fall back to explicit offset for backwards compat
     effective_offset = (page - 1) * limit if offset is None else offset
 
+    from services.xero_sync import source_of
     from sqlalchemy import text
 
     query = """
@@ -232,7 +233,8 @@ async def list_transactions(
             t.id, t.transaction_date, t.description, t.amount, t.type,
             t.reference, t.payee_payer, t.account, t.notes,
             t.is_reconciled, t.created_at,
-            c.id as category_id, c.name as category_name, c.color as category_color
+            c.id as category_id, c.name as category_name, c.color as category_color,
+            t.external_source, t.external_id, t.import_id
         FROM accounting_transactions t
         LEFT JOIN accounting_categories c
                ON t.category_id = c.id AND c.business_id = t.business_id
@@ -288,6 +290,8 @@ async def list_transactions(
                 "notes": row[8],
                 "is_reconciled": row[9],
                 "created_at": row[10].isoformat() if row[10] else None,
+                # ACC-1: where it came from (Xero, a Xero payment, an upload, typed in).
+                "source": source_of(row[14], row[15], row[16]),
                 "category": {
                     "id": str(row[11]),
                     "name": row[12],
@@ -1304,3 +1308,41 @@ async def _detect_column_mapping(headers: List[str], sample_rows: List[List[str]
             break
     
     return mapping
+
+
+
+# ============== ACC-1: possible duplicates (Mike, 1 Nov 2026) ==============
+
+class DuplicateDecision(BaseModel):
+    # Optional so the plan gate answers first (a refused business never sees a 422).
+    upload_id: Optional[str] = None
+    action: Optional[str] = None
+    xero_id: Optional[str] = None     # the Xero row the decision is about (decisions are per pair)
+
+
+@router.get("/duplicates")
+async def list_duplicates(user_business=Depends(get_current_user_and_business), session: Session = Depends(get_session)):
+    """Uploads hidden because Xero has the same transaction, and pairs left for the owner."""
+    _, business = user_business
+    assert_feature_access(business, "accounting")
+    from services import xero_sync
+    return xero_sync.duplicates(session, business.id)
+
+
+@router.post("/duplicates/resolve")
+async def resolve_duplicate(body: DuplicateDecision, user_business=Depends(get_current_user_and_business),
+                            session: Session = Depends(get_session)):
+    """Hide an uploaded transaction as a duplicate, or keep it (never hidden again)."""
+    _, business = user_business
+    assert_feature_access(business, "accounting")
+    from services import xero_sync
+    from services.aria_actions import ActionRefused
+    if not body.upload_id or body.action not in ("hide", "keep"):
+        raise HTTPException(status_code=422, detail="Give the uploaded transaction and hide or keep.")
+    try:
+        out = xero_sync.resolve(session, business.id, body.upload_id, body.action, body.xero_id)
+        session.commit()
+        return out
+    except ActionRefused as exc:
+        session.rollback()
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None

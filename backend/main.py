@@ -96,7 +96,7 @@ from accounting import router as accounting_router
 from realtime_voice import router as realtime_voice_router
 from dependencies import get_current_user_business, get_current_user_and_business
 from providers.xero import (
-    XeroProvider, get_tenant_connections, map_xero_transaction_to_business_hero,
+    XeroProvider, get_tenant_connections,
     map_xero_invoice_to_business_hero, XeroAuthError,
 )
 from providers.xero_oauth import get_xero_auth_url, exchange_code_for_tokens
@@ -1500,7 +1500,9 @@ def preserve_automations(incoming: dict, existing: dict) -> dict:
     client sends."""
     # OUT-15: the outreach setup's privacy notices and approved audiences are
     # written only by the setup wizard, never replaced by this save.
-    protected = lambda k: k == "automations" or k.startswith("outreach_")
+    # ACC-1: the Xero sync's server-owned state (cursors, chart, emails, duplicate decisions) too.
+    protected = lambda k: (k == "automations" or k.startswith("outreach_") or k.startswith("xero_")
+                           or k == "accounting_duplicates")
     out = {k: v for k, v in (incoming or {}).items() if not protected(k)}
     if isinstance(existing, dict):
         out.update({k: v for k, v in existing.items() if protected(k)})
@@ -4126,7 +4128,6 @@ async def sync_xero_transactions(
     tenant_name = row[2]
     token_ciphertext = row[3]
     token_expires_at = row[5]
-    last_sync_at = row[6]
 
     # 2. Get valid access token (refresh if expired)
     try:
@@ -4164,275 +4165,64 @@ async def sync_xero_transactions(
     except Exception:
         pass
 
-    account_lookup = {}
-    provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
+    # ACC-1: the sync runs in a worker thread with its own session and event
+    # loop, so this server stays free for every other request (the page's
+    # connection check waited minutes behind a sync before). Everything comes
+    # in (bank transactions and payments, no page cap), each row once; the
+    # marker moves only when nothing was missed (services/xero_sync.py).
+    import asyncio as _asyncio
+    started = datetime.now(timezone.utc)
 
-    # Build account lookup from Trial Balance report (uses accounting.reports.read scope)
-    try:
-        tb_data = await provider.get_trial_balance()
-        if tb_data and "Reports" in tb_data:
-            for report in tb_data["Reports"]:
-                for row in report.get("Rows", []):
-                    if row.get("RowType") == "Section":
-                        section_title = row.get("Title", "")
-                        is_income = section_title.lower() in ("revenue", "income", "other income", "other revenue")
-                        for sub_row in row.get("Rows", []):
-                            cells = sub_row.get("Cells", [])
-                            if len(cells) >= 2:
-                                account_name = cells[0].get("Value", "")
-                                attrs = cells[0].get("Attributes", [])
-                                account_code = attrs[0].get("Value", "") if attrs else ""
-                                if account_code and account_name:
-                                    import re as _re
-                                    # Attributes[0].Value is the Account ID (UUID),
-                                    # but the real numeric AccountCode is in the name: "Sales (200)"
-                                    code_match = _re.search(r'\((\d+)\)\s*$', account_name)
-                                    if code_match:
-                                        real_code = code_match.group(1)
-                                        clean_name = _re.sub(r'\s*\(\d+\)\s*$', '', account_name).strip()
-                                        account_lookup[real_code] = {
-                                            "name": clean_name,
-                                            "type": "income" if is_income else "expense",
-                                        }
-                                    # Also store by UUID as fallback
-                                    account_lookup[account_code] = {
-                                        "name": account_name,
-                                        "type": "income" if is_income else "expense",
-                                    }
-        _sync_logger.info(f"Built account lookup from Trial Balance: {len(account_lookup)} accounts")
-        if account_lookup:
-            _sync_logger.info(f"[XeroSync] Account lookup codes: {list(account_lookup.keys())}")
-            _sync_logger.info(f"[XeroSync] Account lookup sample: {dict(list(account_lookup.items())[:3])}")
-    except Exception as tb_err:
-        _sync_logger.warning(f"Could not fetch Trial Balance for account lookup: {tb_err}")
+    def _work():   # reads access_token when called, so a retry uses the refreshed one
+        return _asyncio.run(_xero_sync_work(business_id, connection_id, tenant_id, access_token, started))
 
-    # Fetch transactions
-    try:
-        modified_since = None
-        if last_sync_at:
-            if last_sync_at.tzinfo is None:
-                last_sync_at = last_sync_at.replace(tzinfo=timezone.utc)
-            modified_since = last_sync_at.strftime("%Y-%m-%dT%H:%M:%S")
+    result = await _asyncio.to_thread(_work)
+    if result.get("auth_failed"):
+        # Refresh on this (the server's) event loop, where the shared refresh
+        # lock lives, then retry once in a worker (Codex review 1).
+        new_access, _ = await _refresh_xero_token_and_retry(session, connection_id, tenant_id, business_id, _sync_logger)
+        if not new_access:
+            raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
+        access_token = new_access
+        result = await _asyncio.to_thread(_work)
+        if result.get("auth_failed"):
+            raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
+    _sync_logger.info(f"Xero sync for {tenant_name}: {result}")
+    # success: the sync ran (it may still be partial); complete: nothing was missed.
+    return {"success": True, "tenant_name": tenant_name, **result,
+            "new_transactions": result["new"], "updated_transactions": result["updated"],
+            "synced_at": started.isoformat() if result["complete"] else None}
 
-        xero_transactions = await provider.get_all_bank_transactions(modified_since=modified_since)
-        _sync_logger.info(f"Fetched {len(xero_transactions)} transactions from Xero for {tenant_name}")
 
-    except (XeroAuthError, Exception) as e:
-        is_auth_error = isinstance(e, XeroAuthError) or any(
-            s in str(e) for s in ("401", "403", "Forbidden", "Unauthorized")
-        )
-        if is_auth_error:
-            _sync_logger.warning("Xero auth error during transaction fetch, attempting token refresh and retry")
-            new_token, new_provider = await _refresh_xero_token_and_retry(
-                session, connection_id, tenant_id, business_id, _sync_logger
-            )
-            if new_provider:
-                if not account_lookup:
-                    try:
-                        tb_data = await new_provider.get_trial_balance()
-                        if tb_data and "Reports" in tb_data:
-                            for report in tb_data["Reports"]:
-                                for row in report.get("Rows", []):
-                                    if row.get("RowType") == "Section":
-                                        section_title = row.get("Title", "")
-                                        is_income = section_title.lower() in ("revenue", "income", "other income", "other revenue")
-                                        for sub_row in row.get("Rows", []):
-                                            cells = sub_row.get("Cells", [])
-                                            if len(cells) >= 2:
-                                                account_name = cells[0].get("Value", "")
-                                                attrs = cells[0].get("Attributes", [])
-                                                account_code = attrs[0].get("Value", "") if attrs else ""
-                                                if account_code and account_name:
-                                                    import re as _re
-                                                    code_match = _re.search(r'\((\d+)\)\s*$', account_name)
-                                                    if code_match:
-                                                        real_code = code_match.group(1)
-                                                        clean_name = _re.sub(r'\s*\(\d+\)\s*$', '', account_name).strip()
-                                                        account_lookup[real_code] = {
-                                                            "name": clean_name,
-                                                            "type": "income" if is_income else "expense",
-                                                        }
-                                                    account_lookup[account_code] = {
-                                                        "name": account_name,
-                                                        "type": "income" if is_income else "expense",
-                                                    }
-                    except Exception:
-                        pass
-                xero_transactions = await new_provider.get_all_bank_transactions(modified_since=modified_since)
-                _sync_logger.info(f"Retry succeeded: fetched {len(xero_transactions)} transactions")
-            else:
-                _reset_xero_sync_cursor(session, business_id, connection_id, _sync_logger)
-                raise HTTPException(status_code=401, detail="Xero authentication failed. Please reconnect Xero.")
-        else:
-            _sync_logger.error(f"Failed to fetch Xero transactions: {e}")
-            raise HTTPException(status_code=502, detail=f"Failed to fetch transactions from Xero: {str(e)}")
-
-    # 4. Map and upsert transactions (with category resolution)
-    new_count = 0
-    updated_count = 0
-    skipped_count = 0
-    errors = []
-    category_cache = {}
-
-    for xero_txn in xero_transactions:
+async def _xero_sync_work(business_id, connection_id, tenant_id, access_token, started):
+    """In the worker thread: its own session and provider. A refused token is
+    reported back (never refreshed here: the refresh lock belongs to the
+    server's loop). last_sync_at moves only when the run was complete."""
+    import logging
+    from db import engine as _engine
+    from services import xero_sync
+    log = logging.getLogger("xero_sync")
+    with Session(_engine) as s:
+        provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
         try:
-            mapped = map_xero_transaction_to_business_hero(xero_txn, account_lookup=account_lookup)
-
-            if mapped is None:
-                skipped_count += 1
-                continue
-
-            # Diagnostic: log first 5 transactions to trace category pipeline
-            if len(errors) == 0 and (new_count + updated_count + skipped_count) < 5:
-                _sync_logger.info(
-                    f"[XeroSync] Transaction sample: "
-                    f"external_id={mapped.get('external_id', '')[:8]}, "
-                    f"category_code={mapped.get('provider_category_code')}, "
-                    f"category_name={mapped.get('provider_category_name')}, "
-                    f"raw_line_items={xero_txn.get('LineItems', [{}])[0].get('AccountCode', 'NO_CODE') if xero_txn.get('LineItems') else 'NO_LINEITEMS'}"
-                )
-
-            # Resolve category_id from provider category name
-            category_id = None
-            cat_name = mapped.get("provider_category_name")
-            if cat_name and not cat_name.strip().isdigit():
-                if cat_name in category_cache:
-                    category_id = category_cache[cat_name]
-                else:
-                    existing = session.execute(
-                        text("""
-                            SELECT id FROM accounting_categories
-                            WHERE business_id = :business_id AND LOWER(name) = LOWER(:name)
-                        """),
-                        {"business_id": business_id, "name": cat_name},
-                    ).fetchone()
-                    if existing:
-                        category_id = str(existing[0])
-                    else:
-                        cat_type = mapped.get("provider_category_type") or (
-                            "income" if mapped["type"] == "income" else "expense"
-                        )
-                        new_cat = session.execute(
-                            text("""
-                                INSERT INTO accounting_categories
-                                    (business_id, name, type, color, created_at, updated_at)
-                                VALUES
-                                    (:business_id, :name, :cat_type, '#6B7280', NOW(), NOW())
-                                RETURNING id
-                            """),
-                            {"business_id": business_id, "name": cat_name, "cat_type": cat_type},
-                        ).fetchone()
-                        category_id = str(new_cat[0]) if new_cat else None
-                    category_cache[cat_name] = category_id
-
-            # Log category_id for first 5 transactions
-            if len(errors) == 0 and (new_count + updated_count + skipped_count) < 5:
-                _sync_logger.info(f"[XeroSync] → category_id={category_id}")
-
-            result = session.execute(
-                text("""
-                    INSERT INTO accounting_transactions 
-                        (business_id, transaction_date, description, amount, type, 
-                         reference, payee_payer, external_id, external_source, category_id)
-                    VALUES 
-                        (:business_id, :transaction_date, :description, :amount, :type,
-                         :reference, :payee_payer, :external_id, :external_source, :category_id)
-                    ON CONFLICT (business_id, external_source, external_id) 
-                    WHERE external_id IS NOT NULL
-                    DO UPDATE SET
-                        description = EXCLUDED.description,
-                        amount = EXCLUDED.amount,
-                        type = EXCLUDED.type,
-                        reference = EXCLUDED.reference,
-                        payee_payer = EXCLUDED.payee_payer,
-                        category_id = COALESCE(EXCLUDED.category_id, accounting_transactions.category_id),
-                        updated_at = NOW()
-                    RETURNING xmax
-                """),
-                {
-                    "business_id": business_id,
-                    "transaction_date": mapped["transaction_date"],
-                    "description": mapped["description"],
-                    "amount": mapped["amount"],
-                    "type": mapped["type"],
-                    "reference": mapped.get("reference"),
-                    "payee_payer": mapped.get("payee_payer"),
-                    "external_id": mapped["external_id"],
-                    "external_source": mapped["external_source"],
-                    "category_id": category_id,
-                }
-            )
-            
-            # xmax = 0 means INSERT, xmax > 0 means UPDATE
-            row = result.fetchone()
-            if row and row[0] == 0:
-                new_count += 1
-            else:
-                updated_count += 1
-
-        except Exception as e:
-            error_msg = f"Failed to import transaction {xero_txn.get('BankTransactionID', 'unknown')}: {str(e)}"
-            _sync_logger.warning(error_msg)
-            errors.append(error_msg)
-            if len(errors) >= 10:
-                break
-
-    # 5. Update last_sync_at
-    sync_time = datetime.now(timezone.utc)
-    session.execute(
-        text("""
-            UPDATE xero_connections 
-            SET last_sync_at = :sync_time, sync_cursor = :cursor, updated_at = NOW()
-            WHERE id = :conn_id
-        """),
-        {
-            "sync_time": sync_time,
-            "cursor": sync_time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "conn_id": connection_id,
-        }
-    )
-    session.commit()
-
-    # Dual-write sync timestamp to accounting_connections
-    try:
-        session.execute(
-            text("""
-                UPDATE accounting_connections
-                SET last_sync_at = :sync_time,
-                    sync_cursor = :cursor,
-                    updated_at = NOW()
-                WHERE business_id = :business_id AND provider = 'xero'
-            """),
-            {
-                "sync_time": sync_time,
-                "cursor": sync_time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "business_id": business_id,
-            },
-        )
-        session.commit()
-    except Exception:
-        pass
-
-    categorized_count = sum(1 for v in category_cache.values() if v is not None)
-    _sync_logger.info(
-        f"[XeroSync] Category stats: {len(category_cache)} unique categories resolved, "
-        f"cache contents: {category_cache}"
-    )
-    _sync_logger.info(
-        f"Xero sync complete for {tenant_name}: "
-        f"{new_count} new, {updated_count} updated, {skipped_count} skipped, {len(errors)} errors, "
-        f"{categorized_count} categories"
-    )
-
-    return {
-        "success": True,
-        "tenant_name": tenant_name,
-        "new_transactions": new_count,
-        "updated_transactions": updated_count,
-        "skipped": skipped_count,
-        "errors": errors[:5],
-        "synced_at": sync_time.isoformat(),
-    }
+            chart = await xero_sync.cached_chart(s, business_id, provider, started)
+            s.commit()                     # the chart write locked settings: never held across the run's paging
+            result = await xero_sync.run(s, business_id, provider, moment=started, account_lookup=chart["lookup"],
+                                         bank_accounts=chart["bank"], other_accounts=chart["other"])
+        except XeroAuthError:
+            s.rollback()
+            return {"auth_failed": True}
+        if result["complete"]:
+            for table, where in (("xero_connections", "id = :conn"), ("accounting_connections",
+                                                                     "business_id = :b AND provider = 'xero'")):
+                try:
+                    with s.begin_nested():
+                        s.execute(text(f"UPDATE {table} SET last_sync_at = :t, updated_at = NOW() WHERE {where}"),
+                                  {"t": started, "conn": connection_id, "b": business_id})
+                except Exception as exc:
+                    log.warning(f"Could not stamp {table}.last_sync_at: {exc}")
+        s.commit()
+        return result
 
 
 @app.post("/v1/invoices/xero/sync", tags=["Invoices"])
@@ -4500,15 +4290,14 @@ async def sync_xero_invoices(
         _reset_xero_sync_cursor(session, business_id, connection_id, _inv_sync_logger)
         raise HTTPException(status_code=401, detail=f"Xero authentication failed: {str(e)}")
 
+    # ACC-1: incremental (only invoices changed since the last complete sync),
+    # one paged stream with no silent cap, voided/deleted included.
+    from services import xero_sync
+    inv_started = datetime.now(timezone.utc)
     try:
         provider = XeroProvider(access_token=access_token, tenant_id=tenant_id)
-        outstanding = await provider.get_all_invoices(statuses="AUTHORISED,SUBMITTED")
-        paid = await provider.get_all_invoices(statuses="PAID")
-        all_invoices = outstanding + paid
-        _inv_sync_logger.info(
-            f"Fetched {len(outstanding)} outstanding + {len(paid)} paid invoices "
-            f"from Xero for {tenant_name}"
-        )
+        all_invoices, inv_complete = await xero_sync.fetch_invoices(session, business_id, provider)
+        _inv_sync_logger.info(f"Fetched {len(all_invoices)} changed invoices from Xero for {tenant_name}")
     except (XeroAuthError, Exception) as e:
         is_auth_error = isinstance(e, XeroAuthError) or any(
             s in str(e) for s in ("401", "403", "Forbidden", "Unauthorized")
@@ -4519,9 +4308,8 @@ async def sync_xero_invoices(
                 session, connection_id, tenant_id, business_id, _inv_sync_logger
             )
             if new_provider:
-                outstanding = await new_provider.get_all_invoices(statuses="AUTHORISED,SUBMITTED")
-                paid = await new_provider.get_all_invoices(statuses="PAID")
-                all_invoices = outstanding + paid
+                provider = new_provider
+                all_invoices, inv_complete = await xero_sync.fetch_invoices(session, business_id, provider)
                 _inv_sync_logger.info(f"Retry succeeded: fetched {len(all_invoices)} invoices")
             else:
                 _reset_xero_sync_cursor(session, business_id, connection_id, _inv_sync_logger)
@@ -4533,6 +4321,17 @@ async def sync_xero_invoices(
     new_count = 0
     updated_count = 0
     skipped_count = 0
+    failed_invoices = 0
+
+    # ACC-1: missing customer emails are looked up FIRST (network, no lock),
+    # then settings are locked before any invoice row (the order every
+    # settings writer uses), and each contact is asked of Xero once, ever.
+    needing = [(inv.get("Contact") or {}).get("ContactID") for inv in all_invoices
+               if not (inv.get("Contact") or {}).get("EmailAddress")]
+    found_emails, email_failures = await xero_sync.lookup_emails(session, business_id, provider, needing)
+    known_emails = xero_sync.remember_emails(session, business_id, found_emails)
+    if email_failures:
+        inv_complete = False                     # hold the cursor: those invoices are fetched again next sync
 
     for xero_inv in all_invoices:
         contact_data = xero_inv.get("Contact", {})
@@ -4543,9 +4342,28 @@ async def sync_xero_invoices(
             f"Email={contact_data.get('EmailAddress')}}}"
         )
 
-        mapped = map_xero_invoice_to_business_hero(xero_inv)
+        try:
+            mapped = map_xero_invoice_to_business_hero(xero_inv)
+        except Exception as e:                   # a malformed invoice is reported, never the end of the run
+            _inv_sync_logger.warning(f"Could not read Xero invoice {xero_inv.get('InvoiceNumber')}: {e}")
+            failed_invoices += 1
+            continue
 
         if mapped["invoice_type"] != "ACCREC":
+            skipped_count += 1
+            continue
+
+        if xero_inv.get("Status") in ("VOIDED", "DELETED"):
+            # ACC-1: voided or deleted in Xero: never chased or counted here again.
+            try:
+                with session.begin_nested():
+                    session.execute(text("UPDATE invoices SET archived = true, status = :st, updated_at = NOW() "
+                                         "WHERE business_id = :b AND external_source = 'xero' AND external_id = :e"),
+                                    {"st": str(xero_inv.get("Status")).lower(), "b": business_id,
+                                     "e": xero_inv.get("InvoiceID")})
+            except Exception as e:
+                _inv_sync_logger.warning(f"Could not archive voided invoice {xero_inv.get('InvoiceNumber')}: {e}")
+                failed_invoices += 1
             skipped_count += 1
             continue
 
@@ -4554,17 +4372,10 @@ async def sync_xero_invoices(
             continue
 
         if not mapped.get("customer_email") and contact_data.get("ContactID"):
-            try:
-                contact_email = await provider.get_contact_email(contact_data["ContactID"])
-                if contact_email:
-                    mapped["customer_email"] = contact_email
-                    _inv_sync_logger.info(
-                        f"Fetched email {contact_email} from Contacts API "
-                        f"for {xero_inv.get('InvoiceNumber')}"
-                    )
-            except Exception as e:
-                _inv_sync_logger.warning(f"Contact email lookup failed: {e}")
+            mapped["customer_email"] = known_emails.get(contact_data["ContactID"]) or None
 
+        # ACC-1: each invoice in its own savepoint, so one bad row never fails the rest.
+        savepoint = session.begin_nested()
         try:
             upsert_result = session.execute(
                 text("""
@@ -4618,15 +4429,20 @@ async def sync_xero_invoices(
             )
 
             row = upsert_result.fetchone()
+            savepoint.commit()
             if row and row[0] == 0:
                 new_count += 1
             else:
                 updated_count += 1
 
         except Exception as e:
+            savepoint.rollback()
             _inv_sync_logger.warning(f"Failed to upsert invoice {mapped.get('invoice_number')}: {e}")
             skipped_count += 1
+            failed_invoices += 1
 
+    if inv_complete and not failed_invoices:
+        xero_sync.invoices_done(session, business_id, inv_started)   # the cursor moves only when nothing was missed
     session.commit()
 
     _inv_sync_logger.info(
@@ -4636,6 +4452,7 @@ async def sync_xero_invoices(
 
     return {
         "success": True,
+        "complete": bool(inv_complete and not failed_invoices),
         "new_invoices": new_count,
         "updated_invoices": updated_count,
         "skipped": skipped_count,
@@ -4662,8 +4479,6 @@ async def sync_all_accounting(
 
     _, business = user_business
     business_id = str(business.id)
-
-    from datetime import timezone
 
     result = session.execute(
         text("""
@@ -4698,7 +4513,12 @@ async def sync_all_accounting(
 
     if provider_name == "xero" or xero_connected:
         try:
-            txn_result = await sync_xero_transactions(user_business=user_business, session=session)
+            # ACC-1 ROOT CAUSE: since the rate limit was added (6 July 2026) these
+            # calls had no `request`, so slowapi raised before any work and the
+            # error was swallowed: no transaction arrived after 4 July. The
+            # undecorated functions are called (sync-all is itself limited).
+            txn_result = await sync_xero_transactions.__wrapped__(request=request, user_business=user_business,
+                                                                  session=session)
         except HTTPException as e:
             _sync_all_logger.warning(f"Transaction sync failed: {e.detail}")
             txn_result = {"success": False, "error": e.detail}
@@ -4707,7 +4527,14 @@ async def sync_all_accounting(
             txn_result = {"success": False, "error": str(e)}
 
         try:
-            inv_result = await sync_xero_invoices(user_business=user_business, session=session)
+            # ACC-1: off the event loop too (the invoice sync does blocking work).
+            import asyncio as _asyncio
+            def _invoices():   # its own session: never the request's, from another thread
+                from db import engine as _engine
+                with Session(_engine) as inv_session:
+                    return _asyncio.run(sync_xero_invoices.__wrapped__(request=request, user_business=user_business,
+                                                                        session=inv_session))
+            inv_result = await _asyncio.to_thread(_invoices)
         except HTTPException as e:
             _sync_all_logger.warning(f"Invoice sync failed: {e.detail}")
             inv_result = {"success": False, "error": e.detail}
@@ -4726,12 +4553,20 @@ async def sync_all_accounting(
             _sync_all_logger.warning(f"Provider-agnostic sync failed: {e}")
             txn_result = {"success": False, "error": str(e)}
 
-    sync_time = datetime.now(timezone.utc)
+    # ACC-1: the real outcome, never a blanket success (a failed transaction
+    # sync looked like "nothing new" before).
+    all_ok = bool((txn_result or {}).get("success")) and (inv_result is None or bool(inv_result.get("success", True)))
+    # complete: nothing was missed by either part; only then is "last synced" moved.
+    complete = all_ok and (txn_result or {}).get("complete") is not False \
+        and (inv_result is None or inv_result.get("complete") is not False)
     return {
-        "success": True,
+        "success": all_ok,
+        "complete": complete,
         "transactions": txn_result,
         "invoices": inv_result,
-        "synced_at": sync_time.isoformat(),
+        # "last synced" means the transactions (the ledger) fully synced: the same
+        # moment the worker stamps on the connection (Codex review 2).
+        "synced_at": (txn_result or {}).get("synced_at") if (txn_result or {}).get("complete") else None,
         "new_transactions": (txn_result or {}).get("new_transactions", 0),
         "updated_transactions": (txn_result or {}).get("updated_transactions", 0),
     }

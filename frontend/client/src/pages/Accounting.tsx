@@ -89,6 +89,32 @@ interface Category {
   is_default: boolean;
 }
 
+// ACC-1: where each transaction came from, and an honest sync message.
+const SOURCE_LABEL: Record<string, string> = { xero: 'From Xero', xero_payment: 'From Xero (payment)', upload: 'Uploaded', manual: 'Typed in' };
+
+function syncMessage(result: any, provider: string): { message: string; severity: 'success' | 'warning' | 'error' } {
+  const t = result?.transactions ?? result;
+  const inv = result?.invoices;
+  if (t?.success === false) {
+    const why = t?.error || (Array.isArray(t?.errors) && t.errors[0]) || 'Please try again.';
+    return { message: `${provider} sync didn't finish: ${why}`, severity: 'error' };
+  }
+  const extra = [t?.duplicates_hidden ? `${t.duplicates_hidden} uploaded duplicate${t.duplicates_hidden === 1 ? '' : 's'} hidden` : '',
+                 t?.needs_review ? `${t.needs_review} possible duplicate${t.needs_review === 1 ? '' : 's'} to check` : '']
+    .filter(Boolean).join(', ');
+  const counts = `${result?.new_transactions ?? t?.new ?? 0} new, ${result?.updated_transactions ?? t?.updated ?? 0} updated`;
+  if (inv && inv.success === false) {
+    return { message: `Transactions synced (${counts}), but invoices didn't: ${inv.error || 'please try again.'}`, severity: 'warning' };
+  }
+  if (t?.complete === false || inv?.complete === false) {
+    const why = (Array.isArray(t?.errors) && t.errors[0]) || 'some invoices could not be saved';
+    return { message: `${provider} sync: ${counts}, but not everything came through (${why}).${extra ? ' ' + extra + '.' : ''}`, severity: 'warning' };
+  }
+  const nothing = !(result?.new_transactions || result?.updated_transactions || t?.new || t?.updated);
+  return { message: nothing && !extra ? `Everything is up to date with ${provider}.` : `${provider} sync complete: ${counts}.${extra ? ' ' + extra + '.' : ''}`,
+           severity: 'success' };
+}
+
 interface Transaction {
   id: string;
   transaction_date: string;
@@ -100,6 +126,7 @@ interface Transaction {
   account?: string;
   notes?: string;
   is_reconciled: boolean;
+  source?: 'xero' | 'xero_payment' | 'upload' | 'manual' | string;   // ACC-1: where it came from
   category?: {
     id: string;
     name: string;
@@ -196,6 +223,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
     connected_at?: string;
   } | null>(null);
   const [xeroSyncing, setXeroSyncing] = useState(false);
+  const [dupRefresh, setDupRefresh] = useState(0);   // ACC-1: bumps after each sync to reload the duplicates panel
   const [xeroSyncResult, setXeroSyncResult] = useState<{
     new_transactions: number;
     updated_transactions: number;
@@ -209,7 +237,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
   const [snackbar, setSnackbar] = useState<{
     open: boolean;
     message: string;
-    severity: 'success' | 'error' | 'info';
+    severity: 'success' | 'error' | 'info' | 'warning';
   }>({ open: false, message: '', severity: 'info' });
   const [financialSummary, setFinancialSummary] = useState<{
     bank_accounts: Array<{ name: string; balance: number; account_id?: string }>;
@@ -360,7 +388,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
       `Covers ${period} period`,
     ];
     if (xeroStatus?.last_sync_at) {
-      dataQuality.push(`Last synced: ${new Date(xeroStatus.last_sync_at).toLocaleString('en-GB')}`);
+      dataQuality.push(`Transactions last synced: ${new Date(xeroStatus.last_sync_at).toLocaleString('en-GB')}`);
     }
 
     return { summary: summaryText, overview, spending, suggestions, dataQuality, period, dataSource: providerLabel };
@@ -577,18 +605,16 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
           setXeroSyncResult(result);
           localStorage.setItem(SYNC_KEY, new Date().toISOString());
 
-          setXeroStatus(prev => prev ? { ...prev, last_sync_at: result.synced_at } : prev);
+          if (result.synced_at) setXeroStatus(prev => prev ? { ...prev, last_sync_at: result.synced_at } : prev);
+          setDupRefresh(n => n + 1);
           fetchFinancialSummary();
 
-          if (result.new_transactions > 0 || result.updated_transactions > 0) {
-            setSnackbar({
-              open: true,
-              message: `${providerLabel} sync complete: ${result.new_transactions} new, ${result.updated_transactions} updated transactions.`,
-              severity: 'success',
-            });
-            fetchTransactions();
-            fetchSummary();
+          const said = syncMessage(result, providerLabel);
+          if (said.severity !== 'success' || result.new_transactions > 0 || result.updated_transactions > 0) {
+            setSnackbar({ open: true, ...said });   // ACC-1: a failed background sync is never silent
           }
+          fetchTransactions();
+          fetchSummary();
         } else if (response.status === 401) {
           setXeroStatus({ connected: false });
           setAccountingProvider(null);
@@ -703,25 +729,17 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
         const result = await response.json();
         setXeroSyncResult(result);
 
-        setXeroStatus(prev => prev ? {
-          ...prev,
-          last_sync_at: result.synced_at,
-        } : prev);
+        if (result.synced_at) {   // ACC-1: only a complete sync moves "last synced"
+          setXeroStatus(prev => prev ? { ...prev, last_sync_at: result.synced_at } : prev);
+        }
+        setDupRefresh(n => n + 1);
 
         fetchFinancialSummary();
 
-        setSnackbar({
-          open: true,
-          message: result.new_transactions > 0 || result.updated_transactions > 0
-            ? `${providerLabel} sync complete: ${result.new_transactions} new, ${result.updated_transactions} updated transactions.`
-            : `Everything is up to date with ${providerLabel}.`,
-          severity: 'success',
-        });
-
-        if (result.new_transactions > 0 || result.updated_transactions > 0) {
-          fetchTransactions();
-          fetchSummary();
-        }
+        // ACC-1: every outcome said plainly, including a failed or partial sync.
+        setSnackbar({ open: true, ...syncMessage(result, providerLabel) });
+        fetchTransactions();
+        fetchSummary();
       } else {
         const errorData = await response.json().catch(() => ({}));
         setSnackbar({
@@ -974,7 +992,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
                       {xeroSyncing 
                         ? 'Syncing transactions...' 
                         : xeroStatus.last_sync_at 
-                          ? `Last synced: ${new Date(xeroStatus.last_sync_at).toLocaleString()}`
+                          ? `Transactions last synced: ${new Date(xeroStatus.last_sync_at).toLocaleString()}`
                           : 'Not yet synced'
                       }
                       {xeroSyncResult && !xeroSyncing && xeroSyncResult.new_transactions > 0 && (
@@ -1288,7 +1306,9 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
             alignItems: 'center',
             gap: 6,
           }}>
-            {(xeroStatus?.connected || !!accountingProvider) ? (
+            {xeroLoading && !xeroStatus ? (
+              <>Checking connection…</>
+            ) : (xeroStatus?.connected || !!accountingProvider) ? (
               <>
                 <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#2dd48c', flexShrink: 0 }} />
                 Synced with {accountingProvider === 'freeagent' ? 'FreeAgent' : accountingProvider === 'quickbooks' ? 'QuickBooks' : 'Xero'}
@@ -1511,7 +1531,8 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
             selectedCategory={selectedCategory}
             setSelectedCategory={setSelectedCategory}
             onDelete={handleDeleteTransaction}
-            onRefresh={fetchTransactions}
+            onRefresh={() => { fetchTransactions(); fetchSummary(); }}   // totals too (ACC-1)
+            dupRefreshKey={dupRefresh}
             currentPage={currentPage}
             totalPages={totalPages}
             totalTransactions={totalTransactions}
@@ -1885,6 +1906,7 @@ interface TransactionsTabProps {
   setSelectedCategory: (id: string) => void;
   onDelete: (id: string) => void;
   onRefresh: () => void;
+  dupRefreshKey?: number;
   currentPage: number;
   totalPages: number;
   totalTransactions: number;
@@ -1893,7 +1915,50 @@ interface TransactionsTabProps {
   setPerPage: (size: number) => void;
 }
 
+// ACC-1 (Mike, 1 Nov 2026): uploads hidden because Xero has the same
+// transaction, and possible duplicates left for the owner to decide.
+interface DupRow { id: string; date: string; description: string; amount: number; type: string; archived: boolean }
+function DuplicatesPanel({ onChanged, refreshKey }: { onChanged: () => void; refreshKey?: number }) {
+  const [data, setData] = useState<{ review: { xero: DupRow | null; uploads: DupRow[] }[]; hidden: { upload: DupRow | null; xero: DupRow | null }[] } | null>(null);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    apiRequest('GET', '/v1/accounting/duplicates').then(r => r.json()).then(setData).catch(() => setData(null));
+  }, []);
+  useEffect(() => { load(); }, [load, refreshKey]);   // ACC-1: reloads after every sync
+  if (!data || (data.review.length === 0 && data.hidden.length === 0)) return null;
+  const gbp = (n: number) => `£${Math.abs(n).toLocaleString('en-GB', { minimumFractionDigits: 2 })}`;
+  const line = (r: DupRow | null) => r ? `${new Date(r.date).toLocaleDateString('en-GB')} · ${r.description} · ${r.type === 'income' ? '+' : '-'}${gbp(r.amount)}` : '(no longer present)';
+  async function decide(id: string, action: 'hide' | 'keep', xeroId?: string) {
+    setBusy(true);
+    try { await apiRequest('POST', '/v1/accounting/duplicates/resolve', { upload_id: id, action, xero_id: xeroId }); load(); onChanged(); }
+    finally { setBusy(false); }
+  }
+  return (
+    <Alert severity={data.review.length ? 'warning' : 'info'} sx={{ mb: 2 }}
+      action={<Button size="small" onClick={() => setOpen(o => !o)}>{open ? 'Close' : 'Review'}</Button>}>
+      {data.review.length > 0 && `${data.review.length} possible duplicate${data.review.length === 1 ? '' : 's'} between Xero and your uploads need a decision. `}
+      {data.hidden.length > 0 && `${data.hidden.length} uploaded transaction${data.hidden.length === 1 ? '' : 's'} hidden because Xero has the same one.`}
+      {open && <Box sx={{ mt: 1 }}>
+        {data.review.map((r, i) => <Box key={i} sx={{ mb: 1.5 }}>
+          <Typography variant="body2"><strong>Xero:</strong> {line(r.xero)}</Typography>
+          {r.uploads.map(u => <Box key={u.id} sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Typography variant="body2">Uploaded: {line(u)}</Typography>
+            <Button size="small" disabled={busy} onClick={() => decide(u.id, 'hide', r.xero?.id)}>Hide (duplicate)</Button>
+            <Button size="small" disabled={busy} onClick={() => decide(u.id, 'keep', r.xero?.id)}>Keep (different)</Button>
+          </Box>)}
+        </Box>)}
+        {data.hidden.map(h => h.upload && <Box key={h.upload.id} sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+          <Typography variant="body2">Hidden upload: {line(h.upload)} — same as Xero: {line(h.xero)}</Typography>
+          <Button size="small" disabled={busy} onClick={() => decide(h.upload!.id, 'keep', h.xero?.id)}>Restore</Button>
+        </Box>)}
+      </Box>}
+    </Alert>
+  );
+}
+
 const TransactionsTab: React.FC<TransactionsTabProps> = ({
+  dupRefreshKey,
   transactions,
   categories,
   transactionType,
@@ -1987,6 +2052,7 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
 
   return (
     <Box>
+      <DuplicatesPanel onChanged={onRefresh} refreshKey={dupRefreshKey} />
       {/* Filters */}
       <Card sx={{ mb: 3, p: 2 }}>
         <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -2184,6 +2250,8 @@ const TransactionsTab: React.FC<TransactionsTabProps> = ({
                   </TableCell>
                   <TableCell>
                     {transaction.payee_payer || '—'}
+                    {transaction.source && <Typography variant="caption" color="text.secondary" component="div">
+                      {SOURCE_LABEL[transaction.source] || transaction.source}</Typography>}
                   </TableCell>
                   <TableCell align="right">
                     <Typography
