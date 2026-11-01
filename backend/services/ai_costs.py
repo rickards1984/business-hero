@@ -71,6 +71,11 @@ class Unpriced(Exception):
     """A model with no known price: refused before any spend."""
 
 
+
+def now() -> datetime:
+    """The clock (one per module, so a test can pin it)."""
+    return datetime.now(timezone.utc)
+
 def _valid(value) -> Optional[tuple]:
     if not isinstance(value, (list, tuple)) or len(value) not in (3, 6):
         return None
@@ -213,7 +218,7 @@ def record(session, business_id, *, purpose: str, provider: str, model: str, bra
     The platform ledger lock is taken after any business lock the caller holds
     and is followed only by this function's own meter-row writes, so no
     business lock is ever requested while holding it."""
-    moment = moment or datetime.now(timezone.utc)
+    moment = moment or now()
     amount = float(pence) if pence is not None else cost(provider, model, input_tokens, output_tokens, tool_calls)
     period = period_for(moment)
     platform = business_id is None or str(business_id) == PLATFORM
@@ -260,7 +265,7 @@ def allowed(session, *, moment: Optional[datetime] = None, purpose: Optional[str
     AI_MONTHLY_KILL_PENCE, or (PROFIT-1) once this month's running costs reach
     the kill threshold of income, for non-essential purposes. A purpose not
     given counts as non-essential (fail closed)."""
-    moment = moment or datetime.now(timezone.utc)
+    moment = moment or now()
     from services import profit_guard
     if purpose in profit_guard.ESSENTIAL:
         return True   # live calls, reply sorting, unsubscribes, the owner's chat: never stopped (PROFIT-1)

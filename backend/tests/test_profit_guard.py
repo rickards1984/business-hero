@@ -321,6 +321,9 @@ def killed(engine, monkeypatch):
     business(engine, "a", "business")
     ai_spend(engine, "a", 21600)
     monkeypatch.setattr(g, "_engine", lambda: engine)
+    from services import ai_costs                    # the spend's own month, whatever the real date
+    monkeypatch.setattr(g, "now", lambda: NOW)
+    monkeypatch.setattr(ai_costs, "now", lambda: NOW)
     return g
 
 
@@ -476,7 +479,9 @@ def test_voice_overage_minutes_count(engine):
 def test_briefings_and_meetings_also_obey_the_absolute_limit(engine, monkeypatch):
     """P1 5: permits() is ai_costs.allowed: the absolute limit and the guard."""
     g = guard()
+    from services import ai_costs
     monkeypatch.setattr(g, "_engine", lambda: engine)
+    monkeypatch.setattr(ai_costs, "now", lambda: NOW)    # the spend's own month, whatever the real date
     monkeypatch.setenv("AI_MONTHLY_KILL_PENCE", "100")
     ai_spend(engine, "a", 150)
     assert g.permits("briefing") is False and g.permits("meeting") is False and g.permits("classify") is True
