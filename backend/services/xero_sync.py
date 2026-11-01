@@ -16,6 +16,7 @@ State in the business settings document (no migration):
                          "review": [{"xero": row_id, "uploads": [ids]}],
                          "kept": [upload_id, ...]}
 """
+import asyncio
 import logging
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -130,11 +131,42 @@ def source_of(external_source, external_id, import_id) -> str:
 
 # ------------------------------------------------------------- fetching ---
 
+# Xero allows 60 calls a minute per organisation. The first full sync makes
+# more than that in a burst (pages of bank transactions and payments, then
+# invoices 50 at a time), and a refusal used to sink the whole run, so every
+# retry re-read everything and was refused again (ACC-1b). Wait out the minute
+# and carry on; a limit that outlasts a few minutes (the daily one) stops it.
+RATE_WAIT_SECONDS = 61
+RATE_TRIES = 5
+_pause = asyncio.sleep
+
+
+def rate_limited(exc: BaseException) -> bool:
+    """Xero's 429, in either form (some provider calls raise httpx's own error)."""
+    from providers.xero import XeroRateLimitError
+    return isinstance(exc, XeroRateLimitError) or \
+        getattr(getattr(exc, "response", None), "status_code", None) == 429
+
+
+async def _xero(call, *args, **kwargs):
+    """One Xero call, waiting out the per-minute rate limit. A limit still in
+    force after RATE_TRIES re-raises, and callers that otherwise tolerate a
+    failed call let it through: the run stops before writing (Codex ACC-1b)."""
+    for attempt in range(1, RATE_TRIES + 1):
+        try:
+            return await call(*args, **kwargs)
+        except Exception as exc:
+            if not rate_limited(exc) or attempt == RATE_TRIES:
+                raise
+            logger.info("Xero rate limit: waiting %ss (attempt %d of %d)", RATE_WAIT_SECONDS, attempt, RATE_TRIES)
+            await _pause(RATE_WAIT_SECONDS)
+
+
 async def _all(fetch, key: str, since: Optional[str]) -> tuple:
     """Every record of a list, page by page until a short page. (records, complete)"""
     out = []
     for page in range(1, MAX_PAGES + 1):
-        data = await fetch(modified_since=since, page=page)
+        data = await _xero(fetch, modified_since=since, page=page)
         items = list((data or {}).get(key) or [])
         out.extend(items)
         if len(items) < PAGE:
@@ -174,15 +206,19 @@ async def fetch_chart(provider) -> dict:
     ok: both were read, so the result may be called fresh."""
     out = {"lookup": None, "bank": None, "other": None, "ok": False}
     try:
-        out["lookup"] = accounts_from_trial_balance(await provider.get_trial_balance())
+        out["lookup"] = accounts_from_trial_balance(await _xero(provider.get_trial_balance))
     except Exception as exc:                # a missing chart only costs categories, never rows
+        if rate_limited(exc):
+            raise
         logger.warning("Xero chart of accounts unavailable: %s", exc)
     try:
-        accounts = await provider.get_accounts() or []
+        accounts = await _xero(provider.get_accounts) or []
         # Xero: credit cards and PayPal are Type BANK (BankAccountType CREDITCARD / PAYPAL): they count.
         out["bank"] = sorted(str(a.get("AccountID")) for a in accounts if a.get("Type") == "BANK" and a.get("AccountID"))
         out["other"] = sorted(str(a.get("AccountID")) for a in accounts if a.get("Type") != "BANK" and a.get("AccountID"))
     except Exception as exc:
+        if rate_limited(exc):
+            raise
         logger.warning("Xero accounts unavailable: %s", exc)
     out["ok"] = out["lookup"] is not None and out["bank"] is not None
     return out
@@ -420,7 +456,7 @@ async def run(session, business_id, provider, *, moment: datetime, account_looku
                      and str((p.get("Account") or {}).get("AccountID")) in banks})
     invoice_codes = {}
     for start in range(0, len(wanted), INVOICE_BATCH):
-        for inv in await provider.get_invoices_by_ids(wanted[start:start + INVOICE_BATCH]) or []:
+        for inv in await _xero(provider.get_invoices_by_ids, wanted[start:start + INVOICE_BATCH]) or []:
             invoice_codes[str(inv.get("InvoiceID"))] = _largest_code(inv.get("LineItems"))
 
     _lock(session, bid)                       # from here, one writer per business
@@ -611,8 +647,10 @@ async def lookup_emails(session, business_id, provider, contact_ids) -> tuple:
     found, failed = {}, 0
     for cid in sorted({c for c in contact_ids if c and c not in known}):
         try:
-            found[cid] = await provider.get_contact_email_checked(cid) or ""
+            found[cid] = await _xero(provider.get_contact_email_checked, cid) or ""
         except Exception as exc:
+            if rate_limited(exc):
+                raise                       # never one 4-minute wait per remaining contact
             failed += 1
             logger.warning("Xero contact %s: email lookup failed (%s); asked again next sync", cid, exc)
     return found, failed
