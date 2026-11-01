@@ -153,9 +153,10 @@ def run_clock():
     is left alone so a test can still move it (the search-claim tests)."""
     from contextlib import ExitStack
     from unittest import mock
-    from services import aria_actions, outreach_send, outreach_setup
+    from services import ai_costs, aria_actions, outreach_send, outreach_setup
     stack = ExitStack()
-    for module in (outreach_setup, outreach_send, aria_actions):
+    # ai_costs too: a draft's cost lands in the same month as its hold, whatever the real date.
+    for module in (outreach_setup, outreach_send, aria_actions, ai_costs):
         stack.enter_context(mock.patch.object(module, "now", lambda: NOW))
     return stack
 

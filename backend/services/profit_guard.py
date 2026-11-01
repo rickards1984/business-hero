@@ -50,6 +50,11 @@ ALERTED_METER = "profit_alerted"               # once per month per threshold
 UNPRICED_PENCE = (1600, 6400)
 
 
+
+def now() -> datetime:
+    """The clock (one per module, so a test can pin it)."""
+    return datetime.now(timezone.utc)
+
 def _int_env(name: str, default: Optional[int] = None) -> Optional[int]:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -133,7 +138,7 @@ def _percent(spent: int, earned: int) -> Optional[int]:
 
 
 def status(session, *, moment: Optional[datetime] = None) -> dict:
-    moment = moment or datetime.now(timezone.utc)
+    moment = moment or now()
     period = period_for(moment)
     earned, basis = income(session, period)
     spent = costs(session, period)
@@ -178,7 +183,7 @@ def allowed(session, *, purpose: Optional[str], moment: Optional[datetime] = Non
     AI_MONTHLY_KILL_PENCE is ai_costs.allowed's; use that, or permits().)"""
     if purpose in ESSENTIAL:
         return True
-    period = period_for(moment or datetime.now(timezone.utc))
+    period = period_for(moment or now())
     earned, _ = income(session, period)
     if earned <= 0:
         return True
@@ -310,7 +315,7 @@ def periodic_check(moment: Optional[datetime] = None) -> bool:
             # The ledger's own lock, so this check and a cost being recorded
             # never both claim a threshold and send it twice (Codex PROFIT-1 review 2).
             ai_costs._serialise(s)
-            check_after_record(s, moment or datetime.now(timezone.utc))
+            check_after_record(s, moment or now())
             s.commit()
         return True
     except Exception:
