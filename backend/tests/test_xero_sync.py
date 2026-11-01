@@ -700,3 +700,118 @@ def test_a_stale_hide_against_a_since_voided_xero_row_is_refused(engine):
         sync().resolve(s, BIZ, a, "hide", xero_row)
     assert getattr(exc.value, "status_code", None) == 409
     assert a in {r["id"] for r in rows(engine, archived=False)}
+
+
+# ---- ACC-1b: Xero's rate limit (60 calls a minute) never sinks a sync ----
+
+class Throttled(FakeXero):
+    """Answers 429 to the first `limit` calls of the named kinds, then serves normally."""
+
+    def __init__(self, *a, limit=1, kinds=("bank", "payments", "invoices"), **kw):
+        super().__init__(*a, **kw)
+        self.limit, self.kinds, self.refused = limit, kinds, 0
+
+    def _gate(self, kind):
+        from providers.xero import XeroRateLimitError
+        if kind in self.kinds and self.refused < self.limit:
+            self.refused += 1
+            raise XeroRateLimitError("Xero API rate limit exceeded")
+
+    async def get_bank_transactions(self, modified_since=None, page=1):
+        self._gate("bank")
+        return await super().get_bank_transactions(modified_since, page)
+
+    async def get_payments(self, modified_since=None, page=1):
+        self._gate("payments")
+        return await super().get_payments(modified_since, page)
+
+    async def get_invoices_by_ids(self, ids):
+        self._gate("invoices")
+        return await super().get_invoices_by_ids(ids)
+
+
+@pytest.fixture
+def waits(monkeypatch):
+    seen = []
+
+    async def pause(seconds):
+        seen.append(seconds)
+    monkeypatch.setattr(sync(), "_pause", pause)
+    return seen
+
+
+@pytest.mark.parametrize("kind", ["bank", "payments", "invoices"])
+def test_a_rate_limited_call_waits_and_the_run_completes(engine, waits, kind):
+    xero = Throttled(bank_rows=[bank(1)], payments=[payment(1)], kinds=(kind,))
+    out = run(engine, xero)
+    assert out["complete"], out["errors"]
+    assert xero.refused == 1 and len(waits) == 1 and waits[0] >= 60
+    assert len(rows(engine)) == 2
+
+
+def test_a_limit_that_never_lifts_stops_the_run_and_says_so(engine, waits):
+    xero = Throttled(bank_rows=[bank(1)], limit=10_000, kinds=("bank",))
+    with pytest.raises(Exception) as caught:
+        run(engine, xero)
+    assert "rate limit" in str(caught.value).lower()
+    assert xero.refused == sync().RATE_TRIES and len(waits) == sync().RATE_TRIES - 1   # bounded, exactly
+    assert rows(engine) == []
+    with Session(engine) as s:
+        assert "xero_sync" not in sync()._doc(s, BIZ)    # the marker never moved
+
+
+@pytest.mark.parametrize("call", ["get_accounts", "get_trial_balance"])
+def test_a_lasting_limit_on_the_account_refresh_stops_before_any_write(engine, waits, call):
+    """A payment to an account the cache doesn't know makes run() read the chart
+    again; a lasting limit there must stop the run, not carry on writing."""
+    from providers.xero import XeroRateLimitError
+    xero = FakeXero(bank_rows=[bank(1)], payments=[payment(1, account="bank-new")])
+
+    async def refused():
+        raise XeroRateLimitError("Xero API rate limit exceeded")
+    setattr(xero, call, refused)
+    with pytest.raises(XeroRateLimitError):
+        run(engine, xero)
+    assert rows(engine) == []
+
+
+def test_a_lasting_limit_on_contact_emails_stops_after_one_contact(engine, waits):
+    from providers.xero import XeroRateLimitError
+    asked = []
+
+    class Provider:
+        async def get_contact_email_checked(self, cid):
+            asked.append(cid)
+            raise XeroRateLimitError("Xero API rate limit exceeded")
+    with Session(engine) as s:
+        with pytest.raises(XeroRateLimitError):
+            asyncio.run(sync().lookup_emails(s, BIZ, Provider(), ["c-1", "c-2", "c-3", "c-4"]))
+    assert asked == ["c-1"] * sync().RATE_TRIES        # never a fresh four minutes per remaining contact
+    assert len(waits) == sync().RATE_TRIES - 1
+
+
+def test_an_httpx_429_from_the_chart_is_waited_out_too(engine, waits):
+    import httpx
+    xero = FakeXero(bank_rows=[bank(1)])
+    real, state = xero.get_accounts, {"n": 0}
+
+    async def accounts():
+        state["n"] += 1
+        if state["n"] == 1:
+            req = httpx.Request("GET", "https://api.xero.com/api.xro/2.0/Accounts")
+            raise httpx.HTTPStatusError("429", request=req, response=httpx.Response(429, request=req))
+        return await real()
+    xero.get_accounts = accounts
+    chart = asyncio.run(sync().fetch_chart(xero))
+    assert chart["ok"] and chart["bank"] == ["bank-1"] and len(waits) == 1
+
+
+def test_other_errors_are_not_retried(engine, waits):
+    xero = FakeXero(bank_rows=[bank(1)])
+
+    async def broken(modified_since=None, page=1):
+        raise RuntimeError("boom")
+    xero.get_bank_transactions = broken
+    with pytest.raises(RuntimeError):
+        run(engine, xero)
+    assert waits == []
