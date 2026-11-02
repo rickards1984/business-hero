@@ -211,3 +211,7 @@ Cycle 3 of 3. Every review-2 item was confirmed fixed and proven.
 
 **Known limits:**
 - The tax-point categories match by keyword on category names (for example "Computer Equipment"). A business with unusual category names gets fewer points, never wrong figures.
+
+## Codex review 4 (`audits/ACC-2-CODEX-REVIEW-4.md`, quick targeted) → APPROVE
+
+No P1 or P2. Both review-3 fixes were confirmed and proven. A business with no Xero connection still gets pounds and tax points.
