@@ -1579,7 +1579,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
         <DialogTitle>Export Accountant Pack</DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-            Generate a comprehensive Excel workbook with transactions, P&L, Balance Sheet, and more. Ready to send to your accountant.
+            An Excel workbook for your accountant: P&L and balance sheet with last year alongside, aged debtors and creditors at the year end, invoices, transactions, loose ends to tidy, and points to discuss. Leave the dates blank for your last completed financial year.
           </Typography>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
             <TextField
@@ -1588,7 +1588,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
               value={exportPeriodStart}
               onChange={(e) => setExportPeriodStart(e.target.value)}
               InputLabelProps={{ shrink: true }}
-              helperText="Defaults to 6 April (UK tax year start)"
+              helperText="Blank: the start of your last completed financial year"
               fullWidth
             />
             <TextField
@@ -1597,7 +1597,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
               value={exportPeriodEnd}
               onChange={(e) => setExportPeriodEnd(e.target.value)}
               InputLabelProps={{ shrink: true }}
-              helperText="Defaults to today's date"
+              helperText="Blank: your last financial year end (from Xero; otherwise 5 April)"
               fullWidth
             />
           </Box>
@@ -1611,7 +1611,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
             >
               <CheckCircleOutlineIcon sx={{ color: 'success.main', fontSize: 20 }} />
               <Typography variant="body2" color="success.dark">
-                Xero connected — includes P&L, Balance Sheet, Trial Balance, Aged Reports
+                Xero connected: includes P&L, Balance Sheet, Trial Balance, Aged Debtors and Creditors
               </Typography>
             </Paper>
           ) : (
@@ -1624,7 +1624,7 @@ const Accounting: React.FC<AccountingProps> = ({ embedded = false }) => {
             >
               <LinkIcon sx={{ color: 'warning.main', fontSize: 20 }} />
               <Typography variant="body2" color="warning.dark">
-                Connect Xero for full reports (P&L, Balance Sheet, etc.)
+                Without Xero the pack has a cash-basis P&L from your transactions; connect Xero for the balance sheet and aged reports
               </Typography>
             </Paper>
           )}

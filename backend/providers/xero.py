@@ -122,6 +122,32 @@ class XeroProvider:
         data = await self._get_list("Invoices", {"IDs": ",".join(ids), "page": 1}, None)
         return data.get("Invoices", [])
 
+    async def get_invoice_list(self, *, where: Optional[str] = None, statuses: Optional[str] = None,
+                               modified_since: Optional[str] = None, page: int = 1) -> Dict[str, Any]:
+        """ACC-2: invoices (sales and bills) by a Xero `where` filter, read only.
+        Paged responses carry Payments, CreditNotes, Prepayments, Overpayments."""
+        params: Dict[str, Any] = {"page": page, "order": "Date ASC"}
+        if where:
+            params["where"] = where
+        if statuses:
+            params["Statuses"] = statuses
+        return await self._get_list("Invoices", params, modified_since)
+
+    RECORD_LISTS = ("Payments", "CreditNotes", "Prepayments", "Overpayments")
+
+    async def get_records(self, resource: str, *, where: Optional[str] = None, statuses: Optional[str] = None,
+                          page: int = 1) -> Dict[str, Any]:
+        """ACC-2: payments and the credits allocated to invoices (credit notes,
+        prepayments, overpayments, each with its dated Allocations), read only."""
+        if resource not in self.RECORD_LISTS:
+            raise ValueError(f"not a record list: {resource}")
+        params: Dict[str, Any] = {"page": page}
+        if where:
+            params["where"] = where
+        if statuses:
+            params["Statuses"] = statuses
+        return await self._get_list(resource, params, None)
+
     async def _get_list(self, resource: str, params: Dict[str, Any], modified_since: Optional[str]) -> Dict[str, Any]:
         headers = {**self.headers}
         if modified_since:
@@ -216,6 +242,8 @@ class XeroProvider:
         self,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        periods: Optional[int] = None,
+        timeframe: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Fetch Profit and Loss report from Xero.
@@ -232,6 +260,9 @@ class XeroProvider:
             params["fromDate"] = from_date
         if to_date:
             params["toDate"] = to_date
+        if periods:                               # ACC-2: comparatives (periods=1, timeframe=YEAR)
+            params["periods"] = periods
+            params["timeframe"] = timeframe or "YEAR"
         
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers, params=params)
@@ -240,7 +271,8 @@ class XeroProvider:
             resp.raise_for_status()
             return resp.json()
 
-    async def get_balance_sheet(self, date: Optional[str] = None) -> Dict[str, Any]:
+    async def get_balance_sheet(self, date: Optional[str] = None, periods: Optional[int] = None,
+                                timeframe: Optional[str] = None) -> Dict[str, Any]:
         """
         Fetch Balance Sheet report from Xero.
         Args:
@@ -250,6 +282,9 @@ class XeroProvider:
         params = {}
         if date:
             params["date"] = date
+        if periods:
+            params["periods"] = periods
+            params["timeframe"] = timeframe or "YEAR"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers, params=params)
             if resp.status_code in (401, 403):
