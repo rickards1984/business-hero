@@ -45,6 +45,8 @@ DEFAULT_MODELS = {
     "draft": {"openai": "gpt-6.1-sol", "xai": "grok-4.7", "anthropic": "claude-sonnet-4-5"},
     "research": {"openai": "gpt-6.1-sol", "xai": "grok-4.7", "anthropic": "claude-sonnet-4-5"},
     "classify": {"openai": "gpt-6-luna", "xai": "grok-4.20-0309-non-reasoning"},
+    # ACC-2: plain-English rewording of the accountancy pack's points (no facts, no numbers)
+    "wording": {"openai": "gpt-6-luna", "xai": "grok-4.20-0309-non-reasoning"},
 }
 # The most input a single call can be billed for: each model's context window.
 CONTEXT_TOKENS = {"openai/gpt-6.1-sol": 1_050_000, "openai/gpt-6-luna": 1_050_000, "openai/gpt-4.1": 1_047_576,
