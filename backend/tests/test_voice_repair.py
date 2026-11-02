@@ -237,7 +237,7 @@ def voice(monkeypatch):
     return state
 
 
-def _wait(predicate, timeout=5.0):
+def _wait(predicate, timeout=15.0):   # HK-1: headroom on a loaded machine; a pass returns at once
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if predicate():

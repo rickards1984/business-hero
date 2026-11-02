@@ -1085,7 +1085,14 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                     # stays for recovery (review 1, finding 1).
                     _m.voice_session_closed(_s, _b, session_id)
 
-            accrual = asyncio.ensure_future(asyncio.to_thread(_record))
+            # HK-1: handed to the worker pool NOW. ensure_future(to_thread(...))
+            # only submitted it when the task first ran, so a loop torn down
+            # straight after (a deploy, or a test client closing) could lose
+            # the accrual and leave the session to heartbeat recovery.
+            import contextvars
+            import functools
+            accrual = asyncio.get_running_loop().run_in_executor(
+                None, functools.partial(contextvars.copy_context().run, _record))
 
             def _log_failure(done):
                 if not done.cancelled() and done.exception() is not None:

@@ -48,11 +48,12 @@ def send_chase_for_invoice(
 
             # Lazy imports to avoid circular dependency with main
             from models import Invoice, Business, EmailOutbox
-            from main import (
-                get_email_account_for_sending,
-                generate_chase_email,
-                send_email_oauth,
-            )
+            # HK-1: never `from main import`; in production "main" is the root shim
+            from services.backend_main import backend_main
+            _main = backend_main()
+            get_email_account_for_sending = _main.get_email_account_for_sending
+            generate_chase_email = _main.generate_chase_email
+            send_email_oauth = _main.send_email_oauth
             from app.email.service import send_email_smtp
 
             invoice = session.exec(
