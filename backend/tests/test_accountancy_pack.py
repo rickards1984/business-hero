@@ -69,11 +69,11 @@ def bs_report(assets="50000.00", liabilities="20000.00", equity="30000.00"):
 
 def invoice(i, *, kind="ACCREC", issued=date(2026, 1, 10), due=date(2026, 2, 10), total="120.00", sub="100.00",
             tax="20.00", status="AUTHORISED", contact="Client Ltd", due_now=None, payments=(), credits=(),
-            currency="GBP"):
+            currency="GBP", updated=None):
     return {"InvoiceID": f"inv-{i}", "InvoiceNumber": f"INV-{i}", "Type": kind, "Status": status,
             "Contact": {"Name": contact}, "Date": xdate(issued), "DueDate": xdate(due) if due else None,
             "SubTotal": sub, "TotalTax": tax, "Total": total, "AmountDue": due_now if due_now is not None else total,
-            "CurrencyCode": currency,
+            "CurrencyCode": currency, "UpdatedDateUTC": (updated or issued).isoformat() + "T00:00:00",
             "Payments": [{"PaymentID": f"p-{i}-{n}", "Date": xdate(d), "Amount": a, "Invoice": {"InvoiceID": f"inv-{i}"}}
                          for n, (d, a) in enumerate(payments)],
             "CreditNotes": [{"Date": xdate(d), "AppliedAmount": a} for d, a in credits]}
@@ -89,7 +89,11 @@ _WHERE = re.compile(r'(Type)=="(\w+)"|(Date)(<=|>=|>|<)DateTime\((\d+),(\d+),(\d
 
 
 def matches(record, where):
-    """The `where` clauses the pack sends: Type=="X", Date op DateTime(y,m,d)."""
+    """The `where` clauses the pack sends: Type=="X", Date op DateTime(y,m,d),
+    and Status=="X" OR Status=="Y"."""
+    statuses = set(re.findall(r'Status=="(\w+)"', where or ""))
+    if statuses and record.get("Status") not in statuses:
+        return False
     for m in _WHERE.finditer(where or ""):
         if m.group(1):
             if record.get("Type") != m.group(2):
@@ -150,15 +154,16 @@ class FakeXero:
 
     async def get_invoice_list(self, *, where=None, statuses=None, modified_since=None, page=1):
         wanted = set((statuses or "").split(",")) - {""}
-        rows = [i for i in self.invoices if (not wanted or i["Status"] in wanted) and matches(i, where)]
+        rows = [i for i in self.invoices if (not wanted or i["Status"] in wanted) and matches(i, where)
+                and (not modified_since or i["UpdatedDateUTC"] >= modified_since)]      # Xero's If-Modified-Since
         return await self._go("invoices", {"Invoices": self._page(rows, page)}, where=where, statuses=statuses)
 
     async def get_records(self, resource, *, where=None, statuses=None, page=1):
         if resource == "Payments":
             rows = [dict(p, Status="AUTHORISED") for i in self.invoices for p in i["Payments"] if matches(p, where)]
         else:
-            wanted = set((statuses or "").split(",")) - {""}
-            rows = [r for r in self.records[resource] if not wanted or r["Status"] in wanted]
+            assert statuses is None, "Statuses isn't a documented filter for credit records"
+            rows = [r for r in self.records[resource] if matches(r, where)]
         return await self._go(resource, {resource: self._page(rows, page)}, where=where)
 
     async def get_invoices_by_ids(self, ids):
@@ -335,11 +340,11 @@ def test_a3_bucket_edges(days, bucket):
 
 
 def test_a3_an_invoice_paid_after_the_end_is_found_however_it_was_entered(engine):
-    """Codex review 1: paid today by a payment dated after the year end (and
-    entered before it, so never 'modified since'): still owed at the end."""
+    """Codex review 1: paid today by a payment dated after the year end, but
+    entered (last modified) before it: an If-Modified-Since search misses it."""
     out = build(engine, FakeXero(invoices=[
         invoice(1, due=date(2026, 3, 1), total="1200.00", sub="1000.00", tax="200.00", status="PAID", due_now="0.00",
-                payments=[(date(2026, 4, 10), "1200.00")]),
+                payments=[(date(2026, 4, 10), "1200.00")], updated=date(2026, 3, 25)),
         invoice(2, due=date(2026, 3, 1), total="50.00", status="PAID", due_now="0.00",
                 payments=[(date(2026, 3, 20), "50.00")]),                           # paid before: not owed
     ]), start=FY[0], end=FY[1])
@@ -642,6 +647,11 @@ def _points():
     ("This affects 3 things.", False),
     ("Roughly half of it may count.", False),
     ("A pension can help. Talk it through. Plan ahead. Then decide.", False),      # four sentences
+    ("All your spending is tax deductible.", False),                                 # Codex review 2 probes
+    ("Claim a dozen pounds in relief.", False),
+    ("You qualify for tax relief.", False),
+    ("Claim ½ of your costs.", False),
+    ("Pension contributions are a common topic to raise with an accountant.", True),
     ("", False),
     (None, False),
 ])
@@ -690,7 +700,8 @@ def test_w_one_ai_call_per_pack_and_the_plain_line_is_labelled(engine):
     assert len(calls) == 1
     tab = sheet(out, "Points to Discuss")
     assert "accountant" in words(tab[:3]).lower() and "AI-written" in words(tab[:3])
-    assert tab[3][3] == "In plain words (AI)"
+    assert tab[3][3] == "In plain words (AI-written, may be imprecise)"
+    assert "may be imprecise" in words(tab[:3])
     assert find(tab, "T7")[3] == "Uncategorised spending is easy to overlook."
 
 
@@ -759,3 +770,152 @@ def test_a3_deleted_payments_and_voided_credits_never_reduce_a_debt():
     allocs = pack().allocations_by_invoice([voided])
     assert allocs == {}
     assert pack().aged([inv], end, "ACCREC", allocs)[0]["total"] == D("300.00")
+
+
+
+def test_a3_prepayments_and_overpayments_count_by_their_allocation_dates(engine):
+    def credit(i, alloc_date):
+        return {"Status": "AUTHORISED", "Date": xdate(date(2026, 1, 1)),
+                "Allocations": [{"Date": xdate(alloc_date), "Amount": "100.00", "Invoice": {"InvoiceID": f"inv-{i}"}}]}
+    invs = [invoice(1, due=date(2026, 3, 1), total="300.00", status="PAID", due_now="0.00"),
+            invoice(2, due=date(2026, 3, 1), total="300.00", contact="Other Ltd")]
+    out = build(engine, FakeXero(invoices=invs, prepayments=[credit(1, date(2026, 4, 2))],
+                                 overpayments=[credit(2, date(2026, 3, 2))]), start=FY[0], end=FY[1])
+    debtors = sheet(out, "Aged Debtors")
+    assert find(debtors, "Client Ltd")[-1] == 300          # prepayment allocated after the end: still owed
+    assert find(debtors, "Other Ltd")[-1] == 200           # overpayment allocated before the end: deducted
+
+
+def test_a3_invoices_paid_after_the_end_are_fetched_in_batches_of_fifty(engine):
+    many = [invoice(n, due=date(2026, 3, 1), total="2.00", status="PAID", due_now="0.00", contact=f"C{n:03d}",
+                    payments=[(date(2026, 4, 2), "2.00")]) for n in range(60)]
+    xero = FakeXero(invoices=many)
+    out = build(engine, xero, start=FY[0], end=FY[1])
+    assert find(sheet(out, "Aged Debtors"), "Total")[-1] == 120
+    assert sorted(len(k["ids"]) for k in xero.kwargs["by_ids"]) == [10, 50]
+
+
+def test_a5_an_organisation_that_cannot_be_read_falls_back_and_says_why(engine):
+    txn(engine, date(2025, 5, 1), "income", "10.00", "Sales")
+    out = build(engine, FakeXero(fail={"organisation"}))
+    assert "Xero didn't answer" in out["missing"]["Balance Sheet"]
+    assert "cash basis" in words(sheet(out, "Profit & Loss")).lower()        # the ledger P&L, not nothing
+
+
+def test_a_non_gbp_organisation_is_shown_in_its_currency_with_no_pound_tax_points(engine):
+    org = {"Name": "US Co", "OrganisationEntityType": "COMPANY", "TaxNumber": "", "BaseCurrency": "USD",
+           "FinancialYearEndDay": 31, "FinancialYearEndMonth": 3}
+    sales = [invoice(n, issued=date(2025, 6, 1), sub="10000.00", tax="0.00", total="10000.00", currency="USD")
+             for n in range(10)]
+    txn(engine, date(2025, 5, 1), "expense", "40.00")                       # would be T7 in pounds
+    out = build(engine, FakeXero(org=org, invoices=sales + [invoice(99, due=date(2026, 3, 31), currency="USD")]),
+                start=FY[0], end=FY[1])
+    points = sheet(out, "Points to Discuss")
+    assert not any(r and r[0] in ("T1", "T7") for r in points)
+    assert "reports in USD" in words(points)
+    assert "Currency: USD" in words(sheet(out, "Summary"))
+    wb = load_workbook(io.BytesIO(out["content"]))
+    total = next(r for r in wb["Aged Debtors"].iter_rows() if r[0].value == "Total")
+    assert total[-1].value == 100120                         # ten open sales invoices plus one, in dollars
+    assert "USD" in total[-1].number_format and "£" not in total[-1].number_format
+
+
+# ------------------------------------------------------- the connection ---
+
+class _Row:
+    def __init__(self, expires):
+        self.expires = expires
+
+
+def _conn_engine(engine, expires):
+    with engine.begin() as c:
+        c.execute(text("DROP TABLE xero_connections"))
+        c.execute(text("CREATE TABLE xero_connections (id TEXT, business_id TEXT, tenant_id TEXT, "
+                       "token_ciphertext TEXT, token_expires_at TEXT, is_active BOOLEAN, last_sync_at TEXT)"))
+        c.execute(text("INSERT INTO xero_connections VALUES ('c1', :b, 't1', 'secret', :e, 1, NULL)"),
+                  {"b": BIZ, "e": expires})
+
+
+class _Provider:
+    def __init__(self, access_token, tenant_id):
+        self.access_token, self.tenant_id = access_token, tenant_id
+
+
+@pytest.mark.parametrize("expires,renewed,expect", [
+    ("2026-11-02T12:00:00+00:00", None, ("token", None)),                      # fresh: used, no refresh
+    ("2026-11-02T09:00:00+00:00", "new-token", ("new-token", None)),           # expired: renewed
+    ("2026-11-02T09:00:00+00:00", None, (None, "couldn't be renewed")),        # expired, renewal failed: never used
+])
+def test_the_connection_never_uses_a_token_that_could_not_be_renewed(engine, expires, renewed, expect):
+    _conn_engine(engine, expires)
+    refreshed = []
+
+    async def refresh(session, conn_id, tenant, bid, log):
+        refreshed.append(conn_id)
+        return renewed, None
+    with Session(engine) as s:
+        provider, error = asyncio.run(pack().connect(
+            s, BIZ, refresh=refresh, decrypt=lambda c: "token", provider_cls=_Provider,
+            now=datetime(2026, 11, 2, 10, tzinfo=timezone.utc)))
+    token, reason = expect
+    assert (provider.access_token if provider else None) == token
+    assert (reason is None and error is None) or reason in error
+    assert bool(refreshed) is expires.startswith("2026-11-02T09")
+
+
+def test_no_connection_is_not_an_error(engine):
+    _conn_engine(engine, "2026-11-02T12:00:00+00:00")
+    with engine.begin() as c:
+        c.execute(text("DELETE FROM xero_connections"))
+    with Session(engine) as s:
+        assert asyncio.run(pack().connect(s, BIZ, refresh=None, decrypt=None, provider_cls=None)) == (None, None)
+
+
+def test_the_endpoint_builds_off_the_event_loop_and_a_backwards_period_is_400(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    import main
+    seen = {}
+
+    async def connect(*a, **kw):
+        seen["connect_thread"] = threading.current_thread()
+        return None, None
+
+    async def build_ok(*a, **kw):
+        seen["build_thread"] = threading.current_thread()
+        return {"content": b"x", "filename": "pack.xlsx"}
+    monkeypatch.setattr(pack(), "connect", connect)
+    monkeypatch.setattr(pack(), "build", build_ok)
+    monkeypatch.setattr(pack(), "make_ask", lambda bid: None)
+    biz = SimpleNamespace(id=BIZ, name="Test")
+    resp = asyncio.run(main.export_accountant_pack(period_start=None, period_end=None, user_business=(None, biz),
+                                                   session=None))
+    assert resp.headers["content-disposition"] == 'attachment; filename="pack.xlsx"'
+    assert seen["connect_thread"] is not threading.main_thread() and seen["build_thread"] is not threading.main_thread()
+
+    async def build_backwards(*a, **kw):
+        raise pack().PeriodError("backwards")
+    monkeypatch.setattr(pack(), "build", build_backwards)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(main.export_accountant_pack(period_start="2026-04-01", period_end=None, user_business=(None, biz),
+                                                session=None))
+    assert caught.value.status_code == 400
+
+
+def test_w_a_slow_wording_call_never_holds_the_pack(monkeypatch):
+    """Review 2: the router call is synchronous; the wait must still end on time."""
+    import time
+    from services import ai_costs, ai_router, profit_guard
+    monkeypatch.setattr(profit_guard, "permits", lambda purpose: True)
+    monkeypatch.setattr(pack(), "WORDING_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(ai_costs, "save", lambda *a, **kw: None)
+
+    def slow(system, context, *, purpose, max_tokens):
+        time.sleep(0.6)
+        return {"T7": "Late."}
+    monkeypatch.setattr(ai_router, "json_chat", slow)
+    started = time.monotonic()
+    worded = asyncio.run(pack().word_points(_points(), pack().make_ask(BIZ)))
+    assert time.monotonic() - started < 0.4
+    assert all(w["plain"] is None for w in worded)

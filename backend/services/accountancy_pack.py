@@ -526,13 +526,14 @@ def tax_points(f: dict, t: dict = THRESHOLDS) -> list:
 # The AI may add one plain-English line beside each point. It never replaces
 # the rule's text, so it can never change a figure or a claim (review 1): the
 # line is dropped if it carries any number, amount or claim word.
-_NUMBERISH = re.compile(r"[0-9£$€%]|\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+_NUMBERISH = re.compile(r"[0-9£$€%¼½¾⅓⅔⅛]|\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
                         r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|"
                         r"sixty|seventy|eighty|ninety|hundred|thousand|million|billion|half|quarter|double|"
-                        r"twice|triple|percent|k)\b", re.IGNORECASE)
+                        r"twice|triple|percent|dozen|score|couple|several|many|all|every|k)\b", re.IGNORECASE)
 _CLAIMS = re.compile(r"\b(guarantee\w*|definitely|certainly|certain|always|never|must|immediately|refund\w*|"
                      r"rebate\w*|you will|you'll|will save|save you|saving you|avoid\w*|evad\w*|loophole\w*|"
-                     r"entitled|owed|claim now|risk-free|no risk)\b", re.IGNORECASE)
+                     r"entitled|owed|claim now|risk-free|no risk|deductible|allowable|qualif\w*|eligible|relief|"
+                     r"tax[- ]free|exempt|you can claim|claim)\b", re.IGNORECASE)
 _SENTENCE_END = re.compile(r"[.!?](\s|$)")
 
 
@@ -598,9 +599,54 @@ def make_ask(business_id):
         return answer
 
     async def ask(points) -> dict:
+        # A daemon thread, not the loop's executor: when the wait times out the
+        # pack goes on, and asyncio.run never waits for the call to finish
+        # (Codex review 2). The cost is still saved when it does.
+        import threading
         context = {p["code"]: p["title"] for p in points}       # titles only: no figures reach the model
-        return await asyncio.to_thread(call, context)
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+
+        def run():
+            try:
+                outcome, ok = call(context), True
+            except BaseException as exc:            # handed to the waiting pack, never lost
+                outcome, ok = exc, False
+
+            def settle():
+                if not future.done():
+                    future.set_result(outcome) if ok else future.set_exception(outcome)
+            try:
+                loop.call_soon_threadsafe(settle)
+            except RuntimeError:
+                pass                                # the pack finished without it
+        threading.Thread(target=run, name="pack-wording", daemon=True).start()
+        return await future
     return ask
+
+
+# ------------------------------------------------------------ connection ---
+
+async def connect(session, business_id, *, refresh, decrypt, provider_cls, now: Optional[datetime] = None) -> tuple:
+    """(provider, None) for a usable Xero connection; (None, reason) when one
+    exists but can't be used; (None, None) when there is none. A token that
+    can't be renewed is never used (Codex review 2)."""
+    row = session.execute(text("""SELECT id, tenant_id, token_ciphertext, token_expires_at FROM xero_connections
+                                  WHERE business_id = :b AND is_active = :yes LIMIT 1"""),
+                          {"b": str(business_id), "yes": True}).fetchone()
+    if not row:
+        return None, None
+    try:
+        token = decrypt(row[2])
+    except Exception as exc:
+        return None, f"Xero sign-in couldn't be read ({exc}); reconnect Xero in Settings"
+    expires = _moment(row[3])
+    if expires is None or (now or datetime.now(timezone.utc)) >= expires - timedelta(minutes=2):
+        new_token, _ = await refresh(session, str(row[0]), row[1], str(business_id), logger)
+        if not new_token:
+            return None, "Xero sign-in expired and couldn't be renewed; reconnect Xero in Settings"
+        token = new_token
+    return provider_cls(access_token=token, tenant_id=row[1]), None
 
 
 # ------------------------------------------------------------ loose ends ---
@@ -641,7 +687,8 @@ def loose_ends(lines: list, *, pending_duplicates: int, xero: bool, last_sync: O
 def _workbook(pack: dict):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
-    cur = '£#,##0.00;-£#,##0.00'
+    code = pack.get("currency") or "GBP"
+    cur = '£#,##0.00;-£#,##0.00' if code == "GBP" else f'"{code} "#,##0.00;-"{code} "#,##0.00'
     head_font, head_fill = Font(bold=True, color="FFFFFF"), PatternFill("solid", start_color="2B5797")
     title_font, note_font = Font(bold=True, size=14, color="2B5797"), Font(italic=True, color="666666")
 
@@ -723,8 +770,11 @@ async def build(session, business_id, provider=None, *, start: Optional[date] = 
         try:
             org = await call(provider.get_organisation) or {}
         except Exception as exc:
+            # without it neither the year end nor the connection can be trusted:
+            # the pack is built from Business Hero's own data, and says why (review 2)
             logger.warning("Xero organisation unavailable: %s", exc)
-            org = None
+            provider, org = None, None
+            xero_error = xero_error or f"Xero didn't answer ({str(exc) or exc.__class__.__name__})"
     base = (org or {}).get("BaseCurrency") or "GBP"
     fy = ((org or {}).get("FinancialYearEndDay"), (org or {}).get("FinancialYearEndMonth"))
     d_start, d_end = default_period(today, *fy)
@@ -774,7 +824,8 @@ async def build(session, business_id, provider=None, *, start: Optional[date] = 
             guarded("open", pages(provider.get_invoice_list, "Invoices", statuses="AUTHORISED",
                                   where=f"Date<={dt(end)}")),
             guarded("payments_after", pages(records, "Payments", resource="Payments", where=f"Date>{dt(end)}")),
-            guarded("credit_notes", pages(records, "CreditNotes", resource="CreditNotes", statuses="AUTHORISED,PAID")),
+            guarded("credit_notes", pages(records, "CreditNotes", resource="CreditNotes",
+                                          where='Status=="AUTHORISED" OR Status=="PAID"')),
             guarded("prepayments", pages(records, "Prepayments", resource="Prepayments")),
             guarded("overpayments", pages(records, "Overpayments", resource="Overpayments")),
             guarded("sales", pages(provider.get_invoice_list, "Invoices", statuses="AUTHORISED,PAID",
@@ -908,17 +959,22 @@ async def build(session, business_id, provider=None, *, start: Optional[date] = 
                           + (ends or [["Nothing to tidy", None, None, "No loose ends were found."]]), "header_at": 1}
     # ---- Points to discuss
     profit = find_value(pnl_rows, "Net Profit") if pnl_rows is not None else (ledger["net"] if provider is None else None)
+    gbp = base == "GBP"
     points = await word_points(tax_points(facts_from(lines, org=org, profit=profit, turnover_12m=turnover_12m,
-                                                     period=(start, end))), ask)
+                                                     period=(start, end))), ask) if gbp else []
     tabs["Points to Discuss"] = {"rows": [["Points to discuss with your accountant"],
                                           [f"From this pack's own figures, using UK rules checked {THRESHOLDS['checked']}. "
                                            "These are prompts for a conversation, not tax advice. The 'In plain words' "
-                                           "column is AI-written background; the Explanation is what the figures show."],
-                                          [], ["Ref", "Point", "Explanation", "In plain words (AI)", "Figures"]]
+                                           "column is AI-written background and may be imprecise: the Explanation and "
+                                           "Figures are what count; check anything with your accountant."],
+                                          [], ["Ref", "Point", "Explanation", "In plain words (AI-written, may be imprecise)", "Figures"]]
                                  + [[p["code"], p["title"], p["text"], p.get("plain"),
                                      "; ".join(f"{k}: {money(v) if isinstance(v, Decimal) else v}"
                                                for k, v in p["figures"].items())] for p in points]
-                                 + ([] if points else [["", "Nothing to raise", "No rule applied to these figures."]]),
+                                 + ([] if points else [["", "Nothing to raise", "No rule applied to these figures."
+                                                         if gbp else f"Tax points compare figures with UK limits in "
+                                                         f"pounds; this organisation reports in {base}, so none are "
+                                                         f"raised."]]),
                                  "header_at": 4, "notes": (2,)}
     # ---- Summary (last: it reports what was built)
     included = [t for t in TAB_ORDER[1:] if t in tabs]
@@ -930,7 +986,7 @@ async def build(session, business_id, provider=None, *, start: Optional[date] = 
                                                                              "Not known (connect Xero)")
     has_comparatives = "Profit & Loss" in tabs
     summary = [["Accountancy Pack"], [name], [f"Legal type: {legal}"],
-               [f"Period: {_uk(start)} to {_uk(end)}"],
+               [f"Period: {_uk(start)} to {_uk(end)}"], [f"Currency: {base}"],
                [f"Comparatives: {_uk(p_start)} to {_uk(p_end)}" if has_comparatives
                 else "Comparatives: none (no Profit & Loss in this pack)"],
                [f"Generated: {now:%d/%m/%Y %H:%M} (UK time)"],
@@ -939,9 +995,9 @@ async def build(session, business_id, provider=None, *, start: Optional[date] = 
                ["Included"]] + [[t] for t in included] + [[]] + \
               ([["Not included"]] + [[f"{t}: not included. {missing[t]}"] for t in TAB_ORDER[1:] if t in missing]
                if missing else []) + [[], ["Loose ends to tidy", len(ends)], ["Points to discuss", len(points)]]
-    tabs["Summary"] = {"rows": summary, "notes": (6, 7)}
+    tabs["Summary"] = {"rows": summary, "notes": (7, 8)}
 
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "business"
-    return {"content": _workbook({"tabs": tabs}), "filename": f"accountancy-pack-{slug}-{start}-to-{end}.xlsx",
+    return {"content": _workbook({"tabs": tabs, "currency": base}), "filename": f"accountancy-pack-{slug}-{start}-to-{end}.xlsx",
             "included": included, "missing": {t: missing[t] for t in TAB_ORDER if t in missing},
             "period": (start, end)}

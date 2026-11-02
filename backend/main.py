@@ -5081,7 +5081,7 @@ async def export_accountant_pack(
     completed financial year (Xero's year end, else 6 April to 5 April).
     Built in a worker thread, so the server stays free while Xero answers."""
     import logging
-    from datetime import date as _date, datetime, timezone, timedelta
+    from datetime import date as _date
     import asyncio
     from services import accountancy_pack
 
@@ -5109,27 +5109,9 @@ async def export_accountant_pack(
 
         async def go():
             with Session(_engine) as s:
-                provider, xero_error = None, None
-                row = s.execute(
-                    text("""SELECT id, tenant_id, token_ciphertext, token_expires_at FROM xero_connections
-                            WHERE business_id = :business_id AND is_active = true LIMIT 1"""),
-                    {"business_id": business_id}).fetchone()
-                if row:
-                    try:
-                        access_token = decrypt_str(row[2])
-                        exp = row[3]
-                        if exp.tzinfo is None:
-                            exp = exp.replace(tzinfo=timezone.utc)
-                        if datetime.now(timezone.utc) >= exp - timedelta(minutes=2):
-                            new_access, _ = await _refresh_xero_token_and_retry(
-                                s, str(row[0]), row[1], business_id, _export_logger)
-                            if new_access:
-                                access_token = new_access
-                        provider = XeroProvider(access_token=access_token, tenant_id=row[1])
-                    except Exception as e:
-                        # the pack is still produced from Business Hero's own data, and says why
-                        _export_logger.error(f"Xero unavailable for the pack: {e}")
-                        provider, xero_error = None, str(e) or e.__class__.__name__
+                provider, xero_error = await accountancy_pack.connect(
+                    s, business_id, refresh=_refresh_xero_token_and_retry, decrypt=decrypt_str,
+                    provider_cls=XeroProvider)
                 s.commit()
                 return await accountancy_pack.build(
                     s, business_id, provider, start=start, end=end, business_name=business_name,

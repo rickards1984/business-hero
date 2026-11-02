@@ -50,7 +50,7 @@ The pack must be "of the highest standards possible as a first draft to give to 
 - **A1.** Every figure on a Xero-sourced tab is Xero's number. Text is never turned into a number unless Xero marks the cell as a value: a value cell in a data row or summary row, not a heading or code.
 - **A2.** Every total on a built tab equals the sum of its lines, to the penny, using `Decimal`, never `float`.
 - **A3.** Aged balances at the period end: for each invoice dated on or before the end, outstanding = total − payments − credits allocated − overpayments allocated, *each dated on or before the end*. Voided and deleted invoices are excluded. Invoices fully paid by the end are excluded. Buckets are by due date, relative to the period end.
-- **A4.** The Invoices tab holds exactly the sales invoices whose issue date falls in the period, and net + VAT = gross on every row.
+- **A4.** The Invoices tab holds exactly the sales invoices whose issue date falls in the period, and net + VAT + rounding = gross on every row. Xero's rounding is shown, never hidden.
 - **A5.** The Summary lists a tab as included only if it was built. A missing tab is listed with its reason, never silently.
 - **A6.** The balance-sheet check: total assets − total liabilities = total equity. If not, it goes on Loose Ends, and the pack is still produced.
 - **A7.** The ledger P&L (without Xero): income and expense by category, transfers excluded, labelled "cash basis — unaudited". Totals tie to the Transactions tab exactly.
@@ -157,6 +157,35 @@ Every point is framed **"Points to discuss with your accountant"**, with the fig
 - T8 states the conditions: an annual event open to all staff, a combined per-head limit; and for trivial benefits, not cash, not a reward, not contractual.
 
 **Tests:** 83. Mutation testing covered 21 mutants in round 1 and 26 in round 2, all caught.
+
+## Codex review 2 (`audits/ACC-2-CODEX-REVIEW-2.md`, 2 × P1, 3 × P2)
+
+**P1**
+1. **The AI line could still overstate** ("All your spending is tax deductible", "You qualify for tax relief"). A word filter cannot guarantee it never will. **Mike decided on 2 Nov 2026 to keep the AI line,** having been offered pre-written lines or no line instead. So:
+   - the column is headed "In plain words (AI-written, may be imprecise)";
+   - the tab note says the Explanation and Figures are what count;
+   - the filter now also blocks fractions and the words Codex found (deductible, allowable, qualify, eligible, relief, exempt, claim, dozen, all, every…).
+
+   **Accepted residual risk:** an overstated line that avoids every blocked word can still appear. The rule's text and figures beside it are never affected.
+2. **A non-GBP base currency was shown as pounds and tested against UK limits.**
+   - The workbook's money format follows the base currency, and the Summary states it.
+   - No tax points are raised unless the base is GBP; the tab says why.
+
+**P2**
+3. **The wording timeout didn't bound the wait,** because the synchronous router call held `asyncio.run` at shutdown. The call now runs on a daemon thread, so a timeout really ends the wait (its cost is still saved). Tested with a blocking call.
+4. **A token that couldn't be renewed was still used.**
+   - `accountancy_pack.connect()` returns no provider and a reason, and the pack falls back to Business Hero's data and says why.
+   - An organisation that can't be read does the same.
+   - Tested: fresh, renewed, renewal failed, no connection.
+5. **Proof gaps, now covered:**
+   - the fake Xero honours If-Modified-Since, and the paid-after-the-end fixture was last modified *before* the end, so the old approach fails it;
+   - prepayment and overpayment allocations;
+   - two batches of invoice ids;
+   - an endpoint test shows the connection and pack run off the main thread, and a backwards period returns 400.
+
+**Backlog note, also done:** credit notes are filtered with the documented `where` (`Status=="AUTHORISED" OR Status=="PAID"`), not `Statuses`. The fake now rejects `Statuses` for credit records.
+
+**Tests:** 98. Mutation testing on the review-2 fixes: all 6 caught.
 
 **Known limits:**
 - The tax-point categories match by keyword on category names (for example "Computer Equipment"). A business with unusual category names gets fewer points, never wrong figures.
