@@ -100,6 +100,8 @@ Every point is framed **"Points to discuss with your accountant"**, with the fig
 
 ## As built
 
+> **Where the reviews below differ, they describe the final code.** In particular, the AI never rewords a point's explanation. It may add a separate, labelled "In plain words" line (review 1, and Mike's decision in review 2), and invoices for the aged tabs come from payment and allocation dates, not "modified since" (review 1).
+
 - **`services/accountancy_pack.py`:**
   - `build()` makes the workbook, and the endpoint is a thin wrapper that runs it in a worker thread.
   - Pure helpers, each tested:
@@ -186,6 +188,26 @@ Every point is framed **"Points to discuss with your accountant"**, with the fig
 **Backlog note, also done:** credit notes are filtered with the documented `where` (`Status=="AUTHORISED" OR Status=="PAID"`), not `Statuses`. The fake now rejects `Statuses` for credit records.
 
 **Tests:** 98. Mutation testing on the review-2 fixes: all 6 caught.
+
+## Codex review 3 (`audits/ACC-2-CODEX-REVIEW-3.md`, 1 × P1, 1 × P2) → fixed
+
+Cycle 3 of 3. Every review-2 item was confirmed fixed and proven.
+
+1. **P1: the fallback path could show foreign invoices as pounds.** When Xero can't be used (sign-in not renewed, or the organisation unreadable):
+   - the currency is "not confirmed";
+   - amounts are shown as recorded, with no currency symbol;
+   - no tax points are raised, and the tab says why;
+   - stored invoices in another currency (the `invoices.currency` column) are left out and listed under Loose Ends.
+2. **P2: there was no endpoint proof of the fallback.** A new test drives the real `connect` and `build` through the endpoint, faking only Xero's sign-in and the database. A token that can't be renewed produces a workbook built from Business Hero's data, with the reason on the Summary. The request's session is passed as `None`, so using it would fail.
+
+**Mutation testing:** passing `xero_error=None` in the endpoint, dropping the fallback currency filter, and treating an unconfirmed currency as confirmed are all caught.
+
+**Tests:** 100.
+
+**Backlog (Codex):**
+- a provider-level request assertion for credit-note filtering;
+- batch-payment, refund and overlapping-stream fixtures;
+- a cap on lingering wording threads if a provider stalls often.
 
 **Known limits:**
 - The tax-point categories match by keyword on category names (for example "Computer Equipment"). A business with unusual category names gets fewer points, never wrong figures.

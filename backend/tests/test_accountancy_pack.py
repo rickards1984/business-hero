@@ -188,7 +188,7 @@ def engine(tmp_path):
                        "last_sync_at TEXT)"))
         c.execute(text("CREATE TABLE invoices (id TEXT PRIMARY KEY, business_id TEXT, invoice_number TEXT, "
                        "customer_name TEXT, amount NUMERIC, status TEXT, issue_date DATE, due_date DATE, "
-                       "archived BOOLEAN DEFAULT 0)"))
+                       "archived BOOLEAN DEFAULT 0, currency TEXT NOT NULL DEFAULT 'GBP')"))
         c.execute(text("INSERT INTO business_settings VALUES ('s', :b, '{}', 'x', 'x')"), {"b": BIZ})
     yield e
     e.dispose()
@@ -919,3 +919,51 @@ def test_w_a_slow_wording_call_never_holds_the_pack(monkeypatch):
     worded = asyncio.run(pack().word_points(_points(), pack().make_ask(BIZ)))
     assert time.monotonic() - started < 0.4
     assert all(w["plain"] is None for w in worded)
+
+
+
+def test_when_xero_cannot_be_used_stored_foreign_invoices_are_never_pounds(engine):
+    """Review 3: the fallback path. The organisation can't be read, so the
+    currency isn't confirmed; a stored USD invoice is listed, never shown as £."""
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO invoices (id, business_id, invoice_number, customer_name, amount, status, "
+                       "issue_date, currency) VALUES ('i1', :b, 'INV-US', 'US Client', 120, 'sent', '2025-06-01', 'USD'),"
+                       "('i2', :b, 'INV-UK', 'UK Client', 80, 'sent', '2025-06-02', 'GBP')"), {"b": BIZ})
+    txn(engine, date(2025, 5, 1), "expense", "40.00")                       # would be T7
+    out = build(engine, FakeXero(fail={"organisation"}), start=FY[0], end=FY[1])
+    invoices = sheet(out, "Invoices")
+    assert "INV-US" not in words(invoices) and "INV-UK" in words(invoices)
+    assert "USD" in words(sheet(out, "Loose Ends"))
+    assert "Currency: not confirmed" in words(sheet(out, "Summary"))
+    assert not any(r and r[0] == "T7" for r in sheet(out, "Points to Discuss"))
+    wb = load_workbook(io.BytesIO(out["content"]))
+    amount = next(r for r in wb["Transactions"].iter_rows(min_row=2) if r[0].value is not None)[5]
+    assert "£" not in amount.number_format
+
+
+def test_the_endpoint_falls_back_and_says_why_with_the_real_connection_and_pack(engine, monkeypatch):
+    """Review 3: only Xero's sign-in and the database are faked. A token that
+    can't be renewed: the workbook is built from Business Hero's data, with the
+    reason, on the worker's own session (the request's session is never used)."""
+    from types import SimpleNamespace
+    import db
+    import main
+    _conn_engine(engine, "2026-11-02T09:00:00+00:00")                      # expired
+    txn(engine, date(2025, 5, 1), "income", "10.00", "Sales")
+
+    async def refresh_fails(*a, **kw):
+        return None, None
+    monkeypatch.setattr(main, "_refresh_xero_token_and_retry", refresh_fails)
+    monkeypatch.setattr(main, "decrypt_str", lambda c: "old-token")
+    monkeypatch.setattr(db, "engine", engine)
+    monkeypatch.setattr(pack(), "make_ask", lambda bid: None)
+    resp = asyncio.run(main.export_accountant_pack(period_start="2025-04-06", period_end="2026-04-05",
+                                                   user_business=(None, SimpleNamespace(id=BIZ, name="Test")),
+                                                   session=None))
+
+    async def body():
+        return b"".join([chunk async for chunk in resp.body_iterator])
+    out = {"content": asyncio.run(body())}
+    summary = words(sheet(out, "Summary"))
+    assert "Xero connection failed: Xero sign-in expired and couldn't be renewed" in summary
+    assert "cash basis" in words(sheet(out, "Profit & Loss")).lower()

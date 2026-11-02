@@ -687,8 +687,9 @@ def loose_ends(lines: list, *, pending_duplicates: int, xero: bool, last_sync: O
 def _workbook(pack: dict):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
-    code = pack.get("currency") or "GBP"
-    cur = '£#,##0.00;-£#,##0.00' if code == "GBP" else f'"{code} "#,##0.00;-"{code} "#,##0.00'
+    code = pack.get("currency")
+    cur = ('#,##0.00;-#,##0.00' if code is None else '£#,##0.00;-£#,##0.00' if code == "GBP"
+           else f'"{code} "#,##0.00;-"{code} "#,##0.00')
     head_font, head_fill = Font(bold=True, color="FFFFFF"), PatternFill("solid", start_color="2B5797")
     title_font, note_font = Font(bold=True, size=14, color="2B5797"), Font(italic=True, color="666666")
 
@@ -776,6 +777,9 @@ async def build(session, business_id, provider=None, *, start: Optional[date] = 
             provider, org = None, None
             xero_error = xero_error or f"Xero didn't answer ({str(exc) or exc.__class__.__name__})"
     base = (org or {}).get("BaseCurrency") or "GBP"
+    # A Xero connection that failed leaves the currency unconfirmed: amounts are
+    # shown as recorded, with no currency symbol and no tax points (review 3).
+    confirmed = xero_error is None
     fy = ((org or {}).get("FinancialYearEndDay"), (org or {}).get("FinancialYearEndMonth"))
     d_start, d_end = default_period(today, *fy)
     start, end = start or d_start, end or d_end
@@ -918,10 +922,15 @@ async def build(session, business_id, provider=None, *, start: Optional[date] = 
         if streams["credit_notes"][1] is None:
             turnover_12m = invoiced_sales(sales, streams["credit_notes"][0], year_start, end, base=base)
     elif provider is None:
-        got = session.execute(text("""SELECT invoice_number, customer_name, issue_date, due_date, amount, status
+        got = session.execute(text("""SELECT invoice_number, customer_name, issue_date, due_date, amount, status,
+                   currency
             FROM invoices WHERE business_id = :b AND issue_date >= :s AND issue_date <= :e
               AND (archived IS NULL OR archived = :no) ORDER BY issue_date"""),
             {"b": bid, "s": start.isoformat(), "e": end.isoformat(), "no": False}).fetchall()
+        for r in got:                                  # other currencies: listed, never shown as pounds (review 3)
+            if (r[6] or base) != base:
+                other_currencies[r[6]] = other_currencies.get(r[6], 0) + 1
+        got = [r for r in got if (r[6] or base) == base]
         tabs["Invoices"] = {"rows": [["Sales invoices issued in the period"],
                                      [f"{_uk(start)} to {_uk(end)}. VAT isn't recorded without Xero: gross only."], [],
                                      inv_head] + [[r[0] or "", r[1] or "", _day(r[2]), _day(r[3]), None, None, None,
@@ -959,7 +968,7 @@ async def build(session, business_id, provider=None, *, start: Optional[date] = 
                           + (ends or [["Nothing to tidy", None, None, "No loose ends were found."]]), "header_at": 1}
     # ---- Points to discuss
     profit = find_value(pnl_rows, "Net Profit") if pnl_rows is not None else (ledger["net"] if provider is None else None)
-    gbp = base == "GBP"
+    gbp = base == "GBP" and confirmed
     points = await word_points(tax_points(facts_from(lines, org=org, profit=profit, turnover_12m=turnover_12m,
                                                      period=(start, end))), ask) if gbp else []
     tabs["Points to Discuss"] = {"rows": [["Points to discuss with your accountant"],
@@ -972,9 +981,11 @@ async def build(session, business_id, provider=None, *, start: Optional[date] = 
                                      "; ".join(f"{k}: {money(v) if isinstance(v, Decimal) else v}"
                                                for k, v in p["figures"].items())] for p in points]
                                  + ([] if points else [["", "Nothing to raise", "No rule applied to these figures."
-                                                         if gbp else f"Tax points compare figures with UK limits in "
+                                                         if gbp else (f"Tax points compare figures with UK limits in "
                                                          f"pounds; this organisation reports in {base}, so none are "
-                                                         f"raised."]]),
+                                                         f"raised." if confirmed else "Xero couldn't be used, so the "
+                                                         "currency and business type aren't confirmed; no tax points "
+                                                         "are raised.")]]),
                                  "header_at": 4, "notes": (2,)}
     # ---- Summary (last: it reports what was built)
     included = [t for t in TAB_ORDER[1:] if t in tabs]
@@ -986,7 +997,9 @@ async def build(session, business_id, provider=None, *, start: Optional[date] = 
                                                                              "Not known (connect Xero)")
     has_comparatives = "Profit & Loss" in tabs
     summary = [["Accountancy Pack"], [name], [f"Legal type: {legal}"],
-               [f"Period: {_uk(start)} to {_uk(end)}"], [f"Currency: {base}"],
+               [f"Period: {_uk(start)} to {_uk(end)}"],
+               [f"Currency: {base}" if confirmed else
+                "Currency: not confirmed (Xero couldn't be used); amounts are shown as recorded"],
                [f"Comparatives: {_uk(p_start)} to {_uk(p_end)}" if has_comparatives
                 else "Comparatives: none (no Profit & Loss in this pack)"],
                [f"Generated: {now:%d/%m/%Y %H:%M} (UK time)"],
@@ -998,6 +1011,6 @@ async def build(session, business_id, provider=None, *, start: Optional[date] = 
     tabs["Summary"] = {"rows": summary, "notes": (7, 8)}
 
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "business"
-    return {"content": _workbook({"tabs": tabs, "currency": base}), "filename": f"accountancy-pack-{slug}-{start}-to-{end}.xlsx",
+    return {"content": _workbook({"tabs": tabs, "currency": base if confirmed else None}), "filename": f"accountancy-pack-{slug}-{start}-to-{end}.xlsx",
             "included": included, "missing": {t: missing[t] for t in TAB_ORDER if t in missing},
             "period": (start, end)}
