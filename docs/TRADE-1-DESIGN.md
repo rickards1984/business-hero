@@ -206,3 +206,13 @@ Public-sector buyers increasingly ask for CAS-level pre-qualification (PPN 03/24
 | 9 | Evidence presented as compliance | Evidence states only; induction not guaranteed; issues are not statutory reporting |
 | 10 | Marketing approval | Recorded approval, permitted uses, withdrawal, stripped derivative |
 | 11 | Cost | Quotas, limits, metering and a site-user counting rule |
+
+## Codex design review 2 (`audits/TRADE-1-CODEX-REVIEW-2.md`)
+
+The original 11 findings are resolved at design level; a few are noted as partial. The three remaining P1s concern the phase-0 owner boundary:
+
+- route classification categories;
+- the business-selection contract and OAuth state binding;
+- revocation in open voice sessions.
+
+They are taken in full in `docs/TRADE-0-TICKET.md`, which also carries the inventory and acceptance tests from that review. Phase 0 runs as its own RED ticket.
