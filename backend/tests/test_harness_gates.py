@@ -385,11 +385,15 @@ def test_preflight_trap4_ignores_table_text_in_tests(tmp_path):
     assert "FAIL" not in trap, trap
 
 
+_JWT = "e" + "yJhbGciOiJIUzI1NiJ9.x.y"          # built at runtime: this file must not match its own scan
+_ROLE = "SUPABASE_SERVICE" + "_ROLE_KEY"
+
+
 @pytest.mark.parametrize("content,flagged", [
-    ('from supabase_auth import SUPABASE_SERVICE_ROLE_KEY\nif not SUPABASE_SERVICE_ROLE_KEY: pass\n', False),
-    ('SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiJ9.x.y"\n', True),
-    ('SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiJ9.x.y\n', True),
-    ('key = "sk-ant-abc123"\n', True),
+    (f"from supabase_auth import {_ROLE}\nif not {_ROLE}: pass\n", False),
+    (f'{_ROLE} = "{_JWT}"\n', True),
+    (f"{_ROLE}: {_JWT}\n", True),
+    ('key = "' + "sk-" + 'ant-abc123"\n', True),
 ])
 def test_preflight_secret_scan_flags_values_not_setting_names(tmp_path, content, flagged):
     """TRADE-0: reading SUPABASE_SERVICE_ROLE_KEY from the environment is not
