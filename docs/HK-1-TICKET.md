@@ -53,3 +53,7 @@
    - Here-strings replace the pipes.
    - A failed diff counts as a model change.
    - Test files are excluded from the `table=True` scan, since a test may hold it as text; a fixture test covers this.
+
+## Codex review 2 (`audits/HK-1-CODEX-REVIEW-2.md`, targeted) → APPROVE
+
+No P1 or P2. Railway's `uvicorn main:app` start is unaffected. Codex checked the TRAP 4 fix by reading it (its sandbox can't run the fixture tests); the fixture tests pass here.
