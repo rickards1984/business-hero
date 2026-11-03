@@ -59,6 +59,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
 import { config } from '@/config/env';
 import NewInvoiceDialog from '@/components/NewInvoiceDialog';
+import { softSurface, softSurfaceStrong } from '@/lib/surfaces';
 
 // Chase stage definitions
 interface ChaseStage {
@@ -560,7 +561,7 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
             mb: 2,
             px: 2,
             py: 1,
-            bgcolor: 'grey.50',
+            bgcolor: softSurface,
             borderRadius: 2,
           }}
         >
@@ -1153,7 +1154,7 @@ export default function InvoicesPanel({ businessId }: InvoicesPanelProps) {
             </Box>
 
             {chaseDraft && (
-              <Box sx={{ mt: 3, p: 2, bgcolor: 'grey.100', borderRadius: 1 }}>
+              <Box sx={{ mt: 3, p: 2, bgcolor: softSurfaceStrong, borderRadius: 1 }}>
                 <Typography variant="subtitle2" gutterBottom>Email Draft:</Typography>
                 <Typography variant="body2" fontWeight="bold" gutterBottom>{chaseDraft.subject}</Typography>
                 <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{chaseDraft.body}</Typography>

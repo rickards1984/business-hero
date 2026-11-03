@@ -17,6 +17,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { supabase, resolveLogoSrc, type Business } from '@/lib/supabase';
 import { apiRequest } from '@/lib/queryClient';
 import { useQueryClient } from '@tanstack/react-query';
+import { softSurface } from '@/lib/surfaces';
 
 const BRAND_COLOUR_PRESETS = [
   { id: 'blue', label: 'Blue', value: '#3B82F6', hover: '#2563EB' },
@@ -385,7 +386,7 @@ export default function BrandingSettings() {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              bgcolor: 'grey.50',
+              bgcolor: softSurface,
               position: 'relative',
             }}
           >

@@ -34,6 +34,7 @@ import {
 } from '@mui/icons-material';
 import { apiRequest } from '@/lib/queryClient';
 import { isFeatureEnabled } from '@/lib/entitlements';
+import { softSurface } from '@/lib/surfaces';
 
 interface AdminReceptionistSectionProps {
   businessId: string;
@@ -760,13 +761,13 @@ export default function AdminReceptionistSection({ businessId, planTier, feature
               {selectedCall.summary && (
                 <Box sx={{ mt: 2 }}>
                   <Typography variant="subtitle2" color="text.secondary">Summary</Typography>
-                  <Card sx={{ p: 2, bgcolor: 'grey.50', mt: 0.5 }}><Typography variant="body2">{selectedCall.summary}</Typography></Card>
+                  <Card sx={{ p: 2, bgcolor: softSurface, mt: 0.5 }}><Typography variant="body2">{selectedCall.summary}</Typography></Card>
                 </Box>
               )}
               {selectedCall.transcript && (
                 <Box sx={{ mt: 2 }}>
                   <Typography variant="subtitle2" color="text.secondary">Transcript</Typography>
-                  <Card sx={{ p: 2, bgcolor: 'grey.50', maxHeight: 300, overflow: 'auto', mt: 0.5 }}>
+                  <Card sx={{ p: 2, bgcolor: softSurface, maxHeight: 300, overflow: 'auto', mt: 0.5 }}>
                     <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{selectedCall.transcript}</Typography>
                   </Card>
                 </Box>

@@ -78,6 +78,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { config } from '@/config/env';
 import { supabase } from '@/lib/supabase';
 import ProviderSelector from '@/components/ProviderSelector';
+import { softSurfaceStrong } from '@/lib/surfaces';
 
 // ============== Types ==============
 
@@ -2865,7 +2866,7 @@ const UploadDialog: React.FC<{
                 <TableHead>
                   <TableRow>
                     {headers.map((h) => (
-                      <TableCell key={h} sx={{ fontWeight: 600, bgcolor: 'grey.100' }}>
+                      <TableCell key={h} sx={{ fontWeight: 600, bgcolor: softSurfaceStrong }}>
                         {h}
                       </TableCell>
                     ))}
