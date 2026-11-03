@@ -16,6 +16,9 @@ if spec is None or spec.loader is None:
     raise RuntimeError(f"Unable to load backend main module from {_BACKEND_MAIN}")
 
 backend_main = importlib.util.module_from_spec(spec)
+# HK-1: registered, so code that needs main.py's functions can find the module
+# (services/backend_main.py); "main" itself is this shim.
+sys.modules["backend_main"] = backend_main
 spec.loader.exec_module(backend_main)
 
 app = backend_main.app

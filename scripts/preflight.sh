@@ -133,8 +133,22 @@ elif [ "$DIFF_OK" -ne 1 ]; then
   bad "git diff failed for range '$RANGE' — TRAPS 4 and 5 inspected nothing"
   note "An errored diff is not an empty diff. Refusing to report PASS."
 elif [ -f backend/db.py ] && grep -q 'create_all' backend/db.py; then
-  if printf '%s\n' "$CHANGED_LIST" | grep -q 'models.py'; then
-    bad "models.py changed AND create_all() is live"
+  # HK-1: the exact file, or a new SQLModel table anywhere in backend Python.
+  # The old substring match flagged any path containing "models.py" (e.g. a
+  # test named test_ai_models.py) and blocked unrelated pushes.
+  # Here-strings, not pipes: with pipefail, `grep -q` closing early makes the
+  # writer's SIGPIPE read as "no match" (Codex HK-1 review 1). A failed patch
+  # diff is an error, never a pass.
+  MODELS_CHANGED=0
+  grep -qx 'backend/models\.py' <<<"$CHANGED_LIST" && MODELS_CHANGED=1
+  if TABLE_DIFF="$(git diff "$RANGE" -- 'backend/*.py' ':(exclude)backend/tests/*')"; then
+    grep -qE '^\+[^+].*table[[:space:]]*=[[:space:]]*True' <<<"$TABLE_DIFF" && MODELS_CHANGED=1
+  else
+    MODELS_CHANGED=1
+    note "git diff of backend Python failed — treating as a model change"
+  fi
+  if [ "$MODELS_CHANGED" -eq 1 ]; then
+    bad "models.py (or a new SQLModel table) changed AND create_all() is live"
     note "A new SQLModel class creates a live table with RLS OFF."
     note "Confirm RLS + policies for any new table before deploying."
     note "Override intentionally with: SKIP_RLS_DRIFT=1 ./scripts/preflight.sh"

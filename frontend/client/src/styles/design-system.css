@@ -299,7 +299,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .bh-skeleton {
-  background: linear-gradient(90deg, var(--color-neutral-100) 25%, var(--color-neutral-50) 50%, var(--color-neutral-100) 75%);
+  background: linear-gradient(90deg, var(--skeleton-base) 25%, var(--skeleton-highlight) 50%, var(--skeleton-base) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
   border-radius: var(--radius-md);
@@ -2206,12 +2206,23 @@ input, textarea, select, button, a, svg, canvas, video, img {
 }
 
 /* ========== SKELETON LOADING ========== */
+/* HK-1: light mode drew white on white (--glass-bg is near-white there), so
+   the cards looked frozen while loading. Grey in light mode; dark unchanged. */
+:root {
+  --skeleton-base: rgba(15, 23, 42, 0.07);
+  --skeleton-highlight: rgba(15, 23, 42, 0.15);
+}
+.dark {
+  --skeleton-base: var(--glass-bg);
+  --skeleton-highlight: rgba(255, 255, 255, 0.08);
+}
 .skeleton {
+  display: block;
   background: linear-gradient(
     90deg,
-    var(--glass-bg) 25%,
-    rgba(255, 255, 255, 0.08) 50%,
-    var(--glass-bg) 75%
+    var(--skeleton-base) 25%,
+    var(--skeleton-highlight) 50%,
+    var(--skeleton-base) 75%
   );
   background-size: 200% 100%;
   animation: skeleton-shimmer 1.5s ease-in-out infinite;

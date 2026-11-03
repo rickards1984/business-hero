@@ -335,3 +335,51 @@ def test_a_fixture_commit_cannot_land_in_the_real_repository(tmp_path):
     assert "fixture-commit-marker" not in tip, (
         "a fixture commit reached the real repository"
     )
+
+
+# ---------------------------------------------------- preflight TRAP 4 (HK-1) ---
+
+def _trap4_repo(tmp_path):
+    """A throwaway repo with the real preflight, passing traps 1–3, and a
+    backend whose db.py calls create_all()."""
+    d = tmp_path / "t4"
+    (d / "scripts").mkdir(parents=True)
+    (d / "backend").mkdir()
+    (d / "scripts" / "preflight.sh").write_text(PREFLIGHT.read_text())
+    (d / "scripts" / "preflight.sh").chmod(0o755)
+    (d / "requirements.txt").write_text("fastapi\n")
+    (d / "backend" / "requirements.txt").write_text("fastapi\n")
+    (d / "backend" / "db.py").write_text("SQLModel.metadata.create_all(engine)\n")
+    (d / "backend" / "models.py").write_text("class A: pass\n")
+    for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "-A"],
+                ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]):
+        assert run(cmd, cwd=d).returncode == 0
+    return d
+
+
+def _trap4(d, path, content):
+    target = d / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    base = run(["git", "rev-parse", "HEAD"], cwd=d).stdout.strip()
+    run(["git", "add", "-A"], cwd=d)
+    run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "change"], cwd=d)
+    out = run([str(d / "scripts" / "preflight.sh")], cwd=d, env={"PREFLIGHT_BASE": base}).stdout
+    return out.split("TRAP 4")[1].split("TRAP 5")[0]
+
+
+@pytest.mark.parametrize("path,content,flagged", [
+    ("backend/tests/test_ai_models.py", "def test_x(): pass\n", False),       # the old false positive
+    ("backend/services/outreach_models.py", "X = 1\n", False),
+    ("backend/models.py", "class A: pass\nclass B: pass\n", True),
+    ("backend/services/thing.py", "class Thing(SQLModel, table=True):\n    id: int\n", True),
+])
+def test_preflight_trap4_flags_real_model_changes_only(tmp_path, path, content, flagged):
+    trap = _trap4(_trap4_repo(tmp_path), path, content)
+    assert ("FAIL" in trap) is flagged, trap
+
+
+def test_preflight_trap4_ignores_table_text_in_tests(tmp_path):
+    """A test may contain `table=True` as data; only application code counts."""
+    trap = _trap4(_trap4_repo(tmp_path), "backend/tests/test_x.py", 'SRC = "class T(SQLModel, table=True)"\n')
+    assert "FAIL" not in trap, trap

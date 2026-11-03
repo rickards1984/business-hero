@@ -257,7 +257,8 @@ def send_alert(subject: str, body: str) -> None:
         return
     try:
         from sqlmodel import Session
-        from main import send_email_oauth
+        from services.backend_main import backend_main    # HK-1: not `from main import`
+        send_email_oauth = backend_main().send_email_oauth
         from models import EmailAccount
         with Session(_engine()) as s:
             account = s.get(EmailAccount, account_id)
