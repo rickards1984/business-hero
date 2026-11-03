@@ -1404,7 +1404,9 @@ async def get_my_profile(
         business_ctx = get_business_for_user(auth_ctx["user_id"])
     except ValueError as exc:
         args = exc.args
-        if not (len(args) >= 2 and args[0] == "NO_BUSINESS"):
+        # TRADE-0: a person who owns no business (e.g. a site worker) gets the
+        # minimal self response, no business, never an error and never data.
+        if not (len(args) >= 2 and args[0] in ("NO_BUSINESS", "FORBIDDEN")):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     business = None

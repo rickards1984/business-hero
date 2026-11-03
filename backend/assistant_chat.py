@@ -503,21 +503,28 @@ def get_business_by_id(business_id: str) -> Optional[BusinessContext]:
         return None
 
 
+OWNER_ROLE = "owner"
+
+
 def get_business_for_user(user_id: str, requested_business_id: Optional[str] = None) -> BusinessContext:
-    """Get business context for a user.
-    
-    Args:
-        user_id: The authenticated user's UUID
-        requested_business_id: Optional specific business ID if user has multiple
-        
-    Returns:
-        BusinessContext with id, name, and timezone
-        
-    Raises:
-        ValueError: If no business found, access denied, or business not found
+    """The business an OWNER route acts for (TRADE-0 §2).
+
+    Owner authority only: an active membership whose role is "owner". Any other
+    role (worker, subcontractor, an unknown "admin") has none here; site-portal
+    routes use their own narrow capabilities. Platform admins keep access to
+    any business they name.
+
+    - A named business is honoured only if the person owns it (or is a
+      platform admin).
+    - With none named, only businesses the person owns are considered: one is
+      used; several keep today's behaviour (the oldest), which never selects a
+      business where the person isn't an owner. A person whose only active
+      memberships aren't owner roles is refused, never given another business.
+
+    Raises ValueError("NO_BUSINESS" | "FORBIDDEN" | "NOT_FOUND", message).
     """
     is_admin = is_platform_admin(user_id)
-    
+
     if requested_business_id:
         if is_admin:
             business = get_business_by_id(requested_business_id)
@@ -525,47 +532,41 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
                 raise ValueError("NOT_FOUND", f"Business {requested_business_id} not found")
             logger.info(f"Platform admin {user_id} accessing business {business.name} ({business.id})")
             return business
-        
+
         with engine.connect() as conn:
-            result = conn.execute(text("""
+            row = conn.execute(text("""
                 SELECT b.id, b.name, b.timezone, b.logo_url
                 FROM business_members bm
                 JOIN businesses b ON b.id = bm.business_id
-                WHERE bm.user_id = :user_id 
-                  AND bm.business_id = :business_id 
+                WHERE bm.user_id = :user_id
+                  AND bm.business_id = :business_id
                   AND bm.is_active = true
+                  AND bm.role = :owner
                 LIMIT 1
-            """), {"user_id": user_id, "business_id": requested_business_id})
-            row = result.fetchone()
-        
+            """), {"user_id": user_id, "business_id": requested_business_id, "owner": OWNER_ROLE}).fetchone()
+
         if not row:
             raise ValueError("FORBIDDEN", f"Access denied to business {requested_business_id}")
-        
+
         return BusinessContext(id=str(row[0]), name=row[1], timezone=row[2], logo_url=row[3])
-    
+
     with engine.connect() as conn:
-        result = conn.execute(text("""
+        memberships = conn.execute(text("""
             SELECT bm.business_id, b.name, b.timezone, b.logo_url, bm.role, bm.created_at
             FROM business_members bm
             JOIN businesses b ON b.id = bm.business_id
             WHERE bm.user_id = :user_id AND bm.is_active = true
             ORDER BY bm.created_at ASC
-        """), {"user_id": user_id})
-        
-        memberships = result.fetchall()
-    
+        """), {"user_id": user_id}).fetchall()
+
     if not memberships:
         raise ValueError("NO_BUSINESS", "No business assigned to this user")
-    
-    if len(memberships) == 1:
-        m = memberships[0]
-        return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2], logo_url=m[3])
-    
-    for m in memberships:
-        if m[4] == 'owner':  # role is now at index 4
-            return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2], logo_url=m[3])
-    
-    m = memberships[0]
+
+    owned = [m for m in memberships if m[4] == OWNER_ROLE]
+    if not owned:
+        raise ValueError("FORBIDDEN", "This account isn't the owner of a business")
+
+    m = owned[0]          # the only one, or the oldest of several (as before TRADE-0)
     return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2], logo_url=m[3])
 
 

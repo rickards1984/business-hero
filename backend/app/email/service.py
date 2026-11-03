@@ -227,7 +227,7 @@ def ensure_email_manager_role(user_id: str, business_id: str, session: Session) 
     if is_platform_admin_user(user_id, session):
         return
     role = get_business_member_role(user_id, business_id, session)
-    if role not in {"owner", "manager", "admin"}:
+    if role != "owner":       # TRADE-0: undefined roles ("manager", "admin") inherit nothing
         raise HTTPException(status_code=403, detail="Insufficient permissions for email settings")
 
 

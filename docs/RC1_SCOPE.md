@@ -8,6 +8,14 @@ foundation and Mike has accepted the boundary.
 
 ---
 
+## Accepted addition: the trades site portal (Mike, 3 Nov 2026)
+
+Mike accepted the trades site portal (`docs/TRADE-1-DESIGN.md`) into scope and authorised its first ticket, **TRADE-0** (`docs/TRADE-0-TICKET.md`). TRADE-0 is the owner-security boundary: a RED ticket, tests first, with a Codex review. Its production database steps run only from runbooks Mike executes.
+
+Each later portal phase is its own ticket, with Mike's sign-off. This records the portal's acceptance only. The rest of this document's status is unchanged.
+
+---
+
 ## The test every item is measured against
 
 > **Does a UK contractor need this to pay for the product, and can we take

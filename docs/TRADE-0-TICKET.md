@@ -131,3 +131,22 @@ Today the shared resolver (`assistant_chat.get_business_for_user`, and the depen
 - removing the test worker cuts off their open session.
 
 **Not in TRADE-0:** any portal table, invitation or document collection.
+
+## Progress
+
+**Stage 1, done (commit below). Every route classified, and owner authority only.**
+- **`backend/route_policy.py`:** all 307 served method and path pairs (including both WebSockets, and FastAPI 0.141's lazily included routers) each have one category: 230 tenant_owner, 50 platform_admin, 16 public, 5 provider, 5 oauth_continuation, 1 self_bootstrap. Every exception has a recorded reason.
+- **`tests/test_route_policy.py`:**
+  - the table equals the live route tree;
+  - every tenant_owner route passes through a shared business guard, or is one of the three self-authenticating routes that resolve through `get_business_for_user`;
+  - every platform_admin route passes through the platform guard;
+  - no exception route uses a tenant guard.
+- **`assistant_chat.get_business_for_user`** is owner-only: an explicitly named business must be owned. With none named, only owned businesses count: one is used; several keep today's behaviour (the oldest owned). A person with no owner membership is refused, and unknown roles inherit nothing. **`tests/test_owner_boundary.py`** has 3 of 7 tests failing on the old code.
+- **`/v1/me`** gives a non-owner the minimal self response.
+- **The email-settings role check** accepts `owner` only; it had also accepted undefined `manager` and `admin` roles.
+
+**Still to do:**
+- §4: Aria voice rechecks authority before each tool call and data delivery.
+- §3: server-side, single-use OAuth state bound to the initiator, business, provider and operation (a new table: a migration with a runbook).
+- §5: the RLS, RPC and Storage audit (read-only catalog census queries for Mike, then the narrowing migration rehearsed on the local harness).
+- §6: the remaining acceptance tests (no side effects after a denial; live revocation).
