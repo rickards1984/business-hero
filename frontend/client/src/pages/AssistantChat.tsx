@@ -280,7 +280,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                   Talk to Aria
                 </Button>
 
-                <Typography sx={{ fontSize: '0.8125rem', color: 'rgba(232, 230, 225, 0.4)', mb: 4 }}>
+                <Typography sx={{ fontSize: '0.8125rem', color: (t) => (t.palette.mode === 'dark' ? 'rgba(232,230,225,0.4)' : t.palette.text.disabled), mb: 4 }}>
                   or type a message below
                 </Typography>
               </>
@@ -467,7 +467,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                 InputProps={{ disableUnderline: true }}
                 sx={{
                   '& .MuiInputBase-root': { fontSize: '0.875rem', color: 'hsl(var(--foreground))' },
-                  '& .MuiInputBase-input::placeholder': { color: 'rgba(232,230,225,0.4)', opacity: 1 },
+                  '& .MuiInputBase-input::placeholder': { color: (t) => (t.palette.mode === 'dark' ? 'rgba(232,230,225,0.4)' : t.palette.text.disabled), opacity: 1 },
                 }}
               />
               <Button
