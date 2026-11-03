@@ -375,7 +375,11 @@ def test_voice_never_tells_aria_that_absent_data_does_not_exist():
 def test_an_email_error_reaches_aria_as_an_error(monkeypatch):
     """Acceptance 7: a connection failure must not read as an empty inbox."""
     rv = repaired()
+    import assistant_chat
     import assistant_tools
+    from types import SimpleNamespace
+    monkeypatch.setattr(assistant_chat, "get_business_for_user",
+                        lambda uid, bid=None: SimpleNamespace(id=A, timezone="Europe/London"))   # an owner (TRADE-0)
     monkeypatch.setattr(assistant_tools, "execute_tool",
                         lambda name, args, bid, tz="Europe/London":
                         {"error": "Gmail token expired — reconnect your email"})
@@ -888,3 +892,50 @@ def test_cancelling_the_handler_mid_close_still_finishes_closing_openai(voice, m
     assert not voice["connects"][0].open, "the OpenAI close was abandoned"
     assert browser.closed
     assert _wait(lambda: len(voice["recorded"]) == 1, timeout=2.0)
+
+
+
+# -------------------------------------------- TRADE-0 §4: live revocation ---
+
+def test_a_tool_never_runs_for_someone_who_is_no_longer_an_owner(monkeypatch):
+    """The old executor fell back to a default timezone and ran the tool."""
+    rv = repaired()
+    import assistant_chat
+    import assistant_tools
+    ran = []
+
+    def gone(uid, bid=None):
+        raise ValueError("FORBIDDEN", "no longer an owner")
+    monkeypatch.setattr(assistant_chat, "get_business_for_user", gone)
+    monkeypatch.setattr(assistant_tools, "execute_tool", lambda *a, **k: ran.append(a) or {"ok": True})
+    with pytest.raises(rv.AuthorityLost):
+        asyncio.run(rv.execute_tool("get_tasks", {}, USER, A))
+    assert ran == []
+
+
+def test_an_open_session_stops_at_the_next_tool_call_after_removal(voice, monkeypatch):
+    """No card raised, no answer delivered to the model, and the browser is told."""
+    rv = repaired()
+    owner = {"now": True}
+    monkeypatch.setattr(rv, "still_owner", lambda uid, bid: owner["now"])
+    client = voice["make"](script=[{"type": "response.function_call_arguments.done", "call_id": "c1",
+                                    "name": "create_task", "arguments": json.dumps({"title": "x"})}])
+    owner["now"] = False                        # removed after the handshake, before the tool call
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        assert ws.receive_json() == {"type": "ready"}
+        notice = ws.receive_json()
+    assert notice["type"] == "session_limit" and "access to this business has changed" in notice["message"]
+    assert voice["proposed"] == []
+    up = voice["connects"][0]
+    assert not any(json.loads(m).get("type") == "conversation.item.create" for m in up.sent)
+
+
+def test_still_owner_fails_closed(monkeypatch):
+    rv = repaired()
+    import assistant_chat
+
+    def broken(uid, bid=None):
+        raise RuntimeError("database down")
+    monkeypatch.setattr(assistant_chat, "get_business_for_user", broken)
+    assert rv.still_owner(USER, A) is False

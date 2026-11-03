@@ -367,6 +367,21 @@ VOICE_TOOL_MAP = {
 }
 
 
+def still_owner(user_id: str, business_id: str) -> bool:
+    """TRADE-0 §4: the person's authority in this business, read NOW. An open
+    voice session checked it only in its handshake; removal or demotion must
+    stop the next tool call and data delivery. Fails closed."""
+    from assistant_chat import get_business_for_user
+    try:
+        return str(get_business_for_user(user_id, business_id).id) == str(business_id)
+    except Exception:
+        return False
+
+
+class AuthorityLost(Exception):
+    """The person no longer has owner authority in the session's business."""
+
+
 async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: str) -> str:
     """Execute a tool and return the result as a string."""
     _logger.info(f"Executing tool: {tool_name} with args: {args} for user={user_id}, business={business_id}")
@@ -446,11 +461,13 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
         # stall every voice session's deadline while they ran.
         def _run_tool():
             from assistant_chat import get_business_for_user
+            # TRADE-0 §4: a failed lookup used to fall back to a default
+            # timezone and run the tool anyway. Authority comes first.
             try:
                 timezone = get_business_for_user(user_id, business_id).timezone
-            except Exception:
-                timezone = "Europe/London"
-            return execute_assistant_tool(mapped_name, mapped_args, business_id, timezone)
+            except Exception as exc:
+                raise AuthorityLost(str(exc)) from exc
+            return execute_assistant_tool(mapped_name, mapped_args, business_id, timezone or "Europe/London")
         result = await asyncio.to_thread(_run_tool)
         
         # Add explicit instruction wrapper for email results to prevent hallucination
@@ -469,7 +486,9 @@ async def execute_tool(tool_name: str, args: dict, user_id: str, business_id: st
         _logger.info(f"Tool {tool_name} completed successfully")
         _logger.info(f"Tool result sent to OpenAI (first 500 chars): {str(result)[:500]}")
         return json.dumps(result) if isinstance(result, dict) else result
-        
+
+    except AuthorityLost:
+        raise                     # TRADE-0 §4: ends the session, never reported to the model
     except Exception as e:
         _logger.error(f"Tool execution error for {tool_name}: {e}", exc_info=True)
         return json.dumps({"error": str(e)})
@@ -802,7 +821,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     started = None
     ended = None
     timed_out = False
-    stop_reason = None  # "cap" or "meter": why WE ended the session
+    stop_reason = None  # "cap", "meter" or "revoked": why WE ended the session
     handler_task = asyncio.current_task()
     watchdog = None
     heartbeat = None
@@ -889,6 +908,11 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                 if failures >= 3:
                     _stop("meter")
                     return
+            # TRADE-0 §4: a removed or demoted person's open session ends within
+            # one heartbeat even if no tool is called.
+            if not await asyncio.to_thread(still_owner, user_id, business_id):
+                _stop("revoked")
+                return
 
     async def _end_at_cap():
         nonlocal timed_out
@@ -972,6 +996,10 @@ async def realtime_voice_endpoint(websocket: WebSocket):
 
         async def _answer_tool(name: str, arguments: dict) -> str:
             from services import aria_actions
+            # TRADE-0 §4: authority NOW, before any tool runs or card is raised.
+            if not await asyncio.to_thread(still_owner, user_id, business_id):
+                _stop("revoked")
+                raise AuthorityLost("revoked")
             if name in aria_actions.CHAT_ACTION_TYPES:
                 # D18: a spoken action becomes the NS-B10 card on screen. It
                 # is approved by a tap, never by a spoken yes.
@@ -1013,7 +1041,15 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                         except json.JSONDecodeError:
                             arguments = {}
                         _logger.info(f"Tool call received: {name}")
-                        result = await _answer_tool(name, arguments)
+                        try:
+                            result = await _answer_tool(name, arguments)
+                            # ... and again before the result is delivered: an
+                            # in-flight answer for a revoked person is dropped.
+                            if not await asyncio.to_thread(still_owner, user_id, business_id):
+                                raise AuthorityLost("revoked")
+                        except AuthorityLost:
+                            _stop("revoked")
+                            return
                         await openai_ws.send(json.dumps({
                             "type": "conversation.item.create",
                             "item": {"type": "function_call_output",
@@ -1134,6 +1170,8 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         if stop_reason is not None:
             message = ("That's the 20-minute limit for one voice chat. Start a new one any time."
                        if stop_reason == "cap" else
+                       "Your access to this business has changed, so this chat has ended."
+                       if stop_reason == "revoked" else
                        "Voice usage couldn't be recorded, so this chat has ended. "
                        "You can still type to Aria.")
             await _bounded(websocket.send_json({"type": "session_limit", "message": message}),

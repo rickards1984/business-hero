@@ -145,8 +145,21 @@ Today the shared resolver (`assistant_chat.get_business_for_user`, and the depen
 - **`/v1/me`** gives a non-owner the minimal self response.
 - **The email-settings role check** accepts `owner` only; it had also accepted undefined `manager` and `admin` roles.
 
+**Stage 2, done. Live revocation in Aria voice (§4).**
+- `realtime_voice.still_owner()` reads authority *now* and fails closed.
+- **An open session rechecks:**
+  - before each tool call or card;
+  - again before the tool's result is delivered to the model, so an in-flight answer is dropped;
+  - on every heartbeat (each minute), so a removed person's session ends even if they never call a tool.
+
+  On loss of authority the session stops with "Your access to this business has changed".
+- **Found and fixed:** the voice executor used to *swallow* a failed business lookup, fall back to a default timezone and run the tool anyway. It now raises `AuthorityLost`, and the tool never runs.
+- **Tests:**
+  - the tool never runs for a non-owner;
+  - an open session stops at the next tool call, with no card raised, nothing delivered to the model, and the browser told (mutation-tested);
+  - `still_owner` fails closed.
+
 **Still to do:**
-- §4: Aria voice rechecks authority before each tool call and data delivery.
 - §3: server-side, single-use OAuth state bound to the initiator, business, provider and operation (a new table: a migration with a runbook).
 - §5: the RLS, RPC and Storage audit (read-only catalog census queries for Mike, then the narrowing migration rehearsed on the local harness).
 - §6: the remaining acceptance tests (no side effects after a denial; live revocation).
