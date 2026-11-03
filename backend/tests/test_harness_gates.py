@@ -377,3 +377,9 @@ def _trap4(d, path, content):
 def test_preflight_trap4_flags_real_model_changes_only(tmp_path, path, content, flagged):
     trap = _trap4(_trap4_repo(tmp_path), path, content)
     assert ("FAIL" in trap) is flagged, trap
+
+
+def test_preflight_trap4_ignores_table_text_in_tests(tmp_path):
+    """A test may contain `table=True` as data; only application code counts."""
+    trap = _trap4(_trap4_repo(tmp_path), "backend/tests/test_x.py", 'SRC = "class T(SQLModel, table=True)"\n')
+    assert "FAIL" not in trap, trap

@@ -39,3 +39,37 @@ def test_the_backend_main_module_is_found_as_production_loads_it(monkeypatch):
 def test_the_chase_helper_and_profit_alert_use_the_resolver():
     for rel in ("services/invoice_chase_helper.py", "services/profit_guard.py"):
         assert "backend_main()" in (BACKEND / rel).read_text(), rel
+
+
+def test_the_real_root_shim_is_resolved(tmp_path, monkeypatch):
+    """Review 1: exercise the actual root main.py loading a stub backend, the
+    way production does, without registering anything by hand."""
+    from services.backend_main import backend_main
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "main.py").write_text((REPO / "main.py").read_text())
+    stub = tmp_path / "backend" / "main.py"
+    stub.write_text("app = object()\ndef send_email_oauth(*a):\n    return 'sent'\n")
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    for name in ("main", "backend_main"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("main", tmp_path / "main.py")
+    shim = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "main", shim)
+    spec.loader.exec_module(shim)
+    found = backend_main(stub.resolve())
+    assert found is not shim and found.send_email_oauth() == "sent"
+
+
+def test_a_shim_that_does_not_register_the_module_is_still_resolved(monkeypatch):
+    from services.backend_main import backend_main
+    real = types.ModuleType("hidden")
+    real.__file__ = str(BACKEND / "main.py")
+    shim = types.ModuleType("main")
+    shim.__file__ = str(REPO / "main.py")
+    shim.backend_main = real
+    for name, module in list(sys.modules.items()):
+        if getattr(module, "__file__", None) and Path(module.__file__).resolve() == BACKEND / "main.py":
+            monkeypatch.delitem(sys.modules, name)
+    monkeypatch.setitem(sys.modules, "main", shim)
+    assert backend_main() is real

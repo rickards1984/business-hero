@@ -42,3 +42,14 @@
 
 - **The outreach `prepare` scan** (OUT-8 note 2): every open card is scanned per enrolment. The right fix is a partial expression index on `aria_actions (business_id, (payload->>'enrolment_id')) WHERE action_type='send_outreach'`. That is a production migration (RED, from a runbook), needed only **before the pilot cap of 5 is lifted**. The cap is still in place.
 - **OUT-13 retention:** retention, subject rights and redaction. A RED ticket of its own, needed before real personal-data import or launch.
+
+## Codex review 1 (`audits/HK-1-CODEX-REVIEW-1.md`, 1 × P1, 1 × P2) → fixed
+
+1. **P1: the resolver still returned the shim in production.** The root `main.py` executed the backend module without registering it, so nothing in `sys.modules` pointed at `backend/main.py`. The first test hid this by registering it by hand.
+   - The shim now registers `sys.modules["backend_main"]` before executing it.
+   - The resolver also follows the shim's `backend_main` attribute.
+   - A test runs the **real root `main.py`** against a stub backend, as production does, and it fails on the old shim and resolver.
+2. **P2: TRAP 4 could PASS wrongly.** With `pipefail`, `grep -q` closing early made the writer's SIGPIPE read as "no match", and a failed patch diff left it at "no change".
+   - Here-strings replace the pipes.
+   - A failed diff counts as a model change.
+   - Test files are excluded from the `table=True` scan, since a test may hold it as text; a fixture test covers this.

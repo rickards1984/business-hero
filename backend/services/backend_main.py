@@ -17,13 +17,21 @@ from pathlib import Path
 _MAIN = (Path(__file__).resolve().parent.parent / "main.py")
 
 
-def backend_main():
+def _is(module, target) -> bool:
+    path = getattr(module, "__file__", None)
+    try:
+        return bool(path) and Path(path).resolve() == target
+    except OSError:
+        return False
+
+
+def backend_main(target: Path = _MAIN):
+    """By file, under any name; also through the root shim's `backend_main`
+    attribute, in case the shim ever stops registering it (Codex HK-1 review 1)."""
     for module in list(sys.modules.values()):
-        path = getattr(module, "__file__", None)
-        if path:
-            try:
-                if Path(path).resolve() == _MAIN:
-                    return module
-            except OSError:
-                continue
+        if _is(module, target):
+            return module
+        inner = getattr(module, "backend_main", None)
+        if inner is not None and not callable(inner) and _is(inner, target):
+            return inner
     return importlib.import_module("main")
