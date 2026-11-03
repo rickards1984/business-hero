@@ -383,3 +383,20 @@ def test_preflight_trap4_ignores_table_text_in_tests(tmp_path):
     """A test may contain `table=True` as data; only application code counts."""
     trap = _trap4(_trap4_repo(tmp_path), "backend/tests/test_x.py", 'SRC = "class T(SQLModel, table=True)"\n')
     assert "FAIL" not in trap, trap
+
+
+@pytest.mark.parametrize("content,flagged", [
+    ('from supabase_auth import SUPABASE_SERVICE_ROLE_KEY\nif not SUPABASE_SERVICE_ROLE_KEY: pass\n', False),
+    ('SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiJ9.x.y"\n', True),
+    ('SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiJ9.x.y\n', True),
+    ('key = "sk-ant-abc123"\n', True),
+])
+def test_preflight_secret_scan_flags_values_not_setting_names(tmp_path, content, flagged):
+    """TRADE-0: reading SUPABASE_SERVICE_ROLE_KEY from the environment is not
+    a secret, so a changed file that merely names it must not block a push."""
+    d = _trap4_repo(tmp_path)
+    _trap4(d, "backend/app/thing.py", content)                  # commits the change
+    full = run([str(d / "scripts" / "preflight.sh")], cwd=d,
+               env={"PREFLIGHT_BASE": run(["git", "rev-parse", "HEAD~1"], cwd=d).stdout.strip()}).stdout
+    trap5 = full.split("TRAP 5")[1]
+    assert ("possible secret" in trap5) is flagged, trap5

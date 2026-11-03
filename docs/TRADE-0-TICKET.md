@@ -150,3 +150,5 @@ Today the shared resolver (`assistant_chat.get_business_for_user`, and the depen
 - §3: server-side, single-use OAuth state bound to the initiator, business, provider and operation (a new table: a migration with a runbook).
 - §5: the RLS, RPC and Storage audit (read-only catalog census queries for Mike, then the narrowing migration rehearsed on the local harness).
 - §6: the remaining acceptance tests (no side effects after a denial; live revocation).
+
+**Gate fix (in TRADE-0, since TRADE-0 touches the email service):** preflight TRAP 5 matched the *name* `SUPABASE_SERVICE_ROLE_KEY`, which `app/email/service.py` reads from the environment, so any change to that file blocked the push. It now flags a JWT-shaped *value* beside the name. A fixture test covers the name (not flagged) and assigned values (flagged).

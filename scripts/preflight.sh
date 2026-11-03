@@ -182,7 +182,9 @@ if [ -n "$RANGE" ] && [ "$DIFF_OK" -eq 1 ] && [ -n "$CHANGED" ]; then
     # Skip it — scanning the scanner for its own signatures is a false
     # positive, not a secret.
     [ "$f" = "scripts/preflight.sh" ] && continue
-    grep -lEi 'sk-ant-[a-z0-9]|sk-proj-[a-z0-9]|xai-[a-z0-9]{20}|SUPABASE_SERVICE_ROLE|service_role.*ey[A-Za-z0-9]' "$f" 2>/dev/null
+    # TRADE-0: the setting's NAME (SUPABASE_SERVICE_ROLE_KEY, read from the
+    # environment) is not a secret; a JWT-shaped VALUE next to it is.
+    grep -lEi 'sk-ant-[a-z0-9]|sk-proj-[a-z0-9]|xai-[a-z0-9]{20}|SUPABASE_SERVICE_ROLE(_KEY)?["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?ey[A-Za-z0-9]|service_role.*ey[A-Za-z0-9]' "$f" 2>/dev/null
   done)
   if [ -n "$HITS" ]; then
     bad "possible secret in changed files:"
