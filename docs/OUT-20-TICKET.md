@@ -1,57 +1,35 @@
-# OUT-20 — Outreach setup that a small business owner can finish
+# OUT-20: one Launch checklist per brand
 
-**Tier:** YELLOW (setup screens and help). The redraft spends AI money, recorded in the OUT-19 ledger. Stacked on #54 (OUT-19).
+**Tier:** AMBER. It switches on research, which spends AI money, but only within approvals and budgets that already exist. **Mike, 4 Nov 2026:** "I set it up for UKFI… it says it's set up and ready… but nothing has been researched." He suggested a launch button.
 
-**From Mike's click test, 25 Oct 2026.**
+**Cause:** setup ends at "ready", but prospect research is a separate per-brand switch. It is **off by default** and lives on the Settings tab. With it off, nothing is found and nothing is drafted.
 
-## What changes
+**Built:**
+- **`services/outreach_launch.py`:**
+  - `checklist()` shows, per brand: setup finished, outreach not paused, the sending mailbox checked, an audience approved, the privacy notice approved, the campaign's emails approved, and research on. Each item carries what to fix and where.
+  - `launch()` (owner only) switches the brand's research on, and **only** when every approval is in place. Otherwise it refuses with 409, naming what's missing. It never approves anything.
+  - `pause()` (owner only) switches the brand's research off. Emails already in a sequence carry on under their own approvals, and Pause all still stops everything.
+- **Routes:** `GET /v1/outreach/setup/launch`, `POST /v1/outreach/setup/launch` and `POST /v1/outreach/setup/launch/pause`, all through the existing owner and entitlement paths.
+- **Screen:** a Launch panel at the top of Outreach → Overview (owner only). Each brand shows Running or Not running, a tick or a fix link per item, and one Launch or Pause button.
+- **Tests:** `test_outreach_launch.py` has 8:
+  - a set-up brand with research off shows exactly that;
+  - Launch turns research on;
+  - Pause turns it off;
+  - Launch refuses when the templates aren't approved;
+  - only the owner can act;
+  - Pause all blocks launch;
+  - the routes work for the owner and give 403 to staff.
 
-1. **Saying what's happening.** Every save and every Aria draft shows a spinner and what is happening ("Saving your brand…", "Aria is writing your three emails — usually 10–20 seconds…"), with a light "making a little magic…" if it takes longer.
-2. **Speed.** A wizard save refreshes only setup status, plus the outreach lists when campaigns or mailboxes change. Before, it refreshed every outreach view.
-3. **Guidance at each step.**
-   - Step 1 explains that Aria writes from the brand details.
-   - The audience step asks for specifics.
-   - The emails step points to the brand details when they are missing.
-4. **Brand details, editable at any time.**
-   - The details are: what you offer, who it's for, why people choose you, tone, the ask, website.
-   - They are kept in the settings document under `outreach_brand_profiles`, so no migration.
-   - "Edit details" (PATCH /v1/outreach/setup/brands/{id}) changes the name, sender identity or details.
-   - Aria's drafts receive them, under better-written drafting instructions.
-5. **Working with Aria on the emails.**
-   - The owner writes notes; POST /v1/outreach/setup/campaigns/{id}/redraft returns three rewritten emails.
-   - Nothing is saved: the new wording appears for the owner to edit, save and approve.
-   - The cost is recorded.
-6. **A plain DNS fix guide on a failed mailbox check.** It is built from the domain's real records:
-   - who runs the DNS (from the nameservers: names.co.uk, GoDaddy, Cloudflare, IONOS and others);
-   - the exact SPF value, added to the existing record and never replacing it;
-   - the signature-key steps for Google Workspace or Microsoft 365, and DMARC.
+## Codex review 1 (`audits/OUT-20-CODEX-REVIEW-1.md`, 7 × P2) → fixed
 
-   The owner chooses between:
-   - I'll do it myself (Copy buttons);
-   - Send this to my web person (a ready email);
-   - Connect my domain now: hidden until a provider accepts our Domain Connect template. Support is detected already;
-   - Set it up for me (paid; it opens and escalates a support conversation).
+1. **Runtime parity.** The checklist now uses the rules research applies when it runs. The audience approval must be *current* (`research._audience`: reviewer and dates), and the campaign must be `ready` or `running`. It also checks that outreach is included in the plan, the brand is paid for (`brand_live`), the AI allowance has room, and the monthly research budget has room. Each is its own item, with its fix.
+2. **Pause** uses `growth=False`, like research's own switch: an owner can always stop spend.
+3. **The screen:**
+   - Pause is shown whenever research is on, even while another item is failing;
+   - a failed load shows an error with Retry;
+   - the checklist sits under the `outreach` key, so the page's refresh after Pause all, and every setup or research change, refreshes it.
+4. **Tests (13):**
+   - an out-of-date approval, a paused campaign, unapproved templates after setup, an unpaid brand and a used allowance all block launch;
+   - Pause works without growth entitlement.
 
-   The page re-checks every 3 minutes while open, never overlapping, and refreshes readiness when a mailbox passes. The daily check continues as before.
-
-   A failed DNS lookup never produces add or replace instructions; the guide says it couldn't read the records. Duplicate or invalid DMARC records are merged or repaired, never joined by a new one.
-
-## Not yet
-
-**Domain Connect's one-click flow.** Each provider must accept our template first, and names.co.uk doesn't support it. Detection is built; the flow follows once a provider approves.
-
-## Codex review 4 (`audits/OUT-20-CODEX-REVIEW-4.md`): follow-up after merge
-Mike authorised this review beyond the three-cycle limit on 26 Oct 2026. It found no P1s and three P2s, fixed on branch `fix/OUT-20-followup`.
-1. **DMARC repair:**
-   - whitespace the grammar allows around `:` and `,` is normalised, so `fo=0 : 1` is kept;
-   - a reporting address must be a real `mailto:` with a real domain, otherwise the owner's address replaces it.
-2. **A DNS lookup that times out** while checking the SPF fix is now "couldn't check": no value is offered, and the record isn't blamed for being written wrongly. pyspf's `temperror` is kept distinct.
-3. **names.co.uk:**
-   - the guide and the helper email say to **leave the hostname blank**, not to type `@`;
-   - the link goes to names.co.uk's "Changing your domain's DNS records" article;
-   - other hosts still say `@`.
-
-The backlog items are done too:
-- the banner says "adding", "adding or changing" or "checking", to match what's actually needed;
-- the claims that "everyday email keeps working" and "reach inboxes" are gone;
-- the old `advice` strings no longer say to replace SPF with a fresh record.
+   Mutation testing confirms the pause authority and the campaign status are both caught.

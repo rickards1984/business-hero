@@ -17,6 +17,7 @@ from db import get_session
 from services import outreach_allowance as allowance
 from services import outreach_billing as billing
 from services import outreach_boost as boosting
+from services import outreach_launch as launching
 from services import outreach_autopilot as autopilot
 from services import outreach_research as research
 from services import outreach_setup as setup
@@ -231,6 +232,28 @@ def research_configure(body: ResearchConfig, context=Depends(get_user_business_c
 @router.post("/research/lessons")
 def research_lessons(body: Lessons, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
     return _run(research.save_lessons, session, context, body.lessons, brand_id=str(body.brand_id))
+
+
+class LaunchBrand(Body):
+    brand_id: UUID
+
+
+@router.get("/launch")
+def launch_checklist(context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    """OUT-20: each brand's launch checklist (read only)."""
+    return launching.checklist(session, auth._load_business(session, context["business_id"]))
+
+
+@router.post("/launch")
+def launch_brand(body: LaunchBrand, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    """OUT-20: switch research on for a fully approved brand (owner only)."""
+    return _run(launching.launch, session, context, _body(body))
+
+
+@router.post("/launch/pause")
+def pause_brand(body: LaunchBrand, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    """OUT-20: switch the brand's research off (owner only)."""
+    return _run(launching.pause, session, context, _body(body))
 
 
 class Budget(Body):

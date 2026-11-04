@@ -89,6 +89,7 @@ function useCall(businessId: string) {
       const result = await (await apiRequest(method, setupPath(path), body)).json();
       // Refresh only what the change affects (refreshing every outreach view made each step slower).
       client.invalidateQueries({ queryKey: ['outreach-setup', businessId] });
+      client.invalidateQueries({ queryKey: ['outreach', businessId, 'launch'] });   // OUT-20
       if (/^(campaign|campaigns\/|mailboxes|finish)/.test(path)) client.invalidateQueries({ queryKey: ['outreach', businessId] });
       return result as T;
     } catch (e) {
@@ -997,6 +998,74 @@ export function CopyCampaign({ businessId, campaignId }: { businessId: string; c
 interface BrandResearch { brand_id: string; name: string; enabled: boolean; monthly_cap_pence: number; spent_pence: number; paused_reason?: string | null; lessons: string[]; allowance_used_percent?: number }
 interface ResearchStatus { brands: BrandResearch[]; enabled: boolean; daily_target_per_brand: number; min_cap_pence: number; last_run?: string | null; summary?: string | null }
 
+// OUT-20 (Mike, 4 Nov 2026): one place that shows whether each brand is
+// actually running, what's missing and where to fix it, with one Launch.
+interface LaunchItem { key: string; label: string; done: boolean; fix?: string | null; section: string }
+interface LaunchBrand { brand_id: string; name: string; items: LaunchItem[]; can_launch: boolean; launched: boolean; research_enabled: boolean; daily_target?: number; last_run?: string | null }
+const LAUNCH_HREF: Record<string, string> = { setup: '/app/outreach/settings', settings: '/app/outreach/settings', campaigns: '/app/outreach/campaigns' };
+
+export function LaunchPanel({ businessId }: { businessId: string }) {
+  const client = useQueryClient();
+  const api = useCall(businessId);
+  const q = useQuery<{ brands: LaunchBrand[] }>({
+    queryKey: ['outreach', businessId, 'launch'],
+    queryFn: async () => (await apiRequest('GET', setupPath('launch'))).json(),
+    staleTime: 15000, retry: 1,
+  });
+  if (q.isError) return (
+    <Alert severity="warning" action={<Button color="inherit" size="small" onClick={() => q.refetch()}>Retry</Button>}>
+      The launch checklist couldn't be loaded. {outreachError(q.error)}
+    </Alert>);
+  if (!q.data || q.data.brands.length === 0) return null;
+  async function act(path: string, brandId: string) {
+    if (await api.call('POST', path, { brand_id: brandId })) {
+      client.invalidateQueries({ queryKey: ['outreach', businessId, 'launch'] });
+      client.invalidateQueries({ queryKey: ['outreach-research', businessId] });
+    }
+  }
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Stack spacing={1.5}>
+        <Typography variant="h6">Launch</Typography>
+        <Typography variant="body2">
+          Everything each brand needs to find and email new contacts. Launch switches on only what you've already approved;
+          every email still waits for your approval (or the campaign's auto-approve, if you've turned it on).
+        </Typography>
+        {api.error && <Alert severity="error">{api.error}</Alert>}
+        {q.data.brands.map(b => (
+          <Paper key={b.brand_id} variant="outlined" sx={{ p: 2 }}>
+            <Stack spacing={1}>
+              <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between" flexWrap="wrap" useFlexGap>
+                <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{b.name}</Typography>
+                <Chip size="small" color={b.launched ? 'success' : 'default'} label={b.launched ? 'Running' : 'Not running'} />
+              </Stack>
+              {b.items.map(i => (
+                <Stack key={i.key} direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                  <Typography variant="body2" sx={{ color: i.done ? 'success.main' : 'warning.main', fontWeight: 700 }}>{i.done ? '\u2713' : '\u2022'}</Typography>
+                  <Typography variant="body2">{i.label}</Typography>
+                  {!i.done && i.fix && (i.key === 'research'
+                    ? <Typography variant="body2" color="text.secondary">{i.fix}</Typography>
+                    : <Button size="small" component={Link} to={LAUNCH_HREF[i.section] || '/app/outreach'}>{i.fix}</Button>)}
+                </Stack>
+              ))}
+              {b.research_enabled
+                ? <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                    <Typography variant="body2">{b.launched
+                      ? `Aria looks for up to ${b.daily_target ?? 20} new contacts each weekday from 6am and adds them to the campaign.`
+                      : 'Research is switched on but waiting for the items above.'}</Typography>
+                    <Button variant="outlined" disabled={api.busy} onClick={() => act('launch/pause', b.brand_id)}>Pause {b.name}</Button>
+                  </Stack>
+                : <Button variant="contained" disabled={api.busy || !b.can_launch} onClick={() => act('launch', b.brand_id)}>
+                    {b.can_launch ? `Launch ${b.name}` : 'Finish the items above to launch'}
+                  </Button>}
+            </Stack>
+          </Paper>
+        ))}
+      </Stack>
+    </Paper>
+  );
+}
+
 export function useResearchStatus(businessId: string) {
   return useQuery<ResearchStatus>({
     queryKey: ['outreach-research', businessId],
@@ -1150,7 +1219,10 @@ function BrandResearchCard({ businessId, brand, minCap }: { businessId: string; 
   const min = minCap / 100;
   async function save(path: string, body: Record<string, unknown>) {
     const ok = await api.call('POST', path, { brand_id: brand.brand_id, ...body });
-    if (ok) client.invalidateQueries({ queryKey: ['outreach-research', businessId] });
+    if (ok) {
+      client.invalidateQueries({ queryKey: ['outreach-research', businessId] });
+      client.invalidateQueries({ queryKey: ['outreach', businessId, 'launch'] });   // OUT-20
+    }
     return ok;
   }
   return (
