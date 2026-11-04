@@ -150,7 +150,7 @@ export default function Sidebar({
           <Typography
             sx={{
               fontSize: '11px',
-              color: 'rgba(232,230,225,0.4)',
+              color: (t) => (t.palette.mode === 'dark' ? 'rgba(232,230,225,0.4)' : t.palette.text.disabled),
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
@@ -164,7 +164,7 @@ export default function Sidebar({
           <IconButton
             size="small"
             onClick={onSignOut}
-            sx={{ color: 'rgba(232,230,225,0.4)', '&:hover': { color: '#f87171' } }}
+            sx={{ color: (t) => (t.palette.mode === 'dark' ? 'rgba(232,230,225,0.4)' : t.palette.text.disabled), '&:hover': { color: '#f87171' } }}
           >
             <LogoutIcon sx={{ fontSize: 16 }} />
           </IconButton>
