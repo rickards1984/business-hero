@@ -1027,41 +1027,46 @@ export function LaunchPanel({ businessId }: { businessId: string }) {
     <Paper variant="outlined" sx={{ p: 2 }}>
       <Stack spacing={1.5}>
         <Typography variant="h6">Launch</Typography>
-        <Typography variant="body2">
-          Everything each brand needs to find and email new contacts. Launch switches on only what you've already approved;
-          every email still waits for your approval (or the campaign's auto-approve, if you've turned it on).
+        <Typography variant="body2" color="text.secondary">
+          Launch starts Aria's weekday research for a brand. Every email still waits for your approval.
         </Typography>
         {api.error && <Alert severity="error">{api.error}</Alert>}
-        {q.data.brands.map(b => (
-          <Paper key={b.brand_id} variant="outlined" sx={{ p: 2 }}>
-            <Stack spacing={1}>
-              <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between" flexWrap="wrap" useFlexGap>
-                <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{b.name}</Typography>
-                <Chip size="small" color={b.launched ? (b.room_today ? 'success' : 'warning') : 'default'}
-                  label={b.launched ? (b.room_today ? 'Running' : 'On, no room today') : 'Not running'} />
-              </Stack>
-              {b.items.map(i => (
-                <Stack key={i.key} direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                  <Typography variant="body2" sx={{ color: i.done ? 'success.main' : 'warning.main', fontWeight: 700 }}>{i.done ? '\u2713' : '\u2022'}</Typography>
-                  <Typography variant="body2">{i.label}</Typography>
-                  {!i.done && i.fix && (i.key === 'research'
-                    ? <Typography variant="body2" color="text.secondary">{i.fix}</Typography>
-                    : <Button size="small" component={Link} to={LAUNCH_HREF[i.section] || '/app/outreach'}>{i.fix}</Button>)}
-                </Stack>
-              ))}
-              {b.research_enabled
-                ? <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                    <Typography variant="body2">{b.launched
-                      ? `Aria looks for up to ${b.daily_target ?? 20} new contacts each weekday from 6am and adds them to the campaign.`
-                      : 'Research is switched on but waiting for the items above.'}
-                      {b.launched && !b.room_today && b.no_room_reason ? ` ${b.no_room_reason}.` : ''}</Typography>
-                    <Button variant="outlined" disabled={api.busy} onClick={() => act('launch/pause', b.brand_id)}>Pause {b.name}</Button>
-                  </Stack>
-                : <Button variant="contained" disabled={api.busy || !b.can_launch} onClick={() => act('launch', b.brand_id)}>
-                    {b.can_launch ? `Launch ${b.name}` : 'Finish the items above to launch'}
-                  </Button>}
-            </Stack>
-          </Paper>
+        {q.data.brands.map(b => <LaunchBrandRow key={b.brand_id} b={b} busy={api.busy} act={act} />)}
+      </Stack>
+    </Paper>
+  );
+}
+
+// OUT-20b (Mike, 4 Nov 2026: "the simpler the UI, the better"): one line per
+// brand; only what needs fixing is listed, and the full checklist is a tap away.
+function LaunchBrandRow({ b, busy, act }: { b: LaunchBrand; busy: boolean; act: (path: string, brandId: string) => void }) {
+  const [all, setAll] = useState(false);
+  // Research's own row is shown only when it's paused (with the reason); 'off' is what Launch fixes.
+  const todo = b.items.filter(i => !i.done && (i.key !== 'research' || b.research_enabled));
+  const shown = all ? b.items : todo;
+  const status = b.launched ? (b.room_today ? 'Running' : 'On, no room today') : (b.research_enabled ? 'Waiting' : 'Not running');
+  return (
+    <Paper variant="outlined" sx={{ p: 1.5 }}>
+      <Stack spacing={1}>
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700, mr: 'auto' }}>{b.name}</Typography>
+          <Chip size="small" label={status}
+            color={b.launched ? (b.room_today ? 'success' : 'warning') : (b.research_enabled ? 'warning' : 'default')} />
+          {b.research_enabled
+            ? <Button size="small" variant="outlined" disabled={busy} onClick={() => act('launch/pause', b.brand_id)}>Pause</Button>
+            : <Button size="small" variant="contained" disabled={busy || !b.can_launch} onClick={() => act('launch', b.brand_id)}>Launch</Button>}
+          <Button size="small" onClick={() => setAll(v => !v)}>{all ? 'Hide checks' : 'All checks'}</Button>
+        </Stack>
+        {b.launched && !b.room_today && b.no_room_reason && <Typography variant="body2" color="text.secondary">{b.no_room_reason}.</Typography>}
+        {!all && todo.length > 0 && <Typography variant="body2">{b.research_enabled ? 'Research is on but waiting for:' : 'To launch:'}</Typography>}
+        {shown.map(i => (
+          <Stack key={i.key} direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            <Typography variant="body2" sx={{ color: i.done ? 'success.main' : 'warning.main', fontWeight: 700 }}>{i.done ? '\u2713' : '\u2022'}</Typography>
+            <Typography variant="body2">{i.label}</Typography>
+            {!i.done && i.fix && (i.key === 'research'
+              ? <Typography variant="body2" color="text.secondary">{i.fix}</Typography>
+              : <Button size="small" component={Link} to={LAUNCH_HREF[i.section] || '/app/outreach'}>{i.fix}</Button>)}
+          </Stack>
         ))}
       </Stack>
     </Paper>
