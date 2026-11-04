@@ -68,6 +68,7 @@ import { fetchEmailMessages } from '@/lib/emailApi';
 import { applyBrandColor } from '@/pages/BrandingSettings';
 import SupportPanel from '@/components/SupportPanel';
 import SupportHelpButton from '@/components/SupportHelpButton';
+import { softSurface } from '@/lib/surfaces';
 
 /**
  * Get business initials from name
@@ -1139,7 +1140,7 @@ export default function BusinessDashboard() {
                             <Typography variant="subtitle2" color="text.secondary" gutterBottom>
                               Summary
                             </Typography>
-                            <Card sx={{ p: 2, bgcolor: 'grey.50' }}>
+                            <Card sx={{ p: 2, bgcolor: softSurface }}>
                               <Typography variant="body2">
                                 {selectedCall.summary || selectedCall.notes}
                               </Typography>
@@ -1185,7 +1186,7 @@ export default function BusinessDashboard() {
 
                         {/* No details message */}
                         {!selectedCall.summary && !selectedCall.notes && !selectedCall.transcript && !selectedCall.intent && (
-                          <Card sx={{ p: 3, textAlign: 'center', bgcolor: 'grey.50', mb: 3 }}>
+                          <Card sx={{ p: 3, textAlign: 'center', bgcolor: softSurface, mb: 3 }}>
                             <Typography color="text.secondary">
                               No additional details available for this call.
                             </Typography>
