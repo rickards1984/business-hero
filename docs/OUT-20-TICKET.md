@@ -58,3 +58,7 @@ The checklist is now built on **research's own functions**, not a copy of their 
 **Tests:** 21.
 
 **Accepted difference (by design):** launch needs the privacy notice and approved emails on a healthy inbox, while research alone doesn't. In that case launch says "Not running", and research could still find contacts for a brand that can't email them. Launch stays stricter so nothing is found that can't be used.
+
+## Codex review 4 (`audits/OUT-20-CODEX-REVIEW-4.md`, quick targeted) → APPROVE
+
+No P1 or P2.
