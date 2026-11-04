@@ -1001,7 +1001,7 @@ interface ResearchStatus { brands: BrandResearch[]; enabled: boolean; daily_targ
 // OUT-20 (Mike, 4 Nov 2026): one place that shows whether each brand is
 // actually running, what's missing and where to fix it, with one Launch.
 interface LaunchItem { key: string; label: string; done: boolean; fix?: string | null; section: string }
-interface LaunchBrand { brand_id: string; name: string; items: LaunchItem[]; can_launch: boolean; launched: boolean; research_enabled: boolean; daily_target?: number; last_run?: string | null }
+interface LaunchBrand { brand_id: string; name: string; items: LaunchItem[]; can_launch: boolean; launched: boolean; research_enabled: boolean; room_today?: number; no_room_reason?: string | null; daily_target?: number; last_run?: string | null }
 const LAUNCH_HREF: Record<string, string> = { setup: '/app/outreach/settings', settings: '/app/outreach/settings', campaigns: '/app/outreach/campaigns' };
 
 export function LaunchPanel({ businessId }: { businessId: string }) {
@@ -1037,7 +1037,8 @@ export function LaunchPanel({ businessId }: { businessId: string }) {
             <Stack spacing={1}>
               <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between" flexWrap="wrap" useFlexGap>
                 <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{b.name}</Typography>
-                <Chip size="small" color={b.launched ? 'success' : 'default'} label={b.launched ? 'Running' : 'Not running'} />
+                <Chip size="small" color={b.launched ? (b.room_today ? 'success' : 'warning') : 'default'}
+                  label={b.launched ? (b.room_today ? 'Running' : 'On, no room today') : 'Not running'} />
               </Stack>
               {b.items.map(i => (
                 <Stack key={i.key} direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
@@ -1052,7 +1053,8 @@ export function LaunchPanel({ businessId }: { businessId: string }) {
                 ? <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
                     <Typography variant="body2">{b.launched
                       ? `Aria looks for up to ${b.daily_target ?? 20} new contacts each weekday from 6am and adds them to the campaign.`
-                      : 'Research is switched on but waiting for the items above.'}</Typography>
+                      : 'Research is switched on but waiting for the items above.'}
+                      {b.launched && !b.room_today && b.no_room_reason ? ` ${b.no_room_reason}.` : ''}</Typography>
                     <Button variant="outlined" disabled={api.busy} onClick={() => act('launch/pause', b.brand_id)}>Pause {b.name}</Button>
                   </Stack>
                 : <Button variant="contained" disabled={api.busy || !b.can_launch} onClick={() => act('launch', b.brand_id)}>

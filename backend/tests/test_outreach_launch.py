@@ -20,6 +20,15 @@ def launch():
     return importlib.import_module("services.outreach_launch")
 
 
+@pytest.fixture(autouse=True)
+def a_research_provider(monkeypatch):
+    """A priced provider is configured (production has one); the gates that
+    depend on it are tested on their own below."""
+    from services import ai_costs, ai_router
+    monkeypatch.setattr(ai_router, "reserve_pence", lambda: 10)
+    monkeypatch.setattr(ai_costs, "allowed", lambda session, **kw: True)
+
+
 def finished(db, *, approve=True):
     """Setup complete (or not), research NOT switched on: Mike's UKFI."""
     with setup_clock():
@@ -75,7 +84,7 @@ def test_launch_never_skips_an_approval(db):
     biz, brand = finished(db, approve=False)
     with Session(db) as s:
         b, it = items(launch().checklist(s, biz), brand["id"])
-        assert it["campaign"]["done"] is False and b["can_launch"] is False
+        assert it["audience"]["done"] is False and b["can_launch"] is False
         with pytest.raises(Exception) as caught:
             launch().launch(s, biz, OWNER, {"brand_id": brand["id"]})
     assert getattr(caught.value, "status_code", None) == 409
@@ -144,7 +153,8 @@ def test_a_paused_campaign_blocks_launch(db):
         s.execute(text("UPDATE outreach_campaigns SET status = 'paused'"))
         s.commit()
         b, it = items(launch().checklist(s, biz), brand["id"])
-    assert it["campaign"]["done"] is False and b["can_launch"] is False
+    assert it["audience"]["done"] is False and "paused campaign" in it["audience"]["fix"]
+    assert b["can_launch"] is False
 
 
 def test_unapproved_templates_after_setup_block_launch(db):
@@ -154,28 +164,22 @@ def test_unapproved_templates_after_setup_block_launch(db):
         s.execute(text("UPDATE outreach_sequence_steps SET approved_at = NULL"))
         s.commit()
         b, it = items(launch().checklist(s, biz), brand["id"])
-        assert it["started"]["done"] and it["campaign"]["done"] is False and b["can_launch"] is False
+        assert it["started"]["done"] and b["can_launch"] is False
         with pytest.raises(Exception) as caught:
             launch().launch(s, biz, OWNER, {"brand_id": brand["id"]})
     assert getattr(caught.value, "status_code", None) == 409
 
 
 def test_an_unpaid_brand_and_a_used_allowance_block_launch(db, monkeypatch):
-    from services import outreach_billing, outreach_research
+    from services import outreach_billing
     biz, brand = finished(db)
     monkeypatch.setattr(outreach_billing, "brand_live", lambda *a, **k: False)
     with Session(db) as s:
         b, it = items(launch().checklist(s, biz), brand["id"])
     assert it["paid"]["done"] is False and b["can_launch"] is False
     monkeypatch.setattr(outreach_billing, "brand_live", lambda *a, **k: True)
-    real = outreach_research.status
-
-    def used_up(session, business):
-        out = real(session, business)
-        for b_ in out["brands"]:
-            b_["allowance_used_percent"] = 100
-        return out
-    monkeypatch.setattr(outreach_research, "status", used_up)
+    from services import outreach_allowance
+    monkeypatch.setattr(outreach_allowance, "may_research", lambda *a, **k: False)
     with Session(db) as s:
         b, it = items(launch().checklist(s, biz), brand["id"])
     assert it["allowance"]["done"] is False and b["can_launch"] is False
@@ -199,3 +203,54 @@ def test_pause_works_without_growth_entitlement(db, monkeypatch):
         launch().pause(s, biz, OWNER, {"brand_id": brand["id"]})
     with Session(db) as s:
         assert research().status(s, biz)["brands"][0]["enabled"] is False
+
+
+
+# ------------------------- Codex OUT-20 review 2: research's own functions ---
+
+def test_a_current_audience_without_a_campaign_and_an_old_one_with_a_campaign_cannot_launch(db):
+    """Two audiences, each half-ready: research can use neither."""
+    biz, brand = finished(db)
+    import uuid as _uuid
+    with Session(db) as s:
+        lia = dict(s.execute(text("SELECT * FROM outreach_compliance LIMIT 1")).mappings().one())
+        s.execute(text("UPDATE outreach_compliance SET review_due_at = :d"), {"d": "2000-01-01T00:00:00+00:00"})
+        from test_outreach_setup import _insert
+        _insert(s, "outreach_compliance", **{**lia, "id": str(_uuid.uuid4()), "audience_hash": "another-audience"})
+        s.commit()
+        b, it = items(launch().checklist(s, biz), brand["id"])
+    assert it["audience"]["done"] is False and b["can_launch"] is False
+
+
+def test_the_whole_search_reservation_must_fit_the_budget(db, monkeypatch):
+    from services import ai_router
+    biz, brand = finished(db)
+    with Session(db) as s:
+        cap = research().status(s, biz)["brands"][0]["monthly_cap_pence"]
+    monkeypatch.setattr(ai_router, "reserve_pence", lambda: cap + 1)
+    with Session(db) as s:
+        b, it = items(launch().checklist(s, biz), brand["id"])
+    assert it["budget"]["done"] is False and b["can_launch"] is False
+
+
+@pytest.mark.parametrize("gate", ["no_provider", "platform_limit"])
+def test_no_provider_or_the_platform_limit_blocks_launch(db, monkeypatch, gate):
+    from services import ai_costs, ai_router
+    biz, brand = finished(db)
+    if gate == "no_provider":
+        monkeypatch.setattr(ai_router, "reserve_pence", lambda: 0)
+    else:
+        monkeypatch.setattr(ai_costs, "allowed", lambda session, **kw: False)
+    with Session(db) as s:
+        b, it = items(launch().checklist(s, biz), brand["id"])
+    assert it["provider"]["done"] is False and b["can_launch"] is False
+
+
+def test_no_room_today_is_shown_but_never_blocks_launch(db, monkeypatch):
+    from services import outreach_research
+    biz, brand = finished(db)
+    real = outreach_research.capacity
+    monkeypatch.setattr(outreach_research, "capacity", lambda *a, **k: {**real(*a, **k), "room": 0})
+    with Session(db) as s:
+        b, _ = items(launch().checklist(s, biz), brand["id"])
+    assert b["can_launch"] is True and b["room_today"] == 0 and b["no_room_reason"]

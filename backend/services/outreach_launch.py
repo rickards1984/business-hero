@@ -19,32 +19,47 @@ from services import outreach_research as research
 from services import outreach_send as send
 from services import outreach_setup as setup
 
-def _current_audiences(session, bid: str, brand_id: str, moment) -> tuple:
-    """(any current approval, any approval at all) for the brand, by the same
-    rule research uses at run time (research._audience: reviewer, dates)."""
-    current = any_approved = False
+def _runnable_audiences(session, bid: str, brand_id: str, moment, sendable: set) -> dict:
+    """Research's OWN rules, per approved audience of the brand (Codex OUT-20
+    review 2): `research._audience` (the approval is current) and
+    `research.capacity` (a ready or running campaign of this brand for THIS
+    audience, and today's room). An audience counts only if both hold for it."""
+    out = {"any_approved": False, "current": False, "runnable": False, "room": 0, "no_room": None}
     for (cid,) in session.execute(text(
             "SELECT id FROM outreach_compliance WHERE business_id = :b AND brand_id = :br AND decision = 'approved'"),
             {"b": bid, "br": brand_id}):
-        any_approved = True
+        out["any_approved"] = True
         try:
-            research._audience(session, bid, cid, moment)
-            current = True
+            lia, _ = research._audience(session, bid, cid, moment)
         except send.ActionRefused:
-            pass
-    return current, any_approved
+            continue
+        out["current"] = True
+        room = research.capacity(session, bid, brand_id, moment, lia["audience_hash"])
+        # Research places contacts in any ready/running campaign; launch also
+        # needs that audience's campaign emails approved on a healthy inbox
+        # (setup's rule), so whatever research finds can actually be emailed.
+        if room["campaigns"] and str(cid) in sendable:
+            out["runnable"] = True
+            out["room"] = max(out["room"], int(room["room"]))
+            if not room["room"]:
+                out["no_room"] = research._no_room_reason(room)
+    return out
 
 
-def _campaign_runs(session, bid: str, brand: dict) -> bool:
-    """A campaign research can place contacts in (research.capacity): ready
-    by setup's rule (templates approved, on the brand's healthy mailbox) AND
-    its status ready or running (a paused or finished campaign takes nobody)."""
-    ids = {a["campaign"]["id"] for a in brand["audiences"]
-           if a["approved"] and a["campaign"] and a["campaign"]["ready"]}
-    if not ids:
-        return False
-    return any(str(c["id"]) in ids and c["status"] in ("ready", "running")
-               for c in send.rows(session, "outreach_campaigns", bid, "AND brand_id = :br", {"br": brand["id"]}))
+def _spend_gates(session, bid: str, brand_id: str, rb: dict, moment) -> dict:
+    """Research's own reservation gates: a provider exists, the price is known,
+    the platform limit, the brand's AI allowance, and its monthly budget, each
+    for the WHOLE reservation one search takes."""
+    from services import ai_costs, ai_router, outreach_allowance
+    try:
+        reserve = int(ai_router.reserve_pence())
+    except ai_costs.Unpriced:
+        return {"provider": False, "platform": True, "allowance": True, "budget": True}
+    provider = reserve > 0
+    return {"provider": provider,
+            "platform": ai_costs.allowed(session, moment=moment, purpose="research"),
+            "allowance": provider and outreach_allowance.may_research(session, bid, brand_id, moment, reserve),
+            "budget": provider and int(rb.get("spent_pence") or 0) + reserve <= int(rb.get("monthly_cap_pence") or 0)}
 
 
 def _item(key, label, done, fix, section):
@@ -52,8 +67,13 @@ def _item(key, label, done, fix, section):
 
 
 def checklist(session, business) -> dict:
-    """Every brand's launch checklist, by the rules research applies when it
-    runs (Codex OUT-20 review 1). Read only."""
+    """Every brand's launch checklist, built on the functions research itself
+    runs (Codex OUT-20 reviews 1 and 2). Read only.
+
+    Launch is deliberately STRICTER than research on what sending needs (a
+    checked mailbox, the privacy notice): contacts found for a brand that can't
+    email them would only age. Today's room is shown, never a launch blocker:
+    a full inbox is a daily state, not a setup fault."""
     from fastapi import HTTPException
     from auth import assert_feature_access
     from services import outreach_billing
@@ -78,10 +98,10 @@ def checklist(session, business) -> dict:
     out = []
     for brand in state.get("brands") or []:
         rb = by_brand.get(brand["id"]) or {}
-        current, any_approved = _current_audiences(session, bid, brand["id"], moment)
+        sendable = {a["id"] for a in brand["audiences"] if a["campaign"] and a["campaign"]["ready"]}
+        aud = _runnable_audiences(session, bid, brand["id"], moment, sendable)
+        gates = _spend_gates(session, bid, brand["id"], rb, moment)
         paid = outreach_billing.brand_live(session, bid, brand["id"], moment)
-        allowance_left = (rb.get("allowance_used_percent") or 0) < 100
-        budget_left = int(rb.get("spent_pence") or 0) < int(rb.get("monthly_cap_pence") or 0)
         research_on = bool(rb.get("enabled")) and not rb.get("paused_reason")
         items = [
             _item("plan", "Outreach included on your plan", plan_ok, "Check your plan in Billing", "billing"),
@@ -90,16 +110,19 @@ def checklist(session, business) -> dict:
             _item("paid", "Brand paid for", paid, "Pay for this brand in Settings", "settings"),
             _item("mailbox", "Sending mailbox checked" + (f": {brand['mailbox_address']}" if brand.get("mailbox_address") else ""),
                   brand["mailbox_ok"], "Check the brand's mailbox", "setup"),
-            _item("audience", "Audience approved and in date", current,
-                  "The audience's approval is out of date: review it" if any_approved
-                  else "Approve who this brand contacts", "setup"),
             _item("privacy", "Privacy notice approved", brand["privacy"], "Approve the brand's privacy notice", "setup"),
-            _item("campaign", "Campaign approved and running", _campaign_runs(session, bid, brand),
-                  "Approve the campaign's emails, or restart a paused campaign", "campaigns"),
-            _item("allowance", "AI allowance left this month", allowance_left, "Top up the brand's AI allowance in Settings",
+            _item("audience", "An in-date audience with a running campaign", aud["runnable"],
+                  ("The audience's approval is out of date: review it" if aud["any_approved"] and not aud["current"]
+                   else "Approve the campaign's emails, or restart its paused campaign" if aud["current"]
+                   else "Approve who this brand contacts"),
+                  "campaigns" if aud["current"] else "setup"),
+            _item("provider", "AI research available", gates["provider"] and gates["platform"],
+                  "Research is unavailable right now (AI provider or platform limit); it resumes automatically",
                   "settings"),
-            _item("budget", "Research budget left this month", budget_left, "Raise the brand's monthly research budget",
-                  "settings"),
+            _item("allowance", "AI allowance left for a search", gates["allowance"],
+                  "Top up the brand's AI allowance in Settings", "settings"),
+            _item("budget", "Research budget left for a search", gates["budget"],
+                  "Raise the brand's monthly research budget", "settings"),
             _item("research", "Aria researching new contacts each weekday", research_on,
                   f"Research paused: {rb['paused_reason']}" if rb.get("paused_reason") else "Press Launch to switch research on",
                   "settings"),
@@ -109,6 +132,7 @@ def checklist(session, business) -> dict:
                     "can_launch": ready and not rb.get("paused_reason"),
                     "launched": ready and research_on,
                     "research_enabled": bool(rb.get("enabled")),
+                    "room_today": aud["room"], "no_room_reason": aud["no_room"] if not aud["room"] else None,
                     "daily_target": rstate.get("daily_target_per_brand"),
                     "last_run": rstate.get("last_run")})
     session.rollback()

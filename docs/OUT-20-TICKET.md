@@ -33,3 +33,15 @@
    - Pause works without growth entitlement.
 
    Mutation testing confirms the pause authority and the campaign status are both caught.
+
+## Codex review 2 (`audits/OUT-20-CODEX-REVIEW-2.md`, 4 × P2) → fixed
+
+The checklist is now built on **research's own functions**, not a copy of their rules:
+- **Audience and campaign are judged together, per audience.** An audience counts only if `research._audience` accepts its approval as current, **and** `research.capacity` finds a ready or running campaign of this brand for that audience, **and** that audience's campaign emails are approved on a healthy inbox (setup's rule; launch is deliberately stricter on what sending needs). Two half-ready audiences can't add up to "ready".
+- **Spending uses research's own reservation gates for the whole search:**
+  - `ai_router.reserve_pence()` (a provider exists and is priced);
+  - `ai_costs.allowed(purpose="research")` (the platform limit);
+  - `outreach_allowance.may_research(reserve)`;
+  - spent plus the reserve within the monthly budget.
+- **Today's room** (`capacity`) is shown, with research's own reason, but never blocks launch. A full inbox is a daily state, so the badge reads "On, no room today" rather than "Running".
+- **Tests (18):** half-ready audiences, the whole reservation over budget, no provider, the platform limit, and no room today.
