@@ -27,6 +27,7 @@ def a_research_provider(monkeypatch):
     from services import ai_costs, ai_router
     monkeypatch.setattr(ai_router, "reserve_pence", lambda: 10)
     monkeypatch.setattr(ai_costs, "allowed", lambda session, **kw: True)
+    monkeypatch.setenv("COMPANIES_HOUSE_API_KEY", "test-key")
 
 
 def finished(db, *, approve=True):
@@ -254,3 +255,40 @@ def test_no_room_today_is_shown_but_never_blocks_launch(db, monkeypatch):
     with Session(db) as s:
         b, _ = items(launch().checklist(s, biz), brand["id"])
     assert b["can_launch"] is True and b["room_today"] == 0 and b["no_room_reason"]
+
+
+
+# --------------------------------------------------- Codex OUT-20 review 3 ---
+
+def test_without_a_companies_house_key_launch_is_blocked(db, monkeypatch):
+    biz, brand = finished(db)
+    monkeypatch.delenv("COMPANIES_HOUSE_API_KEY")
+    with Session(db) as s:
+        b, it = items(launch().checklist(s, biz), brand["id"])
+    assert it["companies_house"]["done"] is False and b["can_launch"] is False
+
+
+def test_a_newer_draft_never_hides_an_older_approval_research_still_uses(db):
+    import uuid as _uuid
+    from test_outreach_setup import _insert
+    biz, brand = finished(db)
+    with Session(db) as s:
+        lia = dict(s.execute(text("SELECT * FROM outreach_compliance LIMIT 1")).mappings().one())
+        _insert(s, "outreach_compliance", **{**lia, "id": str(_uuid.uuid4()), "version": int(lia["version"]) + 1,
+                                             "decision": "draft", "reviewer": None})
+        s.commit()
+        b, it = items(launch().checklist(s, biz), brand["id"])
+    assert it["audience"]["done"] is True and b["can_launch"] is True
+
+
+def test_an_older_paused_campaign_never_hides_a_ready_one(db):
+    import uuid as _uuid
+    from test_outreach_setup import _insert
+    biz, brand = finished(db)
+    with Session(db) as s:
+        c = dict(s.execute(text("SELECT * FROM outreach_campaigns LIMIT 1")).mappings().one())
+        _insert(s, "outreach_campaigns", **{**c, "id": str(_uuid.uuid4()), "status": "paused",
+                                            "created_at": "2000-01-01T00:00:00+00:00", "name": "old paused"})
+        s.commit()
+        b, it = items(launch().checklist(s, biz), brand["id"])
+    assert it["audience"]["done"] is True and b["can_launch"] is True

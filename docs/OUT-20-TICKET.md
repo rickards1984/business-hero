@@ -45,3 +45,16 @@ The checklist is now built on **research's own functions**, not a copy of their 
   - spent plus the reserve within the monthly budget.
 - **Today's room** (`capacity`) is shown, with research's own reason, but never blocks launch. A full inbox is a daily state, so the badge reads "On, no room today" rather than "Running".
 - **Tests (18):** half-ready audiences, the whole reservation over budget, no provider, the platform limit, and no room today.
+
+## Codex review 3 (`audits/OUT-20-CODEX-REVIEW-3.md`, 2 × P2) → fixed
+
+1. **No Companies House key:** research refuses before every search (it can't confirm a company), so this is now its own blocking item, "Company checks available".
+2. **A newer draft hid an older approval:** launch's "emails approved" check now matches by **audience** (its hash), not by approval version, so a newer draft never hides an older approval that research still uses.
+
+**Also proven:**
+- an older paused campaign never hides a ready one;
+- reverting to version matching is caught by mutation testing.
+
+**Tests:** 21.
+
+**Accepted difference (by design):** launch needs the privacy notice and approved emails on a healthy inbox, while research alone doesn't. In that case launch says "Not running", and research could still find contacts for a brand that can't email them. Launch stays stricter so nothing is found that can't be used.

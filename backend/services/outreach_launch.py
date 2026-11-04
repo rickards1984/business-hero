@@ -13,7 +13,9 @@ owner's approval (or the campaign's auto-approve, if the owner granted it).
 Pause switches the brand's research off; emails already in a sequence carry on
 under their own approvals (Pause all, in Settings, stops everything).
 """
-from sqlalchemy import text
+import os
+
+from sqlalchemy import bindparam, text
 
 from services import outreach_research as research
 from services import outreach_send as send
@@ -38,7 +40,9 @@ def _runnable_audiences(session, bid: str, brand_id: str, moment, sendable: set)
         # Research places contacts in any ready/running campaign; launch also
         # needs that audience's campaign emails approved on a healthy inbox
         # (setup's rule), so whatever research finds can actually be emailed.
-        if room["campaigns"] and str(cid) in sendable:
+        # By audience (hash), not version: a newer draft never hides an older
+        # approval research still uses (Codex OUT-20 review 3).
+        if room["campaigns"] and lia["audience_hash"] in sendable:
             out["runnable"] = True
             out["room"] = max(out["room"], int(room["room"]))
             if not room["room"]:
@@ -98,7 +102,10 @@ def checklist(session, business) -> dict:
     out = []
     for brand in state.get("brands") or []:
         rb = by_brand.get(brand["id"]) or {}
-        sendable = {a["id"] for a in brand["audiences"] if a["campaign"] and a["campaign"]["ready"]}
+        ready_ids = [a["id"] for a in brand["audiences"] if a["campaign"] and a["campaign"]["ready"]]
+        sendable = {h for (h,) in session.execute(text(
+            "SELECT audience_hash FROM outreach_compliance WHERE business_id = :b AND id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True)), {"b": bid, "ids": ready_ids})} if ready_ids else set()
         aud = _runnable_audiences(session, bid, brand["id"], moment, sendable)
         gates = _spend_gates(session, bid, brand["id"], rb, moment)
         paid = outreach_billing.brand_live(session, bid, brand["id"], moment)
@@ -116,6 +123,10 @@ def checklist(session, business) -> dict:
                    else "Approve the campaign's emails, or restart its paused campaign" if aud["current"]
                    else "Approve who this brand contacts"),
                   "campaigns" if aud["current"] else "setup"),
+            # Research refuses before searching without it (no contact can be confirmed as a company).
+            _item("companies_house", "Company checks available (Companies House)",
+                  bool(os.environ.get("COMPANIES_HOUSE_API_KEY")),
+                  "Company checks aren't configured on Business Hero yet; support has been told", "settings"),
             _item("provider", "AI research available", gates["provider"] and gates["platform"],
                   "Research is unavailable right now (AI provider or platform limit); it resumes automatically",
                   "settings"),
