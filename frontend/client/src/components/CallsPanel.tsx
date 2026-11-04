@@ -33,6 +33,17 @@ interface CallsPanelProps {
   onCreateTaskFromCall?: () => void;
 }
 
+// UI-1: the call drawer's colours follow the theme. Dark mode keeps its exact
+// previous values; light mode gets readable equivalents.
+type ThemeLike = { palette: { mode: string; text: { secondary: string }; divider: string; action: { hover: string; selected: string }; primary: { main: string } } };
+const dark = (t: ThemeLike) => t.palette.mode === 'dark';
+const panelSurface = (t: ThemeLike) => (dark(t) ? 'rgba(255, 255, 255, 0.04)' : t.palette.action.hover);
+const panelLine = (t: ThemeLike) => (dark(t) ? 'rgba(255, 255, 255, 0.08)' : t.palette.divider);
+const panelHeading = (t: ThemeLike) => (dark(t) ? 'rgba(232, 230, 225, 0.6)' : t.palette.text.secondary);
+const panelCallerLabel = (t: ThemeLike) => (dark(t) ? 'rgba(232, 230, 225, 0.5)' : t.palette.text.secondary);
+const panelReceptionistLabel = (t: ThemeLike) => (dark(t) ? '#a78bfa' : t.palette.primary.main);
+const panelHover = (t: ThemeLike) => (dark(t) ? 'rgba(255,255,255,0.08)' : t.palette.action.selected);
+
 export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPanelProps) {
   const [calls, setCalls] = useState<Call[]>(() => {
     try {
@@ -465,7 +476,7 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
               </Box>
 
               {/* Caller Info */}
-              <Card sx={{ p: 2, mb: 3, bgcolor: 'rgba(255, 255, 255, 0.04)', border: '0.5px solid rgba(255, 255, 255, 0.08)' }}>
+              <Card sx={{ p: 2, mb: 3, bgcolor: panelSurface, border: '0.5px solid', borderColor: panelLine }}>
                 <Typography variant="subtitle2" color="text.secondary" gutterBottom>
                   Caller
                 </Typography>
@@ -530,11 +541,11 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
               {/* Summary */}
               {(selectedCall.summary || selectedCall.notes) && (
                 <Box sx={{ mb: 3 }}>
-                  <Typography sx={{ fontSize: '0.75rem', fontWeight: 600, color: 'rgba(232, 230, 225, 0.6)', textTransform: 'uppercase', letterSpacing: '0.05em', mb: 1 }}>
+                  <Typography sx={{ fontSize: '0.75rem', fontWeight: 600, color: panelHeading, textTransform: 'uppercase', letterSpacing: '0.05em', mb: 1 }}>
                     Summary
                   </Typography>
-                  <Card sx={{ p: 2, bgcolor: 'rgba(255, 255, 255, 0.04)', border: '0.5px solid rgba(255, 255, 255, 0.08)' }}>
-                    <Typography variant="body2" sx={{ color: '#e8e6e1' }}>
+                  <Card sx={{ p: 2, bgcolor: panelSurface, border: '0.5px solid', borderColor: panelLine }}>
+                    <Typography variant="body2" sx={{ color: 'text.primary' }}>
                       {selectedCall.summary || selectedCall.notes}
                     </Typography>
                   </Card>
@@ -544,7 +555,7 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
               {/* Transcript */}
               {selectedCall.transcript && (
                 <Box sx={{ mb: 3 }}>
-                  <Typography sx={{ fontSize: '0.75rem', fontWeight: 600, color: 'rgba(232, 230, 225, 0.6)', textTransform: 'uppercase', letterSpacing: '0.05em', mb: 1.5 }}>
+                  <Typography sx={{ fontSize: '0.75rem', fontWeight: 600, color: panelHeading, textTransform: 'uppercase', letterSpacing: '0.05em', mb: 1.5 }}>
                     Transcript
                   </Typography>
                   <Box sx={{ maxHeight: 400, overflow: 'auto', px: 0.5 }}>
@@ -559,17 +570,17 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
                                 className={`transcript-bubble ${isCaller ? 'transcript-bubble--caller' : 'transcript-bubble--receptionist'}`}
                                 sx={{ maxWidth: '85%', px: 2, py: 1 }}
                               >
-                                <Typography sx={{ fontSize: '0.625rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', mb: '2px', color: isCaller ? 'rgba(232, 230, 225, 0.5)' : '#a78bfa' }}>
+                                <Typography sx={{ fontSize: '0.625rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', mb: '2px', color: isCaller ? panelCallerLabel : panelReceptionistLabel }}>
                                   {isCaller ? 'Caller' : 'Receptionist'}
                                 </Typography>
-                                <Typography sx={{ fontSize: '0.8125rem', lineHeight: 1.625, color: '#e8e6e1' }}>{text}</Typography>
+                                <Typography sx={{ fontSize: '0.8125rem', lineHeight: 1.625, color: 'text.primary' }}>{text}</Typography>
                               </Box>
                             </Box>
                           );
                         })}
                       </Box>
                     ) : (
-                      <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: '#e8e6e1' }}>
+                      <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: 'text.primary' }}>
                         {selectedCall.transcript}
                       </Typography>
                     )}
@@ -579,7 +590,7 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
 
               {/* No details message */}
               {!selectedCall.summary && !selectedCall.notes && !selectedCall.transcript && !selectedCall.intent && (
-                <Card sx={{ p: 3, textAlign: 'center', bgcolor: 'rgba(255, 255, 255, 0.04)', border: '0.5px solid rgba(255, 255, 255, 0.08)', mb: 3 }}>
+                <Card sx={{ p: 3, textAlign: 'center', bgcolor: panelSurface, border: '0.5px solid', borderColor: panelLine, mb: 3 }}>
                   <Typography color="text.secondary">
                     No additional details available for this call.
                   </Typography>
@@ -622,7 +633,7 @@ export default function CallsPanel({ businessId, onCreateTaskFromCall }: CallsPa
                     bgcolor: 'var(--glass-bg)',
                     border: '0.5px solid var(--glass-border)',
                     color: 'hsl(var(--foreground))',
-                    '&:hover': { bgcolor: 'rgba(255,255,255,0.08)' },
+                    '&:hover': { bgcolor: panelHover },
                   }}
                 >
                   {selectedCall.archived ? 'Unarchive' : 'Archive Call'}
