@@ -5,6 +5,9 @@
 #
 # coverage: FULL
 #
+# PENDING 040 (TRADE-0): the nine oauth_states rows were added by hand ahead of
+# Mike's production run (audits/040-PROD-RUNBOOK.md). Regenerate after it.
+#
 # 039 (PROFIT-1) is live (Mike, 27 Oct 2026): the four platform_meters rows were added by
 # hand and match production's STEP 2 verification (4 columns, columns 1143 -> 1147). The next
 # regeneration with scripts/dump-live-schema.sql will include them natively.
@@ -552,6 +555,15 @@ col   knowledge_base_items.is_active boolean null=NO def=true
 col   knowledge_base_items.sort_order integer(32,0) null=NO def=0
 col   knowledge_base_items.title text null=NO def=-
 col   knowledge_base_items.updated_at timestamp with time zone null=NO def=now()
+col   oauth_states.business_id uuid null=NO def=-
+col   oauth_states.consumed_at timestamp with time zone null=YES def=-
+col   oauth_states.created_at timestamp with time zone null=NO def=now()
+col   oauth_states.expires_at timestamp with time zone null=NO def=-
+col   oauth_states.id uuid null=NO def=gen_random_uuid()
+col   oauth_states.operation text null=NO def=-
+col   oauth_states.provider text null=NO def=-
+col   oauth_states.token_hash text null=NO def=-
+col   oauth_states.user_id uuid null=NO def=-
 col   oauth_tokens.business_id uuid null=NO def=-
 col   oauth_tokens.created_at timestamp without time zone null=NO def=-
 col   oauth_tokens.encrypted_access_token character varying null=NO def=-

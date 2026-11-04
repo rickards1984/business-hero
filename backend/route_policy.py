@@ -51,6 +51,9 @@ REASONS = {
 SELF_AUTHENTICATING_OWNER = {"/v1/realtime/voice", "/v1/assistant/chat", "/v1/tts"}
 
 POLICY = {
+    ('GET', '/v1/outreach/setup/launch'): 'tenant_owner',
+    ('POST', '/v1/outreach/setup/launch'): 'tenant_owner',
+    ('POST', '/v1/outreach/setup/launch/pause'): 'tenant_owner',
     ('DELETE', '/v1/accounting/transactions/{transaction_id}'): 'tenant_owner',
     ('DELETE', '/v1/admin/profit/costs'): 'platform_admin',
     ('DELETE', '/v1/admin/support/articles/{article_id}'): 'platform_admin',

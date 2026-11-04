@@ -3,10 +3,6 @@
 from typing import Any, Dict, List, Optional
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
-import base64
-import hashlib
-import hmac
-import json
 import logging
 import os
 from urllib.parse import urlencode
@@ -131,49 +127,6 @@ MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/toke
 MICROSOFT_PROFILE_URL = "https://graph.microsoft.com/v1.0/me"
 
 
-def _get_state_secret() -> bytes:
-    secret = os.getenv("EMAIL_OAUTH_STATE_SECRET") or os.getenv("EMAIL_ENCRYPTION_KEY")
-    if not secret:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="EMAIL_OAUTH_STATE_SECRET is not configured",
-        )
-    return secret.encode("utf-8")
-
-
-def _encode_b64(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("utf-8").rstrip("=")
-
-
-def _decode_b64(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode(value + padding)
-
-
-def _sign_state(payload: Dict[str, Any]) -> str:
-    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    sig = hmac.new(_get_state_secret(), raw, hashlib.sha256).digest()
-    return f"{_encode_b64(raw)}.{_encode_b64(sig)}"
-
-
-def _verify_state(state: str) -> Dict[str, Any]:
-    try:
-        raw_b64, sig_b64 = state.split(".", 1)
-        raw = _decode_b64(raw_b64)
-        sig = _decode_b64(sig_b64)
-        expected = hmac.new(_get_state_secret(), raw, hashlib.sha256).digest()
-        if not hmac.compare_digest(sig, expected):
-            raise ValueError("Invalid state signature")
-        payload = json.loads(raw.decode("utf-8"))
-        exp = payload.get("exp")
-        if exp is not None:
-            if datetime.utcnow().timestamp() > float(exp):
-                raise ValueError("State expired")
-        return payload
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-
 def _google_scopes(mode: Optional[str]) -> str:
     if mode == "read_basic":
         return "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly"
@@ -206,17 +159,9 @@ def build_google_oauth_start_url(auth_ctx: dict, mode: Optional[str]) -> str:
     if not client_id or not redirect_uri:
         raise HTTPException(status_code=500, detail="Google OAuth not configured")
 
-    now_ts = int(datetime.utcnow().timestamp())
-    state = _sign_state(
-        {
-            "provider": "google",
-            "user_id": auth_ctx["user_id"],
-            "business_id": auth_ctx["business_id"],
-            "ts": now_ts,
-            "exp": now_ts + 600,
-            "mode": mode or "read_full",
-        }
-    )
+    from services import oauth_state     # TRADE-0 §3: single-use, bound to the person and business
+    state = oauth_state.issue(user_id=str(auth_ctx["user_id"]), business_id=str(auth_ctx["business_id"]),
+                              provider="google", operation=f"email:{mode or 'read_full'}")
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -236,17 +181,9 @@ def build_microsoft_oauth_start_url(auth_ctx: dict, mode: Optional[str]) -> str:
     if not client_id or not redirect_uri:
         raise HTTPException(status_code=500, detail="Microsoft OAuth not configured")
 
-    now_ts = int(datetime.utcnow().timestamp())
-    state = _sign_state(
-        {
-            "provider": "microsoft",
-            "user_id": auth_ctx["user_id"],
-            "business_id": auth_ctx["business_id"],
-            "ts": now_ts,
-            "exp": now_ts + 600,
-            "mode": mode or "read_full",
-        }
-    )
+    from services import oauth_state     # TRADE-0 §3: single-use, bound to the person and business
+    state = oauth_state.issue(user_id=str(auth_ctx["user_id"]), business_id=str(auth_ctx["business_id"]),
+                              provider="microsoft", operation=f"email:{mode or 'read_full'}")
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -1580,9 +1517,13 @@ async def google_oauth_callback(
     if not code or not state:
         raise HTTPException(status_code=400, detail="Missing code or state")
 
-    payload = _verify_state(state)
-    if payload.get("provider") != "google":
-        raise HTTPException(status_code=400, detail="Invalid state provider")
+    from services import oauth_state
+    try:
+        claim = oauth_state.consume(state, "google")
+    except oauth_state.StateRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    payload = {"provider": "google", "user_id": claim["user_id"], "business_id": claim["business_id"],
+               "mode": claim["operation"].split(":", 1)[-1]}
 
     client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
@@ -1655,9 +1596,13 @@ async def microsoft_oauth_callback(
     if not code or not state:
         raise HTTPException(status_code=400, detail="Missing code or state")
 
-    payload = _verify_state(state)
-    if payload.get("provider") != "microsoft":
-        raise HTTPException(status_code=400, detail="Invalid state provider")
+    from services import oauth_state
+    try:
+        claim = oauth_state.consume(state, "microsoft")
+    except oauth_state.StateRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    payload = {"provider": "microsoft", "user_id": claim["user_id"], "business_id": claim["business_id"],
+               "mode": claim["operation"].split(":", 1)[-1]}
 
     client_id = os.getenv("MICROSOFT_OAUTH_CLIENT_ID")
     client_secret = os.getenv("MICROSOFT_OAUTH_CLIENT_SECRET")

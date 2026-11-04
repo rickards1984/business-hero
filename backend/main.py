@@ -3640,7 +3640,10 @@ async def oauth_xero_start(
         base_url = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_BASE_URL", "")).strip().rstrip("/")
         redirect_uri = f"{base_url}/v1/oauth/xero/callback"
 
-    url = get_xero_auth_url(business_id=business_id, redirect_uri=redirect_uri)
+    from services import oauth_state
+    state = oauth_state.issue(user_id=str(auth_ctx["user_id"]), business_id=business_id, provider="xero",
+                              operation="accounting")
+    url = get_xero_auth_url(state=state, redirect_uri=redirect_uri)
     return {"url": url}
 
 
@@ -3662,12 +3665,15 @@ async def oauth_xero_callback(
     _xero_logger = logging.getLogger("xero_oauth_callback")
 
     # 1. Decrypt business_id from state
+    # TRADE-0 §3: single-use state, bound to who started it; their CURRENT
+    # ownership is rechecked before any credential is saved.
+    from services import oauth_state
     try:
-        business_id = decrypt_str(state)
+        business_id = oauth_state.consume(state, "xero")["business_id"]
         _xero_logger.info(f"Xero OAuth callback for business: {business_id}")
-    except Exception as e:
-        _xero_logger.error(f"Invalid state parameter: {e}")
-        raise HTTPException(status_code=400, detail="Invalid state parameter")
+    except oauth_state.StateRejected as e:
+        _xero_logger.error(f"Rejected OAuth state: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
     # 2. Build redirect URI (must match what was used in the auth request)
     redirect_uri = os.getenv("XERO_REDIRECT_URI", "").strip()
@@ -3816,12 +3822,15 @@ async def oauth_freeagent_callback(
     if not code or not state:
         raise HTTPException(status_code=400, detail="Invalid FreeAgent OAuth callback")
 
+    # TRADE-0 §3: single-use state, bound to who started it; their CURRENT
+    # ownership is rechecked before any credential is saved.
+    from services import oauth_state
     try:
-        business_id = decrypt_str(state)
+        business_id = oauth_state.consume(state, "freeagent")["business_id"]
         _fa_logger.info(f"FreeAgent OAuth callback for business: {business_id}")
-    except Exception as e:
-        _fa_logger.error(f"Invalid state parameter: {e}")
-        raise HTTPException(status_code=400, detail="Invalid state parameter")
+    except oauth_state.StateRejected as e:
+        _fa_logger.error(f"Rejected OAuth state: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
     base_url = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_BASE_URL", "")).strip().rstrip("/")
     redirect_uri = f"{base_url}/v1/oauth/freeagent/callback"
@@ -3921,12 +3930,15 @@ async def oauth_quickbooks_callback(
     if not code or not state or not realmId:
         raise HTTPException(status_code=400, detail="Invalid QuickBooks OAuth callback")
 
+    # TRADE-0 §3: single-use state, bound to who started it; their CURRENT
+    # ownership is rechecked before any credential is saved.
+    from services import oauth_state
     try:
-        business_id = decrypt_str(state)
+        business_id = oauth_state.consume(state, "quickbooks")["business_id"]
         _qb_logger.info(f"QuickBooks OAuth callback for business: {business_id}, realmId: {realmId}")
-    except Exception as e:
-        _qb_logger.error(f"Invalid state parameter: {e}")
-        raise HTTPException(status_code=400, detail="Invalid state parameter")
+    except oauth_state.StateRejected as e:
+        _qb_logger.error(f"Rejected OAuth state: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
     base_url = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_BASE_URL", "")).strip().rstrip("/")
     redirect_uri = f"{base_url}/v1/oauth/quickbooks/callback"
@@ -4992,14 +5004,17 @@ async def oauth_start(
     base_url = os.getenv("APP_BASE_URL", os.getenv("PUBLIC_BASE_URL", "")).strip().rstrip("/")
     redirect_uri = f"{base_url}/v1/oauth/{provider}/callback"
 
+    from services import oauth_state
+    state = oauth_state.issue(user_id=str(auth_ctx["user_id"]), business_id=business_id, provider=provider,
+                              operation="accounting")
     if provider == "xero":
-        url = get_xero_auth_url(business_id=business_id, redirect_uri=redirect_uri)
+        url = get_xero_auth_url(state=state, redirect_uri=redirect_uri)
     elif provider == "freeagent":
         from providers.freeagent_oauth import get_freeagent_auth_url
-        url = get_freeagent_auth_url(business_id=business_id, redirect_uri=redirect_uri)
+        url = get_freeagent_auth_url(state=state, redirect_uri=redirect_uri)
     elif provider == "quickbooks":
         from providers.quickbooks_oauth import get_quickbooks_auth_url
-        url = get_quickbooks_auth_url(business_id=business_id, redirect_uri=redirect_uri)
+        url = get_quickbooks_auth_url(state=state, redirect_uri=redirect_uri)
     else:
         raise HTTPException(status_code=400, detail=f"Provider not yet supported: {provider}")
 

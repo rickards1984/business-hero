@@ -279,6 +279,8 @@ def test_the_google_sign_in_asks_which_account(monkeypatch):
     monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_URI", "https://example.invalid/cb")
     monkeypatch.setenv("EMAIL_OAUTH_STATE_SECRET", "test-only-secret")
     router = importlib.import_module("app.email.router")
+    from services import oauth_state
+    monkeypatch.setattr(oauth_state, "issue", lambda **kw: "state-token")   # TRADE-0: state is stored server-side
     url = router.build_google_oauth_start_url({"user_id": "u", "business_id": A}, None)
     prompt = parse_qs(urlparse(url).query)["prompt"][0].split()
     assert "select_account" in prompt and "consent" in prompt

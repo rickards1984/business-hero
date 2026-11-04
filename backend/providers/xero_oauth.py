@@ -19,12 +19,12 @@ XERO_AUTH_URL = "https://login.xero.com/identity/connect/authorize"
 XERO_TOKEN_URL = "https://identity.xero.com/connect/token"
 
 
-def get_xero_auth_url(business_id: str, redirect_uri: str) -> str:
+def get_xero_auth_url(state: str, redirect_uri: str) -> str:
     """
     Build the Xero OAuth2 authorization URL.
     
     Args:
-        business_id: The business ID to encode in state parameter
+        state: A single-use state from services.oauth_state (TRADE-0 §3)
         redirect_uri: The callback URL registered with Xero
         
     Returns:
@@ -36,7 +36,7 @@ def get_xero_auth_url(business_id: str, redirect_uri: str) -> str:
         "openid profile email accounting.transactions.read accounting.contacts.read accounting.reports.read accounting.settings.read offline_access"
     )
 
-    state = encrypt_str(business_id)
+    # TRADE-0 §3: the caller passes a single-use state from services.oauth_state.
 
     params = {
         "response_type": "code",
@@ -48,7 +48,7 @@ def get_xero_auth_url(business_id: str, redirect_uri: str) -> str:
 
     query_string = "&".join(f"{k}={v}" for k, v in params.items())
     url = f"{XERO_AUTH_URL}?{query_string}"
-    _logger.info(f"Generated Xero auth URL for business {business_id}")
+    _logger.info("Generated Xero auth URL")
     return url
 
 

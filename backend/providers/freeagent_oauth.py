@@ -13,7 +13,6 @@ from typing import Tuple
 
 import httpx
 
-from email_utils import encrypt_str
 
 _logger = logging.getLogger("freeagent_oauth")
 
@@ -42,10 +41,10 @@ def get_freeagent_api_base() -> str:
     return FREEAGENT_SANDBOX_API_BASE if _is_sandbox() else FREEAGENT_API_BASE
 
 
-def get_freeagent_auth_url(business_id: str, redirect_uri: str) -> str:
+def get_freeagent_auth_url(state: str, redirect_uri: str) -> str:
     """Generate the FreeAgent OAuth authorization URL."""
     client_id = os.getenv("FREEAGENT_CLIENT_ID", "")
-    state = encrypt_str(business_id)
+    # TRADE-0 §3: the caller passes a single-use state from services.oauth_state.
 
     params = {
         "response_type": "code",
@@ -56,7 +55,7 @@ def get_freeagent_auth_url(business_id: str, redirect_uri: str) -> str:
 
     query_string = "&".join(f"{k}={v}" for k, v in params.items())
     url = f"{_get_auth_url()}?{query_string}"
-    _logger.info(f"Generated FreeAgent auth URL for business {business_id}")
+    _logger.info("Generated FreeAgent auth URL")
     return url
 
 

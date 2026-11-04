@@ -15,7 +15,6 @@ from typing import Tuple
 
 import httpx
 
-from email_utils import encrypt_str
 
 _logger = logging.getLogger("quickbooks_oauth")
 
@@ -41,10 +40,10 @@ def _get_basic_auth_header() -> str:
     return f"Basic {encoded}"
 
 
-def get_quickbooks_auth_url(business_id: str, redirect_uri: str) -> str:
+def get_quickbooks_auth_url(state: str, redirect_uri: str) -> str:
     """Generate the QuickBooks OAuth authorization URL."""
     client_id = os.getenv("QUICKBOOKS_CLIENT_ID", "")
-    state = encrypt_str(business_id)
+    # TRADE-0 §3: the caller passes a single-use state from services.oauth_state.
 
     params = {
         "client_id": client_id,
@@ -56,7 +55,7 @@ def get_quickbooks_auth_url(business_id: str, redirect_uri: str) -> str:
 
     query_string = "&".join(f"{k}={v}" for k, v in params.items())
     url = f"{QB_AUTH_URL}?{query_string}"
-    _logger.info(f"Generated QuickBooks auth URL for business {business_id}")
+    _logger.info("Generated QuickBooks auth URL")
     return url
 
 

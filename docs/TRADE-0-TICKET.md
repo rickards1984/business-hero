@@ -159,8 +159,19 @@ Today the shared resolver (`assistant_chat.get_business_for_user`, and the depen
   - an open session stops at the next tool call, with no card raised, nothing delivered to the model, and the browser told (mutation-tested);
   - `still_owner` fails closed.
 
+**Stage 3, done. Single-use OAuth state (§3).**
+- **Migration `040_oauth_states.sql`:** one backend-only table (RLS on, no policies, client grants revoked), with constraints on provider, hash format and expiry, and a foreign key to the business. **Runbook:** `audits/040-PROD-RUNBOOK.md`, run **before** this ticket deploys. Rehearsed on the local harness, which now replays 040.
+- **`services/oauth_state.py`:**
+  - `issue()` stores a random token's SHA-256 (never the token) with the person, business, provider and operation, expiring in 10 minutes;
+  - `consume()` claims it once, atomically (`UPDATE … RETURNING`), and rechecks the person's **current** owner authority before any credential is saved.
+- **Every start and callback is moved over:** Xero, FreeAgent, QuickBooks, Google and Microsoft. The provider URL builders take the state instead of the business id. The old encrypted-id and signed-payload states are removed and no longer accepted.
+- **Tests:**
+  - `test_oauth_state.py` (12): single use, the token never stored, forged, wrong-provider, missing, expired, initiator demoted between start and callback, and a race. The Xero and email callbacks refuse a bad state *before* any code exchange, including the old format.
+  - `test_oauth_state_pg.py` (7, on PostgreSQL): no client role can read or write, the constraints, the foreign key, and a real two-thread race.
+- **Schema record:** the nine `oauth_states` rows are added by hand, marked PENDING 040 (the 039 precedent).
+- **The launch routes** merged from main (OUT-20) are classified as tenant_owner.
+
 **Still to do:**
-- §3: server-side, single-use OAuth state bound to the initiator, business, provider and operation (a new table: a migration with a runbook).
 - §5: the RLS, RPC and Storage audit (read-only catalog census queries for Mike, then the narrowing migration rehearsed on the local harness).
 - §6: the remaining acceptance tests (no side effects after a denial; live revocation).
 
