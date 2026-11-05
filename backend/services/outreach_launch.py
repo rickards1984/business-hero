@@ -127,6 +127,9 @@ def checklist(session, business) -> dict:
             _item("companies_house", "Company checks available (Companies House)",
                   bool(os.environ.get("COMPANIES_HOUSE_API_KEY")),
                   "Company checks aren't configured on Business Hero yet; support has been told", "settings"),
+            # Every contact found is checked against the opt-out list (OUT-21).
+            _item("opt_out_checks", "Opt-out checks available", research.opt_out_checks_ready(),
+                  "Opt-out checks aren't configured on Business Hero yet; support has been told", "settings"),
             _item("provider", "AI research available", gates["provider"] and gates["platform"],
                   "Research is unavailable right now (AI provider or platform limit); it resumes automatically",
                   "settings"),

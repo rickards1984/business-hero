@@ -72,6 +72,15 @@ def impossible_search_pence() -> int:
     return ai_router.impossible_pence() or max_search_pence()
 
 
+OPT_OUT_UNAVAILABLE = ("Research can't start: opt-out checks aren't configured on Business Hero yet, so no contact "
+                       "could be checked. Nothing was searched or charged; support has been told")
+
+
+def opt_out_checks_ready() -> bool:
+    """The opt-out (suppression) key every candidate is checked with (OUT-6)."""
+    return len(os.environ.get("OUTREACH_SUPPRESSION_SECRET", "")) >= 32
+
+
 SEARCH_RESERVE_PENCE = search_reserve_pence()   # the default, for readers and tests
 METER = "outreach_research_pence"
 PILOT_ENROLMENTS = 5                     # decision E: OUT-8's pilot limit for now
@@ -469,6 +478,15 @@ def _address_on(page: str, email: str) -> bool:
     return False
 
 
+def _host(url: str) -> str:
+    try:
+        parts = urlparse(url)
+        parts.port          # a bad port ("host:abc") raises here, not later in a fetch
+        return parts.hostname or ""
+    except ValueError:      # e.g. an unclosed "[" or a bad port from the model
+        return ""
+
+
 def _owns(host: str, domain: str) -> bool:
     host = (host or "").lower().rstrip(".")
     return host == domain or host.endswith("." + domain)
@@ -488,10 +506,16 @@ def _legal_name(value: str) -> str:
     return " ".join(out.split())
 
 
+def _text(c: dict, field: str) -> str:
+    """A candidate's field as text: the model's JSON may hold anything (OUT-21)."""
+    value = c.get(field)
+    return value.strip() if isinstance(value, str) else str(value) if isinstance(value, int) else ""
+
+
 def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callable, companies: Callable) -> dict:
     """One candidate -> {"ok": bool, "review": bool, "reason", ...facts}. Never trusts the model."""
-    email = _address(c.get("contact_email") or "")
-    company = str(c.get("company") or "").strip()[:200]
+    email = _address(_text(c, "contact_email"))
+    company = _text(c, "company")[:200]
     if "@" not in email or not company:
         return {"ok": False, "reason": "no usable company or email"}
     domain = email.split("@")[-1]
@@ -504,23 +528,23 @@ def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callabl
         return {"ok": False, "reason": "company already held or contacted"}
     if _suppressed(session, bid, key, domain):
         return {"ok": False, "reason": "opted out"}
-    source = str(c.get("source_url") or "")
-    if not _owns(urlparse(source).hostname or "", domain):
+    source = _text(c, "source_url")
+    if not _owns(_host(source), domain):
         return {"ok": False, "reason": "the source isn't the company's own website"}
     page, final = _page(fetch, source)
-    if not _owns(urlparse(final).hostname or "", domain):
+    if not _owns(_host(final), domain):
         return {"ok": False, "reason": "the source isn't the company's own website (redirected away)"}
     if not _address_on(page, email):
         return {"ok": False, "reason": "email not on the cited page"}
     if not mx(domain):
         return {"ok": False, "reason": f"no mail server for {domain}"}
-    name, role = str(c.get("contact_name") or "").strip()[:120], str(c.get("role") or "").strip()[:120]
+    name, role = _text(c, "contact_name")[:120], _text(c, "role")[:120]
     base = {"email": email, "email_key": key, "domain": domain, "company": company, "name": name, "role": role,
             "contact_type": _contact_type(email, name, role), "source_url": source}
     review = {"ok": False, "review": True, **base,
               "reason": "kept for review: couldn't confirm a registered company that matches this website "
                         "(sole traders and partnerships need consent under PECR)"}
-    number = str(c.get("company_number") or "").strip().upper()
+    number = _text(c, "company_number").upper()
     record = companies(number) if re.fullmatch(r"[A-Z0-9]{8}", number) else None
     if not record or _legal_name(record.get("name")) != _legal_name(company):
         record = companies(company)   # never trust a model-supplied number for a different name
@@ -936,6 +960,11 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
             out["stopped"] = "Companies House key not configured: no contact can be confirmed as a company"
             return out
         companies = companies_house
+    if not opt_out_checks_ready():
+        # Every candidate is checked against the opt-out list, which needs this
+        # key: without it, a paid search could only be thrown away (OUT-21).
+        out["stopped"] = OPT_OUT_UNAVAILABLE
+        return out
     search, fetch, mx = search or web_search, fetch or fetch_page, mx or has_mail_server
     why = _still_allowed(session, bid, compliance_id, moment)
     session.rollback()
@@ -1237,6 +1266,33 @@ def summary(business, out: dict) -> str:
     return line
 
 
+_EMPTY_RUN = {"accepted": [], "decision_makers": 0, "gatekeepers": 0, "rejected": [], "stopped": None}
+RUN_FAILED = "Research stopped on an unexpected error. Support has been told; it tries again next weekday morning"
+
+
+def _where(exc: BaseException) -> str:
+    """An error's type and the code lines it passed through, never its message:
+    a database error's text can carry the contact's name and email (Codex
+    OUT-21 review 1), and logs are not where personal data belongs."""
+    import traceback
+    frames = traceback.extract_tb(exc.__traceback__)[-6:]
+    return type(exc).__name__ + " at " + " <- ".join(
+        f"{f.filename.rsplit('/', 1)[-1]}:{f.lineno} {f.name}" for f in reversed(frames))
+
+
+def _record_summary(session, bid: str, moment: datetime, note: str) -> None:
+    try:
+        _lock(session, bid)
+        cfg = _config(_doc(session, bid))
+        cfg["summary"] = note
+        cfg["last_summary_at"] = moment.isoformat()
+        _save_config(session, bid, cfg)
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.error("Research for business %s: could not record its summary", bid)
+
+
 def run_due(session, *, moment: Optional[datetime] = None, runner: Callable = run) -> list:
     """From each hourly pass: on weekdays from 06:00 UK, once per business per
     UK day, every business with outreach started and research switched on."""
@@ -1273,9 +1329,19 @@ def run_due(session, *, moment: Optional[datetime] = None, runner: Callable = ru
         session.commit()
         for compliance_id in audiences:
             try:
-                runner(session, business, str(compliance_id), moment=moment)
-            except Exception:
+                out = runner(session, business, str(compliance_id), moment=moment) or {}
+            except Exception as exc:
+                # Never silent (OUT-21): where it failed goes to the logs and
+                # the owner sees that the run failed, not an empty page.
                 session.rollback()
+                logger.error("Research for business %s (audience %s) failed: %s", bid, compliance_id, _where(exc))
+                _record_summary(session, bid, moment, RUN_FAILED + ".")
+                continue
+            # Every outcome is the owner's to see, including a refusal before
+            # any search (the run itself saves only once it has searched).
+            _record_summary(session, bid, moment, summary(business, {**_EMPTY_RUN, **out}))
+            logger.info("Research for business %s (audience %s): %s Spent %sp.", bid, compliance_id,
+                        summary(business, {**_EMPTY_RUN, **out}), int(out.get("spend_pence") or 0))
         try:
             prepare_due_cards(session, business, moment)
         except Exception:
@@ -1309,8 +1375,11 @@ def fetch_page(url: str, *, resolve: Optional[Callable] = None, transport=None,
     import httpx
     resolve = resolve or _system_resolve
     for _hop in range(4):
-        parts = urlparse(url)
-        host = parts.hostname
+        try:
+            parts = urlparse(url)
+            host, port = parts.hostname, parts.port
+        except ValueError:      # a malformed address, or one a redirect named (OUT-21)
+            return None
         if parts.scheme not in ("http", "https") or not host:
             return None
         try:
@@ -1320,7 +1389,7 @@ def fetch_page(url: str, *, resolve: Optional[Callable] = None, transport=None,
         if not addresses or not all(_public_ip(a) for a in addresses):
             return None
         pinned = addresses[0]
-        port = parts.port or (443 if parts.scheme == "https" else 80)
+        port = port or (443 if parts.scheme == "https" else 80)
         target = parts._replace(netloc=f"[{pinned}]:{port}" if ":" in pinned else f"{pinned}:{port}").geturl()
         try:
             with httpx.Client(timeout=10.0, follow_redirects=False, transport=transport,
