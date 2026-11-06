@@ -107,22 +107,21 @@ def _validate_content_variables(content_variables: dict, template_name: str) -> 
     return True, ""
 
 
+def _one_line(value: str) -> str:
+    """WhatsApp template variables may not contain new lines, tabs or more than
+    four spaces in a row (Twilio 21656). Every alert body is written on several
+    lines, so every alert was refused (LOG-1, 5 Nov 2026). Lines are kept as
+    " · " separators, so nothing the owner needs is lost."""
+    lines = [" ".join(part.split()) for part in str(value).replace("\r", "\n").split("\n")]
+    return " · ".join(line for line in lines if line)
+
+
 def _sanitize_template_vars(variables: dict) -> dict:
-    """Ensure all template variables are non-null, non-empty strings within Twilio limits."""
+    """Ensure all template variables are non-null, non-empty, single-line strings within Twilio limits."""
     sanitized = {}
     for key, value in variables.items():
-        if value is None:
-            sanitized[str(key)] = "N/A"
-        elif isinstance(value, (int, float)):
-            sanitized[str(key)] = str(value)
-        elif isinstance(value, str):
-            cleaned = value.strip()
-            if not cleaned:
-                sanitized[str(key)] = "N/A"
-            else:
-                sanitized[str(key)] = cleaned[:1024]
-        else:
-            sanitized[str(key)] = str(value)[:1024] or "N/A"
+        cleaned = "" if value is None else _one_line(value)
+        sanitized[str(key)] = cleaned[:1024].rstrip(" ·") or "N/A"
     return sanitized
 
 
