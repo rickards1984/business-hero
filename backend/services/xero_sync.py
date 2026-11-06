@@ -196,6 +196,14 @@ async def fetch_chart(provider) -> dict:
         if rate_limited(exc):
             raise
         logger.warning("Xero chart of accounts unavailable: %s", exc)
+    from providers.xero import ACCOUNTS_SCOPE
+    lacks = getattr(provider, "lacks", None)
+    if callable(lacks) and lacks(ACCOUNTS_SCOPE):
+        # LOG-2: Xero will refuse it; never spend a call (or a 401) on it each sync.
+        out["missing_permission"] = ACCOUNTS_SCOPE
+        logger.warning("Xero chart of accounts skipped: the connection hasn't granted %s; reconnect Xero",
+                       ACCOUNTS_SCOPE)
+        return out
     try:
         accounts = await _xero(provider.get_accounts) or []
         # Xero: credit cards and PayPal are Type BANK (BankAccountType CREDITCARD / PAYPAL): they count.

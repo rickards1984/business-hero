@@ -29,6 +29,25 @@ class XeroProvider:
             "Content-Type": "application/json",
         }
 
+    def granted_scopes(self) -> Optional[set]:
+        """The permissions Xero granted, from the access token's own claims
+        (Xero access tokens are JWTs). None when unreadable: unknown, never a guess.
+        Not a security check (nothing here is trusted for access), only diagnosis."""
+        import base64
+        import json
+        try:
+            payload = str(self.access_token).split(".")[1]
+            claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+            scope = claims.get("scope")
+            scopes = scope.split() if isinstance(scope, str) else scope
+            return {str(s) for s in scopes} if isinstance(scopes, list) else None
+        except Exception:
+            return None
+
+    def lacks(self, scope: str) -> bool:
+        granted = self.granted_scopes()
+        return granted is not None and not ({scope, *SCOPE_ALSO_GRANTED_BY.get(scope, ())} & granted)
+
     async def get_bank_transactions(
         self,
         modified_since: Optional[str] = None,
@@ -169,6 +188,10 @@ class XeroProvider:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=self.headers)
             if resp.status_code in (401, 403):
+                if self.lacks(ACCOUNTS_SCOPE):
+                    raise XeroPermissionError(
+                        f"Xero hasn't granted {ACCOUNTS_SCOPE} (needed for the chart of accounts): "
+                        f"reconnect Xero and allow access to settings")
                 raise XeroAuthError("Xero access token is expired or invalid")
             resp.raise_for_status()
             return resp.json().get("Accounts", [])
@@ -585,6 +608,18 @@ def map_xero_invoice_to_business_hero(xero_invoice: Dict[str, Any]) -> Dict[str,
 class XeroAuthError(Exception):
     """Raised when Xero returns 401 — token needs refresh or reconnection."""
     pass
+
+
+class XeroPermissionError(XeroAuthError):
+    """LOG-2: Xero refused a request the connection has no permission for. The
+    token is fine; the owner must reconnect Xero and allow the permission."""
+    pass
+
+
+# What each request needs that a connection may lack (Xero's scope names).
+ACCOUNTS_SCOPE = "accounting.settings.read"
+# Scopes that also grant it: the full (read and write) scope covers read (Codex LOG-2 review 1).
+SCOPE_ALSO_GRANTED_BY = {ACCOUNTS_SCOPE: ("accounting.settings",)}
 
 
 class XeroRateLimitError(Exception):
