@@ -34,11 +34,11 @@ class Body(BaseModel):
 
 class BrandProfile(Body):
     """OUT-20: what Aria drafts from."""
-    offer: Optional[str] = Field(default=None, max_length=1000)
-    audience: Optional[str] = Field(default=None, max_length=1000)
-    proof: Optional[str] = Field(default=None, max_length=1000)
-    tone: Optional[str] = Field(default=None, max_length=1000)
-    ask: Optional[str] = Field(default=None, max_length=1000)
+    offer: Optional[str] = Field(default=None, max_length=4000)
+    audience: Optional[str] = Field(default=None, max_length=4000)
+    proof: Optional[str] = Field(default=None, max_length=4000)
+    tone: Optional[str] = Field(default=None, max_length=4000)
+    ask: Optional[str] = Field(default=None, max_length=4000)
     website: Optional[str] = Field(default=None, max_length=1000)
 
 

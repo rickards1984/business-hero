@@ -57,13 +57,10 @@ def _save(session, bid: str, doc: dict) -> None:
     import json
     from services import outreach_send as send
     expr = "CAST(:s AS jsonb)" if send.pg(session) else ":s"
-    params = {"s": json.dumps(doc), "b": bid}
-    if not session.execute(text(f"UPDATE business_settings SET settings = {expr} WHERE business_id = :b"),
-                           params).rowcount:
-        # The live table requires id, created_at and updated_at, with no defaults (Codex review 1).
-        stamp = datetime.now(timezone.utc).replace(tzinfo=None)
-        session.execute(text(f"INSERT INTO business_settings (id, business_id, settings, created_at, updated_at) "
-                             f"VALUES (:i, :b, {expr}, :at, :at)"), {**params, "i": str(uuid.uuid4()), "at": stamp})
+    from services import settings_row
+    settings_row.ensure(session, bid)       # one creator at a time (OUT-22)
+    session.execute(text(f"UPDATE business_settings SET settings = {expr} WHERE business_id = :b"),
+                    {"s": json.dumps(doc), "b": bid})
 
 
 def _lock(session, bid: str) -> None:
@@ -71,20 +68,8 @@ def _lock(session, bid: str) -> None:
     settings row, created first if missing, then locked for the rest of the
     caller's transaction. Settings are always locked FIRST (before invoice or
     transaction rows), the order outreach and billing use too."""
-    from sqlalchemy.exc import IntegrityError
-    if session.execute(text("SELECT 1 FROM business_settings WHERE business_id = :b"), {"b": bid}).first() is None:
-        # Insert only, never update (Codex review 3: an UPDATE here could blank a
-        # row another writer created and committed in between).
-        expr = "CAST(:s AS jsonb)" if _is_pg(session) else ":s"
-        stamp = datetime.now(timezone.utc).replace(tzinfo=None)
-        try:
-            with session.begin_nested():
-                session.execute(text(f"INSERT INTO business_settings (id, business_id, settings, created_at, updated_at) "
-                                     f"SELECT :i, :b, {expr}, :at, :at WHERE NOT EXISTS "
-                                     f"(SELECT 1 FROM business_settings WHERE business_id = :b)"),
-                                {"i": str(uuid.uuid4()), "b": bid, "s": "{}", "at": stamp})
-        except IntegrityError:
-            pass                            # created at the same moment by another writer
+    from services import settings_row
+    settings_row.ensure(session, bid)       # created first if missing, one creator at a time (OUT-22)
     if _is_pg(session):
         session.execute(text("SELECT 1 FROM business_settings WHERE business_id = :b FOR UPDATE"), {"b": bid})
     else:

@@ -372,15 +372,31 @@ const PROFILE_LABELS: [keyof BrandProfile, string, string][] = [
   ['website', 'Website (optional)', 'e.g. https://newbodyhf.co.uk/fitfutures'],
 ];
 
+// OUT-22 (Mike): room to say plenty, and the limit shown before it's reached,
+// never discovered after typing. Matches the server (outreach_setup.PROFILE_LIMITS).
+const PROFILE_MAX = 4000;
+const WEBSITE_MAX = 1000;
+
 function ProfileFields({ value, onChange }: { value: BrandProfile; onChange: (v: BrandProfile) => void }) {
   return (
     <Stack spacing={1}>
       <Typography variant="subtitle2">Tell Aria about it (recommended)</Typography>
-      {PROFILE_LABELS.map(([key, label, hint]) => (
-        <TextField key={key} label={label} placeholder={hint} value={value[key] || ''} multiline={key !== 'website'}
-          minRows={key === 'offer' || key === 'proof' ? 2 : 1}
-          onChange={e => onChange({ ...value, [key]: e.target.value })} />
-      ))}
+      <Typography variant="body2" color="text.secondary">
+        The more Aria knows, the better her emails. Up to {PROFILE_MAX.toLocaleString()} characters for each answer
+        (roughly 600 words); the counter shows how much room is left.
+      </Typography>
+      {PROFILE_LABELS.map(([key, label, hint]) => {
+        const max = key === 'website' ? WEBSITE_MAX : PROFILE_MAX;
+        const used = (value[key] || '').length;
+        return (
+          <TextField key={key} label={label} placeholder={hint} value={value[key] || ''} multiline={key !== 'website'}
+            minRows={key === 'offer' || key === 'proof' ? 2 : 1}
+            inputProps={{ maxLength: max }}
+            helperText={key === 'website' && !used ? undefined : `${used.toLocaleString()} / ${max.toLocaleString()}`}
+            FormHelperTextProps={{ sx: { textAlign: 'right', color: used >= max ? 'warning.main' : undefined } }}
+            onChange={e => onChange({ ...value, [key]: e.target.value.slice(0, max) })} />
+        );
+      })}
     </Stack>
   );
 }

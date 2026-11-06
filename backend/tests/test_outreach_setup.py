@@ -72,7 +72,9 @@ def db(tmp_path, monkeypatch):
         for ddl in (
             "CREATE TABLE businesses (id TEXT PRIMARY KEY, name TEXT, plan_tier TEXT, feature_flags TEXT, "
             "subscription_status TEXT, is_active BOOLEAN, trial_ends_at TIMESTAMP)",
-            "CREATE TABLE business_settings (business_id TEXT PRIMARY KEY, settings TEXT, created_at TEXT, updated_at TEXT)",
+            # As live (audits/live-schema-public.txt): id, created_at and updated_at have no default (OUT-22).
+            "CREATE TABLE business_settings (id TEXT NOT NULL, business_id TEXT PRIMARY KEY, settings TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
             "CREATE TABLE business_members (id TEXT, business_id TEXT, user_id TEXT, role TEXT, is_active BOOLEAN)",
             "CREATE TABLE email_accounts (id TEXT PRIMARY KEY, business_id TEXT, user_id TEXT, provider TEXT, "
             "email_address TEXT, display_name TEXT, capabilities TEXT, is_default BOOLEAN, token_ciphertext TEXT, "
@@ -90,7 +92,8 @@ def db(tmp_path, monkeypatch):
         for bid, plan in ((A, "pro"), (B, "business")):
             _insert(s, "businesses", id=bid, name=f"Biz {bid[:4]}", plan_tier=plan, feature_flags="{}",
                     subscription_status="active", is_active=True)
-            _insert(s, "business_settings", business_id=bid, settings=json.dumps({"automations": {"keep": 1}}))
+            _insert(s, "business_settings", id=str(uuid.uuid4()), business_id=bid, created_at=NOW.isoformat(),
+                    updated_at=NOW.isoformat(), settings=json.dumps({"automations": {"keep": 1}}))
         _insert(s, "business_members", business_id=A, user_id=OWNER, role="owner", is_active=True)
         _insert(s, "business_members", business_id=A, user_id=STAFF, role="member", is_active=True)
         _insert(s, "business_members", business_id=B, user_id=OTHER_OWNER, role="owner", is_active=True)

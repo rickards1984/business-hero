@@ -68,6 +68,8 @@ PROVIDERS = {
 PRIVACY_KEY, AUDIENCE_KEY = "outreach_privacy", "outreach_audiences"
 PROFILE_KEY = "outreach_brand_profiles"   # OUT-20: what each brand offers, for Aria's drafts
 PROFILE_FIELDS = ("offer", "audience", "proof", "tone", "ask", "website")
+# OUT-22 (Mike): owners have a lot to say about their business; the website is just an address.
+PROFILE_LIMITS = {"offer": 4000, "audience": 4000, "proof": 4000, "tone": 4000, "ask": 4000, "website": 1000}
 # OUT-20: who runs a domain's DNS, from its nameservers. Domain Connect marks
 # providers that offer one-click record changes (domainconnect.org).
 DNS_HOSTS = (
@@ -108,6 +110,10 @@ def _authority(session, business, user, *, settings_required: bool = True, growt
         refuse(403, "Only the business owner can set up outreach.")
     bid = str(business.id)
     session.rollback()
+    # OUT-22: create the settings row if this business has none (MSC), in this
+    # transaction, so a refusal below rolls it back.
+    from services import settings_row
+    settings_row.ensure(session, bid)
     if not send.pg(session):   # SQLite: take the writer lock before reading
         session.execute(text("UPDATE business_settings SET business_id = business_id WHERE business_id = :b"),
                         {"b": bid})
@@ -156,6 +162,8 @@ def _settings_doc(session, bid: str) -> dict:
 
 
 def _save_settings_doc(session, bid: str, doc: dict) -> None:
+    from services import settings_row
+    settings_row.ensure(session, bid)   # OUT-22: an UPDATE of no row would silently lose the write
     expr = "CAST(:s AS jsonb)" if send.pg(session) else ":s"
     session.execute(text(f"UPDATE business_settings SET settings = {expr} WHERE business_id = :b"),
                     {"s": json.dumps(doc), "b": bid})
@@ -231,7 +239,7 @@ def _profile(value) -> dict:
     for k in PROFILE_FIELDS:
         v = value.get(k)
         if v is not None and str(v).strip():
-            out[k] = _clean(v, k.capitalize(), 1000, one_line=False)
+            out[k] = _clean(v, k.capitalize(), PROFILE_LIMITS[k], one_line=False)
     return out
 
 

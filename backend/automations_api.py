@@ -33,6 +33,8 @@ def _document(session: Session, business_id: str):
     # switch-off cannot be undone by an earlier, slower save (Codex AUTO-1
     # review 1, finding 5). SQLite (tests) has no row locks.
     lock = " FOR UPDATE" if session.get_bind().dialect.name == "postgresql" else ""
+    from services import settings_row
+    settings_row.ensure(session, business_id)   # OUT-22: one creator at a time, never two rows
     row = session.execute(text("SELECT id, settings FROM business_settings WHERE business_id = :b" + lock),
                           {"b": business_id}).fetchone()
     if row is None:
