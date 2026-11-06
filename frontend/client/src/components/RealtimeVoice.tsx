@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useImperativeHandle } from 'react';
 import {
   Box,
   IconButton,
@@ -21,9 +21,28 @@ import { config } from '@/config/env';
 interface RealtimeVoiceProps {
   onTranscript?: (text: string, isUser: boolean) => void;
   onClose?: () => void;
+  // BM-2: a spoken board meeting. Sent with the auth message; the server
+  // speaks from that meeting and saves both sides into it.
+  meetingId?: string;
+  // Called when a session ends, with the server's reason if it gave one
+  // (e.g. the month's board-meeting voice minutes are used up).
+  onSessionEnd?: (reason: string | null) => void;
+  // A meeting's voice minutes left, live, and whether 80% are used.
+  onVoiceMinutes?: (secondsLeft: number, warn: boolean) => void;
 }
 
-export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onClose }) => {
+export interface RealtimeVoiceHandle {
+  // BM-2: ask the server to save what was said and wait (bounded). Only when
+  // the server confirms EVERYTHING is saved is the session ended and true
+  // returned; otherwise it stays open and false is returned, so the meeting
+  // is not summarised without part of what was said.
+  flushAndStop: () => Promise<boolean>;
+}
+
+const FLUSH_TIMEOUT_MS = 8000;
+
+export const RealtimeVoice = React.forwardRef<RealtimeVoiceHandle, RealtimeVoiceProps>((
+  { onTranscript, onClose, meetingId, onSessionEnd, onVoiceMinutes }, ref) => {
   const [isConnected, setIsConnected] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -51,6 +70,27 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
   // Set on unmount: a start-up still in flight stops instead of opening a
   // socket for a page that is gone (Codex NS-V2 review).
   const unmountedRef = useRef(false);
+  const flushedRef = useRef<((ok: boolean) => void) | null>(null);
+
+  useImperativeHandle(ref, () => ({
+    flushAndStop: async () => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return true;   // nothing live to save
+      const ok = await new Promise<boolean>((resolve) => {
+        const timer = window.setTimeout(() => { flushedRef.current = null; resolve(false); }, FLUSH_TIMEOUT_MS);
+        flushedRef.current = (saved: boolean) => {
+          window.clearTimeout(timer); flushedRef.current = null; resolve(saved);
+        };
+        try {
+          ws.send(JSON.stringify({ type: 'flush' }));
+        } catch {
+          flushedRef.current?.(false);
+        }
+      });
+      if (ok) ws.close();
+      return ok;
+    },
+  }), []);
 
   const clearProgress = () => {
     progressTimersRef.current.forEach((t) => window.clearTimeout(t));
@@ -174,6 +214,14 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
         setProposals(prev => [...prev, data.proposal]);
         break;
 
+      case 'voice_minutes':
+        onVoiceMinutes?.(Number(data.seconds_left) || 0, !!data.warn);
+        break;
+
+      case 'flushed':
+        flushedRef.current?.(data.ok === true);
+        break;
+
       case 'session_limit':
         {
           const reason: string = data.message || 'That voice chat reached its time limit.';
@@ -187,7 +235,7 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
         setStatus(`Error: ${data.message || 'Unknown error'}`);
         break;
     }
-  }, [onTranscript, playNextAudio]);
+  }, [onTranscript, playNextAudio, onVoiceMinutes]);
 
   // Get access token from Supabase
   const getAccessToken = async (): Promise<string> => {
@@ -237,7 +285,9 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
       
       ws.onopen = () => {
         // Send auth message with quiet mode preference
-        ws.send(JSON.stringify({ type: 'auth', token, quietMode }));
+        ws.send(JSON.stringify(meetingId
+          ? { type: 'auth', token, quietMode, meetingId }
+          : { type: 'auth', token, quietMode }));
       };
       
       ws.onmessage = handleMessage;
@@ -262,6 +312,8 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
             ? `${event.reason}. You can still type to Aria.`
             : 'Disconnected');
         stopAudioCapture();
+        onSessionEnd?.(endReasonRef.current
+          || (event.code === 4003 && event.reason ? `${event.reason}. You can carry on by typing.` : null));
       };
       
       // Wait for ready message then start audio
@@ -284,7 +336,7 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
       setConnecting(false);
       setStatus('Failed to connect');
     }
-  }, [handleMessage, connecting, quietMode]);
+  }, [handleMessage, connecting, quietMode, meetingId, onSessionEnd]);
 
   // Start capturing audio from microphone
   const startAudioCapture = async () => {
@@ -637,6 +689,8 @@ export const RealtimeVoice: React.FC<RealtimeVoiceProps> = ({ onTranscript, onCl
       )}
     </Box>
   );
-};
+});
+
+RealtimeVoice.displayName = 'RealtimeVoice';
 
 export default RealtimeVoice;

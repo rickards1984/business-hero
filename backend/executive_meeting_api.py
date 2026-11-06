@@ -219,6 +219,33 @@ async def check_meeting_access(
     }
 
 
+@router.get("/voice-usage", dependencies=[Depends(require_feature("board_meetings"))])
+def board_meeting_voice_usage(
+    auth_ctx: dict = Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """BM-2: this month's board-meeting voice minutes, for the meeting screen
+    (minutes left before speaking; the 80% warning). Reads stored meters only.
+    Sync, so the database read runs off the event loop."""
+    from realtime_voice import aria_voice_enabled
+    from services import metering
+    business = metering.load_business(session, str(auth_ctx["business_id"]))
+    if business is None:
+        raise HTTPException(status_code=404, detail="Business not found")
+    u = metering.usage(session, business, pool=metering.BOARD_POOL)
+    allowed = metering.seconds_allowed(u)
+    return {
+        "voice_available": aria_voice_enabled() and allowed > 0,
+        "allowance_minutes": float(u["allowance_minutes"]),
+        "used_minutes": float(round(u["used_minutes"], 1)),
+        "remaining_minutes": float(round(u["remaining_minutes"], 1)),
+        "minutes_available_now": allowed // 60,
+        "extra_minutes_on": bool(u["metered_usage_enabled"]),
+        "state": u["state"],
+        "warn": bool(u["warn"]),
+    }
+
+
 # ============================================================================
 # Read-only listing endpoints (placeholders — full impl in Prompt 3)
 # ============================================================================

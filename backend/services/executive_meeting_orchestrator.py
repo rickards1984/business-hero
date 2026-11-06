@@ -1035,3 +1035,55 @@ def _safe_repr(obj: Any, max_len: int = 200) -> str:
     except Exception:
         s = repr(obj)
     return s if len(s) <= max_len else s[:max_len] + "…"
+
+
+# ============================================================================
+# BM-2: spoken meetings
+# ============================================================================
+
+def voice_context(meeting_id: str, business_id: str, session: Session) -> str:
+    """The Realtime instructions for a spoken turn of this meeting. Raises
+    ValueError unless the meeting is this business's and in progress: a
+    voice session never opens on someone else's, or a finished, meeting."""
+    from services.executive_meeting_prompts import voice_instructions
+    meeting = _load_meeting(meeting_id, session)
+    if not meeting or str(meeting["business_id"]) != str(business_id):
+        raise ValueError("Meeting not found")
+    if meeting["status"] != "in_progress":
+        raise ValueError("This meeting isn't in progress")
+    settings = _load_settings(str(business_id), session) or {}
+    transcript = _build_transcript(_load_message_history(meeting_id, session))
+    return voice_instructions(meeting.get("prep_data") or {}, settings, transcript)
+
+
+def save_spoken_turn(meeting_id: str, business_id: str, role: str, content: str,
+                     at: datetime, session: Session) -> bool:
+    """Save one transcribed turn ("owner" or "aria") at the moment it was
+    spoken, so the record reads in spoken order even when a transcription
+    arrives late. Only into this business's meeting while it is in progress:
+    the check and the insert are ONE statement, and on PostgreSQL the
+    meeting row is share-locked, so a turn never lands in a meeting that an
+    /end has just completed (Codex BM-2 review 1, finding 4). Commits.
+    Returns whether it was saved."""
+    content = (content or "").strip()
+    if role not in ("owner", "aria") or not content:
+        return False
+    pg = getattr(getattr(getattr(session, "bind", None), "dialect", None), "name", "") == "postgresql"
+    match = ("m.id = CAST(:meeting_id AS uuid) AND m.business_id = CAST(:business_id AS uuid)"
+             if pg else "m.id = :meeting_id AND m.business_id = :business_id")
+    result = session.execute(
+        text(
+            f"""
+            INSERT INTO executive_meeting_messages
+                (meeting_id, business_id, role, content, agenda_section, tokens_used, created_at)
+            SELECT m.id, m.business_id, :role, :content, 'voice', 0, :created_at
+            FROM executive_meetings m
+            WHERE {match} AND m.status = 'in_progress'
+            {"FOR SHARE OF m" if pg else ""}
+            """
+        ),
+        {"meeting_id": str(meeting_id), "business_id": str(business_id), "role": role,
+         "content": content, "created_at": at},
+    )
+    session.commit()
+    return (result.rowcount or 0) == 1
