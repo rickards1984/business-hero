@@ -1518,6 +1518,8 @@ async def update_business_settings(
     """Update business settings. Creates settings if they don't exist."""
     # Row-locked, like /v1/automations, so this save cannot read a stale
     # `automations` and write it back over a switch-off (Codex AUTO-1 review 2).
+    from services import settings_row
+    settings_row.ensure(session, business.id)   # OUT-22: one creator at a time, never two rows
     statement = select(BusinessSettings).where(
         BusinessSettings.business_id == business.id).with_for_update()
     settings = session.exec(statement).first()

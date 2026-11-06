@@ -369,6 +369,8 @@ def stage_list(session, bid: str, stage: str, *, brand_id=None, limit: int = 20,
 
 
 def _lock(session, bid: str) -> None:
+    from services import settings_row
+    settings_row.ensure(session, bid)   # OUT-22: locked and read only once it exists
     if send.pg(session):
         session.execute(text("SELECT 1 FROM business_settings WHERE business_id = :b FOR UPDATE"), {"b": bid})
     else:

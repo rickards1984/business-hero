@@ -97,6 +97,8 @@ def lock_business(session, bid):
     # Also used by unsubscribe. External pause/suppression writers must follow
     # this order: business_settings -> outreach_settings -> meter -> daily ->
     # mailbox/contact/enrolment/campaign/step/evidence -> action.
+    from services import settings_row
+    settings_row.ensure(session, bid)   # OUT-22: a business with no settings row gets one, never a 404
     one(session, 'business_settings', bid, lock=True)
     one(session, 'outreach_settings', bid, lock=True)
 

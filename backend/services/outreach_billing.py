@@ -95,6 +95,8 @@ def _lock(session, bid: str) -> None:
     """The business_settings row (the document's own row): it serialises every
     billing change, exists for every business, and is the first lock the
     owner's actions take, so every path locks in the same order."""
+    from services import settings_row
+    settings_row.ensure(session, bid)   # OUT-22: locked and read only once it exists
     if send.pg(session):
         session.execute(text("SELECT 1 FROM business_settings WHERE business_id = :b FOR UPDATE"), {"b": bid})
     else:
