@@ -51,9 +51,33 @@ MAX_SUMMARY_TOKENS = 800
 MAX_EXTRACTION_TOKENS = 4000
 
 ARIA_ERROR_FALLBACK = (
-    "Apologies — I'm having trouble accessing the data right now. "
-    "Could you try sending that again in a moment?"
+    "Sorry, I couldn't get a reply through just then. Your message is saved, "
+    "so please try sending it again in a moment."
 )
+
+
+# Reasoning is charged to the same allowance as the reply; without headroom it
+# can use all of it and return nothing (Codex BM-1 review 1, finding 2).
+REASONING_HEADROOM = 2000
+
+
+def _base_model(model: str) -> str:
+    """A fine-tuned id ("ft:gpt-5-mini:org::id") behaves as its base model."""
+    m = (model or "").lower()
+    return m.split(":")[1] if m.startswith("ft:") and ":" in m[3:] else m
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """gpt-5 and the o-series refuse max_tokens and any non-default
+    temperature (BM-1); their chat variants take neither reasoning setting."""
+    m = _base_model(model)
+    return (m.startswith("gpt-5") or (len(m) > 1 and m[0] == "o" and m[1].isdigit())) and "-chat" not in m
+
+
+def _responses_only(model: str) -> bool:
+    """The -pro reasoning models serve only the Responses API, so a Chat
+    Completions call to them always fails (Codex BM-1 review 1, finding 3)."""
+    return _is_reasoning_model(model) and "-pro" in _base_model(model)
 
 
 # ============================================================================
@@ -265,7 +289,7 @@ async def end_meeting(meeting_id: str, session: Session) -> Dict[str, Any]:
     key_takeaways: List[str] = []
     sentiment: Optional[str] = None
     try:
-        summary_result = await _run_summary(transcript)
+        summary_result = await _run_summary(transcript, business_id=str(business_id))
         summary_text = summary_result.get("summary")
         key_takeaways = summary_result.get("key_takeaways") or []
         sentiment = summary_result.get("sentiment")
@@ -429,17 +453,28 @@ async def _gpt_chat_completion(
     if not profit_guard.permits("meeting"):
         logger.warning("[ExecMeeting] paused by the profit guard (PROFIT-1)")
         return None, 0
+    if _responses_only(EXECUTIVE_MEETING_AI_MODEL):
+        logger.error("[ExecMeeting] EXECUTIVE_MEETING_AI_MODEL=%s cannot answer chat requests; "
+                     "set it to a chat model such as gpt-5", EXECUTIVE_MEETING_AI_MODEL)
+        return None, 0
     client = _get_async_client()
     if client is None:
         logger.error("[ExecMeeting] OPENAI_API_KEY not configured")
         return None, 0
 
+    # max_completion_tokens is accepted by every current OpenAI chat model;
+    # max_tokens is refused by the reasoning ones (BM-1).
     kwargs: Dict[str, Any] = {
         "model": EXECUTIVE_MEETING_AI_MODEL,
         "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
+        "max_completion_tokens": max_tokens,
     }
+    if _is_reasoning_model(EXECUTIVE_MEETING_AI_MODEL):
+        # Reasoning counts against the budget: kept short, with headroom.
+        kwargs["reasoning_effort"] = "low"
+        kwargs["max_completion_tokens"] = max_tokens + REASONING_HEADROOM
+    else:
+        kwargs["temperature"] = temperature
     if response_format is not None:
         kwargs["response_format"] = response_format
 
@@ -453,6 +488,10 @@ async def _gpt_chat_completion(
     try:
         content = response.choices[0].message.content
         tokens = int(response.usage.total_tokens) if response.usage else 0
+        if getattr(response.choices[0], "finish_reason", None) == "length":
+            logger.warning("[ExecMeeting] reply cut short (finish_reason=length, %d chars)", len(content or ""))
+            if not content or response_format is not None:
+                return None, tokens   # nothing to say, or JSON that cannot parse
         return content, tokens
     except Exception:
         logger.exception("[ExecMeeting] Could not parse GPT response shape")
@@ -691,10 +730,11 @@ def _save_decision(
 # Internal: summary
 # ============================================================================
 
-async def _run_summary(transcript: str) -> Dict[str, Any]:
+async def _run_summary(transcript: str, business_id: Optional[str] = None) -> Dict[str, Any]:
     """Run the closing-summary GPT call. Returns parsed JSON or fallback."""
     msgs = messages_for_summary(transcript)
     content, tokens = await _gpt_chat_completion(
+        business_id=business_id,
         messages=msgs,
         temperature=0.2,
         max_tokens=MAX_SUMMARY_TOKENS,

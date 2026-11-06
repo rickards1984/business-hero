@@ -24,6 +24,7 @@ import {
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import {
   ActionItem,
+  EndMeetingResponse,
   ExecutiveMeeting,
   Goal,
   MeetingMessage,
@@ -38,6 +39,8 @@ import {
 import PrepView from '@/components/board-meeting/PrepView';
 import MeetingChat from '@/components/board-meeting/MeetingChat';
 import MeetingSummary from '@/components/board-meeting/MeetingSummary';
+
+const REFRESH_TIMEOUT_MS = 15_000;
 
 export default function MeetingDetailView() {
   const { meetingId } = useParams<{ meetingId: string }>();
@@ -107,12 +110,27 @@ export default function MeetingDetailView() {
     setBeginning(false);
   };
 
-  const handleEnded = async () => {
-    // Refetch the meeting (status will be 'completed' + summary populated)
+  const handleEnded = async (result: EndMeetingResponse) => {
+    // The meeting is closed: show its summary now, from the /end reply, so the
+    // page cannot stay on the chat whatever the refresh does (BM-1).
+    setForceChat(false);
+    setMeeting((m) => (m ? {
+      ...m,
+      status: 'completed',
+      ended_at: m.ended_at || new Date().toISOString(),
+      summary: result.summary ?? m.summary,
+      sentiment: result.sentiment ?? m.sentiment,
+      duration_minutes: result.duration_minutes ?? m.duration_minutes,
+    } : m));
+    // Then fill in the action items and goals. A slow or failed refresh only
+    // leaves the summary as the reply gave it.
     try {
-      await fetchMeeting();
+      await Promise.race([
+        fetchMeeting(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), REFRESH_TIMEOUT_MS)),
+      ]);
     } catch (e) {
-      setError((e as Error).message || 'Failed to refresh after ending');
+      console.warn('[BoardMeeting] refresh after ending failed', e);
     }
   };
 
