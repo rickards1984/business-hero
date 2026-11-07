@@ -207,7 +207,9 @@ def test_a_spoken_meeting_is_a_board_meeting_session(meeting):
         assert _open(ws) == {"type": "ready"}
         config = json.loads(meeting["voice"]["connects"][0].sent[0])["session"]
     assert meeting["features"] == ["board_meetings"] and meeting["pools"] == ["board_meeting"]
-    assert config["instructions"].startswith("MEETING PROMPT") and config["tools"] == []
+    from services import meeting_ledger
+    assert config["instructions"].startswith("MEETING PROMPT")
+    assert config["tools"] == meeting_ledger.REALTIME_TOOLS, "BM-3: only the read-only ledger look-ups"
     assert _wait(lambda: len(meeting["voice"]["recorded"]) == 1)
     seconds, key, source = meeting["voice"]["recorded"][0]
     assert source == "board_meeting" and key.startswith(m.BOARD_SESSION_PREFIX)
@@ -705,3 +707,129 @@ def test_the_final_save_retries_a_save_that_fails_while_it_is_looking(meeting, m
         assert _open(ws) == {"type": "ready"}
         time.sleep(0.05)
     assert _wait(lambda: meeting["saved"] == ["Kept."], timeout=10)
+
+
+# ---- BM-3: spoken meetings can look up the ledger -------------------------
+
+@pytest.mark.parametrize("name,allowed", [("search_transactions", True), ("send_email", False)])
+def test_a_spoken_meeting_looks_up_only_the_ledger_for_its_business(meeting, monkeypatch, name, allowed):
+    from services import meeting_ledger
+    ran = []
+    monkeypatch.setattr(meeting_ledger, "run_tool",
+                        lambda n, args, session, bid, today: ran.append((n, args, bid)) or '{"matched": 1}')
+    script = [{"type": "response.function_call_arguments.done", "call_id": "k1", "name": name,
+               "arguments": '{"text": "gocardless", "business_id": "someone-else"}'}]
+    client = meeting["make"](script=script)
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        assert _open(ws) == {"type": "ready"}
+        up = meeting["voice"]["connects"][0]
+        assert _wait(lambda: any('"function_call_output"' in x for x in up.sent))
+    output = next(json.loads(x) for x in up.sent if '"function_call_output"' in x)["item"]["output"]
+    if allowed:
+        assert ran == [("search_transactions", {"text": "gocardless", "business_id": "someone-else"}, A)]
+        assert output == '{"matched": 1}'
+    else:
+        assert ran == [] and "no tool" in output.lower()
+
+
+# ---- Codex BM-3 review 5 ---------------------------------------------------
+
+def test_speech_during_a_look_up_is_saved_before_ending(meeting, monkeypatch):
+    """A slow ledger look-up must not stop the stream being read: the owner's
+    transcription that arrives meanwhile is saved, and flush says ok only
+    once the look-up and every turn are done."""
+    from services import executive_meeting_orchestrator as orch
+    from services import meeting_ledger
+    monkeypatch.setattr(realtime_voice, "FLUSH_TRANSCRIPTION_WAIT_SECONDS", 0.05)
+    events = []
+
+    def slow_tool(n, args, session, bid, today):
+        time.sleep(1.0)
+        events.append("tool done")
+        return '{"matched": 0}'
+    monkeypatch.setattr(meeting_ledger, "run_tool", slow_tool)
+    script = [{"type": "response.function_call_arguments.done", "call_id": "k1",
+               "name": "search_transactions", "arguments": "{}"},
+              {"type": "conversation.item.input_audio_transcription.completed",
+               "transcript": "And put the course price up too."}]
+    client = meeting["make"](script=script)
+    monkeypatch.setattr(orch, "save_spoken_turn",
+                        lambda meeting_id, business_id, role, content, at, session:
+                        events.append(("saved", content)))
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        assert _open(ws) == {"type": "ready"}
+        time.sleep(0.2)
+        assert ("saved", "And put the course price up too.") in events, "read and saved while the look-up runs"
+        ws.send_json({"type": "flush"})
+        while True:
+            event = ws.receive_json()
+            if event.get("type") == "flushed":
+                break
+    assert event["ok"] is True and "tool done" in events
+    assert events.index(("saved", "And put the course price up too.")) < events.index("tool done")
+
+
+def test_flush_is_not_ok_while_a_look_up_is_still_running(meeting, monkeypatch):
+    from services import meeting_ledger
+    monkeypatch.setattr(realtime_voice, "FLUSH_TRANSCRIPTION_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(realtime_voice, "FLUSH_SAVE_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(meeting_ledger, "run_tool", lambda *a: time.sleep(2.0) or "{}")
+    client = meeting["make"](script=[{"type": "response.function_call_arguments.done", "call_id": "k1",
+                                      "name": "ledger_summary", "arguments": "{}"}])
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        assert _open(ws) == {"type": "ready"}
+        time.sleep(0.1)
+        ws.send_json({"type": "flush"})
+        while True:
+            event = ws.receive_json()
+            if event.get("type") == "flushed":
+                break
+    assert event["ok"] is False
+
+
+class _PushUpstream:
+    """A fake OpenAI socket the test can push events into at any moment."""
+
+    def __init__(self):
+        self.sent, self.inbox, self.open = [], [], True
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def close(self):
+        self.open = False
+
+    def __aiter__(self):
+        return self._events()
+
+    async def _events(self):
+        import asyncio as _asyncio
+        while self.open:
+            while self.inbox:
+                yield json.dumps(self.inbox.pop(0))
+            await _asyncio.sleep(0.02)
+
+
+def test_a_look_up_that_starts_during_the_flush_is_not_missed(meeting, monkeypatch):
+    """Codex BM-3 review 6: the look-up arrives during the flush's own waits."""
+    import sys as _sys
+    from services import meeting_ledger
+    monkeypatch.setattr(realtime_voice, "FLUSH_TRANSCRIPTION_WAIT_SECONDS", 0.6)
+    monkeypatch.setattr(meeting_ledger, "run_tool", lambda *a: time.sleep(3.0) or "{}")
+    client = meeting["make"]()
+    up = _PushUpstream()
+
+    async def connect(url, additional_headers=None, **k):
+        return up
+    monkeypatch.setattr(_sys.modules["websockets"], "connect", connect)
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        assert _open(ws) == {"type": "ready"}
+        ws.send_json({"type": "flush"})
+        time.sleep(0.2)                 # flush is now in its transcription wait
+        up.inbox.append({"type": "response.function_call_arguments.done", "call_id": "k9",
+                         "name": "ledger_summary", "arguments": "{}"})
+        while True:
+            event = ws.receive_json()
+            if event.get("type") == "flushed":
+                break
+    assert event["ok"] is False

@@ -670,6 +670,20 @@ def _calculate_next_meeting_time(settings: dict) -> Optional[datetime]:
 # this line is modified.
 # ============================================================================
 
+async def prep_off_loop(business_id: str, scheduled_for=None) -> dict:
+    """BM-3 (Codex review 1, finding 2): preparing a meeting reads the whole
+    ledger and every other source, so it runs in a worker thread with its own
+    session, never on the event loop that serves other requests and voice."""
+    import asyncio
+
+    def work():
+        from db import get_session_context
+        from services.executive_meeting_prep import generate_prep_data
+        with get_session_context() as s:
+            return generate_prep_data(business_id=business_id, db_session=s, scheduled_for=scheduled_for)
+    return await asyncio.to_thread(work)
+
+
 @router.post("/prep-now", dependencies=[Depends(require_feature("board_meetings"))])
 @limiter.limit(LIMIT_AI_HEAVY)
 async def trigger_prep_now(
@@ -685,10 +699,7 @@ async def trigger_prep_now(
     """
     business_id = str(auth_ctx["business_id"])
 
-    from services.executive_meeting_prep import generate_prep_data
-
-    prep = generate_prep_data(business_id=business_id, db_session=session)
-    return prep
+    return await prep_off_loop(business_id)
 
 
 @router.post("/start-now", dependencies=[Depends(require_feature("board_meetings"))])
@@ -705,8 +716,6 @@ async def start_meeting_now(
     Prompt 3 will pick this row up and start the actual conversation.
     """
     business_id = str(auth_ctx["business_id"])
-
-    from services.executive_meeting_prep import generate_prep_data
 
     now = datetime.utcnow()
 
@@ -728,11 +737,7 @@ async def start_meeting_now(
     session.commit()
 
     # Run prep on the same business with scheduled_for=now
-    prep = generate_prep_data(
-        business_id=business_id,
-        db_session=session,
-        scheduled_for=now,
-    )
+    prep = await prep_off_loop(business_id, scheduled_for=now)
 
     # Persist prep_data and flip status
     session.execute(

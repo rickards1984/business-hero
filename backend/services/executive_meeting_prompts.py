@@ -235,6 +235,26 @@ Rules:
 # Helpers
 # ============================================================================
 
+# BM-3: what Aria can see of the books, and how she models from it.
+LEDGER_GUIDANCE = """
+## The business's own transactions
+The pre-meeting data has a `ledger` section: the business's recorded transactions for the last six full
+months, month by month — income by payer, spending by supplier and by category, large one-off income
+lines with their references, this month so far, and `coverage` (how many months the records cover).
+Use these figures for analysis and modelling; they are the same figures as the accountancy pack.
+You can also use two tools during the meeting:
+- `search_transactions` for individual lines (by words in the payer, reference or description, by
+  amount, direction or dates), e.g. every GoCardless payment in September, or payments of exactly £1,625;
+- `ledger_summary` for a different number of full months, up to 12.
+If the owner asks for twelve months, say in one sentence that it uses a little more of the meeting's AI
+allowance, then do it. If the records start later than the period asked for (a new business), say how
+many months there are rather than treating missing months as zero.
+When you model a scenario, show the starting figures you used and where they came from, state each
+assumption, keep actual and projected figures clearly apart, and show the arithmetic briefly.
+Never invent a figure: if something you need is not in the data or the tools, say so and ask the owner.
+"""
+
+
 def build_system_prompt(prep_data: Dict[str, Any], settings: Dict[str, Any]) -> str:
     """Compose the executive meeting system prompt with this business's context."""
     business = prep_data.get("business") or {}
@@ -260,7 +280,7 @@ def build_system_prompt(prep_data: Dict[str, Any], settings: Dict[str, Any]) -> 
         custom_agenda_items=custom_items_str,
         include_disclaimers=settings.get("include_disclaimers", True),
         attendees=attendees_str,
-    )
+    ) + LEDGER_GUIDANCE
 
 
 def format_prep_data_for_context(prep_data: Dict[str, Any]) -> str:
