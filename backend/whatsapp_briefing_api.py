@@ -2,9 +2,8 @@
 WhatsApp CEO Briefing API — config, manual triggers, message history.
 """
 
-import json
 import logging
-from datetime import date as date_cls, datetime
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -203,163 +202,30 @@ async def upsert_whatsapp_config(
 @router.post("/send-daily-pulse", dependencies=[Depends(require_feature("whatsapp"))])
 async def trigger_daily_pulse(
     auth_ctx: dict = Depends(get_user_business_context),
-    session: Session = Depends(get_session),
 ):
-    """Manually trigger a daily pulse (for testing)"""
-    business_id = str(auth_ctx["business_id"])
-
-    config_row = session.execute(
-        text("""
-            SELECT phone_number, owner_name, preferred_detail_level
-            FROM whatsapp_configs
-            WHERE business_id = :business_id
-        """),
-        {"business_id": business_id},
-    ).fetchone()
-
-    if not config_row:
-        raise HTTPException(status_code=404, detail="WhatsApp not configured")
-
-    biz_row = session.execute(
-        text("SELECT name FROM businesses WHERE id = :bid"),
-        {"bid": business_id},
-    ).fetchone()
-    business_name = biz_row[0] if biz_row else "Your Business"
-
-    data = await gather_business_data(session, business_id, period="yesterday")
-
-    calls = data.get("calls", {})
-    emails = data.get("emails", {})
-    tasks = data.get("tasks", {})
-    financial = data.get("financial", {})
-    invoices_data = data.get("invoices", {})
-
-    calls_summary = (
-        f"{calls.get('total', 0)} calls yesterday. "
-        f"{calls.get('handled_by_ai', 0)} handled by AI receptionist, "
-        f"{calls.get('transferred', 0)} transferred."
-    )
-    emails_summary = (
-        f"{emails.get('total_received', 0)} new emails. "
-        f"{emails.get('action_required', 0)} action required, "
-        f"{emails.get('awaiting_reply', 0)} awaiting reply."
-    )
-    tasks_summary = (
-        f"{tasks.get('open_total', 0)} open tasks. "
-        f"{tasks.get('open_high_priority', 0)} high priority, "
-        f"{tasks.get('pending', 0)} pending."
-    )
-    snapshot = (
-        f"Revenue: £{financial.get('revenue', 0):,.2f}. "
-        f"Expenses: £{financial.get('expenses', 0):,.2f}. "
-        f"Net: £{financial.get('net_profit', 0):,.2f}. "
-        f"{invoices_data.get('overdue_count', 0)} overdue invoices "
-        f"(£{invoices_data.get('overdue_total', 0):,.2f})."
-    )
-
-    sid = await send_whatsapp_message(
-        to_number=config_row[0],
-        body=json.dumps({
-            "1": business_name,
-            "2": calls_summary[:500],
-            "3": emails_summary[:500],
-            "4": tasks_summary[:500],
-            "5": snapshot[:500],
-        }),
-        business_id=business_id,
-        message_type="daily_pulse",
-    )
-
-    return {"sent": bool(sid), "message_sid": sid}
+    """BRIEF-1: the daily pulse is retired (weekly and monthly briefings replace it)."""
+    return {"sent": False, "detail": "The daily pulse has been replaced by the weekly and monthly briefings."}
 
 
 @router.post("/send-weekly-briefing", dependencies=[Depends(require_feature("whatsapp"))])
 async def trigger_weekly_briefing(
+    kind: str = "weekly",
     auth_ctx: dict = Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
-    """Manually trigger a weekly CEO briefing (for testing)"""
-    business_id = str(auth_ctx["business_id"])
-
-    config_row = session.execute(
-        text("""
-            SELECT phone_number, owner_name, preferred_detail_level
-            FROM whatsapp_configs
-            WHERE business_id = :business_id
-        """),
-        {"business_id": business_id},
-    ).fetchone()
-
-    if not config_row:
-        raise HTTPException(status_code=404, detail="WhatsApp not configured")
-
-    biz_row = session.execute(
-        text("SELECT name FROM businesses WHERE id = :bid"),
-        {"bid": business_id},
-    ).fetchone()
-    business_name = biz_row[0] if biz_row else "Your Business"
-
-    data = await gather_business_data(
-        session, business_id, period="week", include_previous=True
-    )
-
-    week_ending = date_cls.today().strftime("%-d %B %Y")
-
-    calls = data.get("calls", {})
-    emails = data.get("emails", {})
-    tasks = data.get("tasks", {})
-    financial = data.get("financial", {})
-    invoices_data = data.get("invoices", {})
-
-    calls_summary = (
-        f"{calls.get('total', 0)} calls this week. "
-        f"{calls.get('handled_by_ai', 0)} handled by AI receptionist"
-        f" ({calls.get('ai_resolution_rate', 0)}% resolution rate), "
-        f"{calls.get('transferred', 0)} transferred, "
-        f"{calls.get('voicemail', 0)} voicemail."
-    )
-    emails_summary = (
-        f"{emails.get('total_received', 0)} received. "
-        f"{emails.get('action_required', 0)} action required, "
-        f"{emails.get('awaiting_reply', 0)} awaiting reply, "
-        f"{emails.get('newsletters', 0)} newsletters filtered."
-    )
-    tasks_summary = (
-        f"{tasks.get('created_this_period', 0)} created, "
-        f"{tasks.get('completed_this_period', 0)} completed, "
-        f"{tasks.get('open_high_priority', 0)} high priority open."
-    )
-    financial_summary = (
-        f"Revenue: £{financial.get('revenue', 0):,.2f}. "
-        f"Expenses: £{financial.get('expenses', 0):,.2f}. "
-        f"Net profit: £{financial.get('net_profit', 0):,.2f}."
-    )
-    invoices_summary = (
-        f"{invoices_data.get('unpaid_count', 0)} unpaid "
-        f"(£{invoices_data.get('unpaid_total', 0):,.2f}). "
-        f"{invoices_data.get('overdue_count', 0)} overdue "
-        f"(£{invoices_data.get('overdue_total', 0):,.2f})."
-    )
-
-    sid = await send_whatsapp_message(
-        to_number=config_row[0],
-        body=json.dumps({
-            "1": business_name,
-            "2": week_ending,
-            "3": calls_summary[:500],
-            "4": emails_summary[:500],
-            "5": tasks_summary[:500],
-            "6": financial_summary[:500],
-            "7": invoices_summary[:500],
-        }),
-        business_id=business_id,
-        message_type="weekly_briefing",
-    )
-
-    return {
-        "sent": bool(sid),
-        "message_sid": sid,
-    }
+    """Send a test briefing now: ?kind=weekly (this week so far, the default)
+    or ?kind=monthly (last month). BRIEF-1."""
+    from services import whatsapp_briefings
+    if kind not in ("weekly", "monthly"):
+        raise HTTPException(status_code=422, detail="kind must be weekly or monthly")
+    tz = session.execute(text("SELECT timezone FROM whatsapp_configs WHERE business_id = :b"),
+                         {"b": str(auth_ctx["business_id"])}).scalar() or "Europe/London"
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(tz)).date()
+    return await whatsapp_briefings.send_test(
+        session, str(auth_ctx["business_id"]),
+        whatsapp_briefings.WEEKLY if kind == "weekly" else whatsapp_briefings.MONTHLY,
+        today, send=send_whatsapp_message, tz=tz)
 
 
 @router.post("/send-task-reminder", dependencies=[Depends(require_feature("whatsapp"))])
