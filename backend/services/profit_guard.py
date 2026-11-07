@@ -27,7 +27,8 @@ from typing import Optional
 
 from sqlalchemy import event, text
 
-from services.metering import (ARIA_VOICE_METER, ARIA_VOICE_OVERAGE_METER, OVERAGE_METER, RECEPTIONIST_METER,
+from services.metering import (ARIA_VOICE_METER, ARIA_VOICE_OVERAGE_METER, BOARD_VOICE_METER, BOARD_VOICE_OVERAGE_METER,
+                               OVERAGE_METER, RECEPTIONIST_METER,
                                period_for)
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,8 @@ logger = logging.getLogger(__name__)
 PLAN_PRICE_PENCE = {"starter": 6900, "pro": 12900, "business": 26900}
 ESSENTIAL = frozenset({"classify", "receptionist", "unsubscribe", "chat", "voice", "answer"})
 PLATFORM = "platform"                          # ledger rows no business owns (platform_meters, migration 039)
-VOICE_METERS = (RECEPTIONIST_METER, OVERAGE_METER, ARIA_VOICE_METER, ARIA_VOICE_OVERAGE_METER)
+VOICE_METERS = (RECEPTIONIST_METER, OVERAGE_METER, ARIA_VOICE_METER, ARIA_VOICE_OVERAGE_METER,
+                BOARD_VOICE_METER, BOARD_VOICE_OVERAGE_METER)          # BM-2
 TTS_PENCE_PER_1K_CHARS = 1.2                   # tts-1, $15 per million characters
 # A call that sets no output limit is estimated at its model's own maximum
 # output (Codex PROFIT-1 review 2); a model not listed, at the largest of these.

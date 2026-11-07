@@ -8,6 +8,7 @@ import json
 import asyncio
 import logging
 import base64
+from datetime import datetime as _dt, timezone as _tz
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
 
 router = APIRouter()
@@ -45,6 +46,17 @@ _NOTICE_TIMEOUT_SECONDS = 1
 # a failed end-of-session accrual is recovered, not lost (review 1, finding 1).
 VOICE_HEARTBEAT_SECONDS = 60
 _LIVE_SESSIONS: set = set()
+# BM-2: a spoken board meeting. Its length is the board pool's minutes left
+# (metering.seconds_allowed, at most an hour). At that limit a reply Aria is
+# giving may finish, for at most this long; a session shorter than the
+# minimum is not worth opening.
+MEETING_FINISH_GRACE_SECONDS = 20
+MIN_MEETING_SESSION_SECONDS = 30
+TURN_SAVE_ATTEMPTS = 3
+TURN_SAVE_RETRY_SECONDS = 0.5
+FLUSH_TRANSCRIPTION_WAIT_SECONDS = 1.5
+FLUSH_SAVE_TIMEOUT_SECONDS = 4
+FINAL_SAVE_SECONDS = 15
 
 
 def live_sessions() -> set:
@@ -747,6 +759,16 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             
         token = auth_message.get("token")
         quiet_mode = auth_message.get("quietMode", False)
+        # BM-2: a spoken board meeting names its meeting. Anything that is not
+        # a UUID is refused before any lookup.
+        meeting_id = auth_message.get("meetingId")
+        if meeting_id is not None:
+            import uuid as _uuid_check
+            try:
+                meeting_id = str(_uuid_check.UUID(str(meeting_id)))
+            except ValueError:
+                await websocket.close(code=4003, reason="Meeting not found")
+                return
         
         # Verify token using Supabase
         from supabase_auth import verify_supabase_token
@@ -794,7 +816,16 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     import uuid as _uuid
     business_tz = getattr(business, "timezone", None) or "Europe/London"
     owner_name = None if user_name == "there" else user_name
-    session_id = str(_uuid.uuid4())
+    from services import metering as _mp
+    session_id = (_mp.BOARD_SESSION_PREFIX if meeting_id else "") + str(_uuid.uuid4())
+    meeting_instructions = None
+    session_cap = VOICE_SESSION_CAP_SECONDS
+    board_used_at_start = 0.0      # minutes, for the live 80% warning
+    # The most this session may be BILLED for: what it was admitted with, plus
+    # the finishing grace. Never shortened: a later, earlier stopping deadline
+    # must not erase time already spoken (Codex BM-2 review 2, finding 1).
+    bill_cap = VOICE_SESSION_CAP_SECONDS
+    board_allowance = 0.0
     from services import metering as _m0
     # The session is billed in the month it STARTS (Codex review 2, finding 1).
     _period = _m0.period_for(_m0.now())
@@ -809,12 +840,32 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     forwarders = []
 
     def _beat(seconds, period):
+        """The durable heartbeat. For a meeting it also re-reads what may
+        still be spent (another pool's extras use the same cap): returns the
+        seconds this session may now run in total, or None."""
         from services import metering as _m
         from db import get_session_context as _hs
         with _hs() as _s:
             _b = _m.load_business(_s, business_id)
             if _b is not None:
                 _m.voice_session_heartbeat(_s, _b, session_id, seconds, period=period)
+                if meeting_id:
+                    return _m.seconds_allowed(_m.usage(_s, _b, pool=_m.BOARD_POOL))
+        return None
+
+    async def _send_minutes():
+        """BM-2: the minutes left in a spoken meeting, live, with the 80%
+        warning including this session's own time (Codex review 1, finding 7)."""
+        if not meeting_id or started is None:
+            return
+        elapsed = _time.monotonic() - started
+        warn = board_allowance > 0 and (board_used_at_start + elapsed / 60) >= board_allowance * 0.8
+        try:
+            await asyncio.wait_for(websocket.send_json({
+                "type": "voice_minutes", "seconds_left": max(0, int(session_cap - elapsed)),
+                "warn": bool(warn)}), _NOTICE_TIMEOUT_SECONDS)
+        except (Exception, asyncio.TimeoutError):
+            pass
 
     # NS-V2: the plan check, the minutes check and the first heartbeat in ONE
     # worker thread and ONE database session (they were three trips, each
@@ -824,6 +875,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     # decides before anything is spent, and no durable heartbeat means no
     # session. Nothing here contacts OpenAI.
     def _checks():
+        nonlocal meeting_instructions, session_cap, board_used_at_start, board_allowance, bill_cap
         from db import get_session_context
         from auth import assert_feature_access
         from models import Business as _Business
@@ -833,21 +885,52 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             try:
                 _fresh = _session.exec(
                     _select(_Business).where(_Business.id == business.id)).first()
-                assert_feature_access(_fresh, "aria_voice")
+                # BM-2: a spoken meeting is part of board meetings, not of
+                # Aria voice, and draws on its own minutes.
+                assert_feature_access(_fresh, "board_meetings" if meeting_id else "aria_voice")
             except HTTPException as exc:
                 return ("refused", str(exc.detail)[:110])
             except Exception as e:
                 _logger.error(f"Access check failed, refusing voice session: {e}")
                 return ("refused", "Access check failed")
+            if meeting_id:
+                try:
+                    from services import executive_meeting_orchestrator as _orch
+                    meeting_instructions = _orch.voice_context(meeting_id, business_id, _session)
+                except ValueError as e:
+                    return ("refused", str(e)[:110])
+                except Exception as e:
+                    _logger.error("Meeting lookup failed for %s, refusing voice: %s", business_id, e)
+                    return ("refused", "The meeting could not be loaded")
             try:
                 _mb = _m.load_business(_session, business_id)
-                admitted, limit_state = _m.admit_call(_session, _mb)
+                if meeting_id:
+                    admitted, limit_state = _m.admit_call(_session, _mb, pool=_m.BOARD_POOL)
+                else:
+                    admitted, limit_state = _m.admit_call(_session, _mb)
+                if admitted and meeting_id:
+                    _bu = _m.usage(_session, _mb, pool=_m.BOARD_POOL)
+                    session_cap = _m.seconds_allowed(_bu)
+                    bill_cap = session_cap + MEETING_FINISH_GRACE_SECONDS
+                    board_used_at_start = float(_bu.get("used_minutes") or 0)
+                    board_allowance = float(_bu.get("allowance_minutes") or 0)
+                    if session_cap < MIN_MEETING_SESSION_SECONDS:
+                        admitted, limit_state = False, "allowance_exhausted"
+                    else:
+                        # One spoken meeting at a time per business (Codex BM-2
+                        # review 1, finding 1), decided under a lock that the
+                        # first heartbeat's commit releases.
+                        _m.lock_board_admission(_session, business_id)
+                        if _m.live_board_session(_session, business_id):
+                            _session.rollback()
+                            return ("refused", "A spoken board meeting is already running")
             except Exception as e:
                 _logger.error("Voice usage check failed for %s, refusing: %s", business_id, e)
                 return ("refused", "Voice usage could not be checked")
             if not admitted:
                 return ("refused", "This month's spending cap for extra minutes has been reached"
                         if limit_state == "spend_cap_reached"
+                        else "This month's board-meeting voice minutes are used up" if meeting_id
                         else "This month's voice minutes are used up")
             try:
                 if _mb is not None:
@@ -873,15 +956,20 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         """The durable heartbeat, every VOICE_HEARTBEAT_SECONDS after the first.
         Off the loop. Three failures in a row end the session (Codex NS-V1
         review 2, finding 2): unrecorded voice is bounded, not open-ended."""
+        nonlocal session_cap
         failures = 0
         while True:
             await asyncio.sleep(VOICE_HEARTBEAT_SECONDS)
             try:
                 # Bounded: a write that HANGS is a failure too (review 3).
-                await asyncio.wait_for(
+                allowed = await asyncio.wait_for(
                     asyncio.to_thread(_beat, int(_time.monotonic() - started), period),
                     VOICE_HEARTBEAT_SECONDS)
                 failures = 0
+                if meeting_id:
+                    if allowed is not None:
+                        session_cap = min(session_cap, allowed)   # only ever shortened
+                    await _send_minutes()
             except Exception as e:
                 failures += 1
                 _logger.warning("Voice heartbeat failed for %s (%s in a row): %s",
@@ -890,11 +978,108 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                     _stop("meter")
                     return
 
+    responding = False   # Aria is mid-reply (BM-2: she may finish at the limit)
+    playback_until = 0.0  # when the browser will have played the audio sent so far
+    turns: asyncio.Queue = asyncio.Queue()
+    turn_writer = None
+    ledger: list = []    # every spoken turn accepted, with its save state
+
+    def _save_turn(role, content, at):
+        """Saved with retries (Codex BM-2 review 1, finding 5): a passing
+        database fault does not lose what was said."""
+        from db import get_session_context as _ts
+        from services import executive_meeting_orchestrator as _orch
+        for attempt in range(TURN_SAVE_ATTEMPTS):
+            try:
+                with _ts() as _s:
+                    _orch.save_spoken_turn(meeting_id, business_id, role, content, at, _s)
+                return
+            except Exception as e:
+                if attempt + 1 >= TURN_SAVE_ATTEMPTS:
+                    raise
+                _logger.warning("Saving a spoken meeting turn failed (attempt %s): %s", attempt + 1, e)
+                _time.sleep(TURN_SAVE_RETRY_SECONDS)
+
+    # Every turn accepted from the model is in this ledger until it is saved
+    # (Codex BM-2 review 3, finding 1): pending -> saving -> saved | failed.
+    # A turn is CLAIMED before it is saved, so it is saved at most once, and
+    # one that never started (its thread not yet run when the session ended)
+    # or failed is still pending/failed here for the final save.
+    import threading as _threading
+    ledger_lock = _threading.Lock()
+
+    def _accept(turn):
+        entry = {"turn": turn, "state": "pending"}
+        with ledger_lock:
+            ledger.append(entry)
+        return entry
+
+    def _save_entry(entry, deadline=None):
+        if deadline is not None and _time.monotonic() >= deadline:
+            return
+        with ledger_lock:
+            if entry["state"] not in ("pending", "failed"):
+                return
+            entry["state"] = "saving"
+        try:
+            _save_turn(*entry["turn"])
+            outcome = "saved"
+        except Exception as e:
+            _logger.error("Could not save a spoken meeting turn for %s: %s", business_id, e)
+            outcome = "failed"
+        with ledger_lock:
+            entry["state"] = outcome
+
+    def _entries(*states):
+        with ledger_lock:
+            return [e for e in ledger if e["state"] in states]
+
+    def _final_save():
+        """After the socket has gone: every turn not yet saved, retried while
+        saves are still running elsewhere, all within FINAL_SAVE_SECONDS (the
+        deadline is checked before every save; Codex review 3, finding 2)."""
+        deadline = _time.monotonic() + FINAL_SAVE_SECONDS
+        while _time.monotonic() < deadline:
+            # ONE locked snapshot of everything outstanding (Codex BM-2 review
+            # 4): a save that fails between two separate looks is not missed.
+            outstanding = _entries("pending", "failed", "saving")
+            if not outstanding:
+                return
+            for entry in outstanding:
+                _save_entry(entry, deadline)      # claims only pending/failed
+            _time.sleep(TURN_SAVE_RETRY_SECONDS)
+        left = len(_entries("pending", "failed", "saving"))
+        if left:
+            _logger.error("%s spoken meeting turn(s) could not be saved for %s", left, business_id)
+
+    async def _write_turns():
+        """One writer, in arrival order, off the event loop; the audio is
+        never held up. Each turn carries the time it was spoken, so order in
+        the record does not depend on which write finishes first."""
+        while True:
+            entry = await turns.get()
+            try:
+                await asyncio.to_thread(_save_entry, entry)
+            finally:
+                turns.task_done()
+
     async def _end_at_cap():
         nonlocal timed_out
-        await asyncio.sleep(max(0.0, VOICE_SESSION_CAP_SECONDS))
-        _logger.warning("Voice session reached its %ss cap; ending it", VOICE_SESSION_CAP_SECONDS)
-        _stop("cap")
+        if not meeting_id:
+            await asyncio.sleep(max(0.0, VOICE_SESSION_CAP_SECONDS))
+            _logger.warning("Voice session reached its %ss cap; ending it", VOICE_SESSION_CAP_SECONDS)
+            _stop("cap")
+            return
+        # The deadline can only move earlier (a heartbeat re-reads the cap).
+        while _time.monotonic() - started < session_cap:
+            await asyncio.sleep(min(1.0, max(0.0, session_cap - (_time.monotonic() - started))))
+        # Aria finishes what she is saying, generated AND heard (Codex review
+        # 1, finding 6: audio plays in real time after generation ends).
+        grace_until = _time.monotonic() + MEETING_FINISH_GRACE_SECONDS
+        while (responding or _time.monotonic() < playback_until) and _time.monotonic() < grace_until:
+            await asyncio.sleep(0.1)
+        _logger.info("Board-meeting voice session reached its %ss allowance; ending it", session_cap)
+        _stop("allowance")
 
     def _stop(reason):
         nonlocal timed_out, stop_reason
@@ -923,12 +1108,14 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         _lap("openai")
         _logger.info("Connected to OpenAI Realtime API (GA)")
 
+        # BM-2: a meeting speaks from its own prompt and data, with no tools.
         await openai_ws.send(json.dumps(build_session_config(
-            build_system_instructions(business_name, user_name),
-            ARIA_REALTIME_VOICE, quiet_mode, REALTIME_TOOLS)))
+            meeting_instructions if meeting_id else build_system_instructions(business_name, user_name),
+            ARIA_REALTIME_VOICE, quiet_mode, [] if meeting_id else REALTIME_TOOLS)))
         _logger.info(f"Session configured with quiet_mode={quiet_mode}")
 
         await websocket.send_json({"type": "ready"})
+        await _send_minutes()
         _lap("ready")
         _logger.info("[Voice timing] %s", " ".join(f"{k}={v}ms" for k, v in _timing.items()))
 
@@ -943,7 +1130,24 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                     if data.get("text") is not None:
                         message = json.loads(data["text"])
                         msg_type = message.get("type")
-                        if msg_type == "config":
+                        if msg_type == "flush" and meeting_id:
+                            # BM-2 (Codex review 1, finding 3): before /end, the
+                            # browser asks for what was said to be saved. A last
+                            # transcription may still be on its way; then the
+                            # writer is drained, bounded, and the browser told.
+                            # `ok` only if EVERY turn so far is saved (Codex review
+                            # 2, finding 2); failed ones are tried once more first.
+                            await asyncio.sleep(FLUSH_TRANSCRIPTION_WAIT_SECONDS)
+                            for entry in _entries("failed"):
+                                turns.put_nowait(entry)
+                            drained = True
+                            try:
+                                await asyncio.wait_for(turns.join(), FLUSH_SAVE_TIMEOUT_SECONDS)
+                            except asyncio.TimeoutError:
+                                drained = False
+                            await websocket.send_json({"type": "flushed", "ok": drained and not _entries(
+                                "pending", "saving", "failed")})
+                        elif msg_type == "config":
                             quiet_mode = message.get("quietMode", False)
                             await openai_ws.send(json.dumps({
                                 "type": "session.update",
@@ -999,10 +1203,35 @@ async def realtime_voice_endpoint(websocket: WebSocket):
 
         async def forward_to_client():
             """OpenAI -> client: GA events the browser renders; tool calls."""
+            nonlocal responding, playback_until
+            owner_spoke_at = None
+            aria_spoke_at = None
             try:
                 async for message in openai_ws:
                     event = json.loads(message)
                     event_type = event.get("type") or ""
+                    if event_type == "response.created":
+                        responding = True
+                        aria_spoke_at = _dt.now(_tz.utc)
+                    elif event_type == "response.done":
+                        responding = False
+                    elif event_type == "response.output_audio.delta":
+                        # PCM16 mono at 24 kHz: 48,000 bytes a second, played
+                        # from when it arrives or when the previous audio ends.
+                        heard = len(event.get("delta") or "") * 3 / 4 / 48000
+                        playback_until = max(playback_until, _time.monotonic()) + heard
+                    if meeting_id:
+                        # BM-2: both sides into the meeting's record, timed when
+                        # SPOKEN, written in order by one writer, never blocking audio.
+                        if event_type == "input_audio_buffer.speech_stopped":
+                            owner_spoke_at = _dt.now(_tz.utc)
+                        elif event_type == "conversation.item.input_audio_transcription.completed":
+                            turns.put_nowait(_accept(("owner", event.get("transcript"),
+                                                      owner_spoke_at or _dt.now(_tz.utc))))
+                            owner_spoke_at = None
+                        elif event_type == "response.output_audio_transcript.done":
+                            turns.put_nowait(_accept(("aria", event.get("transcript"),
+                                                      aria_spoke_at or _dt.now(_tz.utc))))
                     if event_type == "error":
                         _logger.error(f"OpenAI Realtime API error: {json.dumps(event)}")
                     if event_type == "response.function_call_arguments.done":
@@ -1033,6 +1262,8 @@ async def realtime_voice_endpoint(websocket: WebSocket):
 
         forwarders = [asyncio.create_task(forward_to_openai()),
                       asyncio.create_task(forward_to_client())]
+        if meeting_id:
+            turn_writer = asyncio.create_task(_write_turns())
         await asyncio.wait(forwarders, return_when=asyncio.FIRST_COMPLETED)
 
     except asyncio.CancelledError:
@@ -1070,7 +1301,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         if started is not None:
             if ended is None:
                 ended = _time.monotonic()
-            seconds = int(min(ended - started, VOICE_SESSION_CAP_SECONDS))
+            seconds = int(min(ended - started, bill_cap if meeting_id else VOICE_SESSION_CAP_SECONDS))
 
             def _record():
                 from services import metering as _m
@@ -1080,7 +1311,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                     if _b is None:
                         return
                     _m.accrue_session(_s, _b, session_id, seconds, period=_period,
-                                      source="aria_voice")
+                                      source="board_meeting" if meeting_id else "aria_voice")
                     # Only after a successful accrual: otherwise the heartbeat
                     # stays for recovery (review 1, finding 1).
                     _m.voice_session_closed(_s, _b, session_id)
@@ -1131,12 +1362,28 @@ async def realtime_voice_endpoint(websocket: WebSocket):
 
         if openai_ws is not None:
             await _bounded(openai_ws.close(), _CLOSE_TIMEOUT_SECONDS)
+        if turn_writer is not None:
+            # The last spoken turns are saved before the socket closes, bounded.
+            # Whatever is still queued then is handed to the worker pool, like
+            # the accrual, and saved after the socket has gone (Codex review 1,
+            # finding 5): teardown stays bounded and nothing said is dropped.
+            await _bounded(turns.join(), _CLOSE_TIMEOUT_SECONDS * 2)
+            turn_writer.cancel()
+            if _entries("pending", "saving", "failed"):
+                import contextvars as _cv
+                import functools as _ft
+                asyncio.get_running_loop().run_in_executor(
+                    None, _ft.partial(_cv.copy_context().run, _final_save))
         if stop_reason is not None:
             message = ("That's the 20-minute limit for one voice chat. Start a new one any time."
                        if stop_reason == "cap" else
+                       "This month's board-meeting voice minutes are used up. "
+                       "Carry on by typing: the meeting continues."
+                       if stop_reason == "allowance" else
                        "Voice usage couldn't be recorded, so this chat has ended. "
                        "You can still type to Aria.")
-            await _bounded(websocket.send_json({"type": "session_limit", "message": message}),
+            await _bounded(websocket.send_json({"type": "session_limit", "message": message,
+                                                "reason": stop_reason}),
                            _NOTICE_TIMEOUT_SECONDS)
         await _bounded(websocket.close(), _CLOSE_TIMEOUT_SECONDS)
         if accrual is not None:

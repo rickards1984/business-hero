@@ -1,0 +1,11 @@
+1. **P1 — Shortening the deadline erases billable elapsed time.** [backend/realtime_voice.py:1246](/Users/michaelrickards/dev/bh2-BM-2/backend/realtime_voice.py:1246). When another pool exhausts the cap, the heartbeat sets `session_cap` to zero. Final accrual then clamps the entire session to `0 + 20` seconds—even if it already ran for ten minutes—and removes its recovery heartbeat. A scaled-time probe reproduced zero billed seconds after more than one second of voice. Keep elapsed-time accounting independent of the shortened stopping deadline.
+
+2. **P2 — `flushed` still does not establish persistence before `/end`.** [backend/realtime_voice.py:1088](/Users/michaelrickards/dev/bh2-BM-2/backend/realtime_voice.py:1088). A writer exceeding the four-second drain timeout still receives a successful `flushed` acknowledgement. The browser proceeds to `/end`, whose transcript snapshot excludes that turn; a later save either misses extraction or is rejected after completion. Reproduced with a delayed writer. The client’s eight-second timeout also proceeds as success. Report incomplete persistence and prevent extraction until outstanding turns are accounted for.
+
+3. **P2 — Three failed saves still permanently discard an acknowledged turn.** [backend/realtime_voice.py:996](/Users/michaelrickards/dev/bh2-BM-2/backend/realtime_voice.py:996). After retry exhaustion, `_save_turns` logs the failure and `_write_turns` marks the item done. It is absent from the teardown leftovers, so executor handoff cannot recover it. Reproduced: three failed attempts, no saved turn, no teardown retry. Preserve failed items for recovery and propagate persistence failure to the flush result.
+
+Original findings **2, 4, 6 and 7 appear addressed**; **1 introduces the billing defect above**, and **3 and 5 remain incomplete**.
+
+Verification: **148 existing tests passed**, including ordinary voice, refusals and teardown coverage. Three additional in-memory probes reproduced the findings. Staged whitespace check passed. PostgreSQL tests, full `check.sh` and browser verification were not run. No files changed, commits or pushes.
+
+**Verdict: CHANGES.**

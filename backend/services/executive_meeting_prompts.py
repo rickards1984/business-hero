@@ -346,3 +346,32 @@ def messages_for_summary(transcript: str) -> List[Dict[str, str]]:
         {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
         {"role": "user", "content": "Transcript follows:\n\n" + transcript},
     ]
+
+
+# BM-2: the same meeting, spoken. Appended to the system prompt for a voice
+# session; the prep data and the conversation so far follow it.
+VOICE_MEETING_ADDENDUM = """
+## This meeting is spoken
+You are talking with the owner out loud, not writing. Keep each turn short:
+two to four sentences, then stop and let them answer. Say figures the way a
+person would say them ("about twelve thousand pounds", "four per cent").
+No lists, headings or markdown. Ask one question at a time. If they want a
+table, a long breakdown or a document, say you'll put it in the meeting notes.
+If the conversation so far is below, carry on from it: do not greet them again
+or repeat what has been said.
+"""
+
+VOICE_TRANSCRIPT_CHARS = 12_000
+
+
+def voice_instructions(prep_data: Dict[str, Any], settings: Dict[str, Any], transcript: str) -> str:
+    """The meeting's instructions for the Realtime model: the system prompt,
+    the spoken-meeting rules, the prep data, then the most recent part of the
+    conversation so far (switching from typing to talking keeps context)."""
+    parts = [build_system_prompt(prep_data, settings), VOICE_MEETING_ADDENDUM,
+             format_prep_data_for_context(prep_data)]
+    transcript = (transcript or "").strip()
+    if transcript:
+        parts.append("[CONVERSATION SO FAR — the meeting's own record]\n\n"
+                     + transcript[-VOICE_TRANSCRIPT_CHARS:] + "\n\n[END CONVERSATION SO FAR]")
+    return "\n\n".join(parts)

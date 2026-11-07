@@ -4,8 +4,12 @@
  * Owner and Aria converse turn by turn. Aria writes plain paragraphs
  * (no markdown). Token usage shown discreetly. Soft-cap warning banner
  * at 80% of soft cap. End-Meeting button opens a confirmation dialog.
+ *
+ * BM-2: Talk / Type. Talking uses the board-meeting voice minutes (shown,
+ * with a warning at 80%); when they run out the meeting carries on typed.
+ * Spoken turns are saved by the server and appear here as they're heard.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Avatar,
@@ -21,15 +25,22 @@ import {
   Snackbar,
   Stack,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
 } from '@mui/material';
+import KeyboardIcon from '@mui/icons-material/Keyboard';
+import MicIcon from '@mui/icons-material/Mic';
+import { RealtimeVoice, RealtimeVoiceHandle } from '@/components/RealtimeVoice';
 import SendIcon from '@mui/icons-material/Send';
 import StopCircleOutlinedIcon from '@mui/icons-material/StopCircleOutlined';
 import {
+  BoardVoiceUsage,
   EndMeetingResponse,
   ExecutiveMeeting,
   MeetingMessage,
   endMeeting,
+  getBoardVoiceUsage,
   formatUKDateTime,
   sendMessage,
   startMeeting,
@@ -76,6 +87,42 @@ export default function MeetingChat({ meeting, initialMessages, onEnded }: Meeti
   const [toast, setToast] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const openingTriggered = useRef(false);
+  const [mode, setMode] = useState<'type' | 'talk'>('type');
+  const [voiceUsage, setVoiceUsage] = useState<BoardVoiceUsage | null>(null);
+  const [liveVoice, setLiveVoice] = useState<{ secondsLeft: number; warn: boolean } | null>(null);
+  const [savingVoice, setSavingVoice] = useState(false);
+  const voiceRef = useRef<RealtimeVoiceHandle>(null);
+  const handleVoiceMinutes = useCallback((secondsLeft: number, warn: boolean) => {
+    setLiveVoice({ secondsLeft, warn });
+  }, []);
+
+  const refreshVoiceUsage = useCallback(() => {
+    getBoardVoiceUsage().then(setVoiceUsage).catch(() => setVoiceUsage(null));
+  }, []);
+  useEffect(() => { refreshVoiceUsage(); }, [refreshVoiceUsage]);
+
+  // A spoken turn, as heard. The server has already saved it to the meeting.
+  const handleSpoken = useCallback((text: string, isUser: boolean) => {
+    const content = (text || '').trim();
+    if (!content) return;
+    setMessages((prev) => [...prev, {
+      id: `${isUser ? 'owner' : 'aria'}-voice-${Date.now()}-${prev.length}`,
+      role: isUser ? 'owner' : 'aria',
+      content,
+    }]);
+  }, []);
+
+  const handleVoiceEnded = useCallback((reason: string | null) => {
+    setLiveVoice(null);
+    refreshVoiceUsage();
+    if (reason) {
+      // e.g. the month's board-meeting voice minutes are used up: carry on typed.
+      setMode('type');
+      setToast(reason);
+    }
+  }, [refreshVoiceUsage]);
+
+  const canTalk = !!voiceUsage?.voice_available;
 
   // Generate opening on mount if no messages yet and meeting is in_progress
   useEffect(() => {
@@ -166,6 +213,22 @@ export default function MeetingChat({ meeting, initialMessages, onEnded }: Meeti
     setEnding(true);
     setError(null);
     try {
+      if (mode === 'talk') {
+        // BM-2: what was said is saved BEFORE the meeting is summarised, and
+        // the voice session (and its billing) ends first.
+        setSavingVoice(true);
+        const saved = (await voiceRef.current?.flushAndStop()) ?? true;
+        setSavingVoice(false);
+        if (!saved) {
+          // Never summarise without part of what was said.
+          setEndDialogOpen(false);
+          setError("The last part of the conversation couldn't be saved yet, so the meeting is still open. "
+            + 'Please try ending it again in a moment.');
+          setEnding(false);
+          return;
+        }
+        setMode('type');
+      }
       const result = await endMeeting(meeting.id);
       setEndDialogOpen(false);
       setToast('Meeting ended.');
@@ -196,7 +259,22 @@ export default function MeetingChat({ meeting, initialMessages, onEnded }: Meeti
             {formatUKDateTime(meeting.scheduled_for)} · {tokensTotal.toLocaleString('en-GB')} / {HARD_CAP_TOKENS.toLocaleString('en-GB')} tokens
           </Typography>
         </Box>
-        <Stack direction="row" spacing={1}>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={mode}
+            onChange={(_, value) => value && setMode(value)}
+            aria-label="Talk or type"
+            disabled={ending || starting}
+          >
+            <ToggleButton value="type" aria-label="Type">
+              <KeyboardIcon fontSize="small" sx={{ mr: 0.5 }} /> Type
+            </ToggleButton>
+            <ToggleButton value="talk" aria-label="Talk" disabled={!canTalk}>
+              <MicIcon fontSize="small" sx={{ mr: 0.5 }} /> Talk
+            </ToggleButton>
+          </ToggleButtonGroup>
           <Button
             variant="outlined"
             color="error"
@@ -208,6 +286,26 @@ export default function MeetingChat({ meeting, initialMessages, onEnded }: Meeti
           </Button>
         </Stack>
       </Stack>
+
+      {/* Voice minutes (BM-2) */}
+      {mode === 'talk' && liveVoice ? (
+        <Alert severity={liveVoice.warn ? 'warning' : 'info'} sx={{ mt: 2 }}>
+          {`${Math.floor(liveVoice.secondsLeft / 60)} voice minute${Math.floor(liveVoice.secondsLeft / 60) === 1 ? '' : 's'} left this month.`}
+          {liveVoice.warn ? ' Running low: when they run out, the meeting carries on by typing.' : ''}
+        </Alert>
+      ) : voiceUsage && (mode === 'talk' || voiceUsage.warn || !canTalk) && (
+        <Alert severity={!canTalk ? 'info' : voiceUsage.warn ? 'warning' : 'info'} sx={{ mt: 2 }}>
+          {!canTalk
+            ? (voiceUsage.allowance_minutes > 0
+              ? "This month's board-meeting voice minutes are used up, so this meeting is typed."
+              : 'Voice meetings are not available on this plan, so this meeting is typed.')
+            : `${voiceUsage.minutes_available_now} voice minute${voiceUsage.minutes_available_now === 1 ? '' : 's'} available this month`
+              + (voiceUsage.warn
+                ? ` (${Math.round(voiceUsage.used_minutes)} of ${voiceUsage.allowance_minutes} used).`
+                  + (voiceUsage.extra_minutes_on ? ' Extra minutes are on, at £0.45 a minute.' : ' Typing is always available.')
+                : '.')}
+        </Alert>
+      )}
 
       {/* Warnings */}
       {(softCapWarning || softCapReached) && !hardCapReached && (
@@ -317,6 +415,15 @@ export default function MeetingChat({ meeting, initialMessages, onEnded }: Meeti
           pt: 2,
         }}
       >
+        {mode === 'talk' && canTalk && !hardCapReached ? (
+          <RealtimeVoice
+            ref={voiceRef}
+            meetingId={meeting.id}
+            onTranscript={handleSpoken}
+            onSessionEnd={handleVoiceEnded}
+            onVoiceMinutes={handleVoiceMinutes}
+          />
+        ) : (
         <Stack direction="row" spacing={1} alignItems="flex-end">
           <TextField
             fullWidth
@@ -348,6 +455,7 @@ export default function MeetingChat({ meeting, initialMessages, onEnded }: Meeti
             <SendIcon />
           </IconButton>
         </Stack>
+        )}
       </Box>
 
       {/* End meeting confirmation */}
@@ -357,6 +465,7 @@ export default function MeetingChat({ meeting, initialMessages, onEnded }: Meeti
           <DialogContentText>
             Aria will summarise what was discussed and capture any action items.
             This may take up to 30 seconds.
+            {savingVoice ? ' Saving what was said first…' : ''}
           </DialogContentText>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
