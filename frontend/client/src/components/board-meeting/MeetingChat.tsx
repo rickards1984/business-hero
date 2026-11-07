@@ -35,7 +35,11 @@ import { RealtimeVoice, RealtimeVoiceHandle } from '@/components/RealtimeVoice';
 import SendIcon from '@mui/icons-material/Send';
 import StopCircleOutlinedIcon from '@mui/icons-material/StopCircleOutlined';
 import {
+  AriaMemoryEntry,
   BoardVoiceUsage,
+  confirmAriaMemory,
+  deleteAriaMemory,
+  getAriaMemory,
   EndMeetingResponse,
   ExecutiveMeeting,
   MeetingMessage,
@@ -102,15 +106,39 @@ export default function MeetingChat({ meeting, initialMessages, onEnded }: Meeti
   useEffect(() => { refreshVoiceUsage(); }, [refreshVoiceUsage]);
 
   // A spoken turn, as heard. The server has already saved it to the meeting.
+  // BM-4: Aria's suggestions to remember, shown as cards to confirm.
+  const [suggestions, setSuggestions] = useState<AriaMemoryEntry[]>([]);
+  const refreshSuggestions = useCallback(() => {
+    getAriaMemory()
+      .then((m) => setSuggestions(m.entries.filter((e) => e.status === 'proposed')))
+      .catch(() => undefined);   // the meeting goes on without them
+  }, []);
+  useEffect(() => { refreshSuggestions(); }, [refreshSuggestions]);
+  const answerSuggestion = async (entry: AriaMemoryEntry, remember: boolean) => {
+    setSuggestions((prev) => prev.filter((e) => e.id !== entry.id));
+    try {
+      if (remember) {
+        await confirmAriaMemory(entry.id);
+        setToast(`Aria will remember: ${entry.about}`);
+      } else {
+        await deleteAriaMemory(entry.id);
+      }
+    } catch (e) {
+      setError((e as Error).message || 'That could not be saved');
+      refreshSuggestions();
+    }
+  };
+
   const handleSpoken = useCallback((text: string, isUser: boolean) => {
     const content = (text || '').trim();
     if (!content) return;
+    if (!isUser) refreshSuggestions();   // she may have just suggested something
     setMessages((prev) => [...prev, {
       id: `${isUser ? 'owner' : 'aria'}-voice-${Date.now()}-${prev.length}`,
       role: isUser ? 'owner' : 'aria',
       content,
     }]);
-  }, []);
+  }, [refreshSuggestions]);
 
   const handleVoiceEnded = useCallback((reason: string | null) => {
     setLiveVoice(null);
@@ -182,6 +210,7 @@ export default function MeetingChat({ meeting, initialMessages, onEnded }: Meeti
 
     try {
       const result = await sendMessage(meeting.id, text);
+      refreshSuggestions();
       setMessages((prev) =>
         prev.map((m) =>
           m.id === pendingId
@@ -406,6 +435,24 @@ export default function MeetingChat({ meeting, initialMessages, onEnded }: Meeti
         </Stack>
         <div ref={messagesEndRef} />
       </Box>
+
+      {/* Aria's suggestions to remember (BM-4) */}
+      {suggestions.map((entry) => (
+        <Alert
+          key={entry.id}
+          severity="info"
+          sx={{ mb: 1 }}
+          action={(
+            <Stack direction="row" spacing={1}>
+              <Button size="small" variant="contained" onClick={() => answerSuggestion(entry, true)}>Remember</Button>
+              <Button size="small" onClick={() => answerSuggestion(entry, false)}>Not now</Button>
+            </Stack>
+          )}
+        >
+          Aria suggests remembering: <strong>{entry.about}</strong> — {entry.meaning}
+          {entry.group ? ` (group: ${entry.group})` : ''}
+        </Alert>
+      ))}
 
       {/* Input */}
       <Box

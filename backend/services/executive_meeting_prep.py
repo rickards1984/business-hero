@@ -270,8 +270,16 @@ def _ledger_loader(timezone_name: str):
             today = datetime.now(ZoneInfo(timezone_name)).date()
         except Exception:
             today = datetime.now(timezone.utc).date()
-        return meeting_ledger.fit(meeting_ledger.summary(session, business_id, today),
-                                  meeting_ledger.BRIEF_CHARS)
+        from services import aria_memory
+        try:
+            stored = aria_memory.list_entries(session, business_id)     # BM-4: the owner's groups and threshold
+        except Exception:
+            session.rollback()
+            stored = {"entries": [], "one_off_from": None}
+        return meeting_ledger.fit(meeting_ledger.summary(
+            session, business_id, today,
+            memory=[e for e in stored["entries"] if e.get("status") == "confirmed"],
+            one_off_from=stored.get("one_off_from")), meeting_ledger.BRIEF_CHARS)
     return load
 
 

@@ -119,6 +119,7 @@ async def start_meeting(meeting_id: str, session: Session) -> Dict[str, Any]:
     )
 
     msgs = messages_for_opening(prep_data, settings)
+    msgs[0]["content"] += _memory_block(str(meeting["business_id"]), session)
     content, tokens = await _gpt_chat_completion(
         business_id=str(meeting["business_id"]),
         messages=msgs,
@@ -208,6 +209,9 @@ async def handle_turn(
         history=history,
         inject_wrap_up_hint=soft_capped,
     )
+    # BM-4: the owner's confirmed notes, read fresh each turn, so one
+    # confirmed a moment ago is used straight away.
+    msgs[0]["content"] += _memory_block(str(business_id), session)
 
     from services import meeting_ledger
     content, tokens = await _gpt_chat_completion(
@@ -1107,7 +1111,8 @@ def voice_context(meeting_id: str, business_id: str, session: Session) -> str:
         raise ValueError("This meeting isn't in progress")
     settings = _load_settings(str(business_id), session) or {}
     transcript = _build_transcript(_load_message_history(meeting_id, session))
-    return voice_instructions(meeting.get("prep_data") or {}, settings, transcript)
+    return (voice_instructions(meeting.get("prep_data") or {}, settings, transcript)
+            + _memory_block(str(business_id), session))
 
 
 def save_spoken_turn(meeting_id: str, business_id: str, role: str, content: str,
@@ -1161,3 +1166,18 @@ def _ledger_tool_runner(business_id: str, timezone_name: str):
                 return meeting_ledger.run_tool(name, arguments, s, business_id, today)
         return await asyncio.to_thread(work)
     return run
+
+
+def _memory_block(business_id: str, session=None) -> str:
+    """BM-4: the owner's confirmed notes for Aria's instructions; '' if none
+    or if they cannot be read (they enrich a meeting, never block it). Read
+    in its OWN short session, so a failure can never roll back the caller's
+    pending work (Codex BM-4 review 1, finding 3: start_meeting's status)."""
+    from services import aria_memory
+    try:
+        from db import get_session_context
+        with get_session_context() as own:
+            return aria_memory.prompt_block(aria_memory.confirmed(own, business_id))
+    except Exception:
+        logger.warning("[ExecMeeting] owner's notes unavailable for %s", business_id)
+        return ""

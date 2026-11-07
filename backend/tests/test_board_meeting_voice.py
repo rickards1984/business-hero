@@ -833,3 +833,29 @@ def test_a_look_up_that_starts_during_the_flush_is_not_missed(meeting, monkeypat
             if event.get("type") == "flushed":
                 break
     assert event["ok"] is False
+
+
+# ---- BM-4: ordinary Aria voice knows the owner's notes ---------------------
+
+def test_ordinary_aria_voice_includes_the_owner_s_notes(meeting, monkeypatch):
+    from services import aria_memory
+    monkeypatch.setattr(aria_memory, "confirmed", lambda session, bid: [
+        {"about": "TPS", "meaning": "Main parts supplier", "group": "Parts", "status": "confirmed"}])
+    client = meeting["make"]()
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        assert ws.receive_json() == {"type": "ready"}
+        config = json.loads(meeting["voice"]["connects"][0].sent[0])["session"]
+    assert "TPS: Main parts supplier (group: Parts)" in config["instructions"]
+
+
+def test_ordinary_aria_voice_still_starts_if_the_notes_cannot_be_read(meeting, monkeypatch):
+    from services import aria_memory
+
+    def broken(session, bid):
+        raise RuntimeError("database unavailable")
+    monkeypatch.setattr(aria_memory, "confirmed", broken)
+    client = meeting["make"]()
+    with client.websocket_connect("/v1/realtime/voice") as ws:
+        ws.send_json({"type": "auth", "token": "t"})
+        assert ws.receive_json() == {"type": "ready"}

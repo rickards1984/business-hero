@@ -246,7 +246,7 @@ def test_tool_definitions_exist_for_chat_and_voice():
     from services import meeting_ledger
     chat = {t["function"]["name"] for t in meeting_ledger.CHAT_TOOLS}
     voice = {t["name"] for t in meeting_ledger.REALTIME_TOOLS}
-    assert chat == voice == {"search_transactions", "ledger_summary"}
+    assert chat == voice == {"search_transactions", "ledger_summary", "remember"}   # BM-4
 
 
 # ------------------------------------------------------- wired into Aria ---

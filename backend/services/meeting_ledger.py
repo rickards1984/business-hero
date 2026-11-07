@@ -70,7 +70,8 @@ def _years_back(today: date, years: int) -> date:
 
 
 _TRIM_PATHS = (("transactions",), ("large_one_off_income", "lines"), ("expense_by_supplier",),
-               ("income_by_payer",), ("expense_by_category",))
+               ("income_by_payer",), ("expense_by_category",),
+               ("income_by_group",), ("expense_by_group",))          # BM-4 (Codex review 1, finding 4)
 FIELD_CHARS = 200
 
 
@@ -217,7 +218,25 @@ def _grouped(lines: list, key, months: List[str], top: int, label: str, other: s
     return out
 
 
-def summary(session, bid: str, today: date, months: int = DEFAULT_MONTHS) -> Dict[str, Any]:
+def _by_group(lines: list, memory: list, months: List[str], label: str) -> Optional[List[Dict[str, Any]]]:
+    """BM-4: lines grouped by the owner's confirmed memory groups (the first
+    memory whose words match), everything else "Not grouped". None when the
+    owner has given no groups."""
+    from services import aria_memory
+    grouped = [e for e in memory or [] if e.get("status") == "confirmed" and e.get("group")]
+    if not grouped:
+        return None
+
+    def key(ln):
+        for e in grouped:
+            if aria_memory.matches(e, ln):
+                return e["group"]
+        return "Not grouped"
+    return _grouped(lines, key, months, 10 ** 6, label, "")
+
+
+def summary(session, bid: str, today: date, months: int = DEFAULT_MONTHS, memory: Optional[list] = None,
+            one_off_from=None) -> Dict[str, Any]:
     """The meeting's ledger section. Never raises for an empty business."""
     months = max(1, min(MAX_MONTHS, int(DEFAULT_MONTHS if months is None else months)))
     start, end = _window(today, months)
@@ -255,7 +274,8 @@ def summary(session, bid: str, today: date, months: int = DEFAULT_MONTHS) -> Dic
     seen = defaultdict(int)
     for ln in income:
         seen[(ln.get("payee") or "").strip().casefold()] += 1
-    one_off = sorted((ln for ln in income if ln["amount"] >= LARGE_INCOME
+    threshold = Decimal(str(one_off_from)) if one_off_from not in (None, "") else LARGE_INCOME
+    one_off = sorted((ln for ln in income if ln["amount"] >= threshold
                       and (not (ln.get("payee") or "").strip()
                            or seen[(ln.get("payee") or "").strip().casefold()] < RECURRING_AT)),
                      key=lambda ln: ln["date"], reverse=True)
@@ -283,7 +303,7 @@ def summary(session, bid: str, today: date, months: int = DEFAULT_MONTHS) -> Dic
         "expense_by_category": _grouped(expense, lambda ln: ln.get("category") or "Uncategorised",
                                         month_keys, TOP_CATEGORIES, "category", "All other categories"),
         "large_one_off_income": {
-            "rule": (f"receipts of £{int(LARGE_INCOME)} or more from payers seen fewer than {RECURRING_AT} "
+            "rule": (f"receipts of £{int(threshold):,} or more from payers seen fewer than {RECURRING_AT} "
                      "times in the period, or with no payer; regular payers are in income_by_payer"),
             "count": len(one_off), "shown": len(large),
             "lines": [{"date": ln["date"].isoformat(), "amount": _f(ln["amount"]),
@@ -294,6 +314,11 @@ def summary(session, bid: str, today: date, months: int = DEFAULT_MONTHS) -> Dic
     }
     if months > DEFAULT_MONTHS:
         out["advisory"] = TWELVE_MONTH_ADVISORY
+    income_groups = _by_group(income, memory, month_keys, "group")
+    if income_groups is not None:
+        out["income_by_group"] = income_groups
+        out["expense_by_group"] = _by_group(expense, memory, month_keys, "group")
+        out["groups_note"] = "Groups come from the owner's confirmed notes; totals are unchanged."
     return out
 
 
@@ -375,9 +400,26 @@ _SEARCH_PARAMS = {
 _SUMMARY_PARAMS = {
     "type": "object",
     "properties": {"months": {"type": "integer", "minimum": 1, "maximum": MAX_MONTHS,
-                              "description": "Full months to cover, 6 by default, 12 at most"}},
+                              "description": "Full months to cover, 6 by default, 12 at most"},
+                   "one_off_from": {"type": "number", "minimum": 1,
+                                    "description": "Show one-off income from this many pounds, for this "
+                                                   "question only"}},
     "additionalProperties": False,
 }
+_REMEMBER_PARAMS = {
+    "type": "object",
+    "properties": {
+        "about": {"type": "string", "description": "The payer, reference, word or category it is about, as it "
+                                                   "appears in the books, e.g. a customer or supplier name"},
+        "meaning": {"type": "string", "description": "What it means for this business, in the owner's words"},
+        "group": {"type": "string", "description": "Optional: a label for this kind of income or spending"},
+    },
+    "required": ["about", "meaning"],
+    "additionalProperties": False,
+}
+_REMEMBER_DOC = ("Suggest remembering something the owner has explained about their business (what a payer, "
+                 "reference, category or pattern means). It is saved only when the owner confirms the card on "
+                 "their screen; until then it is not used.")
 _SEARCH_DOC = ("Look at the business's own recorded transactions: individual lines with payer, reference, "
                "description, category and amount. Returns at most 50 lines, newest first, plus the count and "
                "totals of every match.")
@@ -389,12 +431,15 @@ CHAT_TOOLS = [
                                       "parameters": _SEARCH_PARAMS}},
     {"type": "function", "function": {"name": "ledger_summary", "description": _SUMMARY_DOC,
                                       "parameters": _SUMMARY_PARAMS}},
+    {"type": "function", "function": {"name": "remember", "description": _REMEMBER_DOC,
+                                      "parameters": _REMEMBER_PARAMS}},
 ]
 REALTIME_TOOLS = [
     {"type": "function", "name": "search_transactions", "description": _SEARCH_DOC, "parameters": _SEARCH_PARAMS},
     {"type": "function", "name": "ledger_summary", "description": _SUMMARY_DOC, "parameters": _SUMMARY_PARAMS},
+    {"type": "function", "name": "remember", "description": _REMEMBER_DOC, "parameters": _REMEMBER_PARAMS},
 ]
-TOOL_NAMES = frozenset({"search_transactions", "ledger_summary"})
+TOOL_NAMES = frozenset({"search_transactions", "ledger_summary", "remember"})
 _SEARCH_KEYS = ("text", "direction", "min_amount", "max_amount", "date_from", "date_to")
 
 
@@ -406,7 +451,31 @@ def run_tool(name: str, args: Any, session, bid: str, today: date) -> str:
         if name == "search_transactions":
             result = search(session, bid, today, **{k: args.get(k) for k in _SEARCH_KEYS})
         elif name == "ledger_summary":
-            result = summary(session, bid, today, months=args.get("months"))
+            from services import aria_memory
+            try:
+                stored = aria_memory.list_entries(session, bid)
+            except Exception:
+                # The owner's notes make the ledger richer; never a reason to refuse it.
+                logger.warning("[MeetingLedger] memory unavailable for %s; ledger without it", bid)
+                session.rollback()
+                stored = {"entries": [], "one_off_from": None}
+            threshold = args.get("one_off_from") or stored.get("one_off_from")
+            if threshold not in (None, ""):
+                threshold = _amount_arg(threshold, "one_off_from")
+                if threshold <= 0:
+                    raise ValueError("one_off_from must be more than £0")
+            result = summary(session, bid, today, months=args.get("months"),
+                             memory=[e for e in stored["entries"] if e.get("status") == "confirmed"],
+                             one_off_from=threshold)
+        elif name == "remember":
+            from services import aria_memory
+            entry = aria_memory.propose(session, bid, about=args.get("about"), meaning=args.get("meaning"),
+                                        group=args.get("group"), source="meeting")
+            result = {"status": entry["status"], "id": entry["id"], "about": entry["about"],
+                      "meaning": entry["meaning"], "group": entry.get("group"),
+                      "message": ("Suggested. It shows on the owner's screen as a card to confirm; it is not "
+                                  "used until they do. Tell them in one short sentence."
+                                  if entry["status"] == "proposed" else "Already remembered.")}
         else:
             return json.dumps({"error": f"There is no tool called {name!r} in a board meeting."})
     except (ValueError, TypeError) as exc:
