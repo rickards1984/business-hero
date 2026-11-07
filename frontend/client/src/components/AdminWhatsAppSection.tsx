@@ -21,7 +21,6 @@ import {
   fetchAdminWhatsAppOverview,
   updateAdminWhatsAppConfig,
   sendTestBriefing,
-  sendTestPulse,
   type WhatsAppConfig,
 } from '@/lib/whatsappApi';
 import PhoneInput from './PhoneInput';
@@ -91,8 +90,8 @@ export default function AdminWhatsAppSection({ businessId }: AdminWhatsAppSectio
   const handleSendTestBriefing = async () => {
     setSendingTest('briefing');
     try {
-      const result = await sendTestBriefing();
-      setToast({ open: true, message: result.sent ? 'Weekly briefing sent!' : 'Failed to send', severity: result.sent ? 'success' : 'error' });
+      const result = await sendTestBriefing('weekly');
+      setToast({ open: true, message: result.sent ? 'Weekly briefing sent!' : (result.detail || 'Failed to send'), severity: result.sent ? 'success' : 'error' });
     } catch {
       setToast({ open: true, message: 'Failed to send test briefing', severity: 'error' });
     } finally {
@@ -103,10 +102,10 @@ export default function AdminWhatsAppSection({ businessId }: AdminWhatsAppSectio
   const handleSendTestPulse = async () => {
     setSendingTest('pulse');
     try {
-      const result = await sendTestPulse();
-      setToast({ open: true, message: result.sent ? 'Daily pulse sent!' : 'Failed to send', severity: result.sent ? 'success' : 'error' });
+      const result = await sendTestBriefing('monthly');
+      setToast({ open: true, message: result.sent ? 'Monthly summary sent!' : (result.detail || 'Failed to send'), severity: result.sent ? 'success' : 'error' });
     } catch {
-      setToast({ open: true, message: 'Failed to send test pulse', severity: 'error' });
+      setToast({ open: true, message: 'Failed to send test monthly summary', severity: 'error' });
     } finally {
       setSendingTest(null);
     }
@@ -176,7 +175,7 @@ export default function AdminWhatsAppSection({ businessId }: AdminWhatsAppSectio
               Status: <Chip label={config?.enabled ? 'Active' : 'Disabled'} size="small" color={config?.enabled ? 'success' : 'default'} />
             </Typography>
             <Typography variant="body2">
-              Weekly Briefing: {config?.weekly_briefing_enabled ? '✅' : '❌'} · Daily Pulse: {config?.daily_pulse_enabled ? '✅' : '❌'} · Real-Time Alerts: ✅
+              Weekly and monthly briefings: {config?.weekly_briefing_enabled || config?.daily_pulse_enabled ? '✅' : '❌'} · Real-Time Alerts: ✅
             </Typography>
             <Box sx={{ display: 'flex', gap: 1, mt: 2, flexWrap: 'wrap' }}>
               <Button variant="outlined" size="small" startIcon={<EditIcon />} onClick={() => setEditing(true)}>
@@ -197,7 +196,7 @@ export default function AdminWhatsAppSection({ businessId }: AdminWhatsAppSectio
                 onClick={handleSendTestPulse}
                 disabled={!!sendingTest}
               >
-                {sendingTest === 'pulse' ? 'Sending...' : 'Send Test Pulse'}
+                {sendingTest === 'pulse' ? 'Sending...' : 'Send Test Monthly'}
               </Button>
             </Box>
           </>

@@ -71,13 +71,11 @@ export async function saveWhatsAppConfig(config: Partial<WhatsAppConfig>): Promi
   return res.json();
 }
 
-export async function sendTestBriefing(): Promise<{ sent: boolean; message_sid?: string }> {
-  const res = await apiRequest('POST', '/v1/whatsapp/send-weekly-briefing');
-  return res.json();
-}
+export type TestSend = { sent: boolean; message_sid?: string; detail?: string };
 
-export async function sendTestPulse(): Promise<{ sent: boolean; message_sid?: string }> {
-  const res = await apiRequest('POST', '/v1/whatsapp/send-daily-pulse');
+// BRIEF-1: the weekly (this week so far) or monthly (last month) briefing, sent now.
+export async function sendTestBriefing(kind: 'weekly' | 'monthly' = 'weekly'): Promise<TestSend> {
+  const res = await apiRequest('POST', `/v1/whatsapp/send-weekly-briefing?kind=${kind}`);
   return res.json();
 }
 

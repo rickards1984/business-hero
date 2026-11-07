@@ -22,6 +22,9 @@ TWILIO_ALERT_CONTENT_SID = os.getenv("TWILIO_ALERT_CONTENT_SID", "")
 TWILIO_ACTION_CONFIRMATION_CONTENT_SID = os.getenv("TWILIO_ACTION_CONFIRMATION_CONTENT_SID", "")
 TWILIO_AUTOMATION_REPORT_CONTENT_SID = os.getenv("TWILIO_AUTOMATION_REPORT_CONTENT_SID", "")
 TWILIO_TASK_REMINDER_CONTENT_SID = os.getenv("TWILIO_TASK_REMINDER_CONTENT_SID", "")
+# BRIEF-1: the weekly and monthly briefings (docs in services/whatsapp_briefings.py).
+TWILIO_WEEKLY_SUMMARY_CONTENT_SID = os.getenv("TWILIO_WEEKLY_SUMMARY_CONTENT_SID", "")
+TWILIO_MONTHLY_FINANCIAL_CONTENT_SID = os.getenv("TWILIO_MONTHLY_FINANCIAL_CONTENT_SID", "")
 
 TEMPLATE_SID_MAP = {
     "daily_pulse": TWILIO_DAILY_PULSE_CONTENT_SID,
@@ -30,6 +33,8 @@ TEMPLATE_SID_MAP = {
     "action_confirmation": TWILIO_ACTION_CONFIRMATION_CONTENT_SID,
     "automation_report": TWILIO_AUTOMATION_REPORT_CONTENT_SID,
     "task_reminder": TWILIO_TASK_REMINDER_CONTENT_SID,
+    "weekly_summary": TWILIO_WEEKLY_SUMMARY_CONTENT_SID,
+    "monthly_financial": TWILIO_MONTHLY_FINANCIAL_CONTENT_SID,
 }
 
 # Verified against the Twilio Console on 2026-05-10. The keys MUST match
@@ -43,6 +48,8 @@ TEMPLATE_VARIABLE_COUNTS = {
     "weekly_briefing": 7,
     "action_confirmation": 2,
     "alert": 3,
+    "weekly_summary": 7,
+    "monthly_financial": 7,
 }
 
 

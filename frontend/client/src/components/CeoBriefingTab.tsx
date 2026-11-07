@@ -29,7 +29,6 @@ import {
   fetchWhatsAppConfig,
   saveWhatsAppConfig,
   sendTestBriefing,
-  sendTestPulse,
   sendTestTaskReminder,
   fetchWhatsAppMessages,
   fetchAutomationRules,
@@ -40,12 +39,6 @@ import {
   type AutomationRule,
 } from '@/lib/whatsappApi';
 
-const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
-const DETAIL_LEVELS = [
-  { value: 'brief', label: 'Brief' },
-  { value: 'standard', label: 'Standard' },
-  { value: 'detailed', label: 'Detailed' },
-];
 
 function TestButton({
   label,
@@ -55,13 +48,21 @@ function TestButton({
   onSend: () => Promise<unknown>;
 }) {
   const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [why, setWhy] = useState('');
 
   const handleClick = async () => {
     setState('sending');
+    setWhy('');
     try {
-      await onSend();
-      setState('sent');
-      setTimeout(() => setState('idle'), 3000);
+      const result = await onSend() as { sent?: boolean; detail?: string } | undefined;
+      // BRIEF-1: "sent: false" is a failure with a reason, never a tick.
+      if (result && result.sent === false) {
+        setState('error');
+        setWhy(result.detail || 'Not sent');
+      } else {
+        setState('sent');
+        setTimeout(() => setState('idle'), 3000);
+      }
     } catch {
       setState('error');
       setTimeout(() => setState('idle'), 3000);
@@ -79,7 +80,7 @@ function TestButton({
       {state === 'idle' && `📤 ${label}`}
       {state === 'sending' && '⏳ Sending...'}
       {state === 'sent' && '✅ Sent!'}
-      {state === 'error' && '❌ Failed'}
+      {state === 'error' && (why ? `❌ ${why}` : '❌ Failed')}
     </Button>
   );
 }
@@ -102,7 +103,8 @@ function formatMessageTime(createdAt: string | null): string {
 }
 
 function messageTypeIcon(type: string): string {
-  if (type === 'weekly_briefing') return '📊';
+  if (type === 'weekly_briefing' || type === 'weekly_summary') return '📊';
+  if (type === 'monthly_financial') return '📈';
   if (type === 'daily_pulse') return '🌅';
   if (type === 'task_reminder') return '📝';
   if (type === 'alert') return '⚡';
@@ -110,7 +112,8 @@ function messageTypeIcon(type: string): string {
 }
 
 function messageTypeLabel(type: string): string {
-  if (type === 'weekly_briefing') return 'Weekly Briefing';
+  if (type === 'weekly_briefing' || type === 'weekly_summary') return 'Weekly Briefing';
+  if (type === 'monthly_financial') return 'Monthly Money Summary';
   if (type === 'daily_pulse') return 'Daily Pulse';
   if (type === 'task_reminder') return 'Task Reminder';
   if (type === 'alert') return 'Alert';
@@ -134,8 +137,6 @@ export default function CeoBriefingTab() {
   // Form state (mirrors config for editing)
   const [phoneNumber, setPhoneNumber] = useState('');
   const [ownerName, setOwnerName] = useState('');
-  const [dailyPulseEnabled, setDailyPulseEnabled] = useState(false);
-  const [dailyPulseTime, setDailyPulseTime] = useState('07:30');
   const [weeklyBriefingEnabled, setWeeklyBriefingEnabled] = useState(false);
   const [weeklyBriefingDay, setWeeklyBriefingDay] = useState('monday');
   const [weeklyBriefingTime, setWeeklyBriefingTime] = useState('08:00');
@@ -161,9 +162,8 @@ export default function CeoBriefingTab() {
         setConfigured(true);
         setPhoneNumber(data.phone_number);
         setOwnerName(data.owner_name || '');
-        setDailyPulseEnabled(data.daily_pulse_enabled ?? false);
-        setDailyPulseTime(data.daily_pulse_time || '07:30');
-        setWeeklyBriefingEnabled(data.weekly_briefing_enabled ?? false);
+        // BRIEF-1: either old switch means "send me the briefings".
+        setWeeklyBriefingEnabled(Boolean(data.weekly_briefing_enabled || data.daily_pulse_enabled));
         setWeeklyBriefingDay(data.weekly_briefing_day || 'monday');
         setWeeklyBriefingTime(data.weekly_briefing_time || '08:00');
         setPreferredDetailLevel(data.preferred_detail_level || 'standard');
@@ -222,8 +222,7 @@ export default function CeoBriefingTab() {
         phone_number: phoneNumber.replace(/\s/g, ''),
         owner_name: ownerName.trim() || undefined,
         enabled: true,
-        daily_pulse_enabled: true,
-        daily_pulse_time: '07:30',
+        daily_pulse_enabled: false,
         weekly_briefing_enabled: true,
         weekly_briefing_day: 'monday',
         weekly_briefing_time: '08:00',
@@ -247,8 +246,7 @@ export default function CeoBriefingTab() {
         phone_number: phoneNumber.replace(/\s/g, ''),
         owner_name: ownerName.trim() || undefined,
         enabled: true,
-        daily_pulse_enabled: dailyPulseEnabled,
-        daily_pulse_time: dailyPulseTime,
+        daily_pulse_enabled: false,   // retired (BRIEF-1): one switch for both briefings
         weekly_briefing_enabled: weeklyBriefingEnabled,
         weekly_briefing_day: weeklyBriefingDay,
         weekly_briefing_time: weeklyBriefingTime,
@@ -308,8 +306,8 @@ export default function CeoBriefingTab() {
           </Typography>
           <Box sx={{ textAlign: 'left', mb: 3 }}>
             {[
-              '📊 Weekly CEO Briefing — strategic analysis every Monday',
-              '🌅 Daily Morning Pulse — overnight summary at 7:30am',
+              '📊 Weekly Briefing — calls, emails, money, invoices and quotes, every Friday at 4pm',
+              '📈 Monthly Money Summary — profit or loss and your biggest costs, on the 1st at 8am',
               '⚡ Real-Time Alerts — instant notifications for urgent events',
               '🤖 Smart Automations — auto-chase invoices, create tasks',
             ].map((line, i) => (
@@ -360,8 +358,8 @@ export default function CeoBriefingTab() {
 
   // Configured view
   const statsMessages = messages.length;
-  const statsWeekly = messages.filter((m) => m.message_type === 'weekly_briefing').length;
-  const statsDaily = messages.filter((m) => m.message_type === 'daily_pulse').length;
+  const statsWeekly = messages.filter((m) => m.message_type === 'weekly_briefing' || m.message_type === 'weekly_summary').length;
+  const statsMonthly = messages.filter((m) => m.message_type === 'monthly_financial').length;
   const statsAutomations = rules.filter((r) => r.is_active).length;
 
   return (
@@ -394,8 +392,8 @@ export default function CeoBriefingTab() {
           <Typography variant="caption" color="text.secondary">Weekly Briefings</Typography>
         </Card>
         <Card sx={{ flex: '1 1 120px', minWidth: 100, textAlign: 'center', py: 2 }}>
-          <Typography variant="h5" fontWeight={700}>{statsDaily}</Typography>
-          <Typography variant="caption" color="text.secondary">Daily Pulses</Typography>
+          <Typography variant="h5" fontWeight={700}>{statsMonthly}</Typography>
+          <Typography variant="caption" color="text.secondary">Monthly Summaries</Typography>
         </Card>
         <Card sx={{ flex: '1 1 120px', minWidth: 100, textAlign: 'center', py: 2 }}>
           <Typography variant="h5" fontWeight={700}>{statsAutomations}</Typography>
@@ -408,41 +406,20 @@ export default function CeoBriefingTab() {
       </Typography>
       <Card sx={{ mb: 3, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
         <Box sx={{ p: 2, borderBottom: 1, borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
-          <Typography variant="subtitle2" fontWeight={600}>📊 Weekly CEO Briefing</Typography>
+          <Box>
+            <Typography variant="subtitle2" fontWeight={600}>📊 Weekly and monthly briefings</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Fridays at 4pm: your week's calls, emails, money, invoices and quotes.
+              The 1st of each month at 8am: last month's profit or loss and biggest costs.
+            </Typography>
+          </Box>
           <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
             <FormControlLabel
               control={<Switch checked={weeklyBriefingEnabled} onChange={(e) => setWeeklyBriefingEnabled(e.target.checked)} />}
-              label="Enabled"
+              label="On"
             />
-            <FormControl size="small" sx={{ minWidth: 100 }}>
-              <InputLabel>Day</InputLabel>
-              <Select value={weeklyBriefingDay} label="Day" onChange={(e) => setWeeklyBriefingDay(e.target.value)}>
-                {DAYS.map((d) => (
-                  <MenuItem key={d} value={d}>{d.charAt(0).toUpperCase() + d.slice(1)}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            <TextField size="small" type="time" value={weeklyBriefingTime} onChange={(e) => setWeeklyBriefingTime(e.target.value)} sx={{ width: 100 }} />
-            <FormControl size="small" sx={{ minWidth: 100 }}>
-              <InputLabel>Detail</InputLabel>
-              <Select value={preferredDetailLevel} label="Detail" onChange={(e) => setPreferredDetailLevel(e.target.value)}>
-                {DETAIL_LEVELS.map((d) => (
-                  <MenuItem key={d.value} value={d.value}>{d.label}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            <TestButton label="Send Test Briefing" onSend={sendTestBriefing} />
-          </Box>
-        </Box>
-        <Box sx={{ p: 2, borderBottom: 1, borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
-          <Typography variant="subtitle2" fontWeight={600}>🌅 Daily Morning Pulse</Typography>
-          <Box display="flex" alignItems="center" gap={2}>
-            <FormControlLabel
-              control={<Switch checked={dailyPulseEnabled} onChange={(e) => setDailyPulseEnabled(e.target.checked)} />}
-              label="Enabled"
-            />
-            <TextField size="small" type="time" value={dailyPulseTime} onChange={(e) => setDailyPulseTime(e.target.value)} sx={{ width: 100 }} />
-            <TestButton label="Send Test Pulse" onSend={sendTestPulse} />
+            <TestButton label="Send test weekly" onSend={() => sendTestBriefing('weekly')} />
+            <TestButton label="Send test monthly" onSend={() => sendTestBriefing('monthly')} />
           </Box>
         </Box>
         <Box sx={{ p: 2, borderBottom: 1, borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
