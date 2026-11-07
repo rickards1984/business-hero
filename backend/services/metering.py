@@ -43,10 +43,25 @@ OVERAGE_METER = "receptionist_overage_minutes"
 # the allowance, the overage and the cap are judged on the total.
 ARIA_VOICE_METER = "aria_voice_minutes"
 ARIA_VOICE_OVERAGE_METER = "aria_voice_overage_minutes"
+# BM-2 / Mike's decisions of 6 Nov 2026: board-meeting voice is its OWN pool,
+# with its own allowance, so meetings never use the minutes that answer
+# customers' calls. The spend cap is still one cap over every pool's overage.
+BOARD_VOICE_METER = "board_meeting_voice_minutes"
+BOARD_VOICE_OVERAGE_METER = "board_meeting_voice_overage_minutes"
 _SOURCES = {
     "receptionist": (RECEPTIONIST_METER, OVERAGE_METER),
     "aria_voice": (ARIA_VOICE_METER, ARIA_VOICE_OVERAGE_METER),
+    "board_meeting": (BOARD_VOICE_METER, BOARD_VOICE_OVERAGE_METER),
 }
+VOICE_POOL = "voice"
+BOARD_POOL = "board_meeting"
+_POOL_SOURCES = {VOICE_POOL: ("receptionist", "aria_voice"), BOARD_POOL: ("board_meeting",)}
+_SOURCE_POOL = {src: pool for pool, sources in _POOL_SOURCES.items() for src in sources}
+# A board-meeting voice session's id starts with this, so a lost session is
+# recovered into the board pool.
+BOARD_SESSION_PREFIX = "bm-"
+BOARD_SESSION_MAX_SECONDS = 3600
+WARN_AT_SHARE = Decimal("0.8")
 # "Told this month" markers live in the same table, so they reset with it.
 _NOTIFIED_PREFIX = "notified:"
 # One row per metered call ("accrued:<calls.id>"), so a call is counted once.
@@ -74,6 +89,9 @@ MAX_SPEND_CAP_GBP = Decimal("10000")
 
 _ALLOWANCES = {"starter": Decimal("0"), "pro": Decimal("120"),
                "business": Decimal("350"), "beta": Decimal("350")}
+_BOARD_ALLOWANCES = {"starter": Decimal("0"), "pro": Decimal("60"),
+                     "business": Decimal("150"), "beta": Decimal("150")}
+_POOL_ALLOWANCES = {VOICE_POOL: _ALLOWANCES, BOARD_POOL: _BOARD_ALLOWANCES}
 
 STATE_OK = "ok"
 STATE_ALLOWANCE = "allowance_exhausted"
@@ -95,9 +113,9 @@ def period_for(moment: datetime) -> str:
     return moment.astimezone(LONDON).strftime("%Y-%m")
 
 
-def allowance_minutes(plan_tier: Optional[str]) -> Decimal:
+def allowance_minutes(plan_tier: Optional[str], pool: str = VOICE_POOL) -> Decimal:
     """Unknown or missing tiers get nothing: an allowance is never guessed."""
-    return _ALLOWANCES.get((plan_tier or "").strip().lower(), Decimal("0"))
+    return _POOL_ALLOWANCES[pool].get((plan_tier or "").strip().lower(), Decimal("0"))
 
 
 def minutes_from_seconds(seconds: Optional[int]) -> Decimal:
@@ -176,23 +194,26 @@ def _state(used, allowance, metered, spend, cap) -> str:
     return STATE_CAP if metered else STATE_ALLOWANCE
 
 
-def usage(session, business) -> dict:
-    return _usage_for(session, business, period_for(now()))
+def usage(session, business, pool: str = VOICE_POOL) -> dict:
+    return _usage_for(session, business, period_for(now()), pool)
 
 
-def _usage_for(session, business, period: str) -> dict:
+def _usage_for(session, business, period: str, pool: str = VOICE_POOL) -> dict:
     bid = str(business.id)
     by_source = {}
-    used = overage = Decimal("0")
+    used = overage = all_overage = Decimal("0")
     for source, (inside_meter, over_meter) in _SOURCES.items():
-        inside = _read(session, bid, inside_meter, period)
         over = _read(session, bid, over_meter, period)
+        all_overage += over          # the spend cap is one cap over every pool (BM-2)
+        if _SOURCE_POOL[source] != pool:
+            continue
+        inside = _read(session, bid, inside_meter, period)
         used += inside
         overage += over
         by_source[source] = inside + over
-    allowance = allowance_minutes(getattr(business, "plan_tier", None))
+    allowance = allowance_minutes(getattr(business, "plan_tier", None), pool)
     metered = bool(getattr(business, "metered_usage_enabled", False))
-    spend = (overage * OVERAGE_RATE_GBP).quantize(_TWO_DP, rounding=ROUND_HALF_UP)
+    spend = (all_overage * OVERAGE_RATE_GBP).quantize(_TWO_DP, rounding=ROUND_HALF_UP)
     cap = _spend_cap(business)
     return {
         "period": period,
@@ -206,7 +227,22 @@ def _usage_for(session, business, period: str) -> dict:
         "overage_rate_gbp": OVERAGE_RATE_GBP,
         "state": _state(used, allowance, metered, spend, cap),
         "by_source": by_source,
+        "pool": pool,
+        "warn": allowance > 0 and used >= allowance * WARN_AT_SHARE,
     }
+
+
+def seconds_allowed(u: dict) -> int:
+    """How long a NEW board-meeting voice session may run (BM-2): the minutes
+    left inside the allowance, plus, with extra minutes on, what the rest of
+    the spend cap buys; never more than an hour, never less than nothing."""
+    if u["state"] != STATE_OK:
+        return 0
+    minutes = u["remaining_minutes"]
+    if u["metered_usage_enabled"]:
+        left = max(u["spend_cap_gbp"] - u["overage_spend_gbp"], Decimal("0"))
+        minutes += left / u["overage_rate_gbp"]
+    return int(min(Decimal(BOARD_SESSION_MAX_SECONDS), minutes * 60))
 
 
 def seconds_left_in_call(limit_seconds: int, started_at: datetime,
@@ -278,10 +314,14 @@ def notify_owner(business, state: str, current_usage: dict) -> bool:
         return False
 
 
-def _queue_notice(session, business, state: str, period: str) -> None:
+def _queue_notice(session, business, state: str, period: str, pool: str = VOICE_POOL) -> None:
     """Record that the owner must be told — a durable pending marker, cheap
     and local. Nothing is sent here: the scheduler's worker delivers it, so a
-    crash cannot lose it and the call path is never held up by email."""
+    crash cannot lose it and the call path is never held up by email.
+    The board pool's own allowance is told on the meeting screen, not by
+    email; a spend cap reached is one cap, told as before (BM-2)."""
+    if pool != VOICE_POOL and state != STATE_CAP:
+        return
     if not _notices_apply(business):
         return
     bid = str(business.id)
@@ -313,6 +353,11 @@ def deliver_pending_notices(session, lookup=None) -> int:
             session.commit()
             continue
         current = usage(session, business)
+        if state == STATE_CAP and current["state"] != STATE_CAP:
+            # One spend cap over every pool (BM-2, Codex review 1 finding 2):
+            # a cap reached through board-meeting voice is still true while
+            # the receptionist pool has minutes left inside its allowance.
+            current = usage(session, business, BOARD_POOL)
         if current["state"] != state:
             # No longer true — e.g. the cap was raised or extra minutes were
             # switched on before delivery (Codex BH-012 review 3). Dropped
@@ -347,17 +392,17 @@ def display(u: dict) -> dict:
     }
 
 
-def admit_call(session, business) -> Tuple[bool, Optional[str]]:
+def admit_call(session, business, pool: str = VOICE_POOL) -> Tuple[bool, Optional[str]]:
     """May a NEW call be answered? A call already in progress is never cut
     off for running past the allowance — only by the 20-minute cap. A refusal
     queues a notice (e.g. a cap lowered below what is already spent), but
     nothing is sent here, and a failure recording that notice NEVER turns the
     refusal into an answer (Codex BH-012 review 2)."""
-    state = usage(session, business)["state"]
+    state = usage(session, business, pool)["state"]
     if state == STATE_OK:
         return True, None
     try:
-        _queue_notice(session, business, state, period_for(now()))
+        _queue_notice(session, business, state, period_for(now()), pool)
         session.commit()
     except Exception as exc:
         logger.error("[Metering] could not queue notice for %s: %s",
@@ -388,9 +433,9 @@ def record_call(session, business, duration_seconds: Optional[int],
         return current
 
     _allocate(session, business, period, minutes_from_seconds(duration_seconds), source)
-    after = _usage_for(session, business, period)
+    after = _usage_for(session, business, period, _SOURCE_POOL[source])
     if after["state"] != STATE_OK and period == period_for(now()):
-        _queue_notice(session, business, after["state"], period)
+        _queue_notice(session, business, after["state"], period, _SOURCE_POOL[source])
     session.commit()
     return after
 
@@ -401,7 +446,8 @@ def _allocate(session, business, period: str, minutes: Decimal, source: str) -> 
     allowance is the shared pool (Mike's V1), judged on every source."""
     bid = str(business.id)
     inside_meter, over_meter = _SOURCES[source]
-    before = _usage_for(session, business, period)
+    pool = _SOURCE_POOL[source]
+    before = _usage_for(session, business, period, pool)
     remaining = max(before["allowance_minutes"] - before["used_minutes"], Decimal("0"))
     if before["metered_usage_enabled"]:
         inside = min(minutes, remaining)
@@ -427,9 +473,9 @@ def accrue_session(session, business, session_key: str, seconds,
     if extra > 0:
         _allocate(session, business, period, extra, source)
         _add(session, bid, marker, period, extra)
-    after = _usage_for(session, business, period)
+    after = _usage_for(session, business, period, _SOURCE_POOL[source])
     if extra > 0 and after["state"] != STATE_OK and period == period_for(now()):
-        _queue_notice(session, business, after["state"], period)
+        _queue_notice(session, business, after["state"], period, _SOURCE_POOL[source])
     session.commit()
     return after
 
@@ -519,6 +565,33 @@ def voice_session_heartbeat(session, business, session_id: str, seconds,
     session.commit()
 
 
+def live_board_session(session, business_id: str, fresh_seconds: int = 180) -> bool:
+    """Is a board-meeting voice session running for this business? A fresh
+    heartbeat says so. One at a time (Codex BM-2 review 1, finding 1): two
+    sessions admitted together would each be given the same minutes. Call
+    with `lock_board_admission` held, so two admissions cannot both see none."""
+    cutoff = now() - timedelta(seconds=fresh_seconds)
+    rows = session.execute(
+        text("SELECT updated_at FROM usage_meters WHERE business_id = :b AND meter LIKE :p"),
+        {"b": str(business_id), "p": f"{_VOICE_OPEN_PREFIX}{BOARD_SESSION_PREFIX}%"},
+    ).fetchall()
+    for (updated_at,) in rows:
+        beat = _parse_moment(updated_at)
+        if beat is not None and beat >= cutoff:
+            return True
+    return False
+
+
+def lock_board_admission(session, business_id: str) -> None:
+    """Serialise board-meeting voice admissions per business until the first
+    heartbeat is committed (PostgreSQL; SQLite has one writer)."""
+    dialect = getattr(getattr(session, "bind", None), "dialect", None)
+    if getattr(dialect, "name", "") != "postgresql":
+        return
+    session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"board-voice-admission:{business_id}"})
+
+
 def voice_session_closed(session, business, session_id: str) -> None:
     """The session's accrual succeeded: its heartbeat is no longer needed."""
     session.execute(
@@ -551,8 +624,8 @@ def reconcile_open_voice_sessions(session, lookup=None, stale_after_seconds: int
         if business is None:
             continue
         # The heartbeat's own period is the session's start month.
-        accrue_session(session, business, sid, int(Decimal(str(value)) * 60),
-                       period=period, source="aria_voice")
+        accrue_session(session, business, sid, int(Decimal(str(value)) * 60), period=period,
+                       source="board_meeting" if sid.startswith(BOARD_SESSION_PREFIX) else "aria_voice")
         session.execute(
             text("DELETE FROM usage_meters WHERE business_id = :business_id "
                  "AND meter = :meter AND period = :period"),

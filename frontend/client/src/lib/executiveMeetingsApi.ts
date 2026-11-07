@@ -298,6 +298,23 @@ export async function sendMessage(
   return res.json();
 }
 
+// BM-2: this month's board-meeting voice minutes (stored meters only).
+export interface BoardVoiceUsage {
+  voice_available: boolean;
+  allowance_minutes: number;
+  used_minutes: number;
+  remaining_minutes: number;
+  minutes_available_now: number;
+  extra_minutes_on: boolean;
+  state: string;
+  warn: boolean;
+}
+
+export async function getBoardVoiceUsage(): Promise<BoardVoiceUsage> {
+  const res = await apiRequest('GET', `${BASE}/voice-usage`);
+  return res.json();
+}
+
 export async function endMeeting(meetingId: string): Promise<EndMeetingResponse> {
   const res = await apiRequest('POST', `${BASE}/${meetingId}/end`);
   return res.json();
