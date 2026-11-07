@@ -26,6 +26,7 @@ import {
 import SendIcon from '@mui/icons-material/Send';
 import StopCircleOutlinedIcon from '@mui/icons-material/StopCircleOutlined';
 import {
+  EndMeetingResponse,
   ExecutiveMeeting,
   MeetingMessage,
   endMeeting,
@@ -41,7 +42,7 @@ const SOFT_CAP_TOKENS = 50_000;
 interface MeetingChatProps {
   meeting: ExecutiveMeeting;
   initialMessages?: MeetingMessage[];
-  onEnded: () => void;
+  onEnded: (result: EndMeetingResponse) => void;
 }
 
 interface DisplayMessage {
@@ -165,10 +166,13 @@ export default function MeetingChat({ meeting, initialMessages, onEnded }: Meeti
     setEnding(true);
     setError(null);
     try {
-      await endMeeting(meeting.id);
-      setToast('Meeting ended. Generating summary…');
-      onEnded();
+      const result = await endMeeting(meeting.id);
+      setEndDialogOpen(false);
+      setToast('Meeting ended.');
+      onEnded(result);
     } catch (e) {
+      // Close the dialog so the reason is visible, not hidden behind it.
+      setEndDialogOpen(false);
       setError((e as Error).message || 'Failed to end meeting');
       setEnding(false);
     }
