@@ -821,6 +821,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     meeting_instructions = None
     session_cap = VOICE_SESSION_CAP_SECONDS
     board_used_at_start = 0.0      # minutes, for the live 80% warning
+    owner_notes = ""               # BM-4: the owner's confirmed notes, for ordinary Aria voice
     # The most this session may be BILLED for: what it was admitted with, plus
     # the finishing grace. Never shortened: a later, earlier stopping deadline
     # must not erase time already spoken (Codex BM-2 review 2, finding 1).
@@ -875,7 +876,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     # decides before anything is spent, and no durable heartbeat means no
     # session. Nothing here contacts OpenAI.
     def _checks():
-        nonlocal meeting_instructions, session_cap, board_used_at_start, board_allowance, bill_cap
+        nonlocal meeting_instructions, session_cap, board_used_at_start, board_allowance, bill_cap, owner_notes
         from db import get_session_context
         from auth import assert_feature_access
         from models import Business as _Business
@@ -893,6 +894,16 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             except Exception as e:
                 _logger.error(f"Access check failed, refusing voice session: {e}")
                 return ("refused", "Access check failed")
+            if not meeting_id:
+                try:
+                    from services import aria_memory as _am
+                    owner_notes = _am.prompt_block(_am.confirmed(_session, business_id))
+                except Exception as e:
+                    _logger.warning("Owner's notes unavailable for %s: %s", business_id, e)
+                    try:
+                        _session.rollback()
+                    except Exception:
+                        pass
             if meeting_id:
                 try:
                     from services import executive_meeting_orchestrator as _orch
@@ -1113,7 +1124,8 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         # tools are the read-only ledger look-ups, for this business.
         from services import meeting_ledger as _ledger
         await openai_ws.send(json.dumps(build_session_config(
-            meeting_instructions if meeting_id else build_system_instructions(business_name, user_name),
+            meeting_instructions if meeting_id
+            else build_system_instructions(business_name, user_name) + owner_notes,
             ARIA_REALTIME_VOICE, quiet_mode, _ledger.REALTIME_TOOLS if meeting_id else REALTIME_TOOLS)))
         _logger.info(f"Session configured with quiet_mode={quiet_mode}")
 

@@ -247,6 +247,112 @@ def board_meeting_voice_usage(
 
 
 # ============================================================================
+# BM-4: what the owner has told Aria about the business
+# ============================================================================
+
+from pydantic import BaseModel, Field  # noqa: E402
+
+
+class MemoryIn(BaseModel):
+    about: str = Field(..., max_length=200)
+    meaning: str = Field(..., max_length=600)
+    group: Optional[str] = Field(None, max_length=120)
+
+
+class MemoryChange(BaseModel):
+    about: Optional[str] = Field(None, max_length=200)
+    meaning: Optional[str] = Field(None, max_length=600)
+    group: Optional[str] = Field(None, max_length=120)
+    clear_group: bool = False
+
+
+class MemorySettings(BaseModel):
+    one_off_from: Optional[float] = None
+
+
+def _memory_call(fn):
+    try:
+        return fn()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+def _owner_only(session, auth_ctx: dict) -> str:
+    """Only an active OWNER changes what Aria remembers (Codex BM-4 review 1,
+    finding 1): it goes into the business's prompts, so staff may see it and
+    Aria may suggest, but neither can confirm, add, edit or delete."""
+    bid = str(auth_ctx["business_id"])
+    # One query for any id (compared as text, so a malformed id simply matches nothing).
+    owner = session.execute(text(
+        "SELECT 1 FROM business_members WHERE business_id = :b AND CAST(user_id AS TEXT) = :u "
+        "AND role = 'owner' AND is_active = :t"),
+        {"b": bid, "u": str(auth_ctx.get("user_id") or ""), "t": True}).fetchone()
+    if owner is None:
+        session.rollback()
+        raise HTTPException(status_code=403, detail="Only the business owner can change what Aria remembers.")
+    session.rollback()                 # the check is a read; the change takes its own lock
+    return bid
+
+
+@router.get("/memory", dependencies=[Depends(require_feature("board_meetings"))])
+def get_aria_memory(auth_ctx: dict = Depends(get_user_business_context), session: Session = Depends(get_session)):
+    from services import aria_memory
+    return aria_memory.list_entries(session, str(auth_ctx["business_id"]))
+
+
+@router.post("/memory", dependencies=[Depends(require_feature("board_meetings"))])
+def add_aria_memory(body: MemoryIn, auth_ctx: dict = Depends(get_user_business_context),
+                    session: Session = Depends(get_session)):
+    from services import aria_memory
+    bid = _owner_only(session, auth_ctx)
+    return _memory_call(lambda: aria_memory.add(session, bid, about=body.about,
+                                                meaning=body.meaning, group=body.group))
+
+
+@router.put("/memory/settings", dependencies=[Depends(require_feature("board_meetings"))])
+def update_aria_memory_settings(body: MemorySettings, auth_ctx: dict = Depends(get_user_business_context),
+                                session: Session = Depends(get_session)):
+    from services import aria_memory
+    bid = _owner_only(session, auth_ctx)
+    value = _memory_call(lambda: aria_memory.set_one_off_from(session, bid, body.one_off_from))
+    return {"one_off_from": value}
+
+
+@router.put("/memory/{entry_id}", dependencies=[Depends(require_feature("board_meetings"))])
+def update_aria_memory(entry_id: str, body: MemoryChange, auth_ctx: dict = Depends(get_user_business_context),
+                       session: Session = Depends(get_session)):
+    from services import aria_memory
+    bid = _owner_only(session, auth_ctx)
+    group = None if body.clear_group else (... if body.group is None else body.group)
+    out = _memory_call(lambda: aria_memory.update(session, bid, entry_id,
+                                                  about=body.about, meaning=body.meaning, group=group))
+    if out is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return out
+
+
+@router.post("/memory/{entry_id}/confirm", dependencies=[Depends(require_feature("board_meetings"))])
+def confirm_aria_memory(entry_id: str, auth_ctx: dict = Depends(get_user_business_context),
+                        session: Session = Depends(get_session)):
+    from services import aria_memory
+    bid = _owner_only(session, auth_ctx)
+    out = _memory_call(lambda: aria_memory.confirm(session, bid, entry_id))
+    if out is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return out
+
+
+@router.delete("/memory/{entry_id}", dependencies=[Depends(require_feature("board_meetings"))])
+def delete_aria_memory(entry_id: str, auth_ctx: dict = Depends(get_user_business_context),
+                       session: Session = Depends(get_session)):
+    from services import aria_memory
+    bid = _owner_only(session, auth_ctx)
+    if not aria_memory.delete(session, bid, entry_id):
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"deleted": True}
+
+
+# ============================================================================
 # Read-only listing endpoints (placeholders — full impl in Prompt 3)
 # ============================================================================
 

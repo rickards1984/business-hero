@@ -48,7 +48,7 @@ EXPECTED = {
     "accounting": "list_categories create_category list_transactions create_transaction update_transaction delete_transaction bulk_delete_transactions bulk_update_category analyze_spreadsheet import_spreadsheet get_accounting_summary get_ai_insights list_imports list_duplicates resolve_duplicate",
     "booking_api": "list_google_calendars get_booking_settings update_booking_settings",
     "receptionist_api": "get_receptionist_config upsert_receptionist_config toggle_receptionist list_knowledge_base_categories list_knowledge_base create_knowledge_base_item update_knowledge_base_item delete_knowledge_base_item list_voices preview_voice list_voice_presets preview_voice_preset list_receptionist_calls receptionist_stats admin_receptionist_overview admin_toggle_receptionist_flag admin_get_receptionist_config admin_update_receptionist_config admin_assign_phone_number admin_list_knowledge_base admin_create_knowledge_base_item",
-    "executive_meeting_api": "get_meeting_settings update_meeting_settings check_meeting_access board_meeting_voice_usage list_meetings list_action_items update_action_item list_goals update_goal admin_meeting_overview trigger_prep_now start_meeting_now get_meeting_prep_data start_meeting_endpoint send_owner_message end_meeting_endpoint list_meeting_messages extract_actions_endpoint",
+    "executive_meeting_api": "get_meeting_settings update_meeting_settings check_meeting_access board_meeting_voice_usage get_aria_memory add_aria_memory update_aria_memory_settings update_aria_memory confirm_aria_memory delete_aria_memory list_meetings list_action_items update_action_item list_goals update_goal admin_meeting_overview trigger_prep_now start_meeting_now get_meeting_prep_data start_meeting_endpoint send_owner_message end_meeting_endpoint list_meeting_messages extract_actions_endpoint",
 }
 PUBLIC = {"list_knowledge_base_categories", "list_voices", "list_voice_presets"}
 SPECIAL = PUBLIC | {"check_meeting_access", "whatsapp_webhook"}
@@ -176,6 +176,7 @@ def harness(monkeypatch):
             "twilio_phone_number": "+447700900000",
             "voice_preset_id": MODULES["receptionist_api"].VOICE_PRESETS[0]["id"],
             "upload_id": BID, "action": "hide",   # ACC-1 duplicates/resolve
+            "about": "Synthetic", "meaning": "Synthetic",   # BM-4 Aria's memory
         }
         options = {"json": payload} if method in {"POST", "PUT", "PATCH"} else {}
         if "/upload/" in path:
@@ -199,7 +200,7 @@ def test_inventory_covers_every_registered_route():
     for name in MODULES:
         actual = [r.endpoint.__name__ for n, r, _ in ROUTES if n == name]
         assert sorted(actual) == sorted(EXPECTED[name].split())
-    assert len(ROUTES) == 81   # ACC-1: + list_duplicates, resolve_duplicate; BM-2: + board_meeting_voice_usage
+    assert len(ROUTES) == 87   # ACC-1: + list_duplicates, resolve_duplicate; BM-2: + board_meeting_voice_usage; BM-4: + 6 memory routes
 
 
 def normal_routes():

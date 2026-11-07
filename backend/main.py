@@ -1503,7 +1503,8 @@ def preserve_automations(incoming: dict, existing: dict) -> dict:
     # ACC-1: the Xero sync's server-owned state (cursors, chart, emails, duplicate decisions) too.
     # BRIEF-1: the WhatsApp briefings' delivery claims, so a save can never cause a second send.
     protected = lambda k: (k == "automations" or k.startswith("outreach_") or k.startswith("xero_")
-                           or k == "accounting_duplicates" or k == "whatsapp_briefings")
+                           or k == "accounting_duplicates" or k == "whatsapp_briefings"
+                           or k == "aria_memory")   # BM-4: written only through /executive-meetings/memory
     out = {k: v for k, v in (incoming or {}).items() if not protected(k)}
     if isinstance(existing, dict):
         out.update({k: v for k, v in existing.items() if protected(k)})

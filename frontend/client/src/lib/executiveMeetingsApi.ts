@@ -298,6 +298,54 @@ export async function sendMessage(
   return res.json();
 }
 
+// BM-4: what the owner has told Aria about the business.
+export interface AriaMemoryEntry {
+  id: string;
+  about: string;
+  meaning: string;
+  group: string | null;
+  status: 'proposed' | 'confirmed';
+  source: 'meeting' | 'chat' | 'owner';
+  created_at: string;
+}
+
+export interface AriaMemory {
+  entries: AriaMemoryEntry[];
+  one_off_from: number | null;
+}
+
+export async function getAriaMemory(): Promise<AriaMemory> {
+  const res = await apiRequest('GET', `${BASE}/memory`);
+  return res.json();
+}
+
+export async function addAriaMemory(entry: { about: string; meaning: string; group?: string | null }): Promise<AriaMemoryEntry> {
+  const res = await apiRequest('POST', `${BASE}/memory`, entry);
+  return res.json();
+}
+
+export async function updateAriaMemory(
+  id: string,
+  change: { about?: string; meaning?: string; group?: string | null; clear_group?: boolean },
+): Promise<AriaMemoryEntry> {
+  const res = await apiRequest('PUT', `${BASE}/memory/${id}`, change);
+  return res.json();
+}
+
+export async function confirmAriaMemory(id: string): Promise<AriaMemoryEntry> {
+  const res = await apiRequest('POST', `${BASE}/memory/${id}/confirm`);
+  return res.json();
+}
+
+export async function deleteAriaMemory(id: string): Promise<void> {
+  await apiRequest('DELETE', `${BASE}/memory/${id}`);
+}
+
+export async function setOneOffFrom(oneOffFrom: number | null): Promise<{ one_off_from: number | null }> {
+  const res = await apiRequest('PUT', `${BASE}/memory/settings`, { one_off_from: oneOffFrom });
+  return res.json();
+}
+
 // BM-2: this month's board-meeting voice minutes (stored meters only).
 export interface BoardVoiceUsage {
   voice_available: boolean;

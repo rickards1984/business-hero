@@ -6,6 +6,7 @@
  * business/beta tiers — pro sees them disabled with a hint.
  */
 import { useEffect, useMemo, useState } from 'react';
+import AriaMemoryPanel from '@/components/board-meeting/AriaMemoryPanel';
 import {
   Alert,
   Box,
@@ -626,6 +627,8 @@ export default function SettingsPanel({ hasAdvanced }: SettingsPanelProps) {
           </Stack>
         </CardContent>
       </Card>
+
+      <AriaMemoryPanel />
 
       <Snackbar
         open={!!toast}

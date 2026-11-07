@@ -270,6 +270,19 @@ class BusinessContext:
     logo_url: Optional[str] = None
 
 
+def _owner_notes(business_id) -> str:
+    """BM-4: the owner's confirmed notes about the business; '' if none or
+    unreadable (they enrich Aria, never block her)."""
+    try:
+        from db import get_session_context
+        from services import aria_memory
+        with get_session_context() as s:
+            return aria_memory.prompt_block(aria_memory.confirmed(s, str(business_id)))
+    except Exception as exc:
+        logger.warning("[AssistantChat] owner's notes unavailable for %s: %s", business_id, exc)
+        return ""
+
+
 def build_system_prompt(business: BusinessContext, voice_mode: bool = False, user_name: Optional[str] = None, user_email: Optional[str] = None) -> str:
     """Build the system prompt with business context."""
     base_prompt = f"""You are a friendly, professional AI executive assistant for {business.name}. Think of yourself as a trusted colleague who happens to have instant access to emails, calendar, calls, and tasks.
@@ -444,7 +457,7 @@ You can help price up jobs and check on quotes. You cannot save or send quotes y
 
 IMPORTANT: The user is in voice conversation mode. Keep responses extra concise and conversational. No formatting, no lists, just natural speech that sounds good when spoken aloud. Short sentences. Get to the point quickly."""
 
-    return base_prompt
+    return base_prompt + _owner_notes(business.id)   # BM-4: what the owner has told Aria
 
 
 def get_user_display_name(user_id: str) -> Optional[str]:
