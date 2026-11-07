@@ -15,6 +15,7 @@ fallback message and a logged error. A meeting must never get stuck.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -49,6 +50,11 @@ MAX_OUTPUT_TOKENS = 1200
 MAX_OPENING_TOKENS = 1500
 MAX_SUMMARY_TOKENS = 800
 MAX_EXTRACTION_TOKENS = 4000
+# BM-3: lookups Aria may make before one reply, and the most of one result
+# sent back to the model (a 50-line search is well inside it).
+MAX_TOOL_ROUNDS = 4
+TOOL_RESULT_CHARS = 30_000
+TOOL_TIMEOUT_SECONDS = 25
 
 ARIA_ERROR_FALLBACK = (
     "Sorry, I couldn't get a reply through just then. Your message is saved, "
@@ -203,11 +209,14 @@ async def handle_turn(
         inject_wrap_up_hint=soft_capped,
     )
 
+    from services import meeting_ledger
     content, tokens = await _gpt_chat_completion(
         business_id=business_id,
         messages=msgs,
         temperature=0.4,
         max_tokens=MAX_OUTPUT_TOKENS,
+        tools=meeting_ledger.CHAT_TOOLS,
+        run_tool=_ledger_tool_runner(str(business_id), settings.get("timezone") or "Europe/London"),
     )
 
     if not content:
@@ -441,10 +450,16 @@ async def _gpt_chat_completion(
     max_tokens: int = MAX_OUTPUT_TOKENS,
     response_format: Optional[Dict[str, str]] = None,
     business_id: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    run_tool=None,
 ) -> tuple[Optional[str], int]:
     """
     Single point of contact with OpenAI. Returns (content, tokens_used).
-    On any failure returns (None, 0) — caller must handle.
+    On any failure returns (None, tokens so far) — caller must handle.
+
+    BM-3: with `tools` and `run_tool` (async name, arguments -> JSON str),
+    the model may look things up before answering: at most MAX_TOOL_ROUNDS
+    rounds, then it must answer from what it has.
 
     Uses EXECUTIVE_MEETING_AI_MODEL env var to pick the model. Set this in
     Railway to override the default (e.g. "gpt-5.5").
@@ -478,16 +493,55 @@ async def _gpt_chat_completion(
     if response_format is not None:
         kwargs["response_format"] = response_format
 
-    try:
-        with profit_guard.attributed(business_id, "meeting"):
-            response = await client.chat.completions.create(**kwargs)
-    except Exception as exc:
-        logger.exception("[ExecMeeting] GPT call failed: %s", exc)
-        return None, 0
+    conversation = list(messages)
+    tokens = 0
+    for round_ in range(MAX_TOOL_ROUNDS + 1):
+        offer = bool(tools and run_tool) and round_ < MAX_TOOL_ROUNDS
+        kwargs["messages"] = conversation
+        if offer:
+            kwargs["tools"] = tools
+        else:
+            kwargs.pop("tools", None)
+        try:
+            with profit_guard.attributed(business_id, "meeting"):
+                response = await client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            logger.exception("[ExecMeeting] GPT call failed: %s", exc)
+            return None, tokens
+        try:
+            tokens += int(response.usage.total_tokens) if response.usage else 0
+            message = response.choices[0].message
+            calls = getattr(message, "tool_calls", None) if offer else None
+        except Exception:
+            logger.exception("[ExecMeeting] Could not parse GPT response shape")
+            return None, tokens
+        if not calls:
+            break
+        conversation.append({"role": "assistant", "content": message.content or "", "tool_calls": [
+            {"id": c.id, "type": "function", "function": {"name": c.function.name,
+                                                          "arguments": c.function.arguments or "{}"}}
+            for c in calls]})
+        for c in calls:
+            try:
+                result = await asyncio.wait_for(run_tool(c.function.name, c.function.arguments or "{}"),
+                                                TOOL_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                logger.warning("[ExecMeeting] tool %s timed out", c.function.name)
+                result = json.dumps({"error": "That took too long to look up. Answer from the meeting "
+                                              "data, and say the detail could not be checked."})
+            except Exception:
+                logger.exception("[ExecMeeting] tool %s failed", c.function.name)
+                result = json.dumps({"error": "That could not be looked up just now."})
+            # meeting_ledger.run_tool already fits its result; this is only a
+            # backstop, and says so rather than cutting JSON silently.
+            result = str(result)
+            if len(result) > TOOL_RESULT_CHARS:
+                result = json.dumps({"error": "That result was too large to read. Narrow the search."})
+            conversation.append({"role": "tool", "tool_call_id": c.id, "content": result})
+        logger.info("[ExecMeeting] round %s: %s", round_ + 1, ", ".join(c.function.name for c in calls))
 
     try:
         content = response.choices[0].message.content
-        tokens = int(response.usage.total_tokens) if response.usage else 0
         if getattr(response.choices[0], "finish_reason", None) == "length":
             logger.warning("[ExecMeeting] reply cut short (finish_reason=length, %d chars)", len(content or ""))
             if not content or response_format is not None:
@@ -1087,3 +1141,23 @@ def save_spoken_turn(meeting_id: str, business_id: str, role: str, content: str,
     )
     session.commit()
     return (result.rowcount or 0) == 1
+
+
+def _ledger_tool_runner(business_id: str, timezone_name: str):
+    """BM-3: the meeting's ledger tools, for THIS business only, each in its
+    own short database session off the event loop."""
+    import asyncio
+
+    async def run(name: str, arguments: str) -> str:
+        def work():
+            from zoneinfo import ZoneInfo
+            from db import get_session_context
+            from services import meeting_ledger
+            try:
+                today = datetime.now(ZoneInfo(timezone_name)).date()
+            except Exception:
+                today = datetime.now(timezone.utc).date()
+            with get_session_context() as s:
+                return meeting_ledger.run_tool(name, arguments, s, business_id, today)
+        return await asyncio.to_thread(work)
+    return run

@@ -116,6 +116,9 @@ def generate_prep_data(
         financial_loader.gather, "financials", business_id, period, db_session, errors_during_prep
     )
     completeness_components["financials"] = bool(financials.get("available"))
+    # BM-3: the business's own transactions, the last six full months.
+    ledger_section = _safe_loader(_ledger_loader(timezone_name), "ledger", business_id, period,
+                                  db_session, errors_during_prep)
 
     invoices_section = _safe_loader(
         invoices_loader.gather, "invoices", business_id, period, db_session, errors_during_prep
@@ -210,6 +213,7 @@ def generate_prep_data(
         "business": business_profile,
         "period": _serialise_period(period),
         "financials": financials,
+        "ledger": ledger_section,
         "invoices": invoices_section,
         "operations": {
             "calls": calls_section,
@@ -256,6 +260,20 @@ def generate_prep_data(
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
+
+def _ledger_loader(timezone_name: str):
+    """BM-3: the ledger section, as of today in the business's time zone."""
+    def load(business_id, period, session):
+        from zoneinfo import ZoneInfo
+        from services import meeting_ledger
+        try:
+            today = datetime.now(ZoneInfo(timezone_name)).date()
+        except Exception:
+            today = datetime.now(timezone.utc).date()
+        return meeting_ledger.fit(meeting_ledger.summary(session, business_id, today),
+                                  meeting_ledger.BRIEF_CHARS)
+    return load
+
 
 def _safe_loader(loader_fn, loader_name: str, business_id: str, period, session, errors_acc: List[str]):
     """Call a loader, swallow exceptions, and return its empty/error structure."""

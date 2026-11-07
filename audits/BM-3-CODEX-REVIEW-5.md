@@ -1,0 +1,5 @@
+1. **P2 — Ledger lookups can cause spoken turns to be lost when ending a meeting.** [backend/realtime_voice.py:1180](/Users/michaelrickards/dev/bh2-BM-3/backend/realtime_voice.py:1180) awaits the lookup inside the OpenAI stream reader (`:1269`), preventing it from processing incoming transcriptions for up to 25 seconds. Meanwhile, the flush handler can report success because its save queue is empty. Reproduced with a slow lookup followed by a completed owner transcription: flush returned `{"type":"flushed","ok":true}` with **no turn saved**. Ending the meeting then cancels the reader and loses that speech, breaking BM-2’s preservation guarantee. Keep reading events while tools execute, and make flush account for pending work. Add a regression test combining lookup, transcription, flush, and disconnect; the existing tests exercise these separately.
+
+Verification: **123 ledger/BM-1/BM-2 tests passed**; the additional in-memory reproduction failed as described. Broader accountancy/voice checks had **111 passes and 34 setup errors** because the read-only sandbox prevents temporary-file creation. Full `check.sh` was not run. No files changed.
+
+**Verdict: CHANGES.**

@@ -983,6 +983,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     turns: asyncio.Queue = asyncio.Queue()
     turn_writer = None
     ledger: list = []    # every spoken turn accepted, with its save state
+    pending_tools: set = set()   # BM-3: ledger look-ups running beside the stream
 
     def _save_turn(role, content, at):
         """Saved with retries (Codex BM-2 review 1, finding 5): a passing
@@ -1108,10 +1109,12 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         _lap("openai")
         _logger.info("Connected to OpenAI Realtime API (GA)")
 
-        # BM-2: a meeting speaks from its own prompt and data, with no tools.
+        # BM-2: a meeting speaks from its own prompt and data. BM-3: its only
+        # tools are the read-only ledger look-ups, for this business.
+        from services import meeting_ledger as _ledger
         await openai_ws.send(json.dumps(build_session_config(
             meeting_instructions if meeting_id else build_system_instructions(business_name, user_name),
-            ARIA_REALTIME_VOICE, quiet_mode, [] if meeting_id else REALTIME_TOOLS)))
+            ARIA_REALTIME_VOICE, quiet_mode, _ledger.REALTIME_TOOLS if meeting_id else REALTIME_TOOLS)))
         _logger.info(f"Session configured with quiet_mode={quiet_mode}")
 
         await websocket.send_json({"type": "ready"})
@@ -1137,6 +1140,13 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                             # writer is drained, bounded, and the browser told.
                             # `ok` only if EVERY turn so far is saved (Codex review
                             # 2, finding 2); failed ones are tried once more first.
+                            # A look-up still running may be followed by speech:
+                            # wait for it (bounded); one still running is not ok.
+                            tools_done = True
+                            if pending_tools:
+                                _, still = await asyncio.wait(set(pending_tools),
+                                                              timeout=FLUSH_SAVE_TIMEOUT_SECONDS)
+                                tools_done = not still
                             await asyncio.sleep(FLUSH_TRANSCRIPTION_WAIT_SECONDS)
                             for entry in _entries("failed"):
                                 turns.put_nowait(entry)
@@ -1145,8 +1155,11 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                                 await asyncio.wait_for(turns.join(), FLUSH_SAVE_TIMEOUT_SECONDS)
                             except asyncio.TimeoutError:
                                 drained = False
-                            await websocket.send_json({"type": "flushed", "ok": drained and not _entries(
-                                "pending", "saving", "failed")})
+                            # Re-checked at the moment of answering: a look-up that
+                            # began during the waits also counts (Codex review 6).
+                            await websocket.send_json({"type": "flushed", "ok": drained and tools_done
+                                                       and not pending_tools
+                                                       and not _entries("pending", "saving", "failed")})
                         elif msg_type == "config":
                             quiet_mode = message.get("quietMode", False)
                             await openai_ws.send(json.dumps({
@@ -1175,6 +1188,8 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                 _logger.error(f"Forward to OpenAI error: {e}")
 
         async def _answer_tool(name: str, arguments: dict) -> str:
+            if meeting_id:
+                return await _meeting_tool(name, arguments)
             from services import aria_actions
             if name in aria_actions.CHAT_ACTION_TYPES:
                 # D18: a spoken action becomes the NS-B10 card on screen. It
@@ -1200,6 +1215,34 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             except asyncio.TimeoutError:
                 _logger.warning(f"Tool {name} timed out after 25s")
                 return json.dumps({"error": f"Tool {name} timed out. Please try again."})
+
+        async def _reply_to_tool(call_id, name, arguments):
+            result = await _answer_tool(name, arguments)
+            await openai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "function_call_output", "call_id": call_id, "output": result},
+            }))
+            await openai_ws.send(json.dumps({"type": "response.create"}))
+
+        async def _meeting_tool(name: str, arguments: dict) -> str:
+            """BM-3: only the ledger look-ups, only this business, bounded."""
+            from services import meeting_ledger as _ledger
+            if name not in _ledger.TOOL_NAMES:
+                return json.dumps({"error": f"There is no tool called {name!r} in a board meeting."})
+
+            def work():
+                from zoneinfo import ZoneInfo
+                from db import get_session_context as _ls
+                try:
+                    today = _dt.now(ZoneInfo(business_tz)).date()
+                except Exception:
+                    today = _dt.now(_tz.utc).date()
+                with _ls() as _s:
+                    return _ledger.run_tool(name, arguments, _s, business_id, today)
+            try:
+                return await asyncio.wait_for(asyncio.to_thread(work), timeout=25.0)
+            except asyncio.TimeoutError:
+                return json.dumps({"error": "The transactions took too long to read. Please ask again."})
 
         async def forward_to_client():
             """OpenAI -> client: GA events the browser renders; tool calls."""
@@ -1242,13 +1285,15 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                         except json.JSONDecodeError:
                             arguments = {}
                         _logger.info(f"Tool call received: {name}")
-                        result = await _answer_tool(name, arguments)
-                        await openai_ws.send(json.dumps({
-                            "type": "conversation.item.create",
-                            "item": {"type": "function_call_output",
-                                     "call_id": call_id, "output": result},
-                        }))
-                        await openai_ws.send(json.dumps({"type": "response.create"}))
+                        if meeting_id:
+                            # BM-3 (Codex review 5): a ledger look-up runs beside
+                            # the stream, so transcriptions keep being read and
+                            # saved while it works; flush waits for it.
+                            task = asyncio.create_task(_reply_to_tool(call_id, name, arguments))
+                            pending_tools.add(task)
+                            task.add_done_callback(pending_tools.discard)
+                        else:
+                            await _reply_to_tool(call_id, name, arguments)
                     elif event_type in FORWARDED_EVENTS:
                         await websocket.send_json(event)
             except WebSocketDisconnect:
@@ -1362,6 +1407,8 @@ async def realtime_voice_endpoint(websocket: WebSocket):
 
         if openai_ws is not None:
             await _bounded(openai_ws.close(), _CLOSE_TIMEOUT_SECONDS)
+        for task in list(pending_tools):
+            task.cancel()
         if turn_writer is not None:
             # The last spoken turns are saved before the socket closes, bounded.
             # Whatever is still queued then is handed to the worker pool, like
