@@ -363,7 +363,7 @@ _SEARCH_PARAMS = {
     "type": "object",
     "properties": {
         "text": {"type": "string", "description": "Words to find in the payer, reference, description or "
-                                                  "category, e.g. 'gocardless' or 'smith'. All words must match."},
+                                                  "category, e.g. a customer's or supplier's name. All words must match."},
         "direction": {"type": "string", "enum": ["income", "expense"]},
         "min_amount": {"type": "number", "description": "Smallest amount in pounds"},
         "max_amount": {"type": "number", "description": "Largest amount in pounds (equal to min for an exact amount)"},

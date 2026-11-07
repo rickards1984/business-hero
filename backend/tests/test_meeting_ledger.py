@@ -547,3 +547,13 @@ def test_fit_never_returns_json_over_the_limit_whatever_the_limit(db, limit):
     assert len(json.dumps(out)) <= limit
     if limit >= 400:
         assert out["total_income"] == full["total_income"] and "narrow" in out["error"].lower()
+
+
+def test_aria_is_given_no_one_business_s_examples():
+    """BM-3b: the instructions are for every business, so they name no
+    business's payers or prices."""
+    from services import meeting_ledger
+    from services.executive_meeting_prompts import build_system_prompt
+    text = (build_system_prompt({"business": {"name": "Any"}}, {}) + json.dumps(meeting_ledger.CHAT_TOOLS)).lower()
+    for word in ("gocardless", "ashbourne", "1,625", "1625", "smith", "gym", "student"):
+        assert word not in text, word
