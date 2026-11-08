@@ -890,7 +890,11 @@ class _RealtimeLike(_PushUpstream):
         self.sent.append(data)
         e = json.loads(data)
         if e.get("type") == "response.create":
-            if self.active:
+            if getattr(self, "refuse_code", None):
+                self.refused.append(e.get("event_id"))
+                self.inbox.append({"type": "error", "error": {"code": self.refuse_code,
+                                                              "event_id": e.get("event_id")}})
+            elif self.active:
                 self.refused.append(e.get("event_id"))
                 self.inbox.append({"type": "error", "error": {
                     "code": "conversation_already_has_active_response", "event_id": e.get("event_id")}})
@@ -1197,3 +1201,93 @@ def test_ordinary_voice_keeps_talking_to_the_screen_while_a_look_up_runs(realtim
                 break
         assert up.answers() == [], "seen while the look-up is still running"
         realtime["release"]("A")
+
+
+
+# ---- Codex BM-5 review 2 ---------------------------------------------------
+
+def test_another_refusal_of_the_go_on_is_told_and_does_not_hang(realtime, monkeypatch):
+    """Finding 1: refused for another reason (a rate limit): the owner is told,
+    and nothing is left waiting, so ending the meeting is not held up."""
+    monkeypatch.setattr(realtime_voice, "FLUSH_TRANSCRIPTION_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(realtime_voice, "FLUSH_SAVE_TIMEOUT_SECONDS", 2)
+    up = realtime["up"]
+    up.refuse_code = "rate_limit_exceeded"
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws)
+        up.start(("k1", "A"))
+        up.finish()
+        realtime["release"]("A")
+        assert _wait(lambda: len(up.refused) == 1 and up.drained())
+        up.inbox.append({"type": "response.output_audio_transcript.done", "transcript": "sentinel"})
+        while True:
+            told = ws.receive_json()
+            if told.get("type") in ("error", "response.output_audio_transcript.done"):
+                break
+        started = time.monotonic()
+        ws.send_json({"type": "flush"})
+        while True:
+            event = ws.receive_json()
+            if event.get("type") == "flushed":
+                break
+    assert told["type"] == "error" and "ask that again" in told["message"]
+    assert event["ok"] is True and time.monotonic() - started < 1.5
+
+
+def test_her_answer_cut_off_before_a_word_is_still_owed(realtime):
+    """Finding 2: the owner's noise cancels her reply with the answers before
+    any of it is heard, and no reply follows: she goes on again."""
+    up = realtime["up"]
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws)
+        up.start(("k1", "A"))
+        up.finish()
+        realtime["release"]("A")
+        assert _wait(lambda: len(up.accepted) == 1 and up.drained())
+        up.inbox.append({"type": "input_audio_buffer.speech_started"})
+        up.finish("cancelled")
+        up.inbox.append({"type": "input_audio_buffer.speech_stopped"})
+        assert _wait(lambda: len(up.accepted) == 2, timeout=3)
+    assert up.refused == []
+
+
+def test_her_answer_once_heard_is_not_given_twice(realtime):
+    up = realtime["up"]
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws)
+        up.start(("k1", "A"))
+        up.finish()
+        realtime["release"]("A")
+        assert _wait(lambda: len(up.accepted) == 1 and up.drained())
+        up.inbox.extend([{"type": "response.output_audio.delta", "delta": "AAAA"},
+                         {"type": "input_audio_buffer.speech_started"}])
+        up.finish("cancelled")
+        up.inbox.append({"type": "input_audio_buffer.speech_stopped"})
+        time.sleep(0.5)
+    assert len(up.accepted) == 1
+
+
+def test_a_look_up_finishing_just_after_the_owner_stops_waits_for_their_reply(realtime, monkeypatch):
+    """Finding 3: the answer lands after the owner stops but before the
+    provider announces its reply to them: Aria does not collide with it."""
+    monkeypatch.setattr(realtime_voice, "CONTINUE_AFTER_SPEECH_SECONDS", 1.0)
+    up = realtime["up"]
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws)
+        up.start(("k1", "A"))
+        up.finish()
+        up.inbox.extend([{"type": "input_audio_buffer.speech_started"},
+                         {"type": "input_audio_buffer.speech_stopped"}])
+        assert _wait(lambda: up.drained())
+        realtime["release"]("A")
+        assert _wait(lambda: up.answers() == ["k1"])
+        time.sleep(0.1)
+        assert up.accepted == [], "inside the pause after the owner stopped"
+        up.active = True
+        up.inbox.append({"type": "response.created", "response": {"id": "vad"}})
+        time.sleep(0.2)
+        assert up.accepted == [] and up.refused == []
+        up.finish()
+        assert _wait(lambda: len(up.accepted) == 1)
+    assert up.refused == []
+

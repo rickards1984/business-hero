@@ -65,3 +65,18 @@ OpenAI fell only $2; both faults are 400/refusals, not quota errors.
    recorded once, tested through the real hook.
 5. **Tests are not timing-dependent.** Look-ups are held behind explicit
    events and released by the test.
+
+## Codex review 2 — CHANGES REQUESTED (4 findings), all fixed
+
+1. **Any refusal of Aria's go-on** clears the pending request.
+   - "Another reply is running" keeps the debt, and she goes on after it.
+   - Anything else (e.g. a rate limit) tells the owner to ask again, so
+     nothing is left waiting and ending the meeting is not held up.
+2. **Her reply with the answers, cancelled before a word of it is heard**,
+   leaves them owed. Once any of it has been heard it is not repeated.
+3. **The pause after the owner stops** (1.5 s) is enforced inside the one
+   place that asks her to go on, whoever calls it.
+4. **The post-speech timers** are kept and cancelled with the session.
+   Sending to a closing socket is caught. No test was kept for this: the test
+   harness ends its event loop with the socket, so a surviving timer cannot be
+   observed there (a test written for it passed with the fix removed).
