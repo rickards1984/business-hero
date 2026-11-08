@@ -65,6 +65,12 @@ def live_sessions() -> set:
 
 # GA server events the browser renders (RealtimeVoice.tsx). Everything else
 # from OpenAI (session.created with its config, rate limits, …) stays here.
+# BM-5: Aria's own "go on" after look-ups carries this event_id, so OpenAI's
+# refusal of it can be told apart; after the owner stops, the reply OpenAI
+# starts for them is given this long to begin first.
+CONTINUE_EVENT_PREFIX = "bm5-continue-"
+CONTINUE_AFTER_SPEECH_SECONDS = 1.5
+
 FORWARDED_EVENTS = frozenset({
     "response.output_audio.delta",
     "response.output_audio.done",
@@ -995,8 +1001,12 @@ async def realtime_voice_endpoint(websocket: WebSocket):
     # asked was still running: OpenAI refused the second ("conversation
     # already has an active response") and the conversation lost its place.
     # Now Aria is asked to go on ONCE, after that reply has finished and every
-    # look-up it asked for is answered.
-    tool_turn = {"open": set(), "owed": False}
+    # look-up it asked for is answered, and never while the owner is talking.
+    # `asked` is the event_id of a request not yet started, so a refusal of it
+    # restores the debt rather than losing it; `continuing` is that reply
+    # running (Codex BM-5 review 1, finding 1).
+    tool_turn = {"open": set(), "owed": False, "asked": None, "seq": 0,
+                 "owner_speaking": False, "continuing": False}
     tool_lock = asyncio.Lock()
     tally = {"responses": 0, "failed": 0, "owner_turns": 0, "tool_calls": 0}
     playback_until = 0.0  # when the browser will have played the audio sent so far
@@ -1084,6 +1094,12 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             finally:
                 turns.task_done()
 
+    def _tools_busy():
+        """Look-ups still running, or Aria not yet told / not yet done with
+        their answers (Codex BM-5 review 1, findings 2 and 3)."""
+        return bool(tool_turn["open"] or tool_turn["owed"] or tool_turn["asked"]
+                    or (responding and tool_turn["continuing"]))
+
     async def _end_at_cap():
         nonlocal timed_out
         if not meeting_id:
@@ -1097,7 +1113,8 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         # Aria finishes what she is saying, generated AND heard (Codex review
         # 1, finding 6: audio plays in real time after generation ends).
         grace_until = _time.monotonic() + MEETING_FINISH_GRACE_SECONDS
-        while (responding or _time.monotonic() < playback_until) and _time.monotonic() < grace_until:
+        while ((responding or _tools_busy() or _time.monotonic() < playback_until)
+               and _time.monotonic() < grace_until):
             await asyncio.sleep(0.1)
         _logger.info("Board-meeting voice session reached its %ss allowance; ending it", session_cap)
         _stop("allowance")
@@ -1168,6 +1185,12 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                                 _, still = await asyncio.wait(set(pending_tools),
                                                               timeout=FLUSH_SAVE_TIMEOUT_SECONDS)
                                 tools_done = not still
+                            # BM-5: and Aria's reply with their answers, which is
+                            # what was said next (Codex BM-5 review 1, finding 3).
+                            settle_by = _time.monotonic() + FLUSH_SAVE_TIMEOUT_SECONDS
+                            while _tools_busy() and _time.monotonic() < settle_by:
+                                await asyncio.sleep(0.05)
+                            tools_done = tools_done and not _tools_busy()
                             await asyncio.sleep(FLUSH_TRANSCRIPTION_WAIT_SECONDS)
                             for entry in _entries("failed"):
                                 turns.put_nowait(entry)
@@ -1179,7 +1202,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                             # Re-checked at the moment of answering: a look-up that
                             # began during the waits also counts (Codex review 6).
                             await websocket.send_json({"type": "flushed", "ok": drained and tools_done
-                                                       and not pending_tools
+                                                       and not pending_tools and not _tools_busy()
                                                        and not _entries("pending", "saving", "failed")})
                         elif msg_type == "config":
                             quiet_mode = message.get("quietMode", False)
@@ -1241,9 +1264,19 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             """BM-5: one response.create, once the reply that asked for the
             look-ups is done and every one of them has its answer."""
             async with tool_lock:
-                if tool_turn["owed"] and not tool_turn["open"] and not responding:
+                if (tool_turn["owed"] and not tool_turn["open"] and not responding
+                        and not tool_turn["owner_speaking"] and tool_turn["asked"] is None):
                     tool_turn["owed"] = False
-                    await openai_ws.send(json.dumps({"type": "response.create"}))
+                    tool_turn["seq"] += 1
+                    tool_turn["asked"] = f"{CONTINUE_EVENT_PREFIX}{tool_turn['seq']}"
+                    await openai_ws.send(json.dumps({"type": "response.create",
+                                                     "event_id": tool_turn["asked"]}))
+
+        async def _continue_soon(seconds):
+            # After the owner stops: the reply the provider starts for them
+            # comes first; if none does, Aria still goes on.
+            await asyncio.sleep(seconds)
+            await _continue_after_tools()
 
         async def _reply_to_tool(call_id, name, arguments):
             try:
@@ -1294,8 +1327,13 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                         responding = True
                         aria_spoke_at = _dt.now(_tz.utc)
                         tally["responses"] += 1
+                        # A reply has begun: ours if one was asked for (if it was
+                        # not, our request's refusal still arrives and restores it).
+                        tool_turn["continuing"] = tool_turn["asked"] is not None
+                        tool_turn["asked"] = None
                     elif event_type == "response.done":
                         responding = False
+                        tool_turn["continuing"] = False
                         reply = event.get("response") or {}
                         if reply.get("status") in ("failed", "incomplete"):
                             # BM-5: a reply that fails says so nowhere else; the
@@ -1309,6 +1347,12 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                         await _continue_after_tools()
                     elif event_type == "conversation.item.input_audio_transcription.completed":
                         tally["owner_turns"] += 1
+                    elif event_type == "input_audio_buffer.speech_started":
+                        tool_turn["owner_speaking"] = True
+                    elif event_type == "input_audio_buffer.speech_stopped":
+                        tool_turn["owner_speaking"] = False
+                        if tool_turn["owed"]:
+                            asyncio.create_task(_continue_soon(CONTINUE_AFTER_SPEECH_SECONDS))
                     elif event_type == "response.output_audio.delta":
                         # PCM16 mono at 24 kHz: 48,000 bytes a second, played
                         # from when it arrives or when the previous audio ends.
@@ -1328,8 +1372,16 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                                                       aria_spoke_at or _dt.now(_tz.utc))))
                     if event_type == "error":
                         _logger.error(f"OpenAI Realtime API error: {json.dumps(event)}")
-                        if (event.get("error") or {}).get("code") == "conversation_already_has_active_response":
-                            continue   # harmless to the owner; not shown as an error on screen
+                        problem = event.get("error") or {}
+                        if problem.get("code") == "conversation_already_has_active_response":
+                            refused = str(problem.get("event_id") or "")
+                            if refused.startswith(CONTINUE_EVENT_PREFIX):
+                                # Another reply was already running: Aria still
+                                # owes the answers, and goes on after it.
+                                tool_turn["owed"] = True
+                                if tool_turn["asked"] == refused:
+                                    tool_turn["asked"] = None
+                            continue   # not shown to the owner as an error
                     if event_type == "response.function_call_arguments.done":
                         call_id = event.get("call_id")
                         name = event.get("name")
@@ -1341,15 +1393,13 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                         tally["tool_calls"] += 1
                         tool_turn["open"].add(call_id)
                         tool_turn["owed"] = True
-                        if meeting_id:
-                            # BM-3 (Codex review 5): a ledger look-up runs beside
-                            # the stream, so transcriptions keep being read and
-                            # saved while it works; flush waits for it.
-                            task = asyncio.create_task(_reply_to_tool(call_id, name, arguments))
-                            pending_tools.add(task)
-                            task.add_done_callback(pending_tools.discard)
-                        else:
-                            await _reply_to_tool(call_id, name, arguments)
+                        # BM-3 (Codex review 5): a look-up runs beside the
+                        # stream, so events keep being read while it works; flush
+                        # waits for it. BM-5: in ordinary voice too, so the
+                        # owner's interruption is seen (Codex BM-5 review 1).
+                        task = asyncio.create_task(_reply_to_tool(call_id, name, arguments))
+                        pending_tools.add(task)
+                        task.add_done_callback(pending_tools.discard)
                     elif event_type in FORWARDED_EVENTS:
                         await websocket.send_json(event)
             except WebSocketDisconnect:

@@ -748,11 +748,17 @@ def test_speech_during_a_look_up_is_saved_before_ending(meeting, monkeypatch):
         events.append("tool done")
         return '{"matched": 0}'
     monkeypatch.setattr(meeting_ledger, "run_tool", slow_tool)
-    script = [{"type": "response.function_call_arguments.done", "call_id": "k1",
-               "name": "search_transactions", "arguments": "{}"},
-              {"type": "conversation.item.input_audio_transcription.completed",
-               "transcript": "And put the course price up too."}]
-    client = meeting["make"](script=script)
+    import sys as _sys
+    up = _RealtimeLike()       # BM-5: the provider answers Aria's go-on, as OpenAI does
+    client = meeting["make"]()
+
+    async def connect(url, additional_headers=None, **k):
+        return up
+    monkeypatch.setattr(_sys.modules["websockets"], "connect", connect)
+    up.inbox.extend([{"type": "response.function_call_arguments.done", "call_id": "k1",
+                      "name": "search_transactions", "arguments": "{}"},
+                     {"type": "conversation.item.input_audio_transcription.completed",
+                      "transcript": "And put the course price up too."}])
     monkeypatch.setattr(orch, "save_spoken_turn",
                         lambda meeting_id, business_id, role, content, at, session:
                         events.append(("saved", content)))
@@ -761,6 +767,8 @@ def test_speech_during_a_look_up_is_saved_before_ending(meeting, monkeypatch):
         time.sleep(0.2)
         assert ("saved", "And put the course price up too.") in events, "read and saved while the look-up runs"
         ws.send_json({"type": "flush"})
+        assert _wait(lambda: len(up.accepted) == 1, timeout=5)
+        up.finish(transcript="Nothing matched.")
         while True:
             event = ws.receive_json()
             if event.get("type") == "flushed":
@@ -866,121 +874,264 @@ def test_ordinary_aria_voice_still_starts_if_the_notes_cannot_be_read(meeting, m
 # response.create while that reply was still running, OpenAI refused one
 # ("conversation already has an active response") and the talk went silent.
 
-def _pushed(meeting, monkeypatch):
+import threading  # noqa: E402
+
+
+class _RealtimeLike(_PushUpstream):
+    """Behaves like OpenAI where BM-5 matters: one reply at a time. A
+    response.create while a reply runs is refused with the request's
+    event_id; otherwise a reply starts. The test ends replies itself."""
+
+    def __init__(self):
+        super().__init__()
+        self.active, self.accepted, self.refused = False, [], []
+
+    async def send(self, data):
+        self.sent.append(data)
+        e = json.loads(data)
+        if e.get("type") == "response.create":
+            if self.active:
+                self.refused.append(e.get("event_id"))
+                self.inbox.append({"type": "error", "error": {
+                    "code": "conversation_already_has_active_response", "event_id": e.get("event_id")}})
+            else:
+                self.active = True
+                self.accepted.append(e.get("event_id"))
+                self.inbox.append({"type": "response.created", "response": {"id": f"r{len(self.accepted)}"}})
+
+    def start(self, *calls):
+        """A reply begins and asks for these look-ups (call_id, about)."""
+        self.active = True
+        self.inbox.append({"type": "response.created", "response": {"id": "r0"}})
+        for call_id, about in calls:
+            self.inbox.append({"type": "response.function_call_arguments.done", "call_id": call_id,
+                               "name": "remember", "arguments": json.dumps({"about": about, "meaning": "m"})})
+
+    def finish(self, status="completed", transcript=None):
+        if transcript:
+            self.inbox.append({"type": "response.output_audio_transcript.done", "transcript": transcript})
+        self.active = False
+        self.inbox.append({"type": "response.done", "response": {"status": status}})
+
+    def owner_speaks(self):
+        """Server VAD: the owner cuts in, the running reply is cancelled, and
+        when they stop the provider starts its own reply to them."""
+        self.inbox.append({"type": "input_audio_buffer.speech_started"})
+        if self.active:
+            self.finish("cancelled")
+        self.inbox.append({"type": "input_audio_buffer.speech_stopped"})
+        self.active = True
+        self.inbox.append({"type": "response.created", "response": {"id": "vad"}})
+
+    def answers(self):
+        out = []
+        for x in self.sent:
+            e = json.loads(x)
+            if e.get("type") == "conversation.item.create" and e["item"].get("type") == "function_call_output":
+                out.append(e["item"]["call_id"])
+        return out
+
+    def drained(self):
+        return not self.inbox
+
+
+@pytest.fixture
+def realtime(meeting, monkeypatch):
+    """The meeting harness on a _RealtimeLike upstream, with look-ups that
+    finish only when the test releases them."""
+    import asyncio
     import sys as _sys
+    from services import meeting_ledger
+    up = _RealtimeLike()
+    client = meeting["make"]()     # installs the fake websockets module first
+
+    async def connect(url, additional_headers=None, **k):
+        return up
+    monkeypatch.setattr(_sys.modules["websockets"], "connect", connect)
+    gates, broken = {}, set()
+
+    def gate(about):
+        return gates.setdefault(about, threading.Event())
+
+    def held(n, args, session, bid, today):
+        if args.get("about") in broken:
+            raise RuntimeError("database unavailable")
+        assert gate(args.get("about")).wait(10), "never released"
+        return '{"ok": true}'
+    monkeypatch.setattr(meeting_ledger, "run_tool", held)
+
+    async def ordinary(name, args, user_id, business_id):
+        await asyncio.to_thread(held, name, args, None, business_id, None)
+        return '{"ok": true}'
+    monkeypatch.setattr(realtime_voice, "execute_tool", ordinary)
+    monkeypatch.setattr(realtime_voice, "CONTINUE_AFTER_SPEECH_SECONDS", 0.1)
+    return {"up": up, "release": lambda *abouts: [gate(a).set() for a in abouts], "broken": broken,
+            "client": client, "meeting": meeting}
+
+
+def _connect(ws, spoken_meeting=True):
+    if spoken_meeting:
+        assert _open(ws) == {"type": "ready"}
+    else:
+        ws.send_json({"type": "auth", "token": "t"})
+        assert ws.receive_json() == {"type": "ready"}
+
+
+@pytest.mark.parametrize("spoken_meeting", [True, False])
+def test_several_look_ups_in_one_reply_ask_aria_to_go_on_once(realtime, spoken_meeting):
+    up = realtime["up"]
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws, spoken_meeting)
+        up.start(("k1", "A"), ("k2", "B"))
+        realtime["release"]("A", "B")
+        assert _wait(lambda: set(up.answers()) == {"k1", "k2"} and up.drained())
+        assert up.accepted == [] and up.refused == [], "not while the reply that asked is running"
+        up.finish()
+        assert _wait(lambda: len(up.accepted) == 1)
+        up.finish()
+        time.sleep(0.2)
+    assert len(up.accepted) == 1 and up.refused == []
+
+
+def test_aria_goes_on_only_when_the_last_answer_is_in(realtime):
+    up = realtime["up"]
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws)
+        up.start(("k1", "A"), ("k2", "B"))
+        up.finish()
+        realtime["release"]("A")
+        assert _wait(lambda: up.answers() == ["k1"] and up.drained())
+        assert up.accepted == [], "B is still being looked up"
+        realtime["release"]("B")
+        assert _wait(lambda: len(up.accepted) == 1)
+    assert up.answers() == ["k1", "k2"] and up.refused == []
+
+
+@pytest.mark.parametrize("spoken_meeting", [True, False])
+def test_the_owner_cutting_in_during_the_look_ups_loses_nothing(realtime, spoken_meeting):
+    """The owner talks over Aria while her look-ups run: the provider's own
+    reply to them is never collided with, and Aria still goes on, once."""
+    up = realtime["up"]
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws, spoken_meeting)
+        up.start(("k1", "A"), ("k2", "B"))
+        assert _wait(lambda: up.drained())
+        up.owner_speaks()                     # r0 cancelled, the provider's reply running
+        realtime["release"]("A", "B")
+        assert _wait(lambda: len(up.answers()) == 2 and up.drained())
+        time.sleep(0.3)
+        assert up.accepted == [] and up.refused == []
+        up.finish()                           # the provider's reply to the owner ends
+        assert _wait(lambda: len(up.accepted) == 1)
+        up.finish()
+        time.sleep(0.2)
+    assert len(up.accepted) == 1 and up.refused == []
+
+
+def test_a_refused_go_on_is_asked_again_after_the_other_reply(realtime):
+    """A reply the server began that we had not yet heard about: our request
+    is refused, the debt is kept, and Aria goes on after that reply."""
+    up = realtime["up"]
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws)
+        up.start(("k1", "A"))
+        up.finish()
+        assert _wait(lambda: up.drained())
+        up.active = True                      # running on the server, not yet announced
+        realtime["release"]("A")
+        assert _wait(lambda: len(up.refused) == 1 and up.drained())
+        up.inbox.append({"type": "response.created", "response": {"id": "hidden"}})
+        up.finish()
+        assert _wait(lambda: len(up.accepted) == 1)
+    assert up.refused[0].startswith(realtime_voice.CONTINUE_EVENT_PREFIX)
+
+
+def test_a_look_up_that_breaks_is_still_answered(realtime):
+    """An unanswered call leaves the model waiting for it for ever."""
+    up = realtime["up"]
+    realtime["broken"].add("A")
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws)
+        up.start(("k1", "A"))
+        up.finish()
+        assert _wait(lambda: up.answers() == ["k1"] and len(up.accepted) == 1)
+
+
+def test_at_the_limit_aria_still_gives_the_answers_she_looked_up(realtime, monkeypatch):
+    """Codex BM-5 review 1, finding 2: the allowance runs out after the reply
+    that asked has ended but before the answers are in. The finishing grace
+    covers the look-ups and her reply with them."""
+    monkeypatch.setattr(realtime_voice, "MEETING_FINISH_GRACE_SECONDS", 5)
+    monkeypatch.setattr(realtime_voice, "MIN_MEETING_SESSION_SECONDS", 0)
+    realtime["meeting"]["allowed"] = 0.4
+    up = realtime["up"]
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws)
+        up.start(("k1", "A"))
+        up.finish()
+        time.sleep(0.8)                       # past the limit, look-up still running
+        assert up.open, "ended while Aria still owed an answer"
+        realtime["release"]("A")
+        assert _wait(lambda: len(up.accepted) == 1)
+        time.sleep(0.3)
+        assert up.open, "ended before her reply with the answers finished"
+        up.finish(transcript="Here is what I found.")
+        assert _wait(lambda: not up.open, timeout=5)
+
+
+def test_flush_waits_for_aria_s_reply_with_the_answers(realtime, monkeypatch):
+    """Codex BM-5 review 1, finding 3: the look-ups are done but the reply
+    that asked has not ended; flush is ok only once her reply with the
+    answers is over and saved."""
+    monkeypatch.setattr(realtime_voice, "FLUSH_TRANSCRIPTION_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(realtime_voice, "FLUSH_SAVE_TIMEOUT_SECONDS", 3)
+    up, saved = realtime["up"], realtime["meeting"]["saved"]
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws)
+        up.start(("k1", "A"))
+        realtime["release"]("A")
+        assert _wait(lambda: up.answers() == ["k1"] and up.drained())
+        ws.send_json({"type": "flush"})
+        time.sleep(0.2)
+        up.finish()
+        assert _wait(lambda: len(up.accepted) == 1)
+        time.sleep(0.5)                       # her reply with the answers is still being spoken
+        up.finish(transcript="Both are booked in.")
+        while True:
+            event = ws.receive_json()
+            if event.get("type") == "flushed":
+                saved_then = list(saved)
+                break
+    assert event["ok"] is True
+    assert any(content == "Both are booked in." for _, _, content in saved_then), "flushed before it was saved"
+
+
+def test_flush_is_not_ok_while_aria_still_owes_the_answers(realtime, monkeypatch):
+    monkeypatch.setattr(realtime_voice, "FLUSH_TRANSCRIPTION_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(realtime_voice, "FLUSH_SAVE_TIMEOUT_SECONDS", 0.3)
+    up = realtime["up"]
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws)
+        up.start(("k1", "A"))
+        realtime["release"]("A")
+        assert _wait(lambda: up.answers() == ["k1"] and up.drained())
+        ws.send_json({"type": "flush"})       # the reply that asked never ends
+        while True:
+            event = ws.receive_json()
+            if event.get("type") == "flushed":
+                break
+    assert event["ok"] is False
+
+
+def test_a_failed_spoken_reply_is_told_to_the_owner_and_logged(meeting, monkeypatch, caplog):
+    import logging
+    import sys as _sys
+    client = meeting["make"]()
     up = _PushUpstream()
 
     async def connect(url, additional_headers=None, **k):
         return up
     monkeypatch.setattr(_sys.modules["websockets"], "connect", connect)
-    return up
-
-
-def _kinds(up):
-    out = []
-    for x in up.sent:
-        e = json.loads(x)
-        if e.get("type") == "response.create":
-            out.append("create")
-        elif e.get("type") == "conversation.item.create" and e["item"].get("type") == "function_call_output":
-            out.append(e["item"]["call_id"])
-    return out
-
-
-def _two_calls():
-    return [{"type": "response.created", "response": {"id": "r1"}},
-            {"type": "response.function_call_arguments.done", "call_id": "k1", "name": "remember",
-             "arguments": '{"about": "A", "meaning": "a"}'},
-            {"type": "response.function_call_arguments.done", "call_id": "k2", "name": "remember",
-             "arguments": '{"about": "B", "meaning": "b"}'}]
-
-
-@pytest.mark.parametrize("spoken_meeting", [True, False])
-def test_several_look_ups_in_one_reply_ask_aria_to_go_on_once(meeting, monkeypatch, spoken_meeting):
-    from services import meeting_ledger
-    monkeypatch.setattr(meeting_ledger, "run_tool", lambda *a: time.sleep(0.2) or '{"ok": true}')
-
-    async def ordinary_tool(name, args, user_id, business_id):
-        await asyncio.sleep(0.2)
-        return '{"ok": true}'
-    import asyncio
-    monkeypatch.setattr(realtime_voice, "execute_tool", ordinary_tool)
-    client = meeting["make"]()
-    up = _pushed(meeting, monkeypatch)
-    with client.websocket_connect("/v1/realtime/voice") as ws:
-        if spoken_meeting:
-            assert _open(ws) == {"type": "ready"}
-        else:
-            ws.send_json({"type": "auth", "token": "t"})
-            assert ws.receive_json() == {"type": "ready"}
-        up.inbox.extend(_two_calls())
-        assert _wait(lambda: {"k1", "k2"} <= set(_kinds(up)))
-        time.sleep(0.2)
-        assert "create" not in _kinds(up), "not while the reply that asked is still running"
-        up.inbox.append({"type": "response.done", "response": {"id": "r1", "status": "completed"}})
-        assert _wait(lambda: "create" in _kinds(up))
-        time.sleep(0.2)
-    assert _kinds(up).count("create") == 1
-    assert _kinds(up)[-1] == "create"
-
-
-def test_aria_goes_on_once_the_last_answer_arrives_after_her_reply_ends(meeting, monkeypatch):
-    from services import meeting_ledger
-    monkeypatch.setattr(meeting_ledger, "run_tool",
-                        lambda n, args, s, b, t: time.sleep(0.6 if args.get("about") == "B" else 0.05) or "{}")
-    client = meeting["make"]()
-    up = _pushed(meeting, monkeypatch)
-    with client.websocket_connect("/v1/realtime/voice") as ws:
-        assert _open(ws) == {"type": "ready"}
-        up.inbox.extend(_two_calls() + [{"type": "response.done", "response": {"status": "completed"}}])
-        assert _wait(lambda: "k1" in _kinds(up))
-        time.sleep(0.1)
-        assert "create" not in _kinds(up), "k2 is still being looked up"
-        assert _wait(lambda: "create" in _kinds(up), timeout=3)
-        time.sleep(0.2)
-    assert _kinds(up) == ["k1", "k2", "create"]
-
-
-def test_a_reply_cut_short_by_the_owner_still_gets_one_continuation(meeting, monkeypatch):
-    """The owner cuts Aria's reply short once the answers are in: she is asked
-    to go on once, and the replies that follow add no more."""
-    from services import meeting_ledger
-    monkeypatch.setattr(meeting_ledger, "run_tool", lambda *a: "{}")
-    client = meeting["make"]()
-    up = _pushed(meeting, monkeypatch)
-    with client.websocket_connect("/v1/realtime/voice") as ws:
-        assert _open(ws) == {"type": "ready"}
-        up.inbox.extend(_two_calls())
-        assert _wait(lambda: {"k1", "k2"} <= set(_kinds(up)))
-        up.inbox.extend([{"type": "response.done", "response": {"status": "cancelled"}},
-                         {"type": "response.created", "response": {"id": "r2"}}])
-        assert _wait(lambda: "create" in _kinds(up))   # r1 ended with answers in: go on
-        up.inbox.extend([{"type": "response.created", "response": {"id": "r3"}},
-                         {"type": "response.done", "response": {"status": "completed"}},
-                         {"type": "response.done", "response": {"status": "completed"}}])
-        time.sleep(0.3)
-    assert _kinds(up).count("create") == 1
-
-
-def test_a_look_up_that_breaks_is_still_answered(meeting, monkeypatch):
-    """An unanswered call leaves the model waiting for it for ever."""
-    from services import meeting_ledger
-
-    def broken(*a):
-        raise RuntimeError("database unavailable")
-    monkeypatch.setattr(meeting_ledger, "run_tool", broken)
-    client = meeting["make"]()
-    up = _pushed(meeting, monkeypatch)
-    with client.websocket_connect("/v1/realtime/voice") as ws:
-        assert _open(ws) == {"type": "ready"}
-        up.inbox.extend(_two_calls()[:2] + [{"type": "response.done", "response": {"status": "completed"}}])
-        assert _wait(lambda: _kinds(up) == ["k1", "create"])
-
-
-def test_a_failed_spoken_reply_is_told_to_the_owner_and_logged(meeting, monkeypatch, caplog):
-    import logging
-    client = meeting["make"]()
-    up = _pushed(meeting, monkeypatch)
     with caplog.at_level(logging.WARNING, logger="realtime_voice"):
         with client.websocket_connect("/v1/realtime/voice") as ws:
             assert _open(ws) == {"type": "ready"}
@@ -997,8 +1148,13 @@ def test_a_failed_spoken_reply_is_told_to_the_owner_and_logged(meeting, monkeypa
 
 
 def test_the_active_response_refusal_is_not_shown_as_an_error(meeting, monkeypatch):
+    import sys as _sys
     client = meeting["make"]()
-    up = _pushed(meeting, monkeypatch)
+    up = _PushUpstream()
+
+    async def connect(url, additional_headers=None, **k):
+        return up
+    monkeypatch.setattr(_sys.modules["websockets"], "connect", connect)
     with client.websocket_connect("/v1/realtime/voice") as ws:
         assert _open(ws) == {"type": "ready"}
         up.inbox.extend([{"type": "error", "error": {"code": "conversation_already_has_active_response"}},
@@ -1008,3 +1164,36 @@ def test_the_active_response_refusal_is_not_shown_as_an_error(meeting, monkeypat
             if event.get("type") in ("error", "response.output_audio_transcript.done"):
                 break
     assert event["type"] == "response.output_audio_transcript.done"
+
+
+def test_aria_still_goes_on_if_no_reply_follows_the_owner_s_words(realtime):
+    """The owner makes a sound while the look-ups run, and the provider starts
+    no reply to it: Aria is not left owing the answers for ever."""
+    up = realtime["up"]
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws)
+        up.start(("k1", "A"))
+        up.finish()
+        up.inbox.append({"type": "input_audio_buffer.speech_started"})
+        realtime["release"]("A")
+        assert _wait(lambda: up.answers() == ["k1"] and up.drained())
+        time.sleep(0.3)
+        assert up.accepted == [], "not while the owner is talking"
+        up.inbox.append({"type": "input_audio_buffer.speech_stopped"})
+        assert _wait(lambda: len(up.accepted) == 1)
+
+
+def test_ordinary_voice_keeps_talking_to_the_screen_while_a_look_up_runs(realtime):
+    """In ordinary Aria voice the look-up no longer holds the stream: what
+    arrives meanwhile still reaches the browser."""
+    up = realtime["up"]
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws, spoken_meeting=False)
+        up.start(("k1", "A"))
+        up.inbox.append({"type": "response.output_audio_transcript.done", "transcript": "One moment."})
+        while True:
+            event = ws.receive_json()
+            if event.get("type") == "response.output_audio_transcript.done":
+                break
+        assert up.answers() == [], "seen while the look-up is still running"
+        realtime["release"]("A")

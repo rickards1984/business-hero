@@ -43,3 +43,25 @@ OpenAI fell only $2; both faults are 400/refusals, not quota errors.
 - `test_board_meeting_voice.py`: BM-5 section, 7 tests.
 - `test_board_meeting_ai.py`: BM-5 section, 7 tests.
 - Every fix was mutation-checked: removing it fails a test.
+
+## Codex review 1 — CHANGES REQUESTED (5 findings), all fixed
+
+1. **Interruptions.**
+   - Aria is never asked to go on while the owner is talking, or while any
+     reply is running.
+   - Her request carries an `event_id`. If OpenAI refuses it, she still owes
+     the answers and goes on after the other reply.
+   - If the owner stops and no reply follows, she still goes on (1.5 s).
+   - Ordinary voice now runs look-ups beside the stream too, so the owner
+     cutting in is seen.
+   - The tests use `_RealtimeLike`: one reply at a time, and an overlapping
+     request is refused, as OpenAI does.
+2. **Finishing grace at the limit** covers look-ups still running and Aria's
+   reply with their answers.
+3. **Flush** waits (bounded) for that reply and its saved transcript. It is
+   not ok while she still owes the answers.
+4. **No double charge.** `profit_guard.wrap_create` no longer estimates a cost
+   for a 400 (refused as written, never billed). A retried meeting turn is
+   recorded once, tested through the real hook.
+5. **Tests are not timing-dependent.** Look-ups are held behind explicit
+   events and released by the test.
