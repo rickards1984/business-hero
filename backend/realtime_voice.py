@@ -990,6 +990,15 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                     return
 
     responding = False   # Aria is mid-reply (BM-2: she may finish at the limit)
+    # BM-5 (Mike's logs, 8 Nov 17:35): one reply can ask for several look-ups.
+    # Each answer used to send its own response.create, while the reply that
+    # asked was still running: OpenAI refused the second ("conversation
+    # already has an active response") and the conversation lost its place.
+    # Now Aria is asked to go on ONCE, after that reply has finished and every
+    # look-up it asked for is answered.
+    tool_turn = {"open": set(), "owed": False}
+    tool_lock = asyncio.Lock()
+    tally = {"responses": 0, "failed": 0, "owner_turns": 0, "tool_calls": 0}
     playback_until = 0.0  # when the browser will have played the audio sent so far
     turns: asyncio.Queue = asyncio.Queue()
     turn_writer = None
@@ -1228,13 +1237,29 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                 _logger.warning(f"Tool {name} timed out after 25s")
                 return json.dumps({"error": f"Tool {name} timed out. Please try again."})
 
+        async def _continue_after_tools():
+            """BM-5: one response.create, once the reply that asked for the
+            look-ups is done and every one of them has its answer."""
+            async with tool_lock:
+                if tool_turn["owed"] and not tool_turn["open"] and not responding:
+                    tool_turn["owed"] = False
+                    await openai_ws.send(json.dumps({"type": "response.create"}))
+
         async def _reply_to_tool(call_id, name, arguments):
-            result = await _answer_tool(name, arguments)
-            await openai_ws.send(json.dumps({
-                "type": "conversation.item.create",
-                "item": {"type": "function_call_output", "call_id": call_id, "output": result},
-            }))
-            await openai_ws.send(json.dumps({"type": "response.create"}))
+            try:
+                try:
+                    result = await _answer_tool(name, arguments)
+                except Exception:
+                    # Every call gets an answer, or the model waits for it forever.
+                    _logger.exception("Tool %s failed", name)
+                    result = json.dumps({"error": "That could not be looked up just now."})
+                await openai_ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "function_call_output", "call_id": call_id, "output": result},
+                }))
+            finally:
+                tool_turn["open"].discard(call_id)
+            await _continue_after_tools()
 
         async def _meeting_tool(name: str, arguments: dict) -> str:
             """BM-3: only the ledger look-ups, only this business, bounded."""
@@ -1268,8 +1293,22 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                     if event_type == "response.created":
                         responding = True
                         aria_spoke_at = _dt.now(_tz.utc)
+                        tally["responses"] += 1
                     elif event_type == "response.done":
                         responding = False
+                        reply = event.get("response") or {}
+                        if reply.get("status") in ("failed", "incomplete"):
+                            # BM-5: a reply that fails says so nowhere else; the
+                            # owner heard silence and the logs showed nothing.
+                            tally["failed"] += 1
+                            _logger.warning("Aria's spoken reply %s: %s", reply.get("status"),
+                                            json.dumps(reply.get("status_details"), default=str))
+                            if reply.get("status") == "failed":
+                                await websocket.send_json({"type": "error", "message":
+                                    "Aria couldn't answer just then. Please say that again."})
+                        await _continue_after_tools()
+                    elif event_type == "conversation.item.input_audio_transcription.completed":
+                        tally["owner_turns"] += 1
                     elif event_type == "response.output_audio.delta":
                         # PCM16 mono at 24 kHz: 48,000 bytes a second, played
                         # from when it arrives or when the previous audio ends.
@@ -1289,6 +1328,8 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                                                       aria_spoke_at or _dt.now(_tz.utc))))
                     if event_type == "error":
                         _logger.error(f"OpenAI Realtime API error: {json.dumps(event)}")
+                        if (event.get("error") or {}).get("code") == "conversation_already_has_active_response":
+                            continue   # harmless to the owner; not shown as an error on screen
                     if event_type == "response.function_call_arguments.done":
                         call_id = event.get("call_id")
                         name = event.get("name")
@@ -1297,6 +1338,9 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                         except json.JSONDecodeError:
                             arguments = {}
                         _logger.info(f"Tool call received: {name}")
+                        tally["tool_calls"] += 1
+                        tool_turn["open"].add(call_id)
+                        tool_turn["owed"] = True
                         if meeting_id:
                             # BM-3 (Codex review 5): a ledger look-up runs beside
                             # the stream, so transcriptions keep being read and
@@ -1456,3 +1500,5 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         # the handler ends here either way, so there is nothing left for it
         # to stop and it is not re-raised.
         _logger.info("Connection closed%s", " (after a further cancellation)" if cancelled_again else "")
+        _logger.info("[Voice summary] replies=%d failed=%d owner_turns=%d look_ups=%d", tally["responses"],
+                     tally["failed"], tally["owner_turns"], tally["tool_calls"])

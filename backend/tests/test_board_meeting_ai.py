@@ -167,3 +167,92 @@ def test_end_meeting_charges_the_summary_to_the_business(model, monkeypatch):
     except Exception:
         pass
     assert seen == ["biz-9"]
+
+
+# ---- BM-5: gpt-5.5 refuses tools with a reasoning effort (8 Nov 17:42) -----
+
+class ToolStrictModel(StrictReasoningModel):
+    """gpt-5.5's 400: function tools with a reasoning effort other than none."""
+
+    def __init__(self, refuse=True):
+        super().__init__()
+        self.refuse = refuse
+
+    async def create(self, **kwargs):
+        self.sent.append(dict(kwargs))
+        if self.refuse and kwargs.get("tools") and kwargs.get("reasoning_effort") not in (None, "none"):
+            raise RuntimeError("Error code: 400 - Function tools with reasoning_effort are not supported for "
+                               "gpt-5.5 in /v1/chat/completions. To use function tools, use /v1/responses "
+                               "or set reasoning_effort to 'none'.")
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Here it is."),
+                                                        finish_reason="stop")],
+                               usage=SimpleNamespace(total_tokens=7))
+
+
+async def _no_tool(name, arguments):
+    return "{}"
+
+
+def _ask(fake, monkeypatch, name):
+    monkeypatch.setattr(orch, "_get_async_client", lambda: fake)
+    monkeypatch.setattr(profit_guard, "permits", lambda purpose: True)
+    monkeypatch.setattr(orch, "EXECUTIVE_MEETING_AI_MODEL", name)
+    monkeypatch.setattr(orch, "_TOOLS_REFUSE_REASONING", set())
+    return asyncio.run(orch._gpt_chat_completion(
+        messages=[{"role": "user", "content": "What came in last week?"}], business_id="b",
+        tools=[{"type": "function", "function": {"name": "ledger_summary", "parameters": {}}}],
+        run_tool=_no_tool))
+
+
+@pytest.mark.parametrize("name", ["gpt-5.5", "gpt-5.1", "ft:gpt-5.5:org::x"])
+def test_a_typed_turn_with_look_ups_is_answered_on_gpt_5_5(monkeypatch, name):
+    fake = ToolStrictModel()
+    assert _ask(fake, monkeypatch, name) == ("Here it is.", 7)
+    assert len(fake.sent) == 1, "asked correctly first time: no wasted call"
+    assert fake.sent[0]["reasoning_effort"] == "none" and fake.sent[0]["tools"]
+
+
+def test_gpt_5_keeps_its_low_reasoning_with_look_ups(monkeypatch):
+    fake = ToolStrictModel(refuse=False)
+    _ask(fake, monkeypatch, "gpt-5")
+    assert fake.sent[0]["reasoning_effort"] == "low"
+
+
+def test_another_model_that_refuses_is_asked_again_and_remembered(monkeypatch):
+    fake = ToolStrictModel()
+    assert _ask(fake, monkeypatch, "o4-mini")[0] == "Here it is."
+    assert [s["reasoning_effort"] for s in fake.sent] == ["low", "none"]
+    fake.sent.clear()
+    asyncio.run(orch._gpt_chat_completion(
+        messages=[{"role": "user", "content": "And the week before?"}], business_id="b",
+        tools=[{"type": "function", "function": {"name": "ledger_summary", "parameters": {}}}],
+        run_tool=_no_tool))
+    assert [s["reasoning_effort"] for s in fake.sent] == ["none"]
+
+
+def test_other_failures_are_not_retried(monkeypatch):
+    fake = ToolStrictModel(refuse=False)
+
+    async def broken(**kwargs):
+        fake.sent.append(kwargs)
+        raise RuntimeError("Error code: 429 - rate limit")
+    fake.chat.completions.create = broken
+    assert _ask(fake, monkeypatch, "gpt-5")[0] is None
+    assert len(fake.sent) == 1
+
+
+def test_the_final_answer_round_without_tools_keeps_its_reasoning(monkeypatch):
+    """Once the look-ups are used up the last call offers no tools; it may reason."""
+    fake = ToolStrictModel()
+    calls = iter([True] * orch.MAX_TOOL_ROUNDS + [False])
+
+    async def create(**kwargs):
+        fake.sent.append(dict(kwargs))
+        call = SimpleNamespace(id="c", function=SimpleNamespace(name="ledger_summary", arguments="{}"))
+        message = SimpleNamespace(content="Done.", tool_calls=[call] if next(calls) else None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")],
+                               usage=SimpleNamespace(total_tokens=1))
+    fake.chat.completions.create = create
+    _ask(fake, monkeypatch, "gpt-5.5")
+    assert [s["reasoning_effort"] for s in fake.sent] == ["none"] * orch.MAX_TOOL_ROUNDS + ["low"]
+    assert "tools" not in fake.sent[-1]
