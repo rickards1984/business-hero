@@ -87,3 +87,5 @@ A look-up asked for by the provider's own reply to the owner, answered within
 the post-speech pause, left nobody to wake Aria when the pause ended. Now,
 whenever the pause is the only thing holding her back, a tracked timer wakes
 her when it ends. Tested in both modes; the test fails with the timer removed.
+
+**Codex review 4** (targeted, Mike's "Quick check, then PR"): review 3's finding resolved, none new. **APPROVE.**
