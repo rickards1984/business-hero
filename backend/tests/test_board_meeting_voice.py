@@ -1291,3 +1291,25 @@ def test_a_look_up_finishing_just_after_the_owner_stops_waits_for_their_reply(re
         assert _wait(lambda: len(up.accepted) == 1)
     assert up.refused == []
 
+
+
+# ---- Codex BM-5 review 3 ---------------------------------------------------
+
+@pytest.mark.parametrize("spoken_meeting", [True, False])
+def test_a_quick_look_up_right_after_the_owner_speaks_is_still_answered(realtime, monkeypatch, spoken_meeting):
+    """The owner stops; the provider's reply to them asks for a look-up that is
+    answered, and that reply ends, all inside the pause: Aria is woken when
+    the pause ends."""
+    monkeypatch.setattr(realtime_voice, "CONTINUE_AFTER_SPEECH_SECONDS", 0.6)
+    up = realtime["up"]
+    realtime["release"]("A")
+    with realtime["client"].websocket_connect("/v1/realtime/voice") as ws:
+        _connect(ws, spoken_meeting)
+        up.inbox.extend([{"type": "input_audio_buffer.speech_started"},
+                         {"type": "input_audio_buffer.speech_stopped"}])
+        up.start(("k1", "A"))
+        up.finish()
+        assert _wait(lambda: up.answers() == ["k1"] and up.drained())
+        assert up.accepted == [], "inside the pause"
+        assert _wait(lambda: len(up.accepted) == 1, timeout=3)
+    assert up.refused == []

@@ -1265,11 +1265,15 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             """BM-5: one response.create, once the reply that asked for the
             look-ups is done and every one of them has its answer."""
             async with tool_lock:
+                ready = (tool_turn["owed"] and not tool_turn["open"] and not responding
+                         and not tool_turn["owner_speaking"] and tool_turn["asked"] is None)
                 # After the owner stops, the reply the provider starts for them
-                # comes first, whoever asks (Codex BM-5 review 2, finding 3).
-                if (tool_turn["owed"] and not tool_turn["open"] and not responding
-                        and not tool_turn["owner_speaking"] and tool_turn["asked"] is None
-                        and _time.monotonic() >= tool_turn["quiet_until"]):
+                # comes first, whoever asks (Codex BM-5 review 2, finding 3);
+                # held only by that pause, she is woken when it ends (review 3).
+                wait = tool_turn["quiet_until"] - _time.monotonic()
+                if ready and wait > 0:
+                    _wake_in(wait)
+                elif ready:
                     tool_turn["owed"] = False
                     tool_turn["seq"] += 1
                     tool_turn["asked"] = f"{CONTINUE_EVENT_PREFIX}{tool_turn['seq']}"
@@ -1284,6 +1288,11 @@ async def realtime_voice_endpoint(websocket: WebSocket):
             # If no reply follows the owner's words, Aria still goes on.
             await asyncio.sleep(seconds)
             await _continue_after_tools()
+
+        def _wake_in(seconds):
+            timer = asyncio.create_task(_continue_soon(seconds))
+            tool_turn["timers"].add(timer)
+            timer.add_done_callback(tool_turn["timers"].discard)
 
         async def _reply_to_tool(call_id, name, arguments):
             try:
@@ -1367,9 +1376,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
                         tool_turn["owner_speaking"] = False
                         tool_turn["quiet_until"] = _time.monotonic() + CONTINUE_AFTER_SPEECH_SECONDS
                         if tool_turn["owed"]:
-                            timer = asyncio.create_task(_continue_soon(CONTINUE_AFTER_SPEECH_SECONDS))
-                            tool_turn["timers"].add(timer)
-                            timer.add_done_callback(tool_turn["timers"].discard)
+                            _wake_in(CONTINUE_AFTER_SPEECH_SECONDS)
                     elif event_type == "response.output_audio.delta":
                         tool_turn["spoke"] = True
                         # PCM16 mono at 24 kHz: 48,000 bytes a second, played

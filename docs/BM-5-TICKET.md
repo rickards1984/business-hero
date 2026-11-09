@@ -80,3 +80,10 @@ OpenAI fell only $2; both faults are 400/refusals, not quota errors.
    Sending to a closing socket is caught. No test was kept for this: the test
    harness ends its event loop with the socket, so a surviving timer cannot be
    observed there (a test written for it passed with the fix removed).
+
+## Codex review 3 — all four review-2 findings resolved; 1 new finding, fixed
+
+A look-up asked for by the provider's own reply to the owner, answered within
+the post-speech pause, left nobody to wake Aria when the pause ended. Now,
+whenever the pause is the only thing holding her back, a tracked timer wakes
+her when it ends. Tested in both modes; the test fails with the timer removed.
