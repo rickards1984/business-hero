@@ -698,3 +698,63 @@ def test_before_launch_the_trial_budget_is_a_floor_a_small_subscription_never_re
     assert out["percent"] == 42
     monkeypatch.setenv("PROFIT_TRIAL_BUDGET_PENCE", "5000")      # subscriptions now larger: they count
     assert status(engine)["income_pence"] == 12900 and status(engine)["income_basis"] == "subscriptions"
+
+
+# ---- BM-5 (Codex BM-5 review 1, finding 4) ---------------------------------
+
+class _Refusal(Exception):
+    """What the OpenAI SDK raises for a 400: the request refused as written."""
+    status_code = 400
+
+
+def _meters(engine, business):
+    with engine.connect() as c:
+        return dict(c.execute(text("SELECT meter, value FROM usage_meters WHERE business_id = :b"),
+                              {"b": business}).fetchall())
+
+
+def test_a_request_refused_as_written_is_not_charged(engine, monkeypatch):
+    g = guard()
+    monkeypatch.setattr(g, "_engine", lambda: engine)
+
+    def refuses(*a, **k):
+        raise _Refusal("Function tools with reasoning_effort are not supported")
+    with g.attributed("biz-1", "meeting"), pytest.raises(_Refusal):
+        g.wrap_create(refuses)(model="gpt-5.5", messages=[{"role": "user", "content": "x" * 500}],
+                               max_completion_tokens=3000)
+    assert _meters(engine, "biz-1") == {}
+
+
+def test_a_meeting_turn_retried_without_reasoning_is_charged_once(engine, monkeypatch):
+    """Through the real recording hook: the refusal costs nothing, the retry
+    is recorded once, for the business, as a meeting."""
+    import asyncio
+    g = guard()
+    monkeypatch.setattr(g, "_engine", lambda: engine)
+    monkeypatch.setattr(g, "permits", lambda purpose: True)
+    from services import executive_meeting_orchestrator as orch
+    sent = []
+
+    async def create(**kwargs):
+        sent.append(kwargs.get("reasoning_effort"))
+        if kwargs.get("reasoning_effort") != "none":
+            raise _Refusal("Function tools with reasoning_effort are not supported for o4-mini")
+        return SimpleNamespace(model="o4-mini", usage=SimpleNamespace(prompt_tokens=1000, completion_tokens=200,
+                                                                     total_tokens=1200),
+                               choices=[SimpleNamespace(message=SimpleNamespace(content="Here.", tool_calls=None),
+                                                        finish_reason="stop")])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=g.wrap_create(create))))
+    monkeypatch.setattr(orch, "_get_async_client", lambda: client)
+    monkeypatch.setattr(orch, "EXECUTIVE_MEETING_AI_MODEL", "o4-mini")
+    monkeypatch.setattr(orch, "_TOOLS_REFUSE_REASONING", set())
+
+    async def no_tool(name, arguments):
+        return "{}"
+    content, tokens = asyncio.run(orch._gpt_chat_completion(
+        messages=[{"role": "user", "content": "x"}], business_id="biz-1",
+        tools=[{"type": "function", "function": {"name": "ledger_summary", "parameters": {}}}], run_tool=no_tool))
+    assert (content, tokens, sent) == ("Here.", 1200, ["low", "none"])
+    rows = _meters(engine, "biz-1")
+    calls = {k: v for k, v in rows.items() if k.startswith("ai_calls:")}
+    assert list(calls.values()) == [1] and all(":meeting:" in k + ":" for k in calls), rows
+    assert sum(v for k, v in rows.items() if k.startswith("ai_tokens_out:")) == 200, "no estimate for the refusal"

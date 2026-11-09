@@ -462,6 +462,13 @@ def _record_failure(kwargs) -> None:
     _record_call(str(kwargs.get("model") or "unknown"), None, None, kwargs)
 
 
+def _refused_unbilled(exc: BaseException) -> bool:
+    """A 400 is the provider refusing the request as written, before any
+    work: nothing is billed, so nothing is estimated (Codex BM-5 review 1,
+    finding 4: a known refusal retried at once was charged twice)."""
+    return getattr(exc, "status_code", None) == 400
+
+
 def _safely(fn, *args) -> None:
     try:
         fn(*args)
@@ -503,15 +510,17 @@ def wrap_create(fn, recorder=None):
         _refuse_if_paused()
         try:
             result = fn(*args, **kwargs)
-        except BaseException:
-            _safely(_record_failure, kwargs)
+        except BaseException as exc:
+            if not _refused_unbilled(exc):
+                _safely(_record_failure, kwargs)
             raise
         if inspect.isawaitable(result):
             async def finish():
                 try:
                     value = await result
-                except BaseException:
-                    _safely(_record_failure, kwargs)
+                except BaseException as exc:
+                    if not _refused_unbilled(exc):
+                        _safely(_record_failure, kwargs)
                     raise
                 _safely(recorder, value, kwargs)
                 return value

@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -78,6 +79,23 @@ def _is_reasoning_model(model: str) -> bool:
     temperature (BM-1); their chat variants take neither reasoning setting."""
     m = _base_model(model)
     return (m.startswith("gpt-5") or (len(m) > 1 and m[0] == "o" and m[1].isdigit())) and "-chat" not in m
+
+
+# BM-5 (Mike's logs, 8 Nov 17:42): gpt-5.5 refuses function tools alongside a
+# reasoning effort in Chat Completions ("set reasoning_effort to 'none'"), so
+# every typed meeting turn that offered the ledger look-ups failed. The newer
+# gpt-5.x models take "none"; any other model that refuses is learned here.
+_TOOLS_REFUSE_REASONING: set = set()
+
+
+def _tools_need_no_reasoning(model: str) -> bool:
+    m = _base_model(model)
+    return bool(re.match(r"gpt-5\.\d", m)) or m in _TOOLS_REFUSE_REASONING
+
+
+def _refuses_reasoning_with_tools(exc: Exception) -> bool:
+    text_ = str(exc).lower()
+    return "reasoning_effort" in text_ and ("tool" in text_ or "function" in text_)
 
 
 def _responses_only(model: str) -> bool:
@@ -506,9 +524,25 @@ async def _gpt_chat_completion(
             kwargs["tools"] = tools
         else:
             kwargs.pop("tools", None)
+        if "reasoning_effort" in kwargs:
+            kwargs["reasoning_effort"] = ("none" if offer and _tools_need_no_reasoning(EXECUTIVE_MEETING_AI_MODEL)
+                                          else "low")
         try:
-            with profit_guard.attributed(business_id, "meeting"):
-                response = await client.chat.completions.create(**kwargs)
+            try:
+                with profit_guard.attributed(business_id, "meeting"):
+                    response = await client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                if not (offer and kwargs.get("reasoning_effort") not in (None, "none")
+                        and _refuses_reasoning_with_tools(exc)):
+                    raise
+                # A model we did not know refuses the pair: ask once more without
+                # reasoning, and remember it for every later turn.
+                logger.warning("[ExecMeeting] %s refuses tools with reasoning; retrying with none",
+                               EXECUTIVE_MEETING_AI_MODEL)
+                _TOOLS_REFUSE_REASONING.add(_base_model(EXECUTIVE_MEETING_AI_MODEL))
+                kwargs["reasoning_effort"] = "none"
+                with profit_guard.attributed(business_id, "meeting"):
+                    response = await client.chat.completions.create(**kwargs)
         except Exception as exc:
             logger.exception("[ExecMeeting] GPT call failed: %s", exc)
             return None, tokens
