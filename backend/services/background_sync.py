@@ -80,7 +80,8 @@ def _sync_email_for_business(business_id: str):
                 select(EmailSyncState).where(EmailSyncState.email_account_id == account.id)
             ).first()
             if not sync_state:
-                sync_state = EmailSyncState(email_account_id=account.id, cursor={})
+                from services import email_sync_state
+                sync_state = email_sync_state.new(account.id)
                 session.add(sync_state)
                 session.commit()
                 session.refresh(sync_state)
