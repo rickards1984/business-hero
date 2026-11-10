@@ -96,13 +96,17 @@ def suppression_digest(business_id, kind, value):
 # OUT-24: an email's open card is found by its enrolment. The expression is
 # exactly migration 040's index, so PostgreSQL can use it; SQLite (tests) has
 # ->> from 3.38. Never load every open card to find one (OUT-8 note 2).
-OPEN_CARD_WHERE = ("AND action_type = 'send_outreach' AND status IN ('proposed', 'executing') "
+# "Open" is what the owner can still act on, as aria_actions.list_open shows
+# it: a proposed card not yet expired, or one being sent. An expired card
+# never blocks its replacement (Codex OUT-24 review 1, finding 1).
+_OPEN = "AND status IN ('proposed', 'executing') AND (status = 'executing' OR expires_at > :at) "
+OPEN_CARD_WHERE = ("AND action_type = 'send_outreach' " + _OPEN +
                    "AND (payload->>'enrolment_id') = :enrolment")
 
 
 def open_card(session, bid, enrolment_id, lock=False):
     """The open card for this email, or None."""
-    found = rows(session, 'aria_actions', bid, OPEN_CARD_WHERE, {'enrolment': str(enrolment_id)}, lock)
+    found = rows(session, 'aria_actions', bid, OPEN_CARD_WHERE, {'enrolment': str(enrolment_id), 'at': now()}, lock)
     return found[0] if found else None
 
 
@@ -110,7 +114,7 @@ def open_card_enrolments(session, bid):
     """Every enrolment with an open card, read as ids only (one query)."""
     return {str(r[0]) for r in session.execute(text(
         "SELECT payload->>'enrolment_id' FROM aria_actions WHERE business_id = :bid "
-        "AND action_type = 'send_outreach' AND status IN ('proposed', 'executing')"), {'bid': str(bid)})}
+        "AND action_type = 'send_outreach' " + _OPEN), {'bid': str(bid), 'at': now()})}
 
 
 def lock_business(session, bid):
@@ -173,14 +177,23 @@ def _safe_header(value):
     return value
 
 
-def build_payload(session, business, args, owner_name=None, timezone=None):
+def build_payload(session, business, args, owner_name=None, timezone=None, *, one_card=False):
     require(set(args) == {'campaign_id', 'enrolment_id', 'step_id'}, 'Only campaign, enrolment and step IDs are accepted', 422)
-    # OUT-24: the one place a card is made checks for an open one, under the
-    # business lock held to commit, so the morning preparation, the owner's
-    # prepare and the autopilot can never each make one for the same email.
-    lock_business(session, str(business.id))
-    require(open_card(session, str(business.id), args['enrolment_id'], True) is None,
-            'A card for this email is already waiting', 409)
+    if one_card:
+        # OUT-24: where a sequence email's card is made (aria_actions.propose),
+        # an open one is checked for under the business lock held to commit, so
+        # the morning preparation, the owner's prepare and the autopilot never
+        # each make one. Not for a reply's answer, which has its own slot
+        # (Codex OUT-24 review 1, finding 2). A card left to expire is marked so.
+        bid = str(business.id)
+        lock_business(session, bid)
+        session.execute(text(
+            "UPDATE aria_actions SET status = 'expired', updated_at = :at WHERE business_id = :bid "
+            "AND action_type = 'send_outreach' AND status = 'proposed' AND expires_at <= :at "
+            "AND (payload->>'enrolment_id') = :enrolment"),
+            {'bid': bid, 'at': now(), 'enrolment': str(args['enrolment_id'])})
+        require(open_card(session, bid, args['enrolment_id'], True) is None,
+                'A card for this email is already waiting', 409)
     c, e, s, p, b, a = _records(session, business, args)
     require(s['approved_by'] and s['approved_at'])
     require(hashlib.sha256(s['template_text'].encode()).hexdigest() == s['template_hash'])

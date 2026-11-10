@@ -29,3 +29,11 @@
   - the index exists with the lookup's exact definition;
   - two copied cards still send once.
 - **Mutation-checked:** without the guard, or without the business lock, the tests fail.
+
+## Codex review 1 — CHANGES REQUESTED (4), all fixed
+1. **An expired card blocked its replacement.** "Open" now means what the owner can act on, as `aria_actions.list_open` shows it: proposed and not expired, or executing. Where a card is made, a card left to expire is marked `expired` under the lock. Tests: replacement after expiry; the owner's prepare makes a fresh card instead of reporting the expired one.
+2. **The guard blocked a reply's answer.** It now runs only for sequence-email cards (`build_payload(..., one_card=True)` from `aria_actions.propose`). A reply's answer, with its own slot and idempotency, is unaffected. Test: the answer is drafted while a follow-up card is executing.
+3. **The rollback was unbounded.** It is now one block with the same 5 s lock and 60 s statement limits, and a note on what a timeout means. It was rehearsed on the local harness.
+4. **STEP 3's EXPECT** now distinguishes each day's intake, still bounded by the inbox, from the campaign total, which can now pass 5.
+
+All four are mutation-checked.

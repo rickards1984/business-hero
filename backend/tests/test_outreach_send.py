@@ -209,7 +209,7 @@ class LocalActions:
 
     def propose(self, session, business, user_id, action_type, args, **kwargs):
         try:
-            payload = self.module.build_payload(session, business, args, kwargs.get('owner_name'))
+            payload = self.module.build_payload(session, business, args, kwargs.get('owner_name'), one_card=True)
         except self.ActionRefused as exc:
             session.rollback()
             return {'error': exc.detail}

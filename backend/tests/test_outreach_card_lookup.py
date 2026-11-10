@@ -28,6 +28,15 @@ def no_pilot_limit(monkeypatch):
     monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", "0")
 
 
+@pytest.fixture(autouse=True)
+def the_research_day(monkeypatch):
+    """Cards are made on the research harness's day (NOW); whether one is
+    still open is judged on that day too."""
+    from services import aria_actions, outreach_send
+    monkeypatch.setattr(outreach_send, "now", lambda: NOW)
+    monkeypatch.setattr(aria_actions, "now", lambda: NOW)
+
+
 def _enrolment(db):
     with Session(db) as s:
         return s.execute(text("SELECT id, campaign_id, next_step, sequence_version FROM outreach_enrolments "
@@ -159,3 +168,53 @@ def test_migration_040_indexes_exactly_the_lookup_s_expression():
     assert "(payload->>'enrolment_id')" in outreach_send.OPEN_CARD_WHERE
     assert "action_type = 'send_outreach'" in outreach_send.OPEN_CARD_WHERE
     assert re.search(r"lock_timeout", sql), "the index waits a bounded time for its lock"
+
+
+# ------------------------------------------------- Codex OUT-24 review 1 ---
+
+def test_a_card_left_to_expire_does_not_block_its_replacement(db):
+    """Finding 1: an unattended card passes its expiry still 'proposed'."""
+    from services import aria_actions
+    biz, brand, lia, campaign = started(db)
+    run(db, biz, lia, World([[person(1)]]))
+    e = _enrolment(db)
+    with db.begin() as c:
+        c.execute(text("UPDATE aria_actions SET expires_at = :past WHERE business_id = :b"),
+                  {"b": A, "past": NOW.replace(year=NOW.year - 1)})
+    with Session(db) as s:
+        made = aria_actions.propose(s, biz, None, "send_outreach", _step_args(db, e))
+    assert "proposal" in made, made
+    with Session(db) as s:
+        statuses = sorted(r[0] for r in s.execute(text("SELECT status FROM aria_actions WHERE business_id = :b"),
+                                                  {"b": A}))
+    assert statuses == ["expired", "proposed"]
+
+
+def test_a_reply_s_answer_is_drafted_even_while_a_sequence_card_is_open(db):
+    """Finding 2: the answer to a reply has its own slot and idempotency; an
+    executing follow-up card must not block it."""
+    from services import outreach_send
+    biz, brand, lia, campaign = started(db)
+    run(db, biz, lia, World([[person(1)]]))
+    e = _enrolment(db)
+    with db.begin() as c:
+        c.execute(text("UPDATE aria_actions SET status = 'executing' WHERE business_id = :b"), {"b": A})
+    with Session(db) as s:
+        payload = outreach_send.build_payload(s, biz, _step_args(db, e))   # the reply path's call
+        s.rollback()
+    assert payload["enrolment_id"] == str(e.id)
+
+
+def test_the_owner_s_prepare_replaces_a_card_left_to_expire(db):
+    """Finding 1, the owner's side: an expired card is not reported as the
+    one waiting; a fresh card is made."""
+    from services import outreach_manage
+    import test_outreach_setup as setup_tests
+    biz, brand, lia, campaign = started(db)
+    run(db, biz, lia, World([[person(1)]]))
+    with db.begin() as c:
+        c.execute(text("UPDATE aria_actions SET expires_at = :past WHERE business_id = :b"),
+                  {"b": A, "past": NOW.replace(year=NOW.year - 1)})
+    with Session(db) as s:
+        out = outreach_manage.prepare(s, biz, setup_tests.OWNER, str(campaign["id"]), {})
+    assert out["existing"] == [] and len(out["raised"]) == 1, out

@@ -79,12 +79,20 @@ FROM pg_indexes WHERE indexname = 'idx_aria_actions_outreach_enrolment';
 
 ## ROLLBACK (staging rehearsal only, or if told to)
 
+Run this as one block. Like STEP 1, it waits at most 5 seconds for its lock, so it can never queue other work behind it (Codex OUT-24 review 1, finding 3).
+
 ```sql
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 DROP INDEX IF EXISTS public.idx_aria_actions_outreach_enrolment;
+COMMIT;
 SELECT to_regclass('public.idx_aria_actions_outreach_enrolment') AS gone;
 ```
 
 **EXPECT:** `gone` **NULL**. Nothing else depends on the index; the code works without it, only more slowly.
+
+**If it says `canceling statement due to lock timeout`:** nothing changed, and the index is still there. Check with `SELECT to_regclass('public.idx_aria_actions_outreach_enrolment');`, which should return the name. Run the block again in a quiet minute.
 
 ---
 
@@ -102,4 +110,8 @@ Railway redeploys by itself.
 
 **To put a limit back:** set the variable to a number, for example `20`. Removing the variable returns it to 5.
 
-**EXPECT:** at the next morning's research run (weekdays from 06:00), the research summary keeps more than 5 contacts once the inbox has room, and the campaign shows more than 5 active.
+**EXPECT** (Codex OUT-24 review 1, finding 4: the limit was on the **total** in a campaign, not each day's intake):
+- Each morning's research still keeps at most what the inbox can email that day: 5 a day at first, less any follow-ups due and contacts still waiting for their first email.
+- What changes is the **total**. Within a few days the campaign shows **more than 5 active contacts**, where before it stopped at 5 until sequences finished.
+- **Before:** day 1 adds 5, and days 2 onwards add 0.
+- **After:** day 1 adds 5, and following days keep adding while the inbox has room.
