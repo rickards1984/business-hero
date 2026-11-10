@@ -79,7 +79,7 @@ FROM pg_indexes WHERE indexname = 'idx_aria_actions_outreach_enrolment';
 
 ## ROLLBACK (staging rehearsal only, or if told to)
 
-Run this as one block. Like STEP 1, it waits at most 5 seconds for its lock, so it can never queue other work behind it (Codex OUT-24 review 1, finding 3).
+Run this as one block. Like STEP 1, it waits at most 5 seconds for its lock, so other work can queue behind it for no more than those 5 seconds (Codex OUT-24 reviews 1 and 2).
 
 ```sql
 BEGIN;

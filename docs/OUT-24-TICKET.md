@@ -37,3 +37,5 @@
 4. **STEP 3's EXPECT** now distinguishes each day's intake, still bounded by the inbox, from the campaign total, which can now pass 5.
 
 All four are mutation-checked.
+
+**Codex review 2:** all four resolved, none new. **APPROVE.** Its note that the rollback can briefly queue other work (up to the 5 s lock wait) is now stated in the runbook.
