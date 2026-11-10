@@ -375,7 +375,10 @@ class EmailSyncState(SQLModel, table=True):
     last_sync_token: Optional[str] = None
     last_history_id: Optional[str] = None
     last_synced_at: Optional[datetime] = None
-    sync_status: Optional[str] = None
+    # EM-1: NOT NULL DEFAULT 'idle' in production. Leaving it None made every
+    # new mailbox's first sync fail (Mike's logs, 8 Nov 17:08): the ORM sends
+    # the None explicitly, so the column default never applies.
+    sync_status: str = "idle"
     last_error: Optional[str] = None
     error_message: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
