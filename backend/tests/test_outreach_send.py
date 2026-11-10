@@ -281,6 +281,18 @@ def propose(h, **changes):
     return result['proposal']
 
 
+def copy_card(h, card):
+    """A second open card for the same email. OUT-24 refuses to make one, so
+    the send path's own defences are tested on a copy, as a card made before
+    that guard would be."""
+    aid = str(uuid.uuid4())
+    h.s.execute(text('INSERT INTO aria_actions (id, business_id, proposed_by, action_type, payload, status, '
+                     'expires_at, created_at) SELECT :id, business_id, proposed_by, action_type, payload, status, '
+                     'expires_at, created_at FROM aria_actions WHERE id = :src'), {'id': aid, 'src': card['id']})
+    h.s.commit()
+    return dict(card, id=aid)
+
+
 def approve(h, card, **kwargs):
     return h.a.approve(h.s, h.b, card['id'], kwargs.get('user_id', OWNER),
                        version=kwargs.get('version', card['version']))
@@ -874,7 +886,11 @@ def test_claim_without_fresh_search_receipt_fails_closed(h):
 
 
 def test_duplicate_logical_cards_cannot_reserve_twice(h):
-    first, second = propose(h), propose(h)
+    first = propose(h)
+    again = h.a.propose(h.s, h.b, OWNER, 'send_outreach',
+                        dict(campaign_id=CAMPAIGN, enrolment_id=ENROLMENT, step_id=STEP), owner_name='Owner')
+    assert 'already' in again.get('error', ''), again          # OUT-24: never made
+    second = copy_card(h, first)                                 # and if one exists, it still sends once
     assert first['preview']['idempotency_key'] == second['preview']['idempotency_key']
     assert approve(h, first)['status'] == 'done'
     with pytest.raises(h.a.ActionRefused):
@@ -933,7 +949,9 @@ def test_acceptance_projection_failure_holds_unknown_without_retry(h, monkeypatc
 def test_exact_address_digest_cannot_be_replaced_by_old_verification(h):
     card = propose(h)
     change(h, 'outreach_prospects', email='replacement@example.invalid')
-    # Even a fresh proposal cannot turn evidence about the old email into valid evidence.
+    # Even a fresh proposal cannot turn evidence about the old email into valid
+    # evidence. (OUT-24: the old card is dismissed first; two never wait at once.)
+    change(h, 'aria_actions', status='dismissed')
     replacement = propose(h)
     assert replacement['version'] != card['version']
     refused(h, replacement)
@@ -998,7 +1016,8 @@ def test_fifth_accepted_day_promotes_ten_but_unknown_does_not(h):
 
 
 def test_unsubscribe_cancels_all_unclaimed_cards_for_same_tenant_prospect(h):
-    cards = [propose(h), propose(h)]
+    first = propose(h)
+    cards = [first, copy_card(h, first)]
     token = cards[0]['preview']['headers']['List-Unsubscribe'].strip('<>').rsplit('/', 1)[-1]
     h.m.unsubscribe(h.s, token=token, method='POST')
     assert h.s.execute(text('SELECT status FROM aria_actions WHERE business_id=:b'), {'b': A}).scalars().all() == ['dismissed', 'dismissed']

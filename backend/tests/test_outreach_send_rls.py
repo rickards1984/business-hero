@@ -205,8 +205,31 @@ def test_two_taps_on_one_card_at_once_send_once(pg):
     assert _count(pg, "SELECT count(*) FROM outreach_usage_events WHERE business_id = :b", b=A) == 1
 
 
+def _duplicate(pg, card):
+    """A second open card for the same email. OUT-24 refuses to make one, so
+    this copies the first, as a card made before that guard would be: the send
+    path must still send once."""
+    ident = str(uuid.uuid4())
+    with pg.engine.begin() as c:
+        c.execute(text("INSERT INTO aria_actions (id, business_id, proposed_by, action_type, payload, status, "
+                       "created_at, updated_at, expires_at) SELECT :id, business_id, proposed_by, action_type, "
+                       "payload, status, created_at, updated_at, expires_at FROM aria_actions WHERE id = :src"),
+                  {"id": ident, "src": card["id"]})
+    return dict(card, id=ident)
+
+
+def test_a_second_card_for_the_same_email_is_refused(pg):
+    """OUT-24: made where cards are made, under the business lock."""
+    _propose(pg)
+    with Session(pg.engine) as s:
+        out = pg.a.propose(s, pg.b, OWNER, "send_outreach",
+                           dict(campaign_id=CAMPAIGN, enrolment_id=ENROLMENT, step_id=STEP), owner_name="Owner")
+    assert "already" in out.get("error", "").lower(), out
+
+
 def test_two_cards_for_the_same_email_at_once_send_once(pg):
-    first, second = _propose(pg), _propose(pg)
+    first = _propose(pg)
+    second = _duplicate(pg, first)
     results, errors = _together(pg, lambda: _approve(pg, first), lambda: _approve(pg, second))
     assert len(pg.p.sends) == 1, (results, errors)
     assert _count(pg, "SELECT count(*) FROM outreach_dispatch_jobs WHERE business_id = :b", b=A) == 1
@@ -374,3 +397,50 @@ def test_an_automatic_send_under_the_owners_permission_on_postgres(pg):
                              {"id": out["sent"]}).scalar()
     assert approved_by is None and payload["automation"] == "outreach_autopilot"
     assert snapshot["automation"] == "outreach_autopilot" and snapshot["granted_by"] == OWNER
+
+
+def test_two_cards_asked_for_at_once_make_one(pg):
+    """OUT-24: the morning preparation, the owner's prepare and the autopilot
+    asking for the same email's card at the same moment make exactly one,
+    and the refused attempt leaves no unsubscribe token behind."""
+    gate = threading.Barrier(2)
+    original = pg.m.open_card
+
+    def gated(session, bid, enrolment_id, lock=False):
+        if lock:
+            try:
+                gate.wait(2)      # both reach the check together; the lock decides
+            except threading.BrokenBarrierError:
+                pass              # the second waits on the first's lock: that is the point
+        return original(session, bid, enrolment_id, lock)
+    pg.m.open_card = gated
+    outcomes = []
+
+    def ask():
+        with Session(pg.engine) as s:
+            outcomes.append(pg.a.propose(s, pg.b, OWNER, "send_outreach",
+                                         dict(campaign_id=CAMPAIGN, enrolment_id=ENROLMENT, step_id=STEP),
+                                         owner_name="Owner"))
+    threads = [threading.Thread(target=ask) for _ in range(2)]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(20)
+    finally:
+        pg.m.open_card = original
+    assert sorted("proposal" in o for o in outcomes) == [False, True], outcomes
+    assert _count(pg, "SELECT count(*) FROM aria_actions WHERE business_id = :b AND action_type = 'send_outreach' "
+                      "AND status = 'proposed'", b=A) == 1
+    assert _count(pg, "SELECT count(*) FROM outreach_unsubscribe_tokens WHERE business_id = :b", b=A) == 1
+
+
+def test_the_card_lookup_can_use_migration_040_s_index(pg):
+    """Informational on a small table (the planner may scan); asserts only that
+    the index exists with the lookup's exact expression and predicate."""
+    with pg.engine.connect() as c:
+        definition = c.execute(text("SELECT indexdef FROM pg_indexes WHERE indexname = "
+                                    "'idx_aria_actions_outreach_enrolment'")).scalar()
+    if definition is None:
+        pytest.skip("migration 040 is not applied in the local harness")
+    assert "(payload ->> 'enrolment_id'::text)" in definition and "action_type = 'send_outreach'::text" in definition
