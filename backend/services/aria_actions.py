@@ -410,7 +410,7 @@ def _build(session, business, action_type: str, args: dict, owner_name, tz_name)
         return _event_payload(args, tz_name)
     if action_type == "send_outreach":
         from services import outreach_send
-        return outreach_send.build_payload(session, business, args, owner_name=owner_name)
+        return outreach_send.build_payload(session, business, args, owner_name=owner_name, one_card=True)
     return _task_payload(args)
 
 

@@ -208,10 +208,7 @@ def claim_pace(session, bid: str, at: datetime) -> None:
 
 
 def _due_enrolment(session, bid: str, campaign_id: str, moment: datetime):
-    open_for = set()
-    for action in send.rows(session, "aria_actions", bid,
-                            "AND action_type = 'send_outreach' AND status IN ('proposed', 'executing')"):
-        open_for.add(str((send.loads(action["payload"]) or {}).get("enrolment_id")))
+    open_for = send.open_card_enrolments(session, bid)   # OUT-24: ids only, one query
     for e in send.rows(session, "outreach_enrolments", bid,
                        "AND campaign_id = :c AND state = 'active' AND takeover_at IS NULL ORDER BY next_due_at, id",
                        {"c": campaign_id}):

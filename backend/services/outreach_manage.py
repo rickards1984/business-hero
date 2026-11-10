@@ -230,8 +230,7 @@ def prepare(session, business, user, ident, data):
             send.require(e['sequence_version'] == c['sequence_version'], 'Enrolment sequence version is stale')
             p = send.one(session, 'outreach_prospects', business.id, e['prospect_id'], True)
             qualified(session, business.id, c, p)
-            cards = send.rows(session, 'aria_actions', business.id, "AND action_type='send_outreach' AND status IN ('proposed','executing')", lock=True)
-            card = next((a for a in cards if str(send.loads(a['payload']).get('enrolment_id')) == eid), None)
+            card = send.open_card(session, business.id, eid, lock=True)   # OUT-24: by its enrolment
             if card:
                 payload = send.loads(card['payload'])
                 result['existing'].append({'id': str(card['id']), 'status': card['status'], 'preview': payload, 'version': aria_actions.version_of(payload)})

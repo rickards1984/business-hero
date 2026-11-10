@@ -1210,12 +1210,11 @@ def _prepare_cards(session, business, prospect_ids: list) -> list:
     for pid in prospect_ids:
         rows = send.rows(session, "outreach_enrolments", bid, "AND prospect_id = :p AND state = 'active'", {"p": pid})
         session.rollback()
-        open_for = {str((send.loads(a["payload"]) or {}).get("enrolment_id")) for a in send.rows(
-            session, "aria_actions", bid, "AND action_type = 'send_outreach' AND status IN ('proposed', 'executing')")}
-        session.rollback()
         for e in rows:
-            if str(e["id"]) in open_for:
+            if send.open_card(session, bid, e["id"]) is not None:   # OUT-24: indexed, by its enrolment
+                session.rollback()
                 continue
+            session.rollback()
             # OUT-11: a campaign Aria may send by herself gets no card — a
             # waiting card would block her (she never sends over one).
             held, _ = outreach_autopilot.valid_grant(session, business, str(e["campaign_id"]))

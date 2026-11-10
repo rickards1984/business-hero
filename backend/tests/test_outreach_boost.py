@@ -325,9 +325,11 @@ def test_the_monthly_allowance_uses_the_boosted_limit(h):
     first, following, weekdays = metering.month_bounds(date.fromisoformat(day(0)))
     # 200 of the month's history already count; fill the rest of 20 x weekdays
     sent_today(h, 20 * weekdays, BRAND, day=first.isoformat())
-    refused_today(h, propose(h), 20 * weekdays)
+    card = propose(h)
+    refused_today(h, card, 20 * weekdays)
     do_boost(h)
-    assert approve(h, propose(h))["status"] == "done"
+    # OUT-24: the same waiting card is approved; a second is never made.
+    assert approve(h, card)["status"] == "done"
 
 
 def test_a_providers_own_limit_always_binds(h):
