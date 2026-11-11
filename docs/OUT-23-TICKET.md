@@ -24,6 +24,149 @@ Each part is its own PR.
 
 ---
 
+## Part A design, revision 4 (11 Nov 2026) — APPROVED by Codex design review 5 — answers `audits/OUT-23-CODEX-DESIGN-REVIEW-3.md`
+
+Mike chose "fix, quick check, then build". Revision 4 supersedes revision 3 where they differ; B1, B3 and B6 stand.
+
+**R4.1 The drain has its own budget, separate from research's quota and from bank sizing (finding 1).** `outreach_bank.drain_budget(session, bid, moment)` is built from **send-use accounting only**:
+- today's sends: reserved, committed and unknown usage events;
+- follow-ups due by the end of today;
+- step-0 enrolments not yet claimed;
+- the pilot limit's members.
+
+**Banked and review-held prospects are never counted as use.** `capacity()` keeps its research role and is not used by the drain.
+
+**Allocation is per candidate:** for each banked contact, oldest first, the drain takes one place in a matching campaign only if every bound in R4.2 has room. A campaign with no qualifying candidates therefore takes no inbox capacity. A same-day test covers research banking 25 at 06:00 and the 07:00 drain enrolling 5 into a 5-a-day inbox.
+
+**R4.2 One commitment ledger, every bound (finding 2).** Each queued, unreserved item (a follow-up due today, or a step-0 enrolment not yet claimed) counts **once** against **every** bound it will use. Reserved and unknown usage already counts as a send and is not added again.
+
+| Bound | Starting balance |
+|---|---|
+| campaign | `daily_cap` (boosted) less sends today less queued |
+| inbox, cold | `mailbox_daily_cap` less cold sends today less queued on the inbox |
+| inbox, total (replies included) | `reply_headroom()["left"]` less queued on the inbox; **0 if `blocked`** (today's check not yet passed) |
+| brand, daily | the send path's brand limit, **exactly** `outreach_boost.follow(min(20, business_daily_cap), outreach_boost.brand_level(...))` as `metering._cold_limits` (an owner cap left at 20 rises with a boost; a lower one binds), less brand sends and queued |
+| brand, monthly | daily limit × weekdays (as `_cold_limits`) less this month's cold sends less the brand's queued |
+
+Every new enrolment decrements all five. Tests: each bound alone; combined limits (replies at 39 of 40 with one waiting means no new enrolment; one monthly place with a follow-up due means none); repeated hourly passes without double counting.
+
+These are scheduling allocations, not reservations. A later reply or a change of authority can still make a send refuse, and the contact then waits, or is erased at its deadline by OUT-13 core.
+
+**R4.3 Cards prepared independently (finding 3).** Every hourly pass calls `prepare_due_cards` for **every business with due active enrolments** (one indexed query), whatever its bank, research toggle or new placements. It runs outside any drain transaction and is retryable; autopilot grants are still skipped, as `_prepare_cards` does today. Tests cover a crash between the drain's commit and preparation, an empty bank, research off, a later follow-up, and an autopilot grant revoked.
+
+**R4.4 Deterministic allocation for the bank's size (finding 4).**
+- The brand limit is the send path's own: `follow(min(20, business_daily_cap), brand_level)`, as in R4.2 (Codex design review 4). Tests: a boosted brand with the default 20 (30 places); a lower owner cap still binding.
+- For bank sizing only, each inbox's cap is water-filled across its campaigns. Each round gives every campaign with remaining demand an equal integer share; the remainder goes to the oldest campaigns. It is clipped by the campaign's cap and by the brand's remaining limit **across all its inboxes**, and repeated until nothing changes.
+- Tests: multiple inboxes, a shared inbox, a lower owner cap, and redistribution after a brand binds.
+
+**R4.5 Held stock versus drainable stock (finding 5).**
+- `bank_room = target − drainable − waiting`, where *drainable* means at least 5 days before its deadline.
+- Contacts inside the margin are shown as "held", still erased at the deadline by OUT-13 core, and never block replenishment.
+- Tests: a bank entirely inside the margin is replenished; a brand-new contact (28 days left) drains at once, since the rule is 5 days *remaining*, not a 5-day wait.
+
+**R4.6 Review-held contacts: deferred, stated plainly (finding 6).**
+- There is **no** existing operation that makes a review-held contact sendable, and none is invented here. Review-held contacts are stored exactly as today (their own loop, which the existing test allows up to 20), never banked, drained or emailed, and erased at their deadline.
+- They count in the 40 a day.
+- Promoting a review-held contact, by re-verification with evidence, is a later ticket.
+- B3's qualification rule applies to eligible storage only.
+
+**R4.7 The drain's lock sequence (finding 7).**
+1. Resolve the business's active owner (`business_members`, role owner, active). With none, the business is skipped and logged.
+2. `outreach_manage.start(session, business, owner)` and `growth()`. These roll back first, then take the locks and re-read the business.
+3. Then, **with no further rollback** until commit: re-read pause, brand payment, campaigns, candidates and the R4.2 balances; enrol; commit.
+4. `plan()`, card preparation and every other helper that owns its rollback stay outside this phase.
+
+**Manual enrolment is unchanged.** "The only path in" means the only *automatic* placement from research.
+
+**Tests replaced:** the immediate-enrolment and card assertions in `test_outreach_research.py`, `test_outreach_research_capacity.py` and the PostgreSQL research test become research → drain → preparation.
+
+## Part A design, revision 3 (11 Nov 2026): built on OUT-13 core
+
+It answers `audits/OUT-23-CODEX-DESIGN-REVIEW-2.md`, and supersedes revision 2 where they differ. **OUT-13 core** (PR #95) now owns the deadline, hiding, erasure, interrupted claims and the re-collection guard. The bank uses its predicates and adds none of its own.
+
+| Review 2 finding | Answer |
+|---|---|
+| 1 Unsent contacts kept, failed messages | OUT-13 core erases every never-contacted contact (failed, cancelled, draft and proposed messages included); uncertain ones are owner-visible exceptions |
+| 2 Copies (cards of any status, tokens, outcomes, logs) | OUT-13 core R5/T7/T9; chats and memory by Mike's boundary |
+| 3 Cutoff on reads and manual enrolment | OUT-13 core R3 (every reader, browser clock) and `qualified()` |
+| 4 30 vs 28 days; follow-ups | OUT-13 core T1/T2: deadline = min(notice_due_at, captured + 28 days); follow-ups exempt |
+| 5 Drain budget versus send admission | **B4**: the drain is bounded by the send path's own limits |
+| 6 Research at 06:00 before the drain | **B3**: research only banks; the drain alone enrols |
+| 7 Card creation and autopilot | OUT-24: the one-card guard under the lock in `build_payload`; `_prepare_cards` gives an autopilot campaign no card |
+| 8 Review-held contacts versus qualification | **B5** |
+
+### B1. Banked
+A contact stored by research, `eligibility = 'eligible'`, **with no enrolment and no message**. Review-held contacts (`'review'`) are not banked (B5). The bank empties only by the drain (B4) or by OUT-13 core's erasure at the deadline.
+
+### B2. Bank size per audience (review 1's allocation, unchanged)
+- Each inbox's warm-up cap (`mailbox_daily_cap`, with boost) is split across the ready and running campaigns on it, of any brand: an equal share, bounded by each campaign's own cap, with leftover redistributed. The brand's 20 (or boosted) cap binds the sum.
+- `audience_cap` is the sum over the brand's campaigns matching the audience. It is 0 without one, in which case **no research and no banking**.
+- **`bank_target = 5 × audience_cap`**, shown as an *estimated* buffer of about 3 weeks of first emails (a third of steady-state sends): 5 → 25, 10 → 50, 20 → 100.
+- `bank_room = bank_target − banked(audience) − waiting(audience)`, where waiting means enrolled at step 0 and never contacted.
+
+### B3. Research only banks (finding 6)
+- Research no longer enrols anything. Every verified, qualified contact goes to the bank if `bank_room > 0`; otherwise it is rejected as "bank full".
+- **Qualification first:** `qualified()` is checked against a matching campaign before storing. A refusal means the contact is not stored, and "no place today" is no longer a reason. The OUT-13 core guard (`recently_erased`) and suppression checks apply as today.
+- **Gate:** research searches only if `bank_room > 0` for its audience. This is checked before spend and again under the store lock.
+- **Per day:** at most `DAILY_RESEARCH_MAX = 40` contacts per brand, eligible and review-held together. Gatekeepers are at most half. The monthly spend cap and the OUT-19 H overrun rule are unchanged.
+- **Timing:** research keeps its 06:00 weekday run. Because it never takes a place, the old bank-versus-new priority problem is gone. The oldest banked contact is enrolled first (B4).
+
+### B4. The drain: the only path into a campaign (findings 5, 6)
+`outreach_bank.drain_due(session, moment)` runs on the hourly automations pass, weekdays 07:00–18:00 UK, after OUT-13 core's erasure and the health checks.
+
+For each business with banked contacts, under the business lock (selection to commit), it re-reads authority:
+- `pause_all` is off;
+- `outreach_manage.start` and `growth()` pass: entitlement, setup, growth;
+- the brand is paid (`outreach_billing.brand_live`).
+
+**Budget per campaign,** recomputed under the lock, as the **smallest** of:
+1. the campaign's free places from `capacity()` (its cap less today's sends, follow-ups due, step-0 waiting and reserved or unknown sends, with the inbox shared across every campaign and brand on it);
+2. the inbox's remaining room today, replies included: `metering.reply_headroom(...)["left"]`. It is **0 when `blocked`** (today's health check is not yet passing), so a drain before the check enrols nothing and retries next hour;
+3. the brand's monthly allowance remaining: the same count as `_cold_limits` (daily limit × weekdays, less this month's cold sends), less step-0 waiting;
+4. the brand's daily cap less its use.
+
+Each enrolment decrements every bound it touches.
+
+**Each contact:**
+- the **oldest banked first**, by deadline;
+- only with **at least 5 days** before its deadline (`outreach_erasure.deadline`), leaving time for approval;
+- `qualified()` re-checked;
+- enrolled at step 0.
+
+Then `prepare_due_cards` runs **after the commit** (OUT-24's guarded card creation; none for an autopilot campaign).
+
+**Retries:** the drain retries every hour while places are free, so a late health check never strands the bank. There is no day-claim.
+
+### B5. Review-held contacts (finding 8)
+- Stored as today (`eligibility = 'review'`, no lawful basis), counted in the 40 per day and capped at 10 per brand per day (`MAX_GATEKEEPERS`'s sibling, unchanged).
+- **Never banked, drained or emailed** until the owner's existing review makes them eligible, at which point they join the bank.
+- Erased at their deadline by OUT-13 core like anyone never contacted.
+
+### B6. The owner sees it
+`status()` gives, per audience:
+- `{target (estimate), banked, review_held, waiting, oldest_days_left}`;
+- whatever blocks the drain: no campaign, inbox check not passed, monthly allowance used, unpaid, or paused.
+
+The research panel shows, for example: "Prospect bank: 42 of about 100 · oldest must be emailed within 9 days".
+
+### B7. Tests first (RED: paid research, personal data)
+- **Bank size:** each warm-up stage; inbox shared between brands; a campaign capped at 3; an audience without a campaign.
+- **Research:**
+  - fills past today's places and stops at the target;
+  - never enrols;
+  - qualification refusal is not stored;
+  - recently erased and suppressed contacts are not stored;
+  - 40 a day; gatekeepers at most half; the spend cap.
+- **Drain:**
+  - oldest first; matching brand and audience only;
+  - every bound binds alone: places, reply headroom, health not yet checked (enrols nothing, then does at the next pass once it passes), monthly allowance, brand daily cap;
+  - two inboxes with a brand cap of 20;
+  - pause, unpaid, entitlement;
+  - within 5 days of the deadline it skips;
+  - cards only after commit, none for autopilot;
+  - interleaving with manual enrolment, approval, unsubscribe and erasure (PostgreSQL).
+- **Review-held:** never drained; becomes banked when made eligible.
+
 ## Part A design (revision 2, after Codex design review 1: `audits/OUT-23-CODEX-DESIGN-REVIEW-1.md`)
 
 Review 1's 11 findings and where each is answered:
