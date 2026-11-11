@@ -232,9 +232,21 @@ def research_configure(body: ResearchConfig, context=Depends(get_user_business_c
     return _run(research.configure, session, context, _body(body))
 
 
-class HunterKey(Body):
-    # Checked in services.outreach_hunter, whose refusals never repeat the key.
-    key: str = Field(max_length=500)
+def _hunter_key(raw: bytes) -> str:
+    """The connect body, read by hand: FastAPI's own 422 would echo the
+    submitted value, here a secret (Codex OUT-23B code review 1). Every
+    refusal is a fixed sentence that repeats nothing."""
+    import json
+    refuse = HTTPException(422, 'Send the Hunter key as {"key": "..."}')
+    if len(raw) > 2000:
+        raise refuse
+    try:
+        body = json.loads(raw or b"null")
+    except ValueError:
+        raise refuse from None
+    if not isinstance(body, dict) or set(body) != {"key"} or not isinstance(body["key"], str):
+        raise refuse
+    return body["key"]
 
 
 class HunterBrand(Body):
@@ -253,9 +265,12 @@ def hunter_status(context=Depends(get_user_business_context), session: Session =
 
 @router.post("/hunter/connect")
 @limiter.limit("5/minute")
-def hunter_connect(request: Request, body: HunterKey, context=Depends(get_user_business_context),
-                   session: Session = Depends(get_session)):
-    return _run(hunter.connect, session, context, body.key)
+async def hunter_connect(request: Request, context=Depends(get_user_business_context),
+                         session: Session = Depends(get_session)):
+    from starlette.concurrency import run_in_threadpool
+    key = _hunter_key(await request.body())
+    # The service blocks (a Hunter call, the database): never on the event loop.
+    return await run_in_threadpool(_run, hunter.connect, session, context, key)
 
 
 @router.post("/hunter/disconnect")

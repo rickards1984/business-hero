@@ -78,15 +78,15 @@ def now() -> datetime:
 
 def _http(method: str, path: str, params: dict, key: str, timeout: float) -> tuple:
     """The default transport: a fixed host, the key in a header only, no
-    redirects. Returns (status, json or None, headers)."""
+    redirects, and `timeout` as the call's TOTAL time (connect, wait and the
+    streamed body), not an inactivity timeout (Codex code review 1).
+    Returns (status, json or None, headers)."""
     import httpx
+    from services.outreach_research import get_json_within
+    assert method == "GET"
     with httpx.Client(timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)), follow_redirects=False) as client:
-        response = client.request(method, f"{BASE}/{path}", params=params, headers={"X-API-KEY": key})
-        try:
-            body = response.json()
-        except ValueError:
-            body = None
-        return response.status_code, body, dict(response.headers)
+        return get_json_within(client, f"{BASE}/{path}", params=params, headers={"X-API-KEY": key},
+                               end=time.monotonic() + timeout, limit=1_000_000, cap=timeout)
 
 
 def _number(value) -> Optional[Decimal]:
@@ -286,15 +286,15 @@ def mark_invalid(session, bid: str, generation: int) -> None:
     session.commit()
 
 
-def block(session, bid: str, generation: int, pool: str, reset: Optional[str], moment: datetime) -> None:
+def block(session, bid: str, generation: int, pool: str, reset: Optional[str], moment: datetime) -> bool:
     """R2.6: a 429 blocks that pool until Hunter's reset date (00:00 UTC);
     missing or past, for 24 hours. Persisted in the row, never only cached."""
     import json
-    until = moment + timedelta(hours=24)
+    until, known = moment + timedelta(hours=24), False
     if reset and re.fullmatch(r"\d{4}-\d{2}-\d{2}", reset):
         at = datetime.combine(date.fromisoformat(reset), datetime.min.time(), tzinfo=timezone.utc)
         if at > moment:
-            until = at
+            until, known = at, True
     _lock(session, bid)
     r = _row(session, bid, lock=True)
     if r and int(r["generation"]) == generation:
@@ -302,6 +302,7 @@ def block(session, bid: str, generation: int, pool: str, reset: Optional[str], m
         blocked[pool] = until.isoformat()
         _current_write(session, bid, generation, "blocked = " + _json(session, "blocked"), {"blocked": json.dumps(blocked)})
     session.commit()
+    return not known                        # a missing or past reset date: refresh /account (R2.6)
 
 
 def refresh_account(session, bid: str, generation: int, transport: Callable, key: str, *, force: bool = False) -> None:
@@ -497,10 +498,16 @@ def reserve(session, bid: str, brand_id, conn: Connection, operation: str, momen
         return None, "Hunter's monthly credits are used"
     available = _number((r["pools"].get(pool) or {}).get("available"))
     if available is not None:
-        outstanding = Decimal(str(session.execute(text(
-            "SELECT COALESCE(SUM(reserved_native), 0) FROM outreach_provider_charges WHERE business_id = :b "
-            "AND pool = :pool AND state = 'reserved'"), {"b": bid, "pool": pool}).scalar() or 0))
-        if available - outstanding < native:
+        # The snapshot's balance less everything this connection has used
+        # since it was taken, and every reservation still open (Codex code
+        # review 1: a settled call must not free its credit again).
+        fetched = r.get("account_fetched_at")
+        spent = Decimal(str(session.execute(text(
+            "SELECT COALESCE(SUM(CASE WHEN state = 'settled' THEN COALESCE(used_native, 0) ELSE reserved_native END), 0) "
+            "FROM outreach_provider_charges WHERE business_id = :b AND COALESCE(pool_actual, pool) = :pool "
+            "AND generation = :g AND (state = 'reserved'" + (" OR created_at >= :f" if fetched else "") + ")"),
+            {"b": bid, "pool": pool, "g": conn.generation, **({"f": fetched} if fetched else {})}).scalar() or 0))
+        if available - spent < native:
             return None, "Hunter's monthly credits are used"
     cap = _number(brand_config(session, bid, brand_id).get("cap_credits"))
     if cap is not None and used_credits(session, bid, brand_id, moment) + credits > cap:
@@ -511,7 +518,7 @@ def reserve(session, bid: str, brand_id, conn: Connection, operation: str, momen
     return ident, None
 
 
-def settle(session, bid: str, charge_id: str, reported: Optional[tuple]) -> None:
+def settle(session, bid: str, charge_id: str, reported: Optional[tuple]) -> bool:
     """R4.3: one atomic, idempotent update, whatever the connection is now.
     `reported` is (used, unit) from the headers, or None (charged at the
     reservation)."""
@@ -522,7 +529,8 @@ def settle(session, bid: str, charge_id: str, reported: Optional[tuple]) -> None
         {"b": bid, "id": charge_id}).mappings().first()
     if row is None:
         session.rollback()
-        return
+        return False
+    refresh = False
     if reported is None:
         state, used, unit, credits = "charged", Decimal(str(row["reserved_native"])), row["pool"], Decimal(str(row["brand_credits"]))
     else:
@@ -532,12 +540,14 @@ def settle(session, bid: str, charge_id: str, reported: Optional[tuple]) -> None
             # A mismatched unit: settle at the larger, in brand credits (R4.3).
             credits = max(credits, Decimal(str(row["brand_credits"])))
             logger.warning("Hunter charged in %s, expected %s", unit, row["pool"])
+            refresh = True                  # the account model has proved wrong (R2.6)
         state = "settled"
     session.execute(text(
         "UPDATE outreach_provider_charges SET state = :s, used_native = :u, pool_actual = :pa, brand_credits = :c, "
         "settled_at = :t, updated_at = :t WHERE business_id = :b AND id = :id AND state = 'reserved'"),
         {"s": state, "u": str(used), "pa": unit, "c": str(credits), "t": now(), "b": bid, "id": charge_id})
     session.commit()
+    return refresh
 
 
 def sweep(session, moment: Optional[datetime] = None) -> int:
@@ -666,6 +676,8 @@ class Budget:
     def __init__(self, seconds: float = ENRICH_SECONDS, calls: Optional[int] = None, clock: Optional[Callable] = None):
         self.clock = clock or time.monotonic
         self.end, self.calls = self.clock() + seconds, MAX_CALLS if calls is None else calls
+        self.searches: Optional[int] = None   # set to 2 x room at the run's first lead (R2.4)
+        self.tried: set = set()               # each domain once per run, across attempts
 
     def left(self) -> float:
         return self.end - self.clock()
@@ -680,6 +692,13 @@ class Budget:
         if self.calls <= 0 or not self.ok():
             return False
         self.calls -= 1
+        return True
+
+    def take_search(self) -> bool:
+        if self.searches is not None:
+            if self.searches <= 0:
+                return False
+            self.searches -= 1
         return True
 
 
@@ -701,46 +720,53 @@ def _suppress_claimed(session, bid: str, email: str, moment: datetime) -> None:
 
 def _billable(session, bid: str, brand_id, conn: Connection, operation: str, path: str, params: dict, *,
               gate: Callable, transport: Callable, budget: Budget, sleep: Callable, email: Optional[str] = None) -> tuple:
-    """R2.4: gate and reserve under the locks and commit; call outside any
-    transaction; settle. -> (data, None) or (None, (why, stop))."""
-    if not budget.take_call():
-        return None, ("Hunter's time for this run is used", True)
-    moment = now()
-    _lock(session, bid)
-    why = gate(session)
-    if why:
-        session.rollback()
-        return None, (why, True)
-    charge, why = reserve(session, bid, brand_id, conn, operation, moment)
-    if charge is None:
-        session.rollback()
-        return None, (why, True)
-    session.commit()
-    plan = expected(conn.pools, operation)
-    try:
-        data, credits, status_code = call(transport, conn.key, path, params, budget.timeout())
-        while status_code == 202:                 # still verifying: poll within the budget (R2.4)
-            if not budget.take_call() or budget.left() < POLL_EVERY + MIN_SECONDS:
-                settle(session, bid, charge, None)
-                return None, ("Hunter couldn't finish verifying in time", False)
-            sleep(POLL_EVERY)
+    """R2.4: EVERY request (a 202 poll included) is gated and reserved under
+    the locks and committed, called outside any transaction, then settled
+    from its own headers (Codex code review 1). -> (data, None) or
+    (None, (why, stop))."""
+    while True:
+        if not budget.take_call():
+            return None, ("Hunter's time for this run is used", True)
+        if operation == "search" and not budget.take_search():
+            return None, ("enough companies were looked up in Hunter for this run", True)
+        moment = now()
+        _lock(session, bid)
+        why = gate(session)
+        if why:
+            session.rollback()
+            return None, (why, True)
+        charge, why = reserve(session, bid, brand_id, conn, operation, moment)
+        if charge is None:
+            session.rollback()
+            return None, (why, True)
+        session.commit()
+        plan = expected(conn.pools, operation)
+        try:
             data, credits, status_code = call(transport, conn.key, path, params, budget.timeout())
-    except HunterError as exc:
-        settle(session, bid, charge, exc.credits)
-        if exc.kind == "key":
-            mark_invalid(session, bid, conn.generation)
-            return None, ("Hunter no longer accepts the saved key; reconnect it in Outreach settings", True)
-        if exc.kind == "quota":
-            block(session, bid, conn.generation, plan[0] if plan else "credit", conn.pools.get("reset_date"), moment)
-            return None, ("Hunter's monthly credits are used", True)
-        if exc.kind == "rate":
-            return None, ("Hunter is busy; it carries on next run", True)
-        if exc.kind == "claimed" and email:
-            _suppress_claimed(session, bid, email, moment)
-            return None, ("asked Hunter not to be contacted", False)
-        return None, ("Hunter couldn't be reached for this company", False)
-    settle(session, bid, charge, credits)
-    return data, None
+        except HunterError as exc:
+            if settle(session, bid, charge, exc.credits):
+                refresh_account(session, bid, conn.generation, transport, conn.key, force=True)
+            if exc.kind == "key":
+                mark_invalid(session, bid, conn.generation)
+                return None, ("Hunter no longer accepts the saved key; reconnect it in Outreach settings", True)
+            if exc.kind == "quota":
+                if block(session, bid, conn.generation, plan[0] if plan else "credit", conn.pools.get("reset_date"), moment):
+                    refresh_account(session, bid, conn.generation, transport, conn.key, force=True)
+                return None, ("Hunter's monthly credits are used", True)
+            if exc.kind == "rate":
+                return None, ("Hunter is busy; it carries on next run", True)
+            if exc.kind == "claimed" and email:
+                _suppress_claimed(session, bid, email, moment)
+                return None, ("asked Hunter not to be contacted", False)
+            return None, ("Hunter couldn't be reached for this company", False)
+        if settle(session, bid, charge, credits):
+            refresh_account(session, bid, conn.generation, transport, conn.key, force=True)
+        if status_code != 202:
+            return data, None
+        # Still verifying: poll, each poll its own gated, reserved call.
+        if budget.left() < POLL_EVERY + MIN_SECONDS:
+            return None, ("Hunter couldn't finish verifying in time", False)
+        sleep(POLL_EVERY)
 
 
 def find_person(session, bid: str, brand_id, conn: Connection, domain: str, *, gate: Callable, transport: Callable,
@@ -757,7 +783,10 @@ def find_person(session, bid: str, brand_id, conn: Connection, domain: str, *, g
     if err:
         return None, err
     moment = now()
-    people = [p for p in candidates(data, domain, moment) if allowed(p["email"])]
+    # Our own lists and today's gatekeeper allowance, before any fetch or
+    # verification is spent on someone who could not be kept (Codex code review 1).
+    people = [p for p in candidates(data, domain, moment)
+              if allowed(p["email"], contact_type(p["email"], p["name"], p["role"]))]
     if not people:
         return None, ("Hunter had no one published and usable at this company", False)
     verifies = 0

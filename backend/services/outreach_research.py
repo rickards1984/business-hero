@@ -897,20 +897,29 @@ def _bounded(fn: Callable, budget) -> Callable:
             return None
         if fn is fetch_page:
             return fn(*args, deadline=budget.end, clock=budget.clock, **kwargs)
+        if fn is companies_house:
+            return fn(*args, end=budget.end, clock=budget.clock, **kwargs)
+        if fn is has_mail_server:
+            return fn(*args, lifetime=min(5.0, budget.left()), **kwargs)
         return fn(*args, **kwargs)
     return run
 
 
 def _enrich(session, business, lia, leads: list, held: dict, out: dict, *, compliance_id, claim, pending: Callable,
-            fetch: Callable, mx: Callable, companies: Callable, transport: Callable, sleep: Callable, conn) -> list:
+            pending_gatekeepers: Callable, fetch: Callable, mx: Callable, companies: Callable, transport: Callable,
+            sleep: Callable, conn, budget) -> list:
     """OUT-23 Part B: for each lead, the free checks (R2.3) and the corporate
     checks (R2.9) before any credit, then Hunter. -> [(c, v)] ready to store,
     v marked acquisition "hunter"."""
     from services import outreach_hunter
     bid, brand_id = str(business.id), str(lia["brand_id"])
-    budget = outreach_hunter.Budget()
+    # One budget, one set of tried domains and one search allowance for the
+    # WHOLE run, across its attempts (Codex code review 1).
+    if budget.searches is None:
+        budget.searches = 2 * max(1, _bank_room(session, bid, brand_id, lia["audience_hash"], now())["room"])
+        session.rollback()
     fetch, mx, companies = _bounded(fetch, budget), _bounded(mx, budget), _bounded(companies, budget)
-    found, tried = [], set()
+    found, tried = [], budget.tried
 
     def reject(c, reason):
         out["rejected"].append({"company": _text(c, "company")[:200], "reason": reason})
@@ -927,7 +936,13 @@ def _enrich(session, business, lia, leads: list, held: dict, out: dict, *, compl
             return "today's places are found"
         return None
 
-    def allowed(email):
+    def allowed(email, kind):
+        if kind == "gatekeeper":
+            today = _today_counts(session, bid, now(), brand_id)["gatekeeper"]
+            session.rollback()
+            if today + pending_gatekeepers() + sum(1 for _, v in found if v["contact_type"] == "gatekeeper") \
+                    >= MAX_GATEKEEPERS:
+                return False
         key = send.suppression_digest(bid, "email", email)
         domain = email.split("@")[-1]
         ok = not (key in held["keys"] or email in held["seen"] or _suppressed(session, bid, key, domain)
@@ -1090,6 +1105,7 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
         conn = None
     session.rollback()
     out["via_hunter"] = 0
+    hunter_budget = outreach_hunter.Budget() if conn is not None else None
     found_new = False
     claim = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -1242,9 +1258,12 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
                 continue
             verified.append((c, v))
         if conn is not None and leads:
-            verified.extend(_enrich(session, business, lia, leads, held, out, compliance_id=compliance_id, claim=claim,
-                                    pending=lambda: len(verified), fetch=fetch, mx=mx, companies=companies,
-                                    transport=transport, sleep=sleep, conn=conn))
+            verified.extend(_enrich(
+                session, business, lia, leads, held, out, compliance_id=compliance_id, claim=claim,
+                pending=lambda: len(verified),
+                pending_gatekeepers=lambda: sum(1 for _, v in verified if v["contact_type"] == "gatekeeper"),
+                fetch=fetch, mx=mx, companies=companies, transport=transport, sleep=sleep, conn=conn,
+                budget=hunter_budget))
         # Store under the business lock, re-checking everything that can change.
         _lock(session, bid)
         why = _still_allowed(session, bid, compliance_id, moment)
@@ -1585,25 +1604,57 @@ def fetch_page(url: str, *, resolve: Optional[Callable] = None, transport=None,
     return None
 
 
-def has_mail_server(domain: str) -> bool:
+def has_mail_server(domain: str, *, lifetime: float = 5.0) -> bool:
     import dns.resolver
     try:
-        return len(dns.resolver.resolve(domain, "MX", lifetime=5)) > 0
+        return len(dns.resolver.resolve(domain, "MX", lifetime=max(0.5, lifetime))) > 0
     except Exception:
         return False
 
 
-def companies_house(query: str) -> Optional[dict]:
+def get_json_within(client, url: str, *, params: Optional[dict] = None, headers: Optional[dict] = None,
+                    end: Optional[float] = None, clock: Optional[Callable] = None, limit: int = 2_000_000,
+                    cap: float = 10.0) -> tuple:
+    """One GET whose WHOLE duration (connect, wait and every streamed chunk)
+    stays inside `end` (a `clock()` instant): OUT-23 R3.5, Codex code review
+    1. Returns (status, json or None, headers). Raises TimeoutError at the end."""
+    import json as _json
+    import time as _time
+    clock = clock or _time.monotonic
+
+    def left() -> float:
+        return cap if end is None else min(cap, end - clock())
+    if left() < 0.5:
+        raise TimeoutError("deadline")
+    with client.stream("GET", url, params=params, headers=headers, timeout=max(0.5, left())) as response:
+        body = bytearray()
+        for chunk in response.iter_bytes():
+            body.extend(chunk)
+            if len(body) > limit:
+                raise ValueError("too large")
+            if end is not None and clock() >= end:
+                raise TimeoutError("deadline")
+        try:
+            data = _json.loads(bytes(body)) if body else None
+        except ValueError:
+            data = None
+        return response.status_code, data, dict(response.headers)
+
+
+def companies_house(query: str, *, end: Optional[float] = None, clock: Optional[Callable] = None) -> Optional[dict]:
     import httpx
     key = os.environ.get("COMPANIES_HOUSE_API_KEY", "")
     if not key:
         return None
     api = "https://api.company-information.service.gov.uk"
+
+    def get(url, params=None):
+        return get_json_within(client, url, params=params, end=end, clock=clock)[1] or {}
     try:
         with httpx.Client(timeout=10.0, auth=(key, "")) as client:
             number = str(query).strip().upper()
             if not re.fullmatch(r"[A-Z0-9]{8}", number):
-                hits = client.get(f"{api}/search/companies", params={"q": query, "items_per_page": 5}).json()
+                hits = get(f"{api}/search/companies", {"q": query, "items_per_page": 5})
                 wanted = re.sub(r"\b(limited|ltd|plc|llp)\b\.?", "", str(query).lower()).strip()
                 match = next((h for h in hits.get("items", [])
                               if re.sub(r"\b(limited|ltd|plc|llp)\b\.?", "", h.get("title", "").lower()).strip() == wanted),
@@ -1611,8 +1662,8 @@ def companies_house(query: str) -> Optional[dict]:
                 if not match:
                     return None
                 number = match["company_number"]
-            profile = client.get(f"{api}/company/{number}").json()
-            officers = client.get(f"{api}/company/{number}/officers", params={"items_per_page": 50}).json()
+            profile = get(f"{api}/company/{number}")
+            officers = get(f"{api}/company/{number}/officers", {"items_per_page": 50})
     except Exception:
         return None
     return {"number": number, "name": profile.get("company_name"), "status": profile.get("company_status"),

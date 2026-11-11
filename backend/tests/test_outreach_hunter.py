@@ -346,10 +346,13 @@ def test_still_verifying_is_polled_then_kept(db):
     out = hrun(db, biz, lia, World([[lead(1)]]), fake)
     assert len(out["accepted"]) == 1 and fake.count("email-verifier") == 3
     verify = [c for c in charges(db) if c["operation"] == "verify"]
-    assert len(verify) == 1 and verify[0]["state"] == "settled"       # one charge for the whole poll
+    # Every request is its own gated, reserved and settled charge (Codex code review 1).
+    assert len(verify) == 3 and {c["state"] for c in verify} == {"settled"}
+    with Session(db) as s:
+        assert float(hunter().used_credits(s, A, brand["id"], NOW)) == 1 + 3 * 0.5
 
 
-def test_still_verifying_past_the_budget_is_dropped_and_charged(db, monkeypatch):
+def test_still_verifying_past_the_call_budget_is_dropped_each_poll_charged(db, monkeypatch):
     biz, brand, lia, campaign = with_hunter(db)
     monkeypatch.setattr(hunter(), "MAX_CALLS", 3)
     fake = Hunter()
@@ -358,7 +361,7 @@ def test_still_verifying_past_the_budget_is_dropped_and_charged(db, monkeypatch)
     out = hrun(db, biz, lia, World([[lead(1)]]), fake)
     assert out["accepted"] == []
     verify = [c for c in charges(db) if c["operation"] == "verify"]
-    assert len(verify) == 1 and verify[0]["state"] == "charged"
+    assert len(verify) == fake.count("email-verifier") == 2 and {c["state"] for c in verify} == {"settled"}
 
 
 def test_a_decision_maker_beats_a_more_confident_gatekeeper_and_no_one_lower_is_verified(db):
@@ -1053,3 +1056,193 @@ def test_without_migration_042_research_carries_on_with_the_web(db):
         s.commit()
     out = hrun(db, biz, lia, World([[person(1)]]), Hunter())
     assert len(out["accepted"]) == 1
+
+
+# ------------------------------------------------- the API never echoes the key ---
+
+@pytest.fixture
+def api(db, monkeypatch):
+    import auth
+    import db as dbmod
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import outreach_setup_api
+    from rate_limiting import limiter
+    biz, brand, lia, campaign = started(db)
+    app = FastAPI()
+    app.state.limiter = limiter
+    app.include_router(outreach_setup_api.router)
+    session = Session(db)
+    app.dependency_overrides[auth.get_user_business_context] = lambda: {"business_id": A, "user_id": OWNER}
+    app.dependency_overrides[dbmod.get_session] = lambda: session
+    monkeypatch.setattr(auth, "_load_business", lambda s, bid: biz)
+    monkeypatch.setattr(hunter(), "_http", Hunter())
+    limiter.reset()
+    with clocks(), TestClient(app) as client:
+        yield client
+    session.close()
+
+
+@pytest.mark.parametrize("body", [
+    {"key": KEY * 100},                  # too long
+    {"key": 12345678901234567890123},    # not a string
+    {"key": KEY, "extra": KEY},          # an extra field
+    [KEY],                               # not an object
+])
+def test_a_malformed_connect_never_echoes_the_key(api, body):
+    response = api.post("/v1/outreach/setup/hunter/connect", json=body)
+    assert response.status_code == 422
+    assert KEY not in response.text and "12345678901234567890123" not in response.text
+
+
+def test_invalid_json_is_refused_without_echo(api):
+    response = api.post("/v1/outreach/setup/hunter/connect", content=b'{"key": "' + KEY.encode() + b'"',
+                        headers={"content-type": "application/json"})
+    assert response.status_code == 422 and KEY not in response.text
+
+
+def test_a_good_connect_through_the_api_shows_only_the_last_four(api):
+    response = api.post("/v1/outreach/setup/hunter/connect", json={"key": KEY})
+    assert response.status_code == 200, response.text
+    assert response.json()["last4"] == KEY[-4:] and KEY not in response.text
+    shown = api.get("/v1/outreach/setup/hunter")
+    assert shown.status_code == 200 and KEY not in shown.text
+
+
+# ------------------------------------------------ Codex code review 1 findings ---
+
+def test_a_disconnect_mid_poll_stops_the_next_poll_before_it_is_made(db):
+    biz, brand, lia, campaign = with_hunter(db)
+    fake = Hunter()
+    fake.people["studio1.example"] = [found(jo(1), status="unknown")]
+    fake.pending[jo(1)] = 5
+
+    def disconnect():
+        with Session(db) as s:
+            s.execute(text("UPDATE outreach_provider_accounts SET status = 'disconnected', generation = generation + 1"))
+            s.commit()
+    fake.during["email-verifier"] = disconnect
+    out = hrun(db, biz, lia, World([[lead(1)]]), fake)
+    assert out["accepted"] == [] and fake.count("email-verifier") == 1
+    assert len([c for c in charges(db) if c["operation"] == "verify"]) == 1
+
+
+def test_a_settled_call_never_frees_its_credit_in_the_cached_balance(db):
+    biz, brand, lia, campaign = with_hunter(db, available="1")
+    with clocks(), Session(db) as s:
+        hunter()._lock(s, A)
+        conn = hunter().connection(s, A)
+        charge = hunter().reserve(s, A, brand["id"], conn, "search", NOW)[0]
+        s.commit()
+    with clocks(), Session(db) as s:
+        hunter().settle(s, A, charge, (hunter()._number("1"), "credit"))
+    with clocks(), Session(db) as s:
+        hunter()._lock(s, A)
+        assert hunter().reserve(s, A, brand["id"], conn, "search", NOW)[1] == "Hunter's monthly credits are used"
+        s.rollback()
+    # A fresh snapshot (taken after that call) already includes it: not counted twice.
+    with Session(db) as s:
+        s.execute(text("UPDATE outreach_provider_accounts SET account_fetched_at = :t, pools = :p"),
+                  {"t": (NOW + timedelta(minutes=1)).isoformat(),
+                   "p": json.dumps({"credit": {"used": "11", "available": "1"}, "model": "single"})})
+        s.commit()
+    with clocks(), Session(db) as s:
+        hunter()._lock(s, A)
+        assert hunter().reserve(s, A, brand["id"], conn, "search", NOW + timedelta(minutes=2))[0]
+        s.rollback()
+
+
+def test_a_mismatched_unit_refreshes_the_account(db):
+    biz, brand, lia, campaign = with_hunter(db)
+    fake = Hunter()
+
+    def transport(method, path, params, key, timeout):
+        status, body, headers = fake(method, path, params, key, timeout)
+        if path == "domain-search":
+            headers = {"X-Credits-Used": "1", "X-Credits-Unit": "search"}
+        return status, body, headers
+    hrun(db, biz, lia, World([[lead(1)]]), transport)
+    assert fake.count("account") == 1
+
+
+@pytest.mark.parametrize("reset,refreshed", [("2026-11-15", 0), (None, 1), ("2026-10-01", 1)])
+def test_a_429_with_no_usable_reset_date_refreshes_the_account(db, reset, refreshed):
+    biz, brand, lia, campaign = with_hunter(db)
+    with Session(db) as s:
+        pools = {"credit": {"used": "10", "available": "1990"}, "model": "single", "reset_date": reset}
+        s.execute(text("UPDATE outreach_provider_accounts SET pools = :p"), {"p": json.dumps(pools)})
+        s.commit()
+    fake = Hunter()
+    fake.fail["domain-search"] = 429
+    hrun(db, biz, lia, World([[lead(1)]]), fake)
+    assert fake.count("account") == refreshed
+
+
+def test_one_domain_is_looked_up_once_across_a_run_s_attempts(db):
+    biz, brand, lia, campaign = with_hunter(db)
+    fake = Hunter()                                   # Hunter knows no one there: each attempt retries wider
+    world = World([[lead(1)], [lead(1)], [lead(1)]])
+    hrun(db, biz, lia, world, fake)
+    assert len(world.briefs) == 3 and fake.count("domain-search") == 1
+
+
+def test_a_run_searches_at_most_twice_its_room(db):
+    from test_outreach_setup import _insert
+    biz, brand, lia, campaign = with_hunter(db)
+    with Session(db) as s:                            # 39 found today: one place left
+        for i in range(39):
+            pid = f"00000000-0000-0000-0000-{i:012d}"
+            _insert(s, "outreach_prospects", id=pid, business_id=A, company=f"Old {i}", domain=f"old{i}.example",
+                    email=f"a@old{i}.example", email_key=f"k{i}", eligibility="eligible", lia_id=lia["id"],
+                    captured_at=NOW.isoformat(), created_at=NOW.isoformat(), updated_at=NOW.isoformat())
+            _insert(s, "outreach_evidence", id=f"10000000-0000-0000-0000-{i:012d}", business_id=A, prospect_id=pid,
+                    source_type="web", fact_type="contact_type", fact_value="decision_maker",
+                    created_at=NOW.isoformat(), updated_at=NOW.isoformat())
+        s.commit()
+    fake = Hunter()                                   # no one usable anywhere
+    hrun(db, biz, lia, World([[lead(i) for i in range(1, 8)]]), fake)
+    assert fake.count("domain-search") == 2
+
+
+def test_no_gatekeeper_is_fetched_or_verified_once_today_s_twenty_are_found(db, monkeypatch):
+    biz, brand, lia, campaign = with_hunter(db)
+    monkeypatch.setattr(research(), "_today_counts", lambda *a, **k: {"decision_maker": 5, "gatekeeper": 20})
+    world = World([[lead(1)]])
+    fetched = []
+    real = world.fetch
+    world.fetch = lambda url: fetched.append(url) or real(url)
+    fake = Hunter()
+    fake.people["studio1.example"] = [found(jo(1), position="Receptionist", status="unknown")]
+    out = hrun(db, biz, lia, world, fake)
+    assert out["accepted"] == [] and fake.count("email-verifier") == 0
+    assert "https://studio1.example/team" not in fetched
+
+
+def test_a_slowly_streamed_response_stops_at_the_deadline():
+    import time as _time
+    import httpx
+    from services.outreach_research import get_json_within
+
+    def slow():
+        for _ in range(10):
+            _time.sleep(0.15)
+            yield b" "
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=slow()))
+    # Enough time to start (it is not refused up front), too little to finish.
+    with httpx.Client(transport=transport) as client, pytest.raises(TimeoutError):
+        get_json_within(client, "https://api.example/x", end=_time.monotonic() + 0.8)
+
+
+def test_every_network_step_is_bounded_by_the_run_s_deadline(monkeypatch):
+    rs = research()
+    clock = [0.0]
+    budget = hunter().Budget(seconds=20, clock=lambda: clock[0])
+    seen = {}
+    monkeypatch.setattr(rs, "has_mail_server", lambda domain, lifetime=5.0: seen.update(mx=lifetime) or True)
+    monkeypatch.setattr(rs, "companies_house", lambda q, end=None, clock=None: seen.update(ch=end) or None)
+    clock[0] = 14                                   # 6 s left
+    rs._bounded(rs.has_mail_server, budget)("x.example")
+    rs._bounded(rs.companies_house, budget)("X Ltd")
+    assert seen == {"mx": 5.0, "ch": budget.end} and seen["mx"] <= budget.left()
+    clock[0] = 16.5
+    assert rs._bounded(rs.has_mail_server, budget)("x.example") is None     # under the minimum: never started
