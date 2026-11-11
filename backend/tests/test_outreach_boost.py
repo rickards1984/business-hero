@@ -595,7 +595,7 @@ def test_research_capacity_itself_follows_the_brands_boost(h, boosted):
         # OUT-23: the drain's ledger is what now admits new contacts.
         settings = outreach_send.one(h.s, "outreach_settings", A)
         campaigns = [c for c in outreach_bank._ready(h.s, A) if str(c["brand_id"]) == str(BRAND)]
-        ledger = outreach_bank._ledger(h.s, A, settings, campaigns, NOW)
+        ledger = outreach_bank._ledger(h.s, A, settings, NOW)
         room = any(outreach_bank._room(ledger, c) for c in campaigns)
     h.s.rollback()
     assert room is boosted

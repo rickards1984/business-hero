@@ -153,12 +153,16 @@ def bank(session, bid: str, brand_id, audience_hash, moment: Optional[datetime] 
 
 # -------------------------------------------------------- the drain ledger ---
 
-def _ledger(session, bid: str, settings, campaigns: list, moment: datetime) -> dict:
+def _ledger(session, bid: str, settings, moment: datetime) -> dict:
     """R4.2: every bound's starting balance. Each queued, unreserved item (a
     follow-up due by tonight, or a step-0 enrolment not yet claimed) counts
     once against every bound it will use; reserved and unknown usage already
-    counts as a send and is not added again."""
+    counts as a send and is not added again. Built from EVERY campaign of the
+    business, whatever its state: a paused campaign's queue still uses its
+    inbox and brand when it resumes (Codex code review 1). Only where new
+    contacts may go is filtered, by the caller."""
     from services import metering, outreach_boost
+    campaigns = send.rows(session, "outreach_campaigns", bid, "ORDER BY created_at, id")
     local = _local(moment)
     today = local.date().isoformat()
     tomorrow = local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
@@ -278,13 +282,16 @@ def drain_business(session, business, moment: Optional[datetime] = None) -> dict
         session.rollback()
         out["skipped"] = "no ready, paid campaign"
         return out
-    ledger = _ledger(session, bid, settings, campaigns, moment)
+    ledger = _ledger(session, bid, settings, moment)
     candidates = session.execute(text(
         "SELECT p.id, p.lia_id, p.captured_at, p.notice_due_at, p.notice_provided_at FROM outreach_prospects p "
         "WHERE p.business_id = :b AND p.eligibility = 'eligible' AND NOT EXISTS (SELECT 1 FROM outreach_enrolments e "
         "WHERE e.business_id = p.business_id AND e.prospect_id = p.id) AND NOT EXISTS (SELECT 1 FROM "
         "outreach_messages m WHERE m.business_id = p.business_id AND m.prospect_id = p.id) "
         "ORDER BY p.captured_at, p.id"), {"b": bid}).mappings().all()
+    # The nearest deadline first (OUT-13's: notice due, or captured + 28 days),
+    # then the oldest, then by id (Codex code review 1).
+    candidates = sorted(candidates, key=lambda p: (outreach_erasure.deadline(p), str(p["captured_at"]), str(p["id"])))
     lia_audience = {str(r[0]): (str(r[1]), str(r[2])) for r in session.execute(text(
         "SELECT id, brand_id, audience_hash FROM outreach_compliance WHERE business_id = :b"), {"b": bid})}
     for p in candidates:
@@ -310,28 +317,52 @@ def drain_business(session, business, moment: Optional[datetime] = None) -> dict
 
 # --------------------------------------------------------- what the owner sees ---
 
-def _blocked(session, bid: str, brand_id, audience_hash, moment: datetime) -> Optional[str]:
-    """B6: why the drain would enrol none of this audience now, or None.
-    Read-only: the drain's own checks that need no lock."""
-    from services import outreach_billing
+def _context(session, business, moment: datetime) -> dict:
+    """What the drain checks before any audience, read once for the GET:
+    pause, owner, entitlement, and the business's whole ledger."""
+    from fastapi import HTTPException
+    from auth import assert_feature_access
+    bid = str(business.id)
     settings = send.one(session, "outreach_settings", bid) if send.rows(session, "outreach_settings", bid) else None
+    why = None
     if not settings or settings["pause_all"]:
-        return "Outreach is paused"
-    if _owner(session, bid) is None:
-        return "The business has no active owner"
-    campaigns = [c for c in _ready(session, bid)
+        why = "Outreach is paused"
+    elif _owner(session, bid) is None:
+        why = "The business has no active owner"
+    else:
+        try:
+            assert_feature_access(business, "outreach")
+        except HTTPException:
+            why = "Outreach isn't available on this account"
+    return {"why": why, "ledger": None if why else _ledger(session, bid, settings, moment),
+            "ready": _ready(session, bid)}
+
+
+def _blocked(session, bid: str, brand_id, audience_hash, moment: datetime, ctx: dict) -> Optional[str]:
+    """B6: why the drain would enrol none of this audience now, or None only
+    when a campaign it may join has room in every bound."""
+    from services import outreach_billing, outreach_research
+    if ctx["why"]:
+        return ctx["why"]
+    campaigns = [c for c in ctx["ready"]
                  if str(c["brand_id"]) == str(brand_id) and str(c["target_hash"]) == str(audience_hash)]
     if not campaigns:
         return "No ready campaign for this audience"
     if not outreach_billing.brand_live(session, bid, brand_id, moment):
         return "This brand's outreach isn't paid for"
-    ledger = _ledger(session, bid, settings, campaigns, moment)
-    if ledger["brand_month"].get(str(brand_id), 0) <= 0:
+    ledger = ctx["ledger"]
+    if any(_room(ledger, c) for c in campaigns):
+        return None
+    br = str(brand_id)
+    if ledger["brand_month"].get(br, 0) <= 0:
         return "This month's sending for this brand is used"
     reasons = [ledger["blocked"].get(str(c["mailbox_id"])) for c in campaigns]
     if all(reasons):
         return reasons[0]
-    return None
+    if all(ledger["pilot"].get(str(c["id"]), 0) <= 0 for c in campaigns):
+        return (f"Each campaign holds at most {outreach_research.pilot_enrolments()} contacts during the pilot, "
+                "and this audience's are full")
+    return "Today's places are used; more contacts are added from the bank on the next weekday"
 
 
 def audiences(session, business, brand_id, moment: Optional[datetime] = None) -> list:
@@ -344,6 +375,7 @@ def audiences(session, business, brand_id, moment: Optional[datetime] = None) ->
         "AND decision = 'approved' ORDER BY reviewed_at"), {"b": bid, "br": str(brand_id)})))
     from services import outreach_research, outreach_setup
     rules = outreach_research._doc(session, bid).get(outreach_setup.AUDIENCE_KEY) or {}
+    ctx = _context(session, business, moment) if hashes else None
     out = []
     for h in hashes:
         b = bank(session, bid, brand_id, h, moment)
@@ -359,7 +391,7 @@ def audiences(session, business, brand_id, moment: Optional[datetime] = None) ->
         out.append({"audience_hash": h, "description": label[:120], "target": b["target"], "banked": b["drainable"] + b["held"],
                     "drainable": b["drainable"], "held": b["held"], "review_held": int(review or 0),
                     "waiting": b["waiting"], "oldest_days_left": b["oldest_days_left"],
-                    "blocked": _blocked(session, bid, brand_id, h, moment)})
+                    "blocked": _blocked(session, bid, brand_id, h, moment, ctx)})
     return out
 
 

@@ -505,3 +505,59 @@ def test_a_later_run_asks_only_for_what_is_left_of_today_s_forty(db):
     out = run(db, biz, lia, world, drain=False)
     assert "find up to 15 NEW" in world.briefs[0]               # 10 left: asks for min(2x, +5)
     assert len(out["accepted"]) == 10
+
+
+# ------------------------------------------------ Codex code review 1 findings ---
+
+def _paused_clone(db, campaign):
+    with Session(db) as s:
+        cols = [r[1] for r in s.execute(text("PRAGMA table_info(outreach_campaigns)"))]
+        paused = str(uuid.uuid4())
+        picked = ", ".join(":id" if c == "id" else "'paused'" if c == "status" else c for c in cols)
+        s.execute(text(f"INSERT INTO outreach_campaigns ({', '.join(cols)}) SELECT {picked} FROM outreach_campaigns "
+                       "WHERE id = :src"), {"id": paused, "src": campaign["id"]})
+        s.commit()
+    return paused
+
+
+def test_a_paused_campaign_s_queue_still_uses_the_inbox_and_brand(db):
+    """P1: 15 waiting in a paused campaign on the same inbox leave 5 places, not 20."""
+    biz, brand, lia, campaign, out = researched(db, 30)
+    queued(db, _paused_clone(db, campaign), 15)
+    assert len(drain(db, biz)["enrolled"]) == 5
+
+
+def test_the_nearest_deadline_goes_first_not_the_oldest_capture(db):
+    """P2: a recent contact with 6 days left beats older ones with 18 left."""
+    biz, brand, lia, campaign, out = researched(db, 8, full=False)        # 5 places
+    urgent = out["accepted"][0]
+    setting(db, "UPDATE outreach_prospects SET captured_at = :t WHERE business_id = :b AND id <> :p",
+            t=(NOW - timedelta(days=10)).isoformat(), p=urgent)
+    setting(db, "UPDATE outreach_prospects SET notice_due_at = :n WHERE id = :p",
+            n=(NOW + timedelta(days=6)).isoformat(), p=urgent)
+    assert urgent in drain(db, biz)["enrolled"]
+
+
+def test_the_owner_is_told_when_today_s_places_are_used(db):
+    biz, brand, lia, campaign, out = researched(db, 30)
+    assert shown(db, biz)["blocked"] is None
+    drain(db, biz)
+    assert "Today's places are used" in shown(db, biz)["blocked"]
+
+
+def test_the_owner_is_told_when_the_pilot_is_full(db, monkeypatch):
+    biz, brand, lia, campaign, out = researched(db, 30)
+    monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", "5")
+    drain(db, biz)
+    assert "at most 5 contacts during the pilot" in shown(db, biz)["blocked"]
+
+
+def test_the_owner_is_told_when_outreach_is_not_on_their_plan(db, monkeypatch):
+    import auth
+    from fastapi import HTTPException
+    biz, brand, lia, campaign, out = researched(db, 10)
+
+    def refuse(*a, **k):
+        raise HTTPException(403, "no")
+    monkeypatch.setattr(auth, "assert_feature_access", refuse)
+    assert "isn't available on this account" in shown(db, biz)["blocked"]

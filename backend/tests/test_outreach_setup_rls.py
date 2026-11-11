@@ -132,23 +132,33 @@ def test_research_writes_verified_prospects_and_enrols_on_postgres(pg, biz, monk
         outreach_manage.approve_templates(s, biz, OWNER, campaign["id"], {"version": row[0], "sequence_version": row[1]})
         m.finish(s, biz, OWNER)
         outreach_research.configure(s, biz, OWNER, {"brand_id": brand["id"], "enabled": True})
-        # OUT-19 D: research is sized to the inbox. On a 5-a-day warm-up inbox
-        # there is room for 5; past warm-up, 20.
-        assert outreach_research.capacity(s, B, brand["id"], datetime.now(timezone.utc))["room"] == 5
+        # OUT-23: the bank is sized to the inbox. On a 5-a-day warm-up inbox
+        # it holds about 25; past warm-up, about 100.
+        from services import outreach_bank
+        audience = s.execute(text("SELECT audience_hash FROM outreach_compliance WHERE id = :l"), {"l": lia["id"]}).scalar()
+        assert outreach_bank.bank(s, B, brand["id"], audience, datetime.now(timezone.utc))["target"] == 25
         s.rollback()
         s.execute(text("UPDATE outreach_mailboxes SET warmup_stage = 20, daily_cap = 20, sending_days = 10, "
                        "health_reviewed_by = :o, health_reviewed_at = now() WHERE business_id = :b"), {"o": OWNER, "b": B})
         s.execute(text("UPDATE outreach_campaigns SET daily_cap = 20 WHERE business_id = :b"), {"b": B})
         s.commit()
-        assert outreach_research.capacity(s, B, brand["id"], datetime.now(timezone.utc))["room"] == 20
+        assert outreach_bank.bank(s, B, brand["id"], audience, datetime.now(timezone.utc))["target"] == 100
         s.rollback()
         world = World([[person(i) for i in range(12)] + [person(99, company="Sole Trader Gym")]], cost=25)
         world.not_companies.add("Sole Trader Gym")
         kw = world.kwargs()
         kw["moment"] = datetime.now(timezone.utc)
         out = outreach_research.run(s, biz, lia["id"], **kw)
+        # OUT-23: research only banks; the drain enrols (it needs today's inbox check).
+        assert s.execute(text("SELECT count(*) FROM outreach_enrolments WHERE business_id = :b"), {"b": B}).scalar() == 0
+        s.rollback()
+        s.execute(text("UPDATE outreach_mailboxes SET health_status = 'pass', health_checked_at = now() "
+                       "WHERE business_id = :b"), {"b": B})
+        s.commit()
+        drained = outreach_bank.drain_business(s, outreach_bank._business(s, B), datetime.now(timezone.utc))
+        assert drained["skipped"] is None and len(drained["enrolled"]) == 12, drained
     assert len(out["accepted"]) == 12 and out["decision_makers"] == 12
-    assert out["attempts"] == 3, "12 is short of 20, so it retried wider twice"
+    assert out["attempts"] == 3, "12 is short of today's 40, so it retried wider twice"
     with pg.engine.connect() as c:
         assert c.execute(text("SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'eligible'"),
                          {"b": B}).scalar() == 12

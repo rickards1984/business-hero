@@ -138,7 +138,7 @@ def test_research_room_ignores_replies(h):
     def ledger():
         # OUT-23: the drain's ledger is what now admits new contacts.
         settings = outreach_send.one(h.s, "outreach_settings", A)
-        out = outreach_bank._ledger(h.s, A, settings, outreach_bank._ready(h.s, A), NOW)
+        out = outreach_bank._ledger(h.s, A, settings, NOW)
         h.s.rollback()
         return out
     before = ledger()
