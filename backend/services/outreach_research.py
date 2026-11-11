@@ -24,7 +24,7 @@ import logging
 import os
 import re
 import socket
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -339,7 +339,7 @@ def _held(session, bid: str) -> tuple:
 
 
 def plan(session, business, compliance_id, *, moment: Optional[datetime] = None, attempt: int = 1,
-         wanted: Optional[int] = None) -> dict:
+         wanted: Optional[int] = None, leads: bool = False) -> dict:
     """`wanted`: how many new contacts the brand's inbox has room for today
     (OUT-19 D). The brief asks for some spare, since verification turns some
     away; only `wanted` are kept."""
@@ -372,14 +372,14 @@ QUALITY BAR (mandatory):
   traders and partnerships.
 - Prefer smaller, independent organisations over national chains.
 
-ALREADY HELD OR CONTACTED — do NOT return these domains:
+{LEADS_BRIEF if leads else ""}ALREADY HELD OR CONTACTED — do NOT return these domains:
 {chr(10).join(excluded) if excluded else '(none yet)'}
 
 WHAT HAS WORKED FOR THIS BRAND:
 {chr(10).join(learned) if learned else '(no results yet)'}
 
 Return ONLY a JSON object: {{"candidates": [{{"company", "company_number", "contact_name", "role",
-"contact_email", "contact_type" ("decision_maker" or "gatekeeper"), "source_url", "region", "segment",
+"contact_email", "contact_type" ("decision_maker" or "gatekeeper"), "source_url", "website", "region", "segment",
 "fit_reason" (one sentence)}}]}}"""
     session.rollback()
     return {"area": area, "attempt": attempt, "exclusions": excluded, "lessons": learned, "brief": brief,
@@ -387,6 +387,15 @@ Return ONLY a JSON object: {{"candidates": [{{"company", "company_number", "cont
 
 
 # ---------------------------------------------------------------- spending ---
+
+LEADS_BRIEF = """COMPANY LEADS (a contact database is connected):
+- ALSO return fitting limited companies where no named decision-maker's email is published. For each, give
+  "company", "company_number", "website" (the company's own site) and "source_url" (its contact, about or legal
+  page), and leave "contact_email" empty. The named decision-maker is found and verified separately.
+- The same quality bar applies to the company. Never guess an email address.
+
+"""
+
 
 def meter_for(brand_id) -> str:
     """Each brand's own monthly research meter (OUT-18)."""
@@ -544,6 +553,16 @@ def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callabl
     name, role = _text(c, "contact_name")[:120], _text(c, "role")[:120]
     base = {"email": email, "email_key": key, "domain": domain, "company": company, "name": name, "role": role,
             "contact_type": _contact_type(email, name, role), "source_url": source}
+    return _corporate(c, base, page, final, fetch, companies)
+
+
+def _corporate(c: dict, base: dict, page: str, final: str, fetch: Callable, companies: Callable) -> dict:
+    """The corporate checks, shared by web candidates and Hunter leads (OUT-23
+    R2.9): an active registered company of a corporate type whose name
+    matches, whose own website (the page given, else its home page)
+    discloses its registration in visible text, and whose domain fits its
+    name or a disclosed trading name. -> ok, review, or a rejection."""
+    domain, company, name = base["domain"], base["company"], base.get("name") or ""
     review = {"ok": False, "review": True, **base,
               "reason": "kept for review: couldn't confirm a registered company that matches this website "
                         "(sole traders and partnerships need consent under PECR)"}
@@ -606,7 +625,7 @@ def _verify(session, bid: str, c: dict, held: dict, fetch: Callable, mx: Callabl
             return review
     return {"ok": True, **base, "number": registered_number,
             "role_verified": _officer_match(name, record.get("officers") or []) if name else False,
-            "company_type": record.get("type")}
+            "company_type": record.get("type"), "officers": list(record.get("officers") or [])}
 
 
 # The business describing ITSELF as unincorporated — not ordinary wording such
@@ -776,6 +795,14 @@ def _lock(session, bid: str) -> None:
 
 
 def _store(session, bid: str, lia_id: str, c: dict, v: dict, moment: datetime, *, review: bool = False) -> str:
+    """OUT-23 Part B: `v["acquisition"]` is "web" (default) or "hunter". Every
+    contact gets ONE acquisition row, never changed afterwards (R3.7): where
+    the address was found published. A Hunter contact's verification carries
+    Hunter's own date, never `moment` (R2.2, R3.6)."""
+    acquisition = v.get("acquisition") or "web"
+    published = v["source_url"]                            # the page publishing the address
+    company_page = v.get("company_url") or published       # where the company facts were read
+    verified_at = v.get("verified_at") or moment
     ident = send.insert(
         session, "outreach_prospects", bid, company=v["company"], name=v["name"] or None, role=v["role"] or None,
         domain=v["domain"], number=v.get("number"), email=v["email"], email_key=v["email_key"],
@@ -786,23 +813,206 @@ def _store(session, bid: str, lia_id: str, c: dict, v: dict, moment: datetime, *
         notice_due_at=moment + NOTICE_WITHIN, retention_due_at=moment + RETENTION)
     common = dict(prospect_id=ident, source_type="web", operation="research", fetched_at=moment,
                   expires_at=moment + EVIDENCE_LIFE, flags=[], adapter_version="out10-v1")
-    send.insert(session, "outreach_evidence", bid, **{**common, "operation": "verify"}, source_url=v["source_url"],
-                fact_type="email_verification", fact_value=v["email"],
+    found = dict(common, source_type=acquisition, adapter_version="out23b-v1" if acquisition == "hunter" else "out10-v1")
+    send.insert(session, "outreach_evidence", bid,
+                **{**found, "operation": "verify", "expires_at": (moment if review else verified_at) + EVIDENCE_LIFE},
+                source_url=published, fact_type="email_verification", fact_value=v["email"],
                 verification_status=None if review else "valid",
                 verification_subject_email_key=None if review else v["email_key"],
-                verified_at=None if review else moment)
+                verified_at=None if review else verified_at)
+    send.insert(session, "outreach_evidence", bid, **found, source_url=published,
+                fact_type="acquisition", fact_value=acquisition)
     facts = {"contact_type": v["contact_type"], "segment": str(c.get("segment") or "")[:80] or "unknown",
-             "region": str(c.get("region") or "")[:80] or "unknown"}
+             "region": str(c.get("region") or "")[:80] or "unknown", "source": acquisition}
     if not review:
         facts.update(role_verified="true" if v.get("role_verified") else "false",
                      companies_house=f"{v.get('number')}|{v.get('company_type')}|active")
     for kind, value in facts.items():
-        send.insert(session, "outreach_evidence", bid, **common, source_url=v["source_url"],
+        send.insert(session, "outreach_evidence", bid, **common, source_url=company_page,
                     fact_type=kind, fact_value=value)
     return ident
 
 
 # -------------------------------------------------------------- enrolment ---
+
+# --------------------------------------------------------- Hunter (OUT-23 B) ---
+
+def latest_approved(session, bid: str, brand_id, audience_hash) -> Optional[str]:
+    """R4.2: the authoritative version of an audience: its approved row with
+    the highest version."""
+    row = session.execute(text(
+        "SELECT id FROM outreach_compliance WHERE business_id = :b AND brand_id = :br AND audience_hash = :h "
+        "AND decision = 'approved' ORDER BY version DESC LIMIT 1"),
+        {"b": bid, "br": str(brand_id), "h": str(audience_hash)}).first()
+    return str(row[0]) if row else None
+
+
+def _hunter_refused(session, bid: str, compliance_id, generation: Optional[int]) -> Optional[str]:
+    """Why Hunter may not be used for this audience right now, or None.
+    Fresh time throughout (design review 4's note). Never rolls back, so it
+    may run under the locks."""
+    from services import outreach_hunter
+    moment = now()
+    try:
+        lia, _ = _audience(session, bid, compliance_id, moment)
+    except send.ActionRefused as exc:
+        return exc.detail
+    if latest_approved(session, bid, lia["brand_id"], lia["audience_hash"]) != str(lia["id"]):
+        return "A newer approval of this audience is in force"
+    if outreach_hunter.SOURCE_TAG not in (send.loads(lia["sources"]) or []):
+        return "This audience's approval doesn't include Hunter.io as a source"
+    if not outreach_hunter.brand_config(session, bid, lia["brand_id"])["enabled"]:
+        return "Hunter is switched off for this brand"
+    if not outreach_hunter.notice_current(session, bid, lia["brand_id"]):
+        return outreach_hunter.NOTICE_CHANGED
+    r = outreach_hunter._row(session, bid)
+    if not r or r["status"] != "connected" or (generation is not None and int(r["generation"]) != generation):
+        return "Hunter isn't connected"
+    return None
+
+
+def _lead_domain(c: dict) -> str:
+    for field in ("website", "source_url"):
+        host = _host(_text(c, field)).lower().rstrip(".")
+        if host.startswith("www."):
+            host = host[4:]
+        if host and "." in host:
+            return host
+    email = _address(_text(c, "contact_email"))
+    return email.split("@")[-1] if "@" in email else ""
+
+
+def _is_lead(c: dict) -> bool:
+    """A company Aria found without a usable named contact: no email, or a
+    role address (Hunter may find the decision-maker)."""
+    email = _address(_text(c, "contact_email"))
+    return "@" not in email or _text(c, "contact_type") == "gatekeeper"
+
+
+def _bounded(fn: Callable, budget) -> Callable:
+    """R3.5: nothing that reaches the network starts without time left; the
+    real page fetch also gets the deadline itself."""
+    def run(*args, **kwargs):
+        if not budget.ok():
+            return None
+        if fn is fetch_page:
+            return fn(*args, deadline=budget.end, clock=budget.clock, **kwargs)
+        if fn is companies_house:
+            return fn(*args, end=budget.end, clock=budget.clock, **kwargs)
+        if fn is has_mail_server:
+            return fn(*args, lifetime=min(5.0, budget.left()), **kwargs)
+        return fn(*args, **kwargs)
+    return run
+
+
+def _enrich(session, business, lia, leads: list, held: dict, out: dict, *, compliance_id, claim, pending: Callable,
+            pending_gatekeepers: Callable, fetch: Callable, mx: Callable, companies: Callable, transport: Callable,
+            sleep: Callable, conn, budget) -> list:
+    """OUT-23 Part B: for each lead, the free checks (R2.3) and the corporate
+    checks (R2.9) before any credit, then Hunter. -> [(c, v)] ready to store,
+    v marked acquisition "hunter"."""
+    from services import outreach_hunter
+    bid, brand_id = str(business.id), str(lia["brand_id"])
+    # One budget, one set of tried domains and one search allowance for the
+    # WHOLE run, across its attempts (Codex code review 1).
+    if budget.searches is None:
+        budget.searches = 2 * max(1, _bank_room(session, bid, brand_id, lia["audience_hash"], now())["room"])
+        session.rollback()
+    fetch, mx, companies = _bounded(fetch, budget), _bounded(mx, budget), _bounded(companies, budget)
+    found, tried = [], budget.tried
+
+    def reject(c, reason):
+        out["rejected"].append({"company": _text(c, "company")[:200], "reason": reason})
+
+    def gate(locked_session):
+        # Under the business lock, before every billable call (R2.4).
+        if _claim_search(locked_session, bid, claim) != claim:
+            return "Another search for this business took over"
+        why = _still_allowed(locked_session, bid, compliance_id, now()) \
+            or _hunter_refused(locked_session, bid, compliance_id, conn.generation)
+        if why:
+            return why
+        if _bank_room(locked_session, bid, brand_id, lia["audience_hash"], now())["room"] - pending() - len(found) <= 0:
+            return "today's places are found"
+        return None
+
+    def allowed(email, kind):
+        if kind == "gatekeeper":
+            today = _today_counts(session, bid, now(), brand_id)["gatekeeper"]
+            session.rollback()
+            if today + pending_gatekeepers() + sum(1 for _, v in found if v["contact_type"] == "gatekeeper") \
+                    >= MAX_GATEKEEPERS:
+                return False
+        key = send.suppression_digest(bid, "email", email)
+        domain = email.split("@")[-1]
+        ok = not (key in held["keys"] or email in held["seen"] or _suppressed(session, bid, key, domain)
+                  or outreach_erasure.recently_erased(session, bid, email, domain, now()))
+        session.rollback()
+        return ok
+
+    def fetch_text(uri):
+        page, final = _page(fetch, uri)
+        return (page, final) if page else None
+
+    for c in leads:
+        if not budget.ok():
+            break
+        company = _text(c, "company")[:200]
+        domain = _lead_domain(c)
+        if not company or not domain or domain in tried:
+            continue
+        tried.add(domain)
+        if domain in setup.FREE_WEBMAIL:
+            reject(c, "a business website is needed, not free webmail")
+            continue
+        if domain in held["domains"]:
+            reject(c, "company already held or contacted")
+            continue
+        domain_held = bool(send.rows(session, "outreach_suppressions", bid, "AND key_type = 'domain' AND key_digest = :d",
+                                     {"d": send.suppression_digest(bid, "domain", domain)})) \
+            or outreach_erasure.recently_erased(session, bid, None, domain, now())
+        session.rollback()
+        if domain_held:
+            reject(c, "opted out or erased recently")
+            continue
+        if not mx(domain):
+            reject(c, f"no mail server for {domain}")
+            continue
+        cited = _text(c, "source_url")
+        page_url = cited if _owns(_host(cited), domain) else f"https://{domain}/"
+        page, final = _page(fetch, page_url)
+        if not page or not _owns(_host(final), domain):
+            reject(c, "the company's own website couldn't be checked")
+            continue
+        base = {"email": "", "email_key": "", "domain": domain, "company": company, "name": "", "role": "",
+                "contact_type": "decision_maker", "source_url": final}
+        corp = _corporate(c, base, page, final, fetch, companies)
+        session.rollback()
+        if not corp.get("ok"):
+            reject(c, "not confirmed as a registered company, so Hunter wasn't used"
+                   if corp.get("review") else corp.get("reason") or "not a registered company")
+            continue
+        person, err = outreach_hunter.find_person(
+            session, bid, brand_id, conn, domain, gate=gate, transport=transport, budget=budget,
+            fetch_text=fetch_text, address_on=_address_on, allowed=allowed, contact_type=_contact_type, sleep=sleep)
+        if err:
+            reject(c, err[0])
+            if err[1]:
+                out["hunter_stopped"] = err[0]
+                break
+            continue
+        email = person["email"]
+        held["seen"].add(email)
+        held["domains"].add(domain)
+        found.append((c, {**corp, "ok": True, "email": email, "email_key": send.suppression_digest(bid, "email", email),
+                          "name": person["name"], "role": person["role"],
+                          "contact_type": _contact_type(email, person["name"], person["role"]),
+                          "source_url": person["source_url"], "company_url": final, "acquisition": "hunter",
+                          "verified_at": datetime.combine(person["verified_on"], datetime.min.time(), tzinfo=timezone.utc),
+                          "role_verified": _officer_match(person["name"], corp.get("officers") or []) if person["name"] else False,
+                          "generation": conn.generation}))
+    return found
+
 
 # ------------------------------------------------------------------ the run ---
 
@@ -823,13 +1033,13 @@ def _pause_impossible(session, bid: str, brand_id: str, cost, impossible: int, o
 
 def run(session, business, compliance_id, *, search: Optional[Callable] = None, fetch: Optional[Callable] = None,
         mx: Optional[Callable] = None, companies: Optional[Callable] = None,
-        moment: Optional[datetime] = None) -> dict:
+        moment: Optional[datetime] = None, hunter: Optional[Callable] = None, sleep: Optional[Callable] = None) -> dict:
     """See _run. Whatever fails, a search claim this run holds is given back
     (Codex OUT-19 D review 2)."""
     holder = {"claim": None}
     try:
         return _run(session, business, compliance_id, holder, search=search, fetch=fetch, mx=mx,
-                    companies=companies, moment=moment)
+                    companies=companies, moment=moment, hunter=hunter, sleep=sleep)
     except BaseException:
         session.rollback()
         if holder["claim"]:
@@ -844,7 +1054,7 @@ def run(session, business, compliance_id, *, search: Optional[Callable] = None, 
 
 def _run(session, business, compliance_id, holder: dict, *, search: Optional[Callable] = None,
          fetch: Optional[Callable] = None, mx: Optional[Callable] = None, companies: Optional[Callable] = None,
-         moment: Optional[datetime] = None) -> dict:
+         moment: Optional[datetime] = None, hunter: Optional[Callable] = None, sleep: Optional[Callable] = None) -> dict:
     """One research run for one approved audience. Commits its own work.
 
     Authority is re-read fresh before any spend and again, under the shared
@@ -878,6 +1088,24 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
         out["stopped"] = "This brand is waiting for payment: research starts once it's paid for."
         return out
     session.rollback()
+    # OUT-23 Part B: Hunter, when this audience may use it (R2.8, R3.8, R4.2).
+    from services import outreach_hunter
+    import time as _time
+    transport, sleep = hunter or outreach_hunter._http, sleep or _time.sleep
+    conn = None
+    try:
+        if _hunter_refused(session, bid, compliance_id, None) is None:
+            conn = outreach_hunter.connection(session, bid)
+            session.rollback()
+            if conn is not None:
+                outreach_hunter.refresh_account(session, bid, conn.generation, transport, conn.key)
+                conn = outreach_hunter.connection(session, bid)
+    except Exception as exc:          # e.g. migration 042 not yet run: web research carries on
+        logger.error("Research for business %s: Hunter unavailable: %s", bid, type(exc).__name__)
+        conn = None
+    session.rollback()
+    out["via_hunter"] = 0
+    hunter_budget = outreach_hunter.Budget() if conn is not None else None
     found_new = False
     claim = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -941,7 +1169,8 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
             break
         _spend(session, bid, moment, reserve, brand_id)
         session.commit()
-        brief = plan(session, business, compliance_id, moment=moment, attempt=attempt, wanted=room["room"])["brief"]
+        brief = plan(session, business, compliance_id, moment=moment, attempt=attempt, wanted=room["room"],
+                     leads=conn is not None)["brief"]
         out["attempts"] = attempt
         try:
             result = search(brief) or {}
@@ -1010,8 +1239,12 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
             "SELECT email_key FROM outreach_prospects WHERE business_id = :b AND email_key IS NOT NULL"), {"b": bid})}
         held = {"domains": domains, "keys": keys, "seen": set()}
         session.rollback()
-        verified, reviews = [], []
+        verified, reviews, leads = [], [], []
         for c in [c for c in (result.get("candidates") or []) if isinstance(c, dict)]:
+            if conn is not None and _is_lead(c):
+                leads.append(c)          # Hunter may find the named decision-maker (OUT-23 B)
+                if "@" not in _address(_text(c, "contact_email")):
+                    continue             # no published address: Hunter only
             v = _verify(session, bid, c, held, fetch, mx, companies)   # no lock held: network
             if v.get("email") and outreach_erasure.recently_erased(session, bid, v.get("email"), v.get("domain"), moment):
                 # OUT-13 core: erased in the past 90 days; not collected again yet.
@@ -1024,6 +1257,13 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
                 out["rejected"].append({"company": str(c.get("company") or "")[:200], "reason": v["reason"]})
                 continue
             verified.append((c, v))
+        if conn is not None and leads:
+            verified.extend(_enrich(
+                session, business, lia, leads, held, out, compliance_id=compliance_id, claim=claim,
+                pending=lambda: len(verified),
+                pending_gatekeepers=lambda: sum(1 for _, v in verified if v["contact_type"] == "gatekeeper"),
+                fetch=fetch, mx=mx, companies=companies, transport=transport, sleep=sleep, conn=conn,
+                budget=hunter_budget))
         # Store under the business lock, re-checking everything that can change.
         _lock(session, bid)
         why = _still_allowed(session, bid, compliance_id, moment)
@@ -1058,6 +1298,13 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
                 # Again under the store lock: erasure may have run mid-search.
                 out["rejected"].append({"company": v["company"], "reason": RECENTLY_ERASED})
                 continue
+            if v.get("acquisition") == "hunter":
+                # Again under the store lock, on fresh time: Hunter may have been
+                # disconnected, the notice changed or a newer approval made (R4.2).
+                why_not = _hunter_refused(session, bid, compliance_id, v["generation"])
+                if why_not:
+                    out["rejected"].append({"company": v["company"], "reason": why_not})
+                    continue
             if total >= DAILY_TARGET or left <= 0 or (
                     v["contact_type"] == "gatekeeper" and counts["gatekeeper"] >= MAX_GATEKEEPERS):
                 out["rejected"].append({"company": v["company"], "reason": "today's quota is full"})
@@ -1076,6 +1323,8 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
             counts[v["contact_type"]] += 1
             out["accepted"].append(ident)
             out["decision_makers" if v["contact_type"] == "decision_maker" else "gatekeepers"] += 1
+            if v.get("acquisition") == "hunter":
+                out["via_hunter"] += 1
             found_new = True
         # Contacts kept only for the owner's review are personal data too: they
         # count toward the brand's daily limits and come after eligible ones.
@@ -1170,6 +1419,10 @@ def summary(business, out: dict) -> str:
     why = ", ".join(f"{n} {label}" for label, n in sorted(reasons.items(), key=lambda x: -x[1])[:4])
     line = (f"I found {len(out['accepted'])} new contacts for {getattr(business, 'name', 'the business')}: "
             f"{out['decision_makers']} decision-makers, {out['gatekeepers']} gatekeepers.")
+    if out.get("via_hunter"):
+        line += f" {out['via_hunter']} found via Hunter."
+    if out.get("hunter_stopped"):
+        line += f" Hunter stopped: {out['hunter_stopped']}."
     if out["rejected"]:
         line += f" {len(out['rejected'])} were rejected ({why})."
     if out.get("stopped"):
@@ -1227,9 +1480,12 @@ def run_due(session, *, moment: Optional[datetime] = None, runner: Callable = ru
         if business is None:
             session.rollback()
             continue
+        # R4.2: one run per audience, its latest approved version only.
         audiences = [r[0] for r in session.execute(text(
-            "SELECT id, brand_id FROM outreach_compliance WHERE business_id = :b AND decision = 'approved' "
-            "ORDER BY reviewed_at"), {"b": bid}) if str(r[1]) in on]
+            "SELECT c.id, c.brand_id FROM outreach_compliance c WHERE c.business_id = :b AND c.decision = 'approved' "
+            "AND c.version = (SELECT max(o.version) FROM outreach_compliance o WHERE o.business_id = c.business_id "
+            "AND o.brand_id = c.brand_id AND o.audience_hash = c.audience_hash AND o.decision = 'approved') "
+            "ORDER BY c.reviewed_at"), {"b": bid}) if str(r[1]) in on]
         _lock(session, bid)   # claim the day under the business lock: two schedulers never both run
         cfg = _config(_doc(session, bid))
         if cfg.get("last_run") == today:
@@ -1276,16 +1532,54 @@ def _system_resolve(host: str) -> list:
     return [(info[4][0],) for info in socket.getaddrinfo(host, None)]
 
 
+def _resolve_within(resolve: Callable, host: str, seconds: float) -> list:
+    """DNS bounded by the deadline too (OUT-23 R3.5, R4.4)."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as Late
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(resolve, host).result(timeout=max(0.1, seconds))
+    except Late:
+        raise TimeoutError("dns") from None
+    finally:
+        pool.shutdown(wait=False)
+
+
 def fetch_page(url: str, *, resolve: Optional[Callable] = None, transport=None,
-               limit: int = 2_000_000) -> Optional[dict]:
+               limit: int = 2_000_000, deadline: Optional[float] = None,
+               clock: Optional[Callable] = None) -> Optional[dict]:
+    """See _fetch_page. With a deadline the whole fetch (DNS, every hop,
+    every read) is abandoned when it passes (Codex OUT-23B code review 2)."""
+    if deadline is None:
+        return _fetch_page(url, resolve=resolve, transport=transport, limit=limit)
+    import time as _time
+    clock = clock or _time.monotonic
+    try:
+        return within(deadline - clock(), _fetch_page, url, resolve=resolve, transport=transport, limit=limit,
+                      deadline=deadline, clock=clock)
+    except TimeoutError:
+        return None
+
+
+def _fetch_page(url: str, *, resolve: Optional[Callable] = None, transport=None,
+                limit: int = 2_000_000, deadline: Optional[float] = None,
+                clock: Optional[Callable] = None) -> Optional[dict]:
     """GET a public web page. The model names the URL, so every hop resolves
     the host ONCE, refuses any non-public address, and connects to exactly
     that checked address (Host header and TLS name kept), so DNS rebinding
     cannot redirect the connection (Codex OUT-10 review 1). The body is read
-    to at most `limit` bytes. Returns {"url": final url, "text"} or None."""
+    to at most `limit` bytes. Returns {"url": final url, "text"} or None.
+    With a `deadline` (a `clock()` instant), DNS, every hop and the streamed
+    read all stop when it passes (OUT-23 R3.5)."""
     import httpx
+    import time as _time
     resolve = resolve or _system_resolve
+    clock = clock or _time.monotonic
+
+    def left() -> float:
+        return 10.0 if deadline is None else min(10.0, deadline - clock())
     for _hop in range(4):
+        if left() < 1:
+            return None
         try:
             parts = urlparse(url)
             host, port = parts.hostname, parts.port
@@ -1294,7 +1588,7 @@ def fetch_page(url: str, *, resolve: Optional[Callable] = None, transport=None,
         if parts.scheme not in ("http", "https") or not host:
             return None
         try:
-            addresses = [a[0] for a in resolve(host)]
+            addresses = [a[0] for a in (resolve(host) if deadline is None else _resolve_within(resolve, host, left()))]
         except Exception:
             return None
         if not addresses or not all(_public_ip(a) for a in addresses):
@@ -1303,7 +1597,7 @@ def fetch_page(url: str, *, resolve: Optional[Callable] = None, transport=None,
         port = port or (443 if parts.scheme == "https" else 80)
         target = parts._replace(netloc=f"[{pinned}]:{port}" if ":" in pinned else f"{pinned}:{port}").geturl()
         try:
-            with httpx.Client(timeout=10.0, follow_redirects=False, transport=transport,
+            with httpx.Client(timeout=max(1.0, left()), follow_redirects=False, transport=transport,
                               headers={"User-Agent": "BusinessHero-Research/1.0 (+contact verification)"}) as client:
                 with client.stream("GET", target, headers={"Host": host},
                                    extensions={"sni_hostname": host}) as response:
@@ -1318,31 +1612,85 @@ def fetch_page(url: str, *, resolve: Optional[Callable] = None, transport=None,
                         body.extend(chunk)
                         if len(body) >= limit:
                             break
+                        if deadline is not None and left() <= 0:
+                            return None
                     return {"url": url, "text": bytes(body[:limit]).decode(response.encoding or "utf-8", "replace")}
         except Exception:
             return None
     return None
 
 
-def has_mail_server(domain: str) -> bool:
+def has_mail_server(domain: str, *, lifetime: float = 5.0) -> bool:
     import dns.resolver
     try:
-        return len(dns.resolver.resolve(domain, "MX", lifetime=5)) > 0
+        return len(dns.resolver.resolve(domain, "MX", lifetime=max(0.5, lifetime))) > 0
     except Exception:
         return False
 
 
-def companies_house(query: str) -> Optional[dict]:
+def within(seconds: float, fn: Callable, *args, **kwargs):
+    """Run `fn` and give up at an ABSOLUTE limit (Codex OUT-23B code review
+    2): a blocking read is abandoned when the time is up, never waited on.
+    The abandoned worker ends at its own per-read timeout; its result is
+    discarded."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as Late
+    if seconds <= 0:
+        raise TimeoutError("deadline")
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(fn, *args, **kwargs).result(timeout=seconds)
+    except Late:
+        raise TimeoutError("deadline") from None
+    finally:
+        pool.shutdown(wait=False)
+
+
+def get_json_within(client, url: str, *, params: Optional[dict] = None, headers: Optional[dict] = None,
+                    end: Optional[float] = None, clock: Optional[Callable] = None, limit: int = 2_000_000,
+                    cap: float = 10.0) -> tuple:
+    """One GET whose WHOLE duration (connect, wait and every streamed chunk)
+    stays inside `end` (a `clock()` instant): OUT-23 R3.5, Codex code review
+    1. Returns (status, json or None, headers). Raises TimeoutError at the end."""
+    import json as _json
+    import time as _time
+    clock = clock or _time.monotonic
+
+    def left() -> float:
+        return cap if end is None else min(cap, end - clock())
+    if left() < 0.5:
+        raise TimeoutError("deadline")
+
+    def fetch():
+        with client.stream("GET", url, params=params, headers=headers, timeout=max(0.5, left())) as response:
+            body = bytearray()
+            for chunk in response.iter_bytes():
+                body.extend(chunk)
+                if len(body) > limit:
+                    raise ValueError("too large")
+                if end is not None and clock() >= end:
+                    raise TimeoutError("deadline")
+            try:
+                data = _json.loads(bytes(body)) if body else None
+            except ValueError:
+                data = None
+            return response.status_code, data, dict(response.headers)
+    return fetch() if end is None else within(end - clock(), fetch)
+
+
+def companies_house(query: str, *, end: Optional[float] = None, clock: Optional[Callable] = None) -> Optional[dict]:
     import httpx
     key = os.environ.get("COMPANIES_HOUSE_API_KEY", "")
     if not key:
         return None
     api = "https://api.company-information.service.gov.uk"
+
+    def get(url, params=None):
+        return get_json_within(client, url, params=params, end=end, clock=clock)[1] or {}
     try:
         with httpx.Client(timeout=10.0, auth=(key, "")) as client:
             number = str(query).strip().upper()
             if not re.fullmatch(r"[A-Z0-9]{8}", number):
-                hits = client.get(f"{api}/search/companies", params={"q": query, "items_per_page": 5}).json()
+                hits = get(f"{api}/search/companies", {"q": query, "items_per_page": 5})
                 wanted = re.sub(r"\b(limited|ltd|plc|llp)\b\.?", "", str(query).lower()).strip()
                 match = next((h for h in hits.get("items", [])
                               if re.sub(r"\b(limited|ltd|plc|llp)\b\.?", "", h.get("title", "").lower()).strip() == wanted),
@@ -1350,8 +1698,8 @@ def companies_house(query: str) -> Optional[dict]:
                 if not match:
                     return None
                 number = match["company_number"]
-            profile = client.get(f"{api}/company/{number}").json()
-            officers = client.get(f"{api}/company/{number}/officers", params={"items_per_page": 50}).json()
+            profile = get(f"{api}/company/{number}")
+            officers = get(f"{api}/company/{number}/officers", {"items_per_page": 50})
     except Exception:
         return None
     return {"number": number, "name": profile.get("company_name"), "status": profile.get("company_status"),

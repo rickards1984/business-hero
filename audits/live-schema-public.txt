@@ -13,6 +13,10 @@
 # were added by hand from the local harness (identical format), BEFORE production runs 041;
 # audits/041-PROD-RUNBOOK.md STEP 2 confirms columns +16. Regenerate after it is live.
 #
+# 042 (OUT-23 Part B, Hunter.io): the 31 rows of outreach_provider_accounts and
+# outreach_provider_charges were added the same way from the local harness, BEFORE production
+# runs 042; audits/042-PROD-RUNBOOK.md STEP 2 confirms columns +31. Regenerate after it is live.
+#
 # FULL means this file describes every table, so the guard checks every column
 # the backend writes and `test_full_coverage_leaves_nothing_unguarded` requires
 # that nothing is left unchecked. Keep UNGUARDED_BUDGET at 0 while this says
@@ -797,6 +801,37 @@ col   outreach_prospects.stage text null=NO def='new'::text
 col   outreach_prospects.subscriber_type text null=NO def='unknown'::text
 col   outreach_prospects.updated_at timestamp with time zone null=NO def=now()
 col   outreach_prospects.why_now text null=YES def=-
+col   outreach_provider_accounts.account_fetched_at timestamp with time zone null=YES def=-
+col   outreach_provider_accounts.blocked jsonb null=NO def='{}'::jsonb
+col   outreach_provider_accounts.business_id uuid null=NO def=-
+col   outreach_provider_accounts.connected_at timestamp with time zone null=YES def=-
+col   outreach_provider_accounts.connected_by uuid null=YES def=-
+col   outreach_provider_accounts.created_at timestamp with time zone null=NO def=now()
+col   outreach_provider_accounts.generation integer(32,0) null=NO def=-
+col   outreach_provider_accounts.id uuid null=NO def=gen_random_uuid()
+col   outreach_provider_accounts.key_ciphertext text null=YES def=-
+col   outreach_provider_accounts.key_last4 text null=YES def=-
+col   outreach_provider_accounts.plan text null=YES def=-
+col   outreach_provider_accounts.pools jsonb null=NO def='{}'::jsonb
+col   outreach_provider_accounts.provider text null=NO def=-
+col   outreach_provider_accounts.status text null=NO def=-
+col   outreach_provider_accounts.updated_at timestamp with time zone null=NO def=now()
+col   outreach_provider_charges.brand_credits numeric(10,4) null=NO def=-
+col   outreach_provider_charges.brand_id uuid null=NO def=-
+col   outreach_provider_charges.business_id uuid null=NO def=-
+col   outreach_provider_charges.created_at timestamp with time zone null=NO def=now()
+col   outreach_provider_charges.generation integer(32,0) null=NO def=-
+col   outreach_provider_charges.id uuid null=NO def=gen_random_uuid()
+col   outreach_provider_charges.operation text null=NO def=-
+col   outreach_provider_charges.period text null=NO def=-
+col   outreach_provider_charges.pool text null=NO def=-
+col   outreach_provider_charges.pool_actual text null=YES def=-
+col   outreach_provider_charges.provider text null=NO def=-
+col   outreach_provider_charges.reserved_native numeric(10,4) null=NO def=-
+col   outreach_provider_charges.settled_at timestamp with time zone null=YES def=-
+col   outreach_provider_charges.state text null=NO def=-
+col   outreach_provider_charges.updated_at timestamp with time zone null=NO def=now()
+col   outreach_provider_charges.used_native numeric(10,4) null=YES def=-
 col   outreach_recently_erased.business_id uuid null=NO def=-
 col   outreach_recently_erased.created_at timestamp with time zone null=NO def=now()
 col   outreach_recently_erased.digest_version integer null=NO def=1

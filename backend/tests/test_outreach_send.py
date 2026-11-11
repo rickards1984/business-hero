@@ -136,10 +136,13 @@ def database(tmp_path):
         # OUT-13 core: migration 041's tables too.
         tables += re.findall(r'CREATE TABLE IF NOT EXISTS public\.(outreach_\w+) \(\n(.*?)\n\);',
                              (Path(__file__).parents[1] / 'migrations/041_outreach_erasure.sql').read_text(), re.S)
+        # OUT-23 Part B: migration 042's tables (the send path reads the Hunter settings).
+        tables += re.findall(r'CREATE TABLE IF NOT EXISTS public\.(outreach_\w+) \(\n(.*?)\n\);',
+                             (Path(__file__).parents[1] / 'migrations/042_outreach_provider_accounts.sql').read_text(), re.S)
         for name, body in tables:
             cols = []
             for line in body.splitlines():
-                match = re.match(r'  ([a-z_]+) (uuid|text\[\]|text|jsonb|integer|boolean|numeric|timestamptz|date)\b', line)
+                match = re.match(r'  ([a-z_0-9]+) (uuid|text\[\]|text|jsonb|integer|boolean|numeric|timestamptz|date)\b', line)
                 if match:
                     col, kind = match.groups()
                     affinity = 'NUMERIC' if kind in ('integer', 'boolean', 'numeric') else 'TEXT'
