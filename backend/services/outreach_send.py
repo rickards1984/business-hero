@@ -56,23 +56,38 @@ def loads(value):
 # OUT-25 review 1).
 _TOKEN = re.compile(r"(?<![\w/=?&%.-])(?:\[([^\[\]\n]{1,120})\]|\{\{([^{}\n]{1,120})\}\}|\{([^{}\n]{1,120})\}"
                     r"|<([^<>@/=\n]{1,120})>)")
-_FIELD = re.compile(r"\b(your|their|insert|recipient|sender|first|last|full|name|names|surname|company|business|"
-                    r"organisation|organization|job|title|role|position|signature|phone|mobile|telephone|email|"
-                    r"e-mail|website|url|link|contact|address|city|town)\b", re.I)
+# A field label is made ONLY of these words (Codex OUT-25 review 2: a field
+# word inside an ordinary sentence, "[by email only]", is not a label).
+_LABEL_WORDS = {
+    "insert", "add", "enter", "type", "the", "a", "an", "of", "for", "here", "your", "their", "my", "his", "her",
+    "s", "recipient", "recipients", "sender", "senders", "contact", "contacts", "prospect", "prospects", "client",
+    "customer", "lead", "first", "last", "full", "given", "family", "middle", "surname", "name", "names", "firstname",
+    "lastname", "fullname", "company", "companies", "business", "organisation", "organization", "org", "job", "title",
+    "role", "position", "signature", "phone", "mobile", "telephone", "tel", "number", "email", "e", "mail",
+    "emailaddress", "address", "website", "web", "site", "url", "link", "booking", "calendar", "city", "town",
+    "region", "details", "info", "date", "time"}
+_LABEL_CORE = {"name", "names", "firstname", "lastname", "fullname", "surname", "company", "business", "organisation",
+               "organization", "org", "title", "role", "position", "signature", "phone", "mobile", "telephone",
+               "number", "email", "mail", "emailaddress", "address", "website", "site", "url", "link", "city", "town",
+               "details", "recipient", "sender", "contact", "prospect", "client", "customer"}
 _HTML = {"b", "i", "u", "p", "br", "hr", "em", "strong", "div", "span", "ul", "ol", "li", "a", "html", "body"}
 PLACEHOLDER_REFUSED = ("This email still contains a placeholder such as [YOUR NAME]. "
                        "Edit the campaign's emails to remove it: your sign-off is added automatically")
 
 
+def label_words(inner: str) -> list:
+    """Words of a token's inside: camelCase and snake_case split, lower case."""
+    spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", inner.strip())
+    return [w for w in re.split(r"[\s_\-'’.:]+", spaced.lower()) if w]
+
+
 def _is_field(inner: str, angled: bool) -> bool:
-    inner = inner.strip()
-    if not inner or (angled and inner.lower().split(" ")[0] in _HTML):
+    words = label_words(inner)
+    if not words or (angled and words[0] in _HTML):
         return False
-    if re.fullmatch(r"[A-Z][A-Z0-9 _'-]{1,60}", inner):                    # [YOUR NAME], <NAME>, [CITY]
+    if re.fullmatch(r"[A-Z][A-Z0-9 _'-]{1,60}", inner.strip()):           # [YOUR NAME], <NAME>, [CITY]
         return True
-    if re.fullmatch(r"[a-z]+(_[a-z0-9]+)+", inner):                        # {first_name}
-        return True
-    return bool(_FIELD.search(inner))
+    return all(w in _LABEL_WORDS for w in words) and any(w in _LABEL_CORE for w in words)
 
 
 def placeholder(*texts):

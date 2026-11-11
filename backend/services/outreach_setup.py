@@ -952,15 +952,27 @@ EMAIL_CRAFT = (
 # and refused when saved.
 _VALEDICTION = re.compile(r"^(best( wishes| regards)?|kind regards|warm regards|regards|many thanks|thanks|"
                           r"thank you|cheers|all the best|yours sincerely|yours faithfully|sincerely),?$", re.I)
-_SENDER = re.compile(r"^[\[{<]{1,2}\s*(your|sender'?s?|my)\b[^\]}>]*[\]}>]{1,2}$|"
-                     r"^[\[{<]{1,2}\s*(name|full name|signature|company( name)?|job title|title|position|"
-                     r"phone( number)?|email( address)?|website)\s*[\]}>]{1,2}$", re.I)
+_SENDER_WORDS = {"your", "my", "sender", "senders", "s", "the", "full", "first", "last", "name", "title", "job",
+                 "position", "role", "signature", "company", "business", "phone", "mobile", "number", "email",
+                 "mail", "e", "address", "website", "web", "site", "contact", "details"}
+_SENDER_CORE = {"name", "title", "position", "role", "signature", "company", "business", "phone", "mobile",
+                "email", "mail", "website", "site", "details"}
+
+
+def _sender_placeholder(line: str) -> bool:
+    """A line that is ONLY a sender-field placeholder: [YOUR NAME],
+    {{senderName}}, [Job Title]. Never a sentence (Codex OUT-25 review 2)."""
+    found = re.fullmatch(r"(?:\[([^\[\]]{1,80})\]|\{\{([^{}]{1,80})\}\}|\{([^{}]{1,80})\}|<([^<>@/=]{1,80})>)", line)
+    if not found:
+        return False
+    words = send.label_words(next(g for g in found.groups() if g is not None))
+    return bool(words) and all(w in _SENDER_WORDS for w in words) and any(w in _SENDER_CORE for w in words)
 
 
 def _drop_placeholder_sign_off(body: str) -> str:
     lines = (body or "").rstrip().split("\n")
     end = len(lines)
-    while end and (not lines[end - 1].strip() or _SENDER.match(lines[end - 1].strip())):
+    while end and (not lines[end - 1].strip() or _sender_placeholder(lines[end - 1].strip())):
         end -= 1
     removed = [ln for ln in lines[end:] if ln.strip()]
     if not removed:

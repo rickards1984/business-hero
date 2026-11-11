@@ -34,7 +34,8 @@ def setup():
 @pytest.mark.parametrize("value", ["Thanks,\n[YOUR NAME]", "Hi [First Name],", "Dear {{first_name}}", "Hi {first_name}",
                                    "at [Company] we", "Hi <NAME>,", "Dear {{name}}",
                                    "Hi [Insert the first name of the recipient here], how are you?",
-                                   "Visit [your website link]", "[CITY] gyms"])
+                                   "Visit [your website link]", "[CITY] gyms", "Dear {{firstName}},", "Hi [firstname],",
+                                   "Reply to [emailAddress].", "Kind regards, [Sender's name]", "Call [phone number]"])
 def test_placeholders_are_found(value):
     assert send().placeholder(value)
 
@@ -43,7 +44,9 @@ def test_placeholders_are_found(value):
                                    "Reply with a yes or no.", "A 1:1 session", "See https://example.com/a?b=c",
                                    "£20 a month [ex VAT].", "Our monthly fee is £20.\n[Prices exclude VAT]",
                                    "https://example.com/?filter[sector]=gyms", "Write to <sam@example.com>",
-                                   "<br>", "[see below]", "We ran 12 sessions [in 2025]."])
+                                   "<br>", "[see below]", "We ran 12 sessions [in 2025].", "Please reply [by email only].",
+                                   "Our pricing is fixed.\n[My prices include VAT]", "[Sent from my phone]",
+                                   "Prices [per person, per session]."])
 def test_ordinary_writing_is_not_a_placeholder(value):
     assert send().placeholder(value) is None
 
@@ -52,6 +55,7 @@ def test_ordinary_writing_is_not_a_placeholder(value):
     ("Hello Sam,\n\nWould a short call help?\n\nBest regards,\n[YOUR NAME]", "Hello Sam,\n\nWould a short call help?"),
     ("Hello Sam,\n\nWorth a chat?\n\nThanks\n\n[Your Name]\n[Company]", "Hello Sam,\n\nWorth a chat?"),
     ("Hello Sam,\n\nWorth a chat?\n[YOUR NAME]", "Hello Sam,\n\nWorth a chat?"),
+    ("Hi,\n\nA thought.\n\nCheers,\n{{senderName}}\n[Job Title]", "Hi,\n\nA thought."),
     ("Hello Sam,\n\nWorth a chat?", "Hello Sam,\n\nWorth a chat?"),
 ])
 def test_a_drafted_placeholder_sign_off_is_removed(body, expected):
@@ -62,6 +66,8 @@ def test_a_drafted_placeholder_sign_off_is_removed(body, expected):
     "Our monthly fee is £20.\n[Prices exclude VAT]",
     "Book a slot:\n[https://cal.example/msc]",
     "Hello Sam,\n\nThanks for reading.\n\nBest regards,",
+    "Our pricing is fixed.\n[My prices include VAT]",
+    "Reply any time.\n[Your call, no pressure]",
 ])
 def test_real_content_is_never_removed(body):
     """Codex OUT-25 review 1, finding 1."""
