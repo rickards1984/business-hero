@@ -616,3 +616,118 @@ Tests: erasing a Hunter contact leaves no source URL, verification fact, learnin
 
 ## R2.12 Tests first (RED)
 Revision 1's B-7 list, plus each finding's tests above, plus migration 042 rehearsed on the local PostgreSQL harness with its runbook (`audits/042-PROD-RUNBOOK.md`, staging first).
+
+---
+
+# Part B — revision 3 (answers Codex design review 2; supersedes revision 2 where they differ)
+
+Each item is numbered by review 2's finding.
+
+## R3.1 A connection epoch that never repeats (finding 1)
+- The `outreach_provider_accounts` row is **never deleted**. Disconnecting sets `key_ciphertext = NULL`, `status = 'disconnected'` and `generation = generation + 1`. The row has no personal data and goes only with the business.
+- **Connect** happens in two steps:
+  1. outside any transaction, read `generation` (or 0 if there's no row) as `seen`, then call `GET /account`;
+  2. under the locks (R3.4), `UPDATE ... SET key_ciphertext, status = 'connected', generation = generation + 1 ... WHERE generation = :seen`, or `INSERT ... ON CONFLICT DO NOTHING` when `seen = 0`.
+
+  Zero rows written means "the connection changed meanwhile; try again", and nothing is stored.
+- **Every other write** (account refresh, error states, quota blocks, settlement, storing a Hunter contact) is conditional on the generation that the work started with.
+- Tests: an old run finishing after disconnect and reconnect stores nothing; a connect whose `/account` returns after a disconnect is refused.
+
+## R3.2 A charge ledger instead of meters (finding 2) — in migration 042
+`outreach_provider_charges` holds one row per billable call:
+
+| Column | Type / rule |
+|---|---|
+| `id`, `business_id`, `brand_id`, `provider` | — |
+| `generation` | int |
+| `operation` | `CHECK IN ('search', 'verify')` |
+| `pool` | `CHECK IN ('credit', 'search', 'verification')`: native, expected |
+| `reserved_native` | numeric(10,4) |
+| `brand_credits` | numeric(10,4): the brand-cap charge |
+| `used_native` | numeric(10,4), nullable |
+| `pool_actual` | text, nullable |
+| `state` | `CHECK IN ('reserved', 'settled', 'charged')` |
+| `period` | `YYYY-MM`, the UK month **of the reservation** |
+| `created_at`, `settled_at` | — |
+
+RLS is on, with no policies and no grants. **No domain, email or person is stored**, only an operation and its cost.
+
+- **The cap** for a brand and period is `Σ brand_credits` over every state (an outstanding reservation counts).
+- **Settlement** is `UPDATE ... SET state = 'settled', used_native, pool_actual WHERE id = :id AND state = 'reserved'`. It is idempotent, and a late response after the sweep (state `charged`) changes nothing.
+- **The sweep**, in the hourly pass, moves `reserved` rows older than 1 hour to `charged` at their reserved amount (conservative).
+- **Months:** a charge always counts in the month it was reserved.
+- Hunter's usage no longer touches `usage_meters`; the owner's figures are computed from this ledger.
+
+## R3.3 Native pools and brand credits (finding 3)
+- **The expected pool** comes from the cached account model: one `credit` pool, or separate `search`/`verification` pools. An unknown model refreshes `/account` first, and if it is still unknown no call is made.
+
+| Model | Search | Verify | Brand credits (cap) |
+|---|---|---|---|
+| Single pool | reserves 1 `credit` | reserves 0.5 `credit` | search 1, verify 0.5 |
+| Separate pools | reserves 1 `search` | reserves 1 `verification` | search 1, verify 0.5 |
+
+  The brand cap is defined in credits whatever the pools.
+- **Before a call:** the expected pool isn't blocked, the account shows at least the reserved amount available (when known), and the brand has room for `brand_credits`.
+- **Settlement:**
+  - `X-Credits-Unit` must equal the expected pool;
+  - a mismatch charges the larger amount, refreshes `/account` and logs the mismatch;
+  - a missing or malformed header charges the reservation (estimated).
+- Tests: both models, a mismatched unit, missing headers on errors, and `0.5` remaining.
+
+## R3.4 One lock order for every writer (finding 4)
+The order is `business_settings → outreach_settings → outreach_provider_accounts → outreach_provider_charges → (existing: meter → daily → … → evidence → action)`. This extends `outreach_send.lock_business`'s documented order.
+
+- **Every writer** takes `research._lock` (that is, `send.lock_business`) first, then locks its provider rows in that order:
+  - reservation, settlement and the sweep;
+  - connect, disconnect, account refresh and error or quota updates;
+  - storing a Hunter contact.
+- **No rollback-owning helper** (`outreach_setup._authority`, `outreach_manage.start`) is called inside the critical section. Authority checks run before the lock, as `draft_audience` does today, then `_still_allowed` (which doesn't roll back) runs under it.
+- **No network call** inside a transaction.
+- Tests: PostgreSQL interleavings of settlement against reservation, the sweep against research, and connect against a run. `pg_blocking_pids` proves each contention, as in Part A.
+
+## R3.5 A wall-clock deadline for all enrichment (finding 5)
+- At its start the enrichment phase sets a **monotonic deadline of 180 s**. That covers corporate checks, publication fetches, Hunter calls and Verifier polling.
+- Every operation runs with `timeout = min(its own, deadline − now)`, and nothing starts with under 5 s left. `fetch_page` gets a `deadline` argument that bounds its redirects and reads in total.
+- The claim is **renewed and checked** before each lead, before each billable call and before storing. Its 15-minute lease is far longer than the AI search plus 180 s.
+- **On a takeover** the old owner stores nothing (the claim check fails), and its outstanding reservations settle or are swept (R3.2). Paid work is repeated only after a lapsed lease, which is accepted, bounded and tested.
+- Tests: a slow publication fetch and a slow corporate check stop at the deadline, as well as slow Hunter calls; a takeover mid-lead.
+
+## R3.6 Verifier acceptance, fully typed (finding 6)
+Path (b) accepts the person only when all of these hold:
+- the top-level `data.email` equals the address;
+- `data.status == "valid"`, and `data.verification.status == "valid"`, matching it;
+- `data.verification.date` parses as `YYYY-MM-DD`, is not in the future, and is within 30 days. Hunter can return a cached verification, and an absent or null date is rejected;
+- `accept_all`, `webmail`, `disposable`, `block` and `gibberish` are all false, and `smtp_check` is true.
+
+`verified_at` = that date; `verification_subject_email_key` = the address's key; `expires_at = verified_at + EVIDENCE_LIFE`. `prepare_claim` already accepts such evidence with no source-type change, and a test proves it through a real claim.
+
+## R3.7 An immutable acquisition record (finding 7)
+- `_store` writes **one** `fact_type = 'acquisition'` evidence row per prospect, for web and Hunter contacts alike: `source_type`, `source_url` (the publication page), and `fact_value` ∈ {`web`, `hunter`}.
+- Nothing ever updates or adds an acquisition row. The only evidence writer is `_store`, and a test asserts no other writer exists. Verification rows may be added later and never change attribution.
+- **`build_payload`** takes the footer's source from the acquisition row when there is one, else from today's selection (older contacts). A web contact's acquisition `source_url` is the same page as today, so its footer is byte-identical.
+- R2.8's Hunter-origin checks read the acquisition row only.
+- Test: a Hunter acquisition followed by a later web verification row keeps "found via Hunter.io" and the original page.
+
+## R3.8 Assessment sources that persist (finding 8)
+- `draft_audience` takes `sources`, validated against a fixed vocabulary {`public_websites`, `hunter.io`} (default `["public_websites"]`). They are **included in the drafting context**, so the purpose, necessity and balancing-test text address database sourcing, and they are **persisted** on the new version. `approve_audience` approves the version as drafted, sources included.
+- **Sources are not part of `rules`**, so the `audience_hash`, and with it every campaign's `target_hash`, is unchanged by a re-approval with Hunter.
+- **Which version:**
+  - acquisition uses the version research runs (`research._audience(compliance_id)`: approved and current), and runs Hunter only if its `sources` include `hunter.io`;
+  - a Hunter contact's first-send check uses the version it was collected under (`prospect.lia_id`), which must include `hunter.io`.
+- Tests: re-approval keeps the campaigns linked; a version without Hunter means no Hunter calls; an older approved version is never used for acquisition.
+
+## R3.9 Notice permission at claim and dispatch (finding 9)
+- **Payloads are immutable**: nothing rewrites them. **Permission to dispatch is checked separately.**
+- For a never-contacted prospect whose acquisition row is `hunter`, both `prepare_claim` (under the business lock) **and** `dispatch`'s final gate (inside its existing `require` block, so a failure takes the **blocked path**, never transport) require all of:
+  - the brand's Hunter confirmation `notice_hash` equals the hash of the brand's current approved notice;
+  - the confirmation is not revoked;
+  - the prospect's `lia_id` version includes `hunter.io`.
+
+  A mismatch refuses, with "This brand's privacy notice changed; confirm it still names Hunter.io".
+- Tests: a notice change between card and claim refuses at claim; a change between claim and dispatch takes the blocked path with the payload untouched; web contacts are unaffected.
+
+## R3.10 Migration 042 (revised)
+- Creates `outreach_provider_accounts` (R2.5 as amended by R3.1: never deleted, a `disconnected` status, `generation` monotonic) and `outreach_provider_charges` (R3.2).
+- Indexes: `(business_id, brand_id, period)` on charges, and a partial index on `state = 'reserved'` for the sweep.
+- No change to existing tables: the acquisition row and assessment `sources` use existing columns.
+- Rehearsed on the local harness; runbook `audits/042-PROD-RUNBOOK.md` (staging first). The persistence allowlist (R2.11) adds both tables, neither of which holds personal data.
