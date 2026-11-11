@@ -96,7 +96,7 @@ def test_a_search_that_overruns_its_reserve_is_recorded_and_research_carries_on(
     from test_outreach_setup import A
     r = research()
     biz, brand, lia, campaign = started(db)
-    out = run(db, biz, lia, World([[person(i) for i in range(20)]], cost=r.SEARCH_RESERVE_PENCE + 40))
+    out = run(db, biz, lia, World([[person(i) for i in range(40)]], cost=r.SEARCH_RESERVE_PENCE + 40))
     assert not out["stopped"] or "paused" not in out["stopped"]
     with Session(db) as s:
         assert r.status(s, biz)["brands"][0]["enabled"] is True

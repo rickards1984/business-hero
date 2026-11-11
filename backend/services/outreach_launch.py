@@ -23,9 +23,9 @@ from services import outreach_setup as setup
 
 def _runnable_audiences(session, bid: str, brand_id: str, moment, sendable: set) -> dict:
     """Research's OWN rules, per approved audience of the brand (Codex OUT-20
-    review 2): `research._audience` (the approval is current) and
-    `research.capacity` (a ready or running campaign of this brand for THIS
-    audience, and today's room). An audience counts only if both hold for it."""
+    review 2): `research._audience` (the approval is current), a ready or
+    running campaign of this brand for THIS audience, and (OUT-23) the room in
+    its bank today, `research._bank_room`. An audience counts only if all hold."""
     out = {"any_approved": False, "current": False, "runnable": False, "room": 0, "no_room": None}
     for (cid,) in session.execute(text(
             "SELECT id FROM outreach_compliance WHERE business_id = :b AND brand_id = :br AND decision = 'approved'"),
@@ -36,17 +36,22 @@ def _runnable_audiences(session, bid: str, brand_id: str, moment, sendable: set)
         except send.ActionRefused:
             continue
         out["current"] = True
-        room = research.capacity(session, bid, brand_id, moment, lia["audience_hash"])
-        # Research places contacts in any ready/running campaign; launch also
-        # needs that audience's campaign emails approved on a healthy inbox
-        # (setup's rule), so whatever research finds can actually be emailed.
-        # By audience (hash), not version: a newer draft never hides an older
-        # approval research still uses (Codex OUT-20 review 3).
-        if room["campaigns"] and lia["audience_hash"] in sendable:
+        # OUT-23: research's own gate is now the audience's bank (B3):
+        # research._bank_room, the same function research runs.
+        room = research._bank_room(session, bid, brand_id, lia["audience_hash"], moment)
+        campaigns = session.execute(text(
+            "SELECT count(*) FROM outreach_campaigns WHERE business_id = :b AND brand_id = :br "
+            "AND target_hash = :h AND status IN ('ready', 'running')"),
+            {"b": bid, "br": brand_id, "h": lia["audience_hash"]}).scalar()
+        # Launch also needs that audience's campaign emails approved on a
+        # healthy inbox (setup's rule), so whatever research finds can actually
+        # be emailed. By audience (hash), not version: a newer draft never hides
+        # an older approval research still uses (Codex OUT-20 review 3).
+        if campaigns and lia["audience_hash"] in sendable:
             out["runnable"] = True
             out["room"] = max(out["room"], int(room["room"]))
             if not room["room"]:
-                out["no_room"] = research._no_room_reason(room)
+                out["no_room"] = room["why"]
     return out
 
 

@@ -40,7 +40,9 @@ from services.metering import period_for
 logger = logging.getLogger(__name__)
 LONDON = ZoneInfo("Europe/London")
 KEY = "outreach_research"
-DAILY_TARGET, MIN_DECISION_MAKERS, MAX_GATEKEEPERS = 20, 10, 10
+# OUT-23: up to 40 a day per brand into the bank; at least half named
+# decision-makers, gatekeepers at most half.
+DAILY_TARGET, MIN_DECISION_MAKERS, MAX_GATEKEEPERS = 40, 20, 20
 MAX_ATTEMPTS = 3
 DEFAULT_CAP_PENCE = 2000                 # decision C: £20 a month, editable
 MIN_CAP_PENCE, MAX_CAP_PENCE = 2000, 100000   # OUT-18 (Mike): per brand, never below £20
@@ -197,7 +199,7 @@ def save_lessons(session, business, user, notes: list, *, brand_id) -> dict:
 
 
 def status(session, business) -> dict:
-    from services import outreach_allowance
+    from services import outreach_allowance, outreach_bank
     bid = str(business.id)
     cfg = _config(_doc(session, bid))
     moment = now()
@@ -209,7 +211,8 @@ def status(session, business) -> dict:
                        "paused_reason": b.get("paused_reason"), "lessons": b["lessons"],
                        # OUT-19 B: how much of the hidden allowance is used, never the figure
                        "allowance_used_percent": outreach_allowance.used_percent(session, bid, brand["id"], moment),
-                       "lessons_from_results": lessons(session, business, brand["id"])[:10]})
+                       "lessons_from_results": lessons(session, business, brand["id"])[:10],
+                       "bank": outreach_bank.audiences(session, business, brand["id"], moment)})   # OUT-23 B6
     session.rollback()
     return {"brands": brands, "enabled": any(b["enabled"] for b in brands),
             "daily_target_per_brand": DAILY_TARGET, "min_cap_pence": MIN_CAP_PENCE,
@@ -686,144 +689,38 @@ def _today_counts(session, bid: str, moment: datetime, brand_id) -> dict:
     return counts
 
 
-def capacity(session, bid: str, brand_id, moment: datetime, audience_hash: Optional[str] = None) -> dict:
-    """OUT-19 D (Mike's decision 1): research finds only as many new contacts
-    as can be emailed for the first time today, and each one it keeps takes a
-    place in a campaign for its audience at once (Codex OUT-19 D review 1).
-
-    Everything already spoken for today is counted first, whatever the state
-    of its campaign now: cold emails sent or held today, follow-ups due by the
-    end of today and contacts waiting for their first email (an email already
-    being sent is counted once, as a send). Then, for each ready campaign of
-    this brand and audience, its free places are the smallest of:
-    its own cap less its use; the pilot enrolment limit less its contacts;
-    and what its inbox has left (an inbox is shared by every campaign and
-    brand on it). `room` is the sum, never above the brand's 20 (or the
-    owner's lower cap) less the brand's use, nor above the daily target less
-    the contacts found today. Replies are outside all of this (OUT-19 E).
-    Read-only; the caller holds the business lock when it must not change."""
-    from services import metering
-    local = moment.astimezone(LONDON)
-    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    tomorrow = start + timedelta(days=1)
-    br = str(brand_id)
+def _bank_room(session, bid: str, brand_id, audience_hash, moment: datetime) -> dict:
+    """OUT-23: today's research room for one audience: the bank's room, never
+    above what is left of the brand's 40 today; and why there is none."""
+    from services import outreach_bank
+    b = outreach_bank.bank(session, bid, brand_id, audience_hash, moment)
     found = _today_counts(session, bid, moment, brand_id)
-    out = {"room": 0, "places": [], "campaigns": 0, "found_today": found, "sent_today": 0,
-           "followups_due": 0, "waiting": 0, "inbox_left": 0}
-    settings = send.one(session, "outreach_settings", bid)
-    if not settings or settings["pause_all"]:
-        return out
-    campaigns = send.rows(session, "outreach_campaigns", bid, "ORDER BY created_at, id")
-    by_id = {str(c["id"]): c for c in campaigns}
-    sent, sent_on_box = {}, {}
-    for cid, mailbox_id, n in session.execute(text(
-            "SELECT m.campaign_id, u.mailbox_id, count(*) FROM outreach_usage_events u JOIN outreach_messages m "
-            "ON m.business_id = u.business_id AND m.id = u.message_id WHERE u.business_id = :b "
-            "AND u.kind = 'outreach_emails_sent' AND (m.kind IS NULL OR m.kind <> 'bespoke') AND u.local_send_date = :d "
-            "AND u.state IN ('reserved', 'committed', 'unknown') GROUP BY m.campaign_id, u.mailbox_id"),
-            {"b": bid, "d": local.date().isoformat()}):
-        sent[str(cid)] = sent.get(str(cid), 0) + int(n)
-        sent_on_box[str(mailbox_id)] = sent_on_box.get(str(mailbox_id), 0) + int(n)
-    queued, members = {}, {}
-    for eid, cid, step, due, busy in session.execute(text(
-            "SELECT e.id, e.campaign_id, e.next_step, e.next_due_at, EXISTS (SELECT 1 FROM outreach_messages m "
-            "WHERE m.business_id = e.business_id AND m.enrolment_id = e.id AND m.direction = 'outbound' "
-            "AND m.state IN ('claimed', 'unknown')) FROM outreach_enrolments e WHERE e.business_id = :b "
-            "AND e.state IN ('pending', 'active')"), {"b": bid}):
-        members[str(cid)] = members.get(str(cid), 0) + 1
-        if busy or step is None:
-            continue                      # being sent now: already counted as a send
-        q = queued.setdefault(str(cid), [0, 0])
-        if int(step) == 0:
-            q[1] += 1
-        elif due is not None and _parse(due) < tomorrow:
-            q[0] += 1
-    def used(cid):
-        due, waiting = queued.get(cid, [0, 0])
-        return sent.get(cid, 0) + due + waiting
-    mine = [c for c in campaigns if str(c["brand_id"]) == br]
-    out.update(sent_today=sum(sent.get(str(c["id"]), 0) for c in mine),
-               followups_due=sum(queued.get(str(c["id"]), [0, 0])[0] for c in mine),
-               waiting=sum(queued.get(str(c["id"]), [0, 0])[1] for c in mine))
-    # OUT-19 G: a boosted inbox raises the brand's limit when left at 20 (as the send path).
-    from services import outreach_boost
-    boosts = {str(c["mailbox_id"]): outreach_boost.level(session, bid, c["mailbox_id"]) for c in campaigns}
-    brand_boost = outreach_boost.brand_level(session, bid, br)      # the send path's own policy
-    brand_left = outreach_boost.follow(min(20, int(settings["business_daily_cap"])), brand_boost) \
-        - sum(used(str(c["id"])) for c in mine)
-    inbox_left = {}
-    for mailbox_id in {str(c["mailbox_id"]) for c in campaigns}:
-        boxes = send.rows(session, "outreach_mailboxes", bid, "AND mailbox_id = :m", {"m": mailbox_id})
-        cap = metering.mailbox_daily_cap(boxes[0], boost=boosts[mailbox_id]) if len(boxes) == 1 else 0
-        queued_here = sum(sum(queued.get(cid, [0, 0])) for cid, c in by_id.items() if str(c["mailbox_id"]) == mailbox_id)
-        inbox_left[mailbox_id] = max(0, cap - sent_on_box.get(mailbox_id, 0) - queued_here)
-    # Contacts kept today that hold no place (held for the owner's review), of
-    # EVERY brand, use the inbox of a ready campaign for their audience, so a
-    # brand sharing that inbox sees them too (Codex OUT-19 D review 3).
-    unplaced, mine_unplaced, on_campaign = 0, 0, {}
-    for p_brand, audience in session.execute(text(
-            "SELECT l.brand_id, l.audience_hash FROM outreach_prospects p JOIN outreach_compliance l "
-            "ON l.business_id = p.business_id AND l.id = p.lia_id WHERE p.business_id = :b AND p.captured_at >= :start "
-            "AND p.eligibility IN ('eligible', 'review') AND NOT EXISTS (SELECT 1 FROM outreach_enrolments e "
-            "WHERE e.business_id = p.business_id AND e.prospect_id = p.id)"), {"b": bid, "start": start}):
-        unplaced += 1
-        if str(p_brand) == br:
-            mine_unplaced += 1
-        ready = [c for c in campaigns if str(c["brand_id"]) == str(p_brand) and c["status"] in ("ready", "running")]
-        home = next((c for c in ready if c["target_hash"] == audience), ready[0] if ready else None)
-        if home is not None:
-            # It holds that campaign's place too: its daily cap and its pilot
-            # places (Codex OUT-19 D review 4), each counted once.
-            on_campaign[str(home["id"])] = on_campaign.get(str(home["id"]), 0) + 1
-            if inbox_left.get(str(home["mailbox_id"]), 0) > 0:
-                inbox_left[str(home["mailbox_id"])] -= 1
-    limit = pilot_enrolments()
-    matching = [c for c in mine if c["status"] in ("ready", "running")
-                and (audience_hash is None or c["target_hash"] == audience_hash)]
-    out["campaigns"] = len(matching)
-    for c in matching:
-        cid, mailbox_id = str(c["id"]), str(c["mailbox_id"])
-        held = on_campaign.get(cid, 0)
-        free = max(0, outreach_boost.follow(int(c["daily_cap"]), boosts[mailbox_id]) - used(cid) - held)
-        if limit:
-            free = min(free, max(0, limit - members.get(cid, 0) - held))
-        free = min(free, inbox_left[mailbox_id])
-        inbox_left[mailbox_id] -= free
-        if free:
-            out["places"].append([c, free])
-    out["inbox_left"] = sum(inbox_left.values())
-    out["unplaced_today"] = mine_unplaced
-    # The brand's own unplaced contacts also use its 20, whichever inbox they sit on.
-    out["room"] = max(0, min(DAILY_TARGET - found["decision_maker"] - found["gatekeeper"], brand_left - mine_unplaced,
-                             sum(f for _, f in out["places"])))
-    return out
+    today = max(0, DAILY_TARGET - found["decision_maker"] - found["gatekeeper"])
+    why = None
+    if b["daily_capacity"] <= 0:
+        why = "No search: this audience has no ready campaign on a healthy inbox to email new contacts"
+    elif b["room"] <= 0:
+        why = f"No search today: the prospect bank is full ({b['drainable']} of about {b['target']})"
+    elif today <= 0:
+        why = "No search: today's 40 new contacts for this brand are already found"
+    return {"room": min(b["room"], today) if not why else 0, "bank": b["room"], "why": why, "bank_detail": b}
 
 
-def _no_room_reason(room: dict) -> str:
-    if not room["campaigns"]:
-        return "No search: this audience has no ready campaign on a healthy inbox to email new contacts"
-    return "No search today: this brand's inbox is already full with follow-ups and contacts waiting for their first email"
-
-
-def _take_place(session, bid: str, room: dict, prospect_id: str, moment: datetime) -> Optional[str]:
-    """Enrol a contact just stored into a campaign with a free place, in the
-    same transaction (Codex OUT-19 D review 1: a place is taken as the contact
-    is kept, never later). Returns the campaign id, or None."""
+def _unqualified(session, bid: str, homes: list, prospect_id: str) -> Optional[str]:
+    """None if the stored contact qualifies for one of its audience's ready
+    campaigns; otherwise the reason (outreach_manage.qualified's own)."""
     from services import outreach_manage
+    if not homes:
+        return "no ready campaign for this audience"
     p = send.one(session, "outreach_prospects", bid, prospect_id, True)
-    for place in room["places"]:
-        c, free = place
-        if free <= 0:
-            continue
+    reason = "not eligible"
+    for c in homes:
         try:
             outreach_manage.qualified(session, bid, c, p)
-        except send.ActionRefused:
-            continue
-        send.insert(session, "outreach_enrolments", bid, prospect_id=prospect_id, campaign_id=str(c["id"]),
-                    sequence_version=c["sequence_version"], state="active", next_step=0, next_due_at=moment)
-        place[1] -= 1
-        return str(c["id"])
-    return None
+            return None
+        except send.ActionRefused as exc:
+            reason = str(exc.detail)
+    return reason
 
 
 def _unstore(session, bid: str, prospect_id: str) -> None:
@@ -995,13 +892,13 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
             session.rollback()
             out["stopped"] = why
             break
-        # OUT-19 D: is there room to email anyone new today? Checked here,
-        # under the same lock as the spend reservation (Codex OUT-19 D review 1).
-        room = capacity(session, bid, brand_id, moment, lia["audience_hash"])
+        # OUT-23: is there room in this audience's bank, and in today's 40?
+        # Checked under the same lock as the spend reservation.
+        room = _bank_room(session, bid, brand_id, lia["audience_hash"], moment)
         if room["room"] <= 0:
             session.rollback()
-            if attempt == 1 and room["found_today"]["decision_maker"] + room["found_today"]["gatekeeper"] < DAILY_TARGET:
-                out["stopped"] = _no_room_reason(room)
+            if attempt == 1:
+                out["stopped"] = room["why"]
             break
         claim = _claim_search(session, bid, claim)
         holder["claim"] = claim
@@ -1139,10 +1036,12 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
             out["stopped"] = "Another search for this business took over; research carries on in a few minutes"
             break
         counts = _today_counts(session, bid, moment, brand_id)
-        # Re-read under the lock: another audience or brand may have filled the
-        # inbox meanwhile. Each contact kept takes its campaign place here.
-        room = capacity(session, bid, brand_id, moment, lia["audience_hash"])
-        left = room["room"]
+        # Re-read under the lock: another run may have filled the bank meanwhile.
+        # Research only banks (OUT-23 B3): the drain alone enrols.
+        left = _bank_room(session, bid, brand_id, lia["audience_hash"], moment)["bank"]
+        homes = [c for c in send.rows(session, "outreach_campaigns", bid, "AND status IN ('ready', 'running') "
+                                       "AND brand_id = :br AND target_hash = :h ORDER BY created_at, id",
+                                       {"br": brand_id, "h": lia["audience_hash"]})]
         stored_domains, stored_keys = _held(session, bid)[0], {r[0] for r in session.execute(text(
             "SELECT email_key FROM outreach_prospects WHERE business_id = :b AND email_key IS NOT NULL"), {"b": bid})}
         # Decision-makers first; gatekeepers only fill, never more than 10.
@@ -1164,14 +1063,14 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
                 out["rejected"].append({"company": v["company"], "reason": "today's quota is full"})
                 continue
             ident = _store(session, bid, str(lia["id"]), c, v, moment)
-            if not _take_place(session, bid, room, ident, moment):
-                # Kept only with a place: a contact that cannot join a campaign
-                # is not collected (Codex OUT-19 D review 2).
+            why_not = _unqualified(session, bid, homes, ident)
+            if why_not:
+                # Qualified for its audience before it is kept (OUT-23 B3):
+                # a contact who could never be emailed is not collected.
                 _unstore(session, bid, ident)
-                out["rejected"].append({"company": v["company"], "reason": "could not join a campaign"})
+                out["rejected"].append({"company": v["company"], "reason": why_not})
                 continue
             left -= 1
-            out["enrolled"].append(ident)
             stored_keys.add(v["email_key"])
             stored_domains.add(v["domain"])
             counts[v["contact_type"]] += 1
@@ -1186,12 +1085,13 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
             if outreach_erasure.recently_erased(session, bid, v.get("email"), v.get("domain"), moment):
                 continue
             kind = v["contact_type"] if v["contact_type"] in counts else "decision_maker"
-            if counts["decision_maker"] + counts["gatekeeper"] >= DAILY_TARGET or left <= 0 or (
+            # Review-held contacts count in the day's 40 but never in the bank
+            # (OUT-23 R4.6): they are not drained or emailed.
+            if counts["decision_maker"] + counts["gatekeeper"] >= DAILY_TARGET or (
                     kind == "gatekeeper" and counts["gatekeeper"] >= MAX_GATEKEEPERS):
                 out["rejected"].append({"company": v["company"], "reason": "today's quota is full"})
                 continue
             _store(session, bid, str(lia["id"]), c, v, moment, review=True)
-            left -= 1
             stored_keys.add(v["email_key"])
             counts[kind] += 1
         session.commit()

@@ -1011,7 +1011,8 @@ export function CopyCampaign({ businessId, campaignId }: { businessId: string; c
 
 // ---------------------------------------------------- OUT-10: research ---
 
-interface BrandResearch { brand_id: string; name: string; enabled: boolean; monthly_cap_pence: number; spent_pence: number; paused_reason?: string | null; lessons: string[]; allowance_used_percent?: number }
+interface AudienceBank { audience_hash: string; description: string; target: number; banked: number; held: number; review_held: number; waiting: number; oldest_days_left: number | null; blocked: string | null }
+interface BrandResearch { brand_id: string; name: string; enabled: boolean; monthly_cap_pence: number; spent_pence: number; paused_reason?: string | null; lessons: string[]; allowance_used_percent?: number; bank?: AudienceBank[] }
 interface ResearchStatus { brands: BrandResearch[]; enabled: boolean; daily_target_per_brand: number; min_cap_pence: number; last_run?: string | null; summary?: string | null }
 
 // OUT-20 (Mike, 4 Nov 2026): one place that shows whether each brand is
@@ -1233,6 +1234,23 @@ function OutreachBudget({ businessId }: { businessId: string }) {
   );
 }
 
+// OUT-23 B6: what is banked for an audience, how soon the oldest must be
+// emailed, and whatever stops Aria adding them to a campaign.
+function ProspectBank({ bank, several }: { bank: AudienceBank; several: boolean }) {
+  const days = (n: number) => `${n} day${n === 1 ? '' : 's'}`;
+  const parts = [`Prospect bank${several && bank.description ? ` (${bank.description})` : ''}: ${bank.banked} of about ${bank.target}`];
+  if (bank.banked && bank.oldest_days_left !== null) parts.push(`oldest must be emailed within ${days(bank.oldest_days_left)}`);
+  if (bank.waiting) parts.push(`${bank.waiting} waiting for their first email`);
+  if (bank.review_held) parts.push(`${bank.review_held} for you to review`);
+  return (
+    <Stack spacing={0.5}>
+      <Typography variant="body2">{parts.join(' · ')}</Typography>
+      {bank.held > 0 && <Typography variant="body2" color="text.secondary">{bank.held} are too close to their deadline to start a sequence, so they'll be removed rather than emailed.</Typography>}
+      {bank.blocked && bank.banked > 0 && <Alert severity="warning">Not being added to campaigns: {bank.blocked}.</Alert>}
+    </Stack>
+  );
+}
+
 function BrandResearchCard({ businessId, brand, minCap }: { businessId: string; brand: BrandResearch; minCap: number }) {
   const client = useQueryClient();
   const api = useCall(businessId);
@@ -1256,6 +1274,7 @@ function BrandResearchCard({ businessId, brand, minCap }: { businessId: string; 
         {typeof brand.allowance_used_percent === 'number' && (brand.allowance_used_percent >= 100
           ? <Alert severity="warning">This brand's AI allowance for the month is used, so research has stopped. A top-up below carries it on now.</Alert>
           : <Typography variant="body2">AI allowance this month: {brand.allowance_used_percent}% used.</Typography>)}
+        {(brand.bank ?? []).map(a => <ProspectBank key={a.audience_hash} bank={a} several={(brand.bank ?? []).length > 1} />)}
         <BrandBilling businessId={businessId} brandId={brand.brand_id} brandName={brand.name} />
         <FormControlLabel control={<Checkbox checked={brand.enabled} disabled={api.busy}
           onChange={(_, v) => save('research', { enabled: v })} />} label={`Aria researches new contacts for ${brand.name} each weekday`} />

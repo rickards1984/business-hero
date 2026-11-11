@@ -63,26 +63,27 @@ def spent(db, brand):
 
 
 def batch(start):
-    return [person(start + i) for i in range(15)] + [gatekeeper(start + 100 + i) for i in range(10)]
+    """A full day for one brand in one search (OUT-23: 40, at most 20 gatekeepers)."""
+    return [person(start + i) for i in range(25)] + [gatekeeper(start + 100 + i) for i in range(15)]
 
 
 # -------------------------------------------------------- 20 a day per brand ---
 
-def test_each_brand_gets_its_own_twenty_a_day(db):
+def test_each_brand_gets_its_own_forty_a_day(db):
     biz, brand, lia, campaign = started(db)
     fit, fit_lia = second_brand(db, biz)
     first = run(db, biz, lia, World([batch(0)]))
     second = run(db, biz, fit_lia, World([batch(1000)]))
-    assert len(first["accepted"]) == 20 and len(second["accepted"]) == 20
-    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'eligible'") == 40
+    assert len(first["accepted"]) == 40 and len(second["accepted"]) == 40
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'eligible'") == 80
 
 
-def test_each_brand_has_at_most_ten_gatekeepers_a_day(db):
+def test_each_brand_has_at_most_twenty_gatekeepers_a_day(db):
     biz, brand, lia, campaign = started(db)
     fit, fit_lia = second_brand(db, biz)
-    run(db, biz, lia, World([[gatekeeper(i) for i in range(12)]]))
-    out = run(db, biz, fit_lia, World([[gatekeeper(500 + i) for i in range(12)]]))
-    assert out["gatekeepers"] == 10
+    run(db, biz, lia, World([[gatekeeper(i) for i in range(22)]]))
+    out = run(db, biz, fit_lia, World([[gatekeeper(500 + i) for i in range(22)]]))
+    assert out["gatekeepers"] == 20
 
 
 def test_a_brands_audiences_still_share_its_twenty(db):
@@ -357,26 +358,26 @@ def sole_trader(i):
 
 
 def test_contacts_kept_for_review_count_toward_the_brands_daily_limit(db):
-    """P1 2: 25 sole traders in one batch never store more than 20, and a
-    later run that day stores nothing more."""
+    """P1 2: 45 sole traders in one batch never store more than the day's 40
+    (OUT-23), and a later run that day stores nothing more."""
     biz, brand, lia, campaign = started(db)
-    world = World([[sole_trader(i) for i in range(25)]])
-    world.not_companies.update(f"Sole {i} Fitness" for i in range(25))
+    world = World([[sole_trader(i) for i in range(45)]])
+    world.not_companies.update(f"Sole {i} Fitness" for i in range(45))
     run(db, biz, lia, world)
-    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'") == 20
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'") == 40
     again = World([[sole_trader(100 + i) for i in range(5)]])
     again.not_companies.update(f"Sole {100 + i} Fitness" for i in range(5))
     run(db, biz, lia, again)
-    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b") == 20
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b") == 40
 
 
 def test_eligible_contacts_are_kept_before_review_ones(db):
     biz, brand, lia, campaign = started(db)
-    world = World([[sole_trader(i) for i in range(10)] + [person(500 + i) for i in range(15)]])
-    world.not_companies.update(f"Sole {i} Fitness" for i in range(10))
+    world = World([[sole_trader(i) for i in range(30)] + [person(500 + i) for i in range(25)]])
+    world.not_companies.update(f"Sole {i} Fitness" for i in range(30))
     out = run(db, biz, lia, world)
-    assert len(out["accepted"]) == 15
-    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'") == 5
+    assert len(out["accepted"]) == 25                       # all eligible first
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'review'") == 15
 
 
 class Tracked(Session):

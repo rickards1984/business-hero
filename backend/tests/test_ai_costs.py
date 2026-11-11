@@ -183,7 +183,7 @@ def test_aria_drafting_a_legal_basis_is_recorded_against_the_business_and_brand(
 def test_a_research_search_is_recorded_against_its_brand(db):
     from test_outreach_research import World, person, run, started
     biz, brand, lia, campaign = started(db)
-    run(db, biz, lia, World([[person(i) for i in range(20)]], cost=37))
+    run(db, biz, lia, World([[person(i) for i in range(40)]], cost=37))
     from test_outreach_setup import A
     assert meter(db, A, f"ai_pence:research:{brand['id']}:openai/gpt-6.1-sol") == 37
     assert meter(db, A, "ai_pence") == 37

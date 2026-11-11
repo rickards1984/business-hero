@@ -326,3 +326,21 @@ The research panel shows, for example: "Prospect bank: 42 of about 100 (an estim
 **Needs Mike:**
 - may an erased company be found again after 90 days (A7)?
 - the runbook for 040.
+
+---
+
+## Part A — Implementation (revision 4, built 11 Nov 2026)
+
+| Design | Code | Tests |
+|---|---|---|
+| B1/R4.4 bank size, water-filled per inbox, brand limit as the send path | `outreach_bank.audience_caps`, `bank`, `_brand_limit` | `test_outreach_bank.py` bank size |
+| R4.5 drainable vs held (5-day margin), `room = target − drainable − waiting` | `outreach_bank._stock`, `bank` | margin tests |
+| B3 research banks only: 40 a day per brand, ≥20 decision-makers, ≤20 gatekeepers; no search when the bank is full; qualification refusal not stored | `outreach_research._bank_room`, `_unqualified`, the store loop; `capacity()`/`_take_place` removed | research tests, `test_outreach_research_brands.py`, today's-40 gate tests |
+| R4.2 the drain's ledger: campaign, inbox cold, inbox total (reply headroom; 0 if blocked), brand day, brand month, pilot | `outreach_bank._ledger`, `_room`, `_take` | each bound alone, combined, carried OUT-19 D accounting (in-flight once, unknown once, UK day, paused campaign, released usage, over-cap campaign) |
+| R4.7 drain order: owner → `start()` + `growth()` → pause → paid campaigns → ledger → oldest first → `qualified` → insert → commit | `outreach_bank.drain_business` | skip, unpaid, oldest first, review-held never drained |
+| Weekdays 07:00–18:59 UK, every hourly pass, no day claim | `outreach_bank.drain_due`, wired in `automations.run_all_due` after research | drain hours, hourly-pass order |
+| R4.3 cards for every due enrolment, independently | `outreach_bank.prepare_all_due`, wired after the drain | cards with an empty bank and research off |
+| B6 the owner sees it | `outreach_bank.audiences` → `research.status()["brands"][i]["bank"]`; `ProspectBank` in `OutreachSetupWizard.tsx` | B6 tests (figures, review-held apart, each blocker) |
+| PostgreSQL | — | `test_outreach_bank_pg.py` (sizing, ledger, drain, cards, `drain_due`) |
+
+No migration: the bank is the existing `outreach_prospects` rows that have no enrolment.

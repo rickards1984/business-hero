@@ -628,6 +628,21 @@ def run_all_due(session) -> int:
     except Exception as exc:  # never stops invoice chasing
         session.rollback()
         logger.error("[Autopilot] outreach research failed: %s", type(exc).__name__)
+    try:
+        # OUT-23: the bank's drain is the only automatic way into a campaign,
+        # weekdays 07:00-18:59 UK, after the mailbox check and research.
+        from services import outreach_bank
+        outreach_bank.drain_due(session)
+    except Exception as exc:  # never stops invoice chasing
+        session.rollback()
+        logger.error("[Autopilot] outreach bank drain failed: %s", type(exc).__name__)
+    try:
+        # OUT-23 R4.3: every due email gets its card, whatever the drain did.
+        from services import outreach_bank
+        outreach_bank.prepare_all_due(session)
+    except Exception as exc:  # never stops invoice chasing
+        session.rollback()
+        logger.error("[Autopilot] outreach card preparation failed: %s", type(exc).__name__)
     rows = session.execute(text("SELECT business_id, settings FROM business_settings")).fetchall()
     total = 0
     done_here = set()
