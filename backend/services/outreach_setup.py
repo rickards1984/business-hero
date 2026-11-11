@@ -945,22 +945,30 @@ EMAIL_CRAFT = (
     "[YOUR NAME], [Company] or {first_name}: write every word as it will be sent.")
 
 
-# A model's own sign-off despite the rule above: a valediction, then a line
-# holding only a placeholder, at the very end (OUT-25). Removed from drafts;
-# any other placeholder is left for the owner, and refused when saved.
+# A model's own sign-off despite the rule above: at the very end, only lines
+# that are SENDER placeholders ([YOUR NAME], [Your Title], [Company Name],
+# [Signature]...), and the valediction just before them. Nothing else is ever
+# removed (Codex OUT-25 review 1); any other placeholder is left for the owner
+# and refused when saved.
 _VALEDICTION = re.compile(r"^(best( wishes| regards)?|kind regards|warm regards|regards|many thanks|thanks|"
                           r"thank you|cheers|all the best|yours sincerely|yours faithfully|sincerely),?$", re.I)
+_SENDER = re.compile(r"^[\[{<]{1,2}\s*(your|sender'?s?|my)\b[^\]}>]*[\]}>]{1,2}$|"
+                     r"^[\[{<]{1,2}\s*(name|full name|signature|company( name)?|job title|title|position|"
+                     r"phone( number)?|email( address)?|website)\s*[\]}>]{1,2}$", re.I)
 
 
 def _drop_placeholder_sign_off(body: str) -> str:
     lines = (body or "").rstrip().split("\n")
-    while lines and send.PLACEHOLDER.fullmatch(lines[-1].strip() or "x"):
-        lines.pop()
-        while lines and not lines[-1].strip():
-            lines.pop()
-        if lines and _VALEDICTION.match(lines[-1].strip()):
-            lines.pop()
-    return "\n".join(lines).rstrip()
+    end = len(lines)
+    while end and (not lines[end - 1].strip() or _SENDER.match(lines[end - 1].strip())):
+        end -= 1
+    removed = [ln for ln in lines[end:] if ln.strip()]
+    if not removed:
+        return "\n".join(lines).rstrip()
+    keep = lines[:end]
+    if keep and _VALEDICTION.match(keep[-1].strip()):
+        keep = keep[:-1]
+    return "\n".join(keep).rstrip()
 
 
 def _tidy_drafts(emails) -> list:

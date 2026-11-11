@@ -47,20 +47,41 @@ def loads(value):
 
 
 # OUT-25: templates take no variables (allowed_variables is always []), so a
-# bracketed or braced token is an unfilled placeholder, e.g. a model's
+# placeholder-shaped token is an unfilled placeholder, e.g. a model's
 # "[YOUR NAME]". The real sign-off is added by sign_off(); a placeholder is
-# never sent.
-PLACEHOLDER = re.compile(r"\[[^\[\]\n]{1,40}\]|\{\{[^{}\n]{1,40}\}\}|\{[A-Za-z_][A-Za-z0-9_ ]{0,30}\}")
+# never sent. Placeholder-SHAPED means a bracketed, braced or angled token,
+# not glued to a word (so not "filter[sector]=" in a URL), whose inside is a
+# field name: one of the words below, an ALL-CAPS label, or a snake_case
+# name. Ordinary editorial brackets ("[ex VAT]") are left alone (Codex
+# OUT-25 review 1).
+_TOKEN = re.compile(r"(?<![\w/=?&%.-])(?:\[([^\[\]\n]{1,120})\]|\{\{([^{}\n]{1,120})\}\}|\{([^{}\n]{1,120})\}"
+                    r"|<([^<>@/=\n]{1,120})>)")
+_FIELD = re.compile(r"\b(your|their|insert|recipient|sender|first|last|full|name|names|surname|company|business|"
+                    r"organisation|organization|job|title|role|position|signature|phone|mobile|telephone|email|"
+                    r"e-mail|website|url|link|contact|address|city|town)\b", re.I)
+_HTML = {"b", "i", "u", "p", "br", "hr", "em", "strong", "div", "span", "ul", "ol", "li", "a", "html", "body"}
 PLACEHOLDER_REFUSED = ("This email still contains a placeholder such as [YOUR NAME]. "
                        "Edit the campaign's emails to remove it: your sign-off is added automatically")
+
+
+def _is_field(inner: str, angled: bool) -> bool:
+    inner = inner.strip()
+    if not inner or (angled and inner.lower().split(" ")[0] in _HTML):
+        return False
+    if re.fullmatch(r"[A-Z][A-Z0-9 _'-]{1,60}", inner):                    # [YOUR NAME], <NAME>, [CITY]
+        return True
+    if re.fullmatch(r"[a-z]+(_[a-z0-9]+)+", inner):                        # {first_name}
+        return True
+    return bool(_FIELD.search(inner))
 
 
 def placeholder(*texts):
     """The first unfilled placeholder in any of the texts, or None."""
     for value in texts:
-        found = PLACEHOLDER.search(value or "")
-        if found:
-            return found.group(0)
+        for match in _TOKEN.finditer(value or ""):
+            inner = next(g for g in match.groups() if g is not None)
+            if _is_field(inner, angled=match.group(0).startswith("<")):
+                return match.group(0)
     return None
 
 

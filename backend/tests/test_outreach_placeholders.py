@@ -32,13 +32,18 @@ def setup():
 # ------------------------------------------------------------- detection ---
 
 @pytest.mark.parametrize("value", ["Thanks,\n[YOUR NAME]", "Hi [First Name],", "Dear {{first_name}}", "Hi {first_name}",
-                                   "at [Company] we"])
+                                   "at [Company] we", "Hi <NAME>,", "Dear {{name}}",
+                                   "Hi [Insert the first name of the recipient here], how are you?",
+                                   "Visit [your website link]", "[CITY] gyms"])
 def test_placeholders_are_found(value):
     assert send().placeholder(value)
 
 
 @pytest.mark.parametrize("value", ["Fees from £20 a month.", "Our team (six coaches) can help.",
-                                   "Reply with a yes or no.", "A 1:1 session", "See https://example.com/a?b=c"])
+                                   "Reply with a yes or no.", "A 1:1 session", "See https://example.com/a?b=c",
+                                   "£20 a month [ex VAT].", "Our monthly fee is £20.\n[Prices exclude VAT]",
+                                   "https://example.com/?filter[sector]=gyms", "Write to <sam@example.com>",
+                                   "<br>", "[see below]", "We ran 12 sessions [in 2025]."])
 def test_ordinary_writing_is_not_a_placeholder(value):
     assert send().placeholder(value) is None
 
@@ -53,16 +58,29 @@ def test_a_drafted_placeholder_sign_off_is_removed(body, expected):
     assert setup()._drop_placeholder_sign_off(body) == expected
 
 
+@pytest.mark.parametrize("body", [
+    "Our monthly fee is £20.\n[Prices exclude VAT]",
+    "Book a slot:\n[https://cal.example/msc]",
+    "Hello Sam,\n\nThanks for reading.\n\nBest regards,",
+])
+def test_real_content_is_never_removed(body):
+    """Codex OUT-25 review 1, finding 1."""
+    assert setup()._drop_placeholder_sign_off(body) == body.rstrip()
+
+
 def test_a_placeholder_in_the_middle_is_left_for_the_owner():
     body = "Hello Sam,\n\nAt [Company] we coach gyms.\n\nBest,\n[YOUR NAME]"
     assert setup()._drop_placeholder_sign_off(body) == "Hello Sam,\n\nAt [Company] we coach gyms."
 
 
-def test_the_drafting_model_s_output_is_tidied(monkeypatch):
+@pytest.mark.parametrize("drafter", ["model_draft_emails", "model_redraft_emails"])
+def test_the_drafting_model_s_output_is_tidied(monkeypatch, drafter):
     monkeypatch.setattr(setup(), "_model_json", lambda prompt, context: {"emails": [
-        {"subject": "A quick idea", "body": "Hi Sam,\n\nA thought.\n\nKind regards,\n[YOUR NAME]"}] * 3})
-    emails = setup().model_draft_emails({})
-    assert all("[YOUR NAME]" not in e["body"] and e["body"].endswith("A thought.") for e in emails)
+        {"subject": f"A quick idea {i}", "body": "Hi Sam,\n\nA thought.\n\nKind regards,\n[YOUR NAME]"}
+        for i in range(3)]})
+    emails = getattr(setup(), drafter)({})
+    assert [e["body"] for e in emails] == ["Hi Sam,\n\nA thought."] * 3
+    assert [e["subject"] for e in emails] == ["A quick idea 0", "A quick idea 1", "A quick idea 2"]
     assert "Never use placeholders" in setup().EMAIL_CRAFT
 
 
