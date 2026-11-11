@@ -445,3 +445,42 @@ def test_held_erasures_are_escalated_on_the_home_after_their_threshold(db):
         s.commit()
     with db.connect() as c:
         assert e.escalations(c, A, DAY_28) == {"error": 1, "may_have_sent": 1}
+
+
+# ------------------------------------------------- Codex code review 2 ---
+
+def test_a_legacy_summary_behind_many_clean_ones_is_still_cleaned(db):
+    """Finding 1: 210 clean research documents ahead of one legacy summary
+    (more than one pass selects); the legacy one is still reached."""
+    import json
+    e = erasure()
+    started(db)
+    clean = {"outreach_research": {"summary": "I found 3 new contacts: 3 decision-makers."}}
+    legacy = {"outreach_research": {"summary": "I found 0 new contacts: 1 were rejected (1 no mail server for "
+                                               "studio9.example)."}}
+    with db.begin() as c:
+        for i in range(211):
+            c.execute(text("INSERT INTO business_settings (id, business_id, settings, created_at, updated_at) "
+                           "VALUES (:id, :b, :s, :t, :t)"),
+                      {"id": str(uuid.uuid4()), "b": f"{i:04d}-business", "t": NOW.isoformat(),
+                       "s": json.dumps(legacy if i == 210 else clean)})
+    for _ in range(3):
+        with Session(db) as s:
+            e._scrub_summaries(s)
+    with db.connect() as c:
+        doc = c.execute(text("SELECT settings FROM business_settings WHERE business_id = '0210-business'")).scalar()
+    assert "studio9.example" not in doc and "no mail server for [domain]" in doc
+
+
+def test_a_contacted_classification_is_not_a_dashboard_warning(db):
+    """Finding 2: an imported, already-emailed contact is never 'held'."""
+    from services import outreach_dashboard
+    started(db)
+    with Session(db) as s:
+        _insert(s, "outreach_erasure_exceptions", id=str(uuid.uuid4()), business_id=A, prospect_id=str(uuid.uuid4()),
+                reason="contacted", first_seen_at=NOW.isoformat(), last_checked_at=NOW.isoformat(),
+                created_at=NOW.isoformat(), updated_at=NOW.isoformat())
+        s.commit()
+        rec = outreach_dashboard._records(s, A)
+        needs = outreach_dashboard._needs_you(s, A, rec, None, [], [], DAY_28)
+    assert needs["erasure_held"] == {}

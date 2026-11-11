@@ -381,3 +381,7 @@ These remain OUT-13 proper, a launch gate.
 5. **Timeouts after a rollback.** `_limits` is re-applied before the error record, and before every scheduler query: reconciliation selection, summary scan, re-check selection and backlog age.
 6. **Backlog age.** It uses the effective deadline, the earlier of notice due and capture plus 28 days. Test: a day-20 deadline at day 24 is 96 hours.
 7. **No escalation.** `escalations` covers errors after 3 days, uncertain sends and cross-references after 7, and orphaned cards after 3. It goes in the outreach summary, and the Aria home's "Needs you" shows a warning with a link. This replaces T6's "daily briefing": the home is the owner's daily screen. Test: thresholds, with `contacted` excluded.
+
+## Codex code review 2 — all 7 earlier findings resolved; 2 new, fixed
+1. **Summary scrubbing could stall behind clean documents.** It now selects only documents still holding the one identifying phrase unscrubbed (`no mail server for <domain>`, the only reason that names a domain). Each document cleaned drops out, so every one is reached. Test: 210 clean documents ahead of one legacy summary; the old query fails it.
+2. **`contacted` showed as a dashboard warning.** It is now excluded from `erasure_held` too. Tested.

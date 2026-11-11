@@ -258,7 +258,8 @@ def _needs_you(session, bid: str, rec: dict, brand: Optional[str], replies: list
     # Counts only: their details are already withheld.
     held = {}
     for reason, first_seen in session.execute(text(
-            "SELECT reason, first_seen_at FROM outreach_erasure_exceptions WHERE business_id = :b"), {"b": bid}):
+            "SELECT reason, first_seen_at FROM outreach_erasure_exceptions WHERE business_id = :b "
+            "AND reason <> 'contacted'"), {"b": bid}):   # contacted is not a problem (Codex code review 2)
         entry = held.setdefault(reason, {"count": 0, "oldest_days": 0})
         entry["count"] += 1
         seen = _parse(first_seen)

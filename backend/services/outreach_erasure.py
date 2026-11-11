@@ -452,16 +452,23 @@ def _prune(session, moment: datetime) -> None:
             logger.warning("Erasure pruning failed (%s)", type(exc).__name__)
 
 
+LEGACY_REASON = "no mail server for "
+
+
 def _scrub_summaries(session, stop: Optional[float] = None, limit: int = 50) -> None:
     """Research summaries stored before OUT-13 core could name a domain
     ("no mail server for …"); each is cleaned once, under the settings lock.
     Only rows that can need it are read, and at most `limit` per pass."""
     from services import outreach_research, outreach_setup
     _limits(session, 10)
+    # The only identifying text a summary can hold is "no mail server for
+    # <domain>" (outreach_research._verify). Only documents still holding it
+    # unscrubbed are selected, so each one cleaned drops out and every one is
+    # reached in turn (Codex code review 2, finding 1).
     rows = session.execute(text(
-        "SELECT business_id, settings FROM business_settings WHERE settings IS NOT NULL "
-        "AND CAST(settings AS TEXT) LIKE :research LIMIT :n"),
-        {"research": f'%"{outreach_research.KEY}"%', "n": limit * 4}).fetchall()
+        "SELECT business_id, settings FROM business_settings WHERE CAST(settings AS TEXT) LIKE :legacy "
+        "AND CAST(settings AS TEXT) NOT LIKE :clean ORDER BY business_id LIMIT :n"),
+        {"legacy": f"%{LEGACY_REASON}%", "clean": f"%{LEGACY_REASON}[domain]%", "n": limit}).fetchall()
     session.rollback()
     done = 0
     for bid, raw in rows:
