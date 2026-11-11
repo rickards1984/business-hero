@@ -341,7 +341,7 @@ def _context(session, business, moment: datetime) -> dict:
 def _blocked(session, bid: str, brand_id, audience_hash, moment: datetime, ctx: dict) -> Optional[str]:
     """B6: why the drain would enrol none of this audience now, or None only
     when a campaign it may join has room in every bound."""
-    from services import outreach_billing, outreach_research
+    from services import outreach_billing
     if ctx["why"]:
         return ctx["why"]
     campaigns = [c for c in ctx["ready"]
@@ -353,15 +353,21 @@ def _blocked(session, bid: str, brand_id, audience_hash, moment: datetime, ctx: 
     ledger = ctx["ledger"]
     if any(_room(ledger, c) for c in campaigns):
         return None
-    br = str(brand_id)
+    # Each campaign's own reason; only a campaign stopped by a daily bound
+    # alone promises more tomorrow (Codex code review 2).
+    return "; ".join(dict.fromkeys(_why_full(ledger, c) for c in campaigns))
+
+
+def _why_full(ledger: dict, c) -> str:
+    from services import outreach_research
+    cid, box, br = str(c["id"]), str(c["mailbox_id"]), str(c["brand_id"])
     if ledger["brand_month"].get(br, 0) <= 0:
         return "This month's sending for this brand is used"
-    reasons = [ledger["blocked"].get(str(c["mailbox_id"])) for c in campaigns]
-    if all(reasons):
-        return reasons[0]
-    if all(ledger["pilot"].get(str(c["id"]), 0) <= 0 for c in campaigns):
+    if ledger["blocked"].get(box):
+        return ledger["blocked"][box]
+    if ledger["pilot"].get(cid, 0) <= 0:
         return (f"Each campaign holds at most {outreach_research.pilot_enrolments()} contacts during the pilot, "
-                "and this audience's are full")
+                "and this campaign is full")
     return "Today's places are used; more contacts are added from the bank on the next weekday"
 
 

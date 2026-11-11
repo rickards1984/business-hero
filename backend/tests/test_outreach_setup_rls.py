@@ -108,9 +108,9 @@ def test_the_whole_wizard_and_a_mailbox_change_on_postgres(pg, biz):
 def test_research_writes_verified_prospects_and_enrols_on_postgres(pg, biz, monkeypatch):
     """OUT-10 on real 037 constraints: prospects, evidence (JSONB flags,
     verification binding), the spend meter and enrolment."""
-    from datetime import datetime, timezone
     from services import outreach_manage, outreach_research, outreach_setup as m
     from test_outreach_research import World, person
+    from test_outreach_send import NOW as AT     # the pg fixture's frozen clock: one instant throughout (Codex code review 2)
     monkeypatch.setenv("OUTREACH_SUPPRESSION_SECRET", "synthetic-key-" * 4)
     with Session(pg.engine) as s:
         m.begin(s, biz, OWNER)
@@ -136,26 +136,28 @@ def test_research_writes_verified_prospects_and_enrols_on_postgres(pg, biz, monk
         # it holds about 25; past warm-up, about 100.
         from services import outreach_bank
         audience = s.execute(text("SELECT audience_hash FROM outreach_compliance WHERE id = :l"), {"l": lia["id"]}).scalar()
-        assert outreach_bank.bank(s, B, brand["id"], audience, datetime.now(timezone.utc))["target"] == 25
+        assert outreach_bank.bank(s, B, brand["id"], audience, AT)["target"] == 25
         s.rollback()
         s.execute(text("UPDATE outreach_mailboxes SET warmup_stage = 20, daily_cap = 20, sending_days = 10, "
                        "health_reviewed_by = :o, health_reviewed_at = now() WHERE business_id = :b"), {"o": OWNER, "b": B})
         s.execute(text("UPDATE outreach_campaigns SET daily_cap = 20 WHERE business_id = :b"), {"b": B})
         s.commit()
-        assert outreach_bank.bank(s, B, brand["id"], audience, datetime.now(timezone.utc))["target"] == 100
+        assert outreach_bank.bank(s, B, brand["id"], audience, AT)["target"] == 100
         s.rollback()
         world = World([[person(i) for i in range(12)] + [person(99, company="Sole Trader Gym")]], cost=25)
         world.not_companies.add("Sole Trader Gym")
         kw = world.kwargs()
-        kw["moment"] = datetime.now(timezone.utc)
+        kw["moment"] = AT
         out = outreach_research.run(s, biz, lia["id"], **kw)
         # OUT-23: research only banks; the drain enrols (it needs today's inbox check).
+        assert s.execute(text("SELECT max(captured_at) FROM outreach_prospects WHERE business_id = :b"),
+                         {"b": B}).scalar() <= AT, "stored on the same clock the drain is given"
         assert s.execute(text("SELECT count(*) FROM outreach_enrolments WHERE business_id = :b"), {"b": B}).scalar() == 0
         s.rollback()
-        s.execute(text("UPDATE outreach_mailboxes SET health_status = 'pass', health_checked_at = now() "
-                       "WHERE business_id = :b"), {"b": B})
+        s.execute(text("UPDATE outreach_mailboxes SET health_status = 'pass', health_checked_at = :t "
+                       "WHERE business_id = :b"), {"b": B, "t": AT})
         s.commit()
-        drained = outreach_bank.drain_business(s, outreach_bank._business(s, B), datetime.now(timezone.utc))
+        drained = outreach_bank.drain_business(s, outreach_bank._business(s, B), AT)
         assert drained["skipped"] is None and len(drained["enrolled"]) == 12, drained
     assert len(out["accepted"]) == 12 and out["decision_makers"] == 12
     assert out["attempts"] == 3, "12 is short of today's 40, so it retried wider twice"

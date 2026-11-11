@@ -75,28 +75,36 @@ def test_drain_due_finds_the_business_on_postgres(banked):
 # ------------------------------------------------- interleavings (R4.7, B7) ---
 
 def _held_drain(pg, monkeypatch, other):
-    """Run the drain, hold it inside its transaction (locks taken, ledger
-    read), start `other` in a second session, then let the drain finish.
-    Returns (drain result, other's result or exception, whether other had
-    finished before the drain was released)."""
+    """Run the drain and hold it inside its transaction (locks taken, ledger
+    read). Start `other` on its own connection and wait until PostgreSQL
+    itself reports that connection blocked by the drain's (pg_blocking_pids),
+    then let the drain finish (Codex code review 2: liveness is not proof).
+    Each session is bound to one connection, so its pid stays its own.
+    Returns (drain result, other's result or exception, whether other was
+    seen blocked by the drain)."""
+    import time
     inside, release = threading.Event(), threading.Event()
     real = bank()._ledger
+    pids = {}
 
-    def held(*a, **k):
-        out = real(*a, **k)
+    def held(session, *a, **k):
+        out = real(session, *a, **k)
+        pids["drain"] = session.execute(text("SELECT pg_backend_pid()")).scalar()
         inside.set()
-        release.wait(10)
+        release.wait(15)
         return out
     monkeypatch.setattr(bank(), "_ledger", held)
     got = {}
 
     def drain():
-        with Session(pg.engine) as s:
+        with pg.engine.connect() as conn, Session(bind=conn) as s:
             got["drain"] = bank().drain_business(s, bank()._business(s, A), NOW)
 
     def run_other():
         try:
-            with Session(pg.engine) as s:
+            with pg.engine.connect() as conn, Session(bind=conn) as s:
+                pids["other"] = s.execute(text("SELECT pg_backend_pid()")).scalar()
+                s.rollback()
                 got["other"] = other(s)
         except Exception as exc:          # noqa: BLE001 - reported to the test
             got["other"] = exc
@@ -105,32 +113,44 @@ def _held_drain(pg, monkeypatch, other):
     assert inside.wait(10), "the drain never reached its ledger"
     t2 = threading.Thread(target=run_other)
     t2.start()
-    t2.join(1.5)
-    early = not t2.is_alive()
+    blocked = False
+    with pg.engine.connect() as watch:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and t2.is_alive():
+            if "other" in pids and pids["drain"] in (watch.execute(
+                    text("SELECT pg_blocking_pids(:p)"), {"p": pids["other"]}).scalar() or []):
+                blocked = True
+                break
+            time.sleep(0.05)
     release.set()
-    t1.join(10)
-    t2.join(10)
+    t1.join(15)
+    t2.join(15)
     assert not t1.is_alive() and not t2.is_alive(), "deadlock"
-    return got["drain"], got.get("other"), early
+    return got["drain"], got.get("other"), blocked
 
 
 def test_manual_enrolment_waits_for_the_drain_and_never_doubles(banked, monkeypatch):
     from services import outreach_manage
     pg = banked
-    drained, other, early = _held_drain(
+    drained, other, blocked = _held_drain(
         pg, monkeypatch, lambda s: outreach_manage.enrol(s, pg.b, OWNER, CAMPAIGN, {"prospect_ids": [PROSPECT]}))
-    assert not early, "the owner's enrolment waited on the drain's lock"
+    assert blocked, "the owner's enrolment waited on the drain's lock"
     assert drained["enrolled"] == [PROSPECT]
+    live = _count(pg, "SELECT id FROM outreach_enrolments WHERE business_id = :b AND prospect_id = :p", b=A, p=PROSPECT)
     assert _count(pg, "SELECT count(*) FROM outreach_enrolments WHERE business_id = :b AND prospect_id = :p",
                   b=A, p=PROSPECT) == 1
+    # It succeeds and returns the very enrolment the drain made (Codex code review 2).
+    assert not isinstance(other, Exception), other
+    assert [str(i["id"]) for i in other["items"]] == [str(live)]
 
 
 def test_an_unsubscribe_waits_and_the_contact_is_then_stopped(banked, monkeypatch):
     from services import outreach_manage
     pg = banked
-    drained, other, early = _held_drain(
+    drained, other, blocked = _held_drain(
         pg, monkeypatch, lambda s: outreach_manage.suppress(s, pg.b, OWNER, {"email": EMAIL}))
-    assert not early and not isinstance(other, Exception), other
+    assert blocked and not isinstance(other, Exception), other
+    assert drained["enrolled"] == [PROSPECT], "the drain went first; the unsubscribe then stopped it"
     # Whichever came first, the contact is suppressed and no live enrolment is left.
     assert _count(pg, "SELECT count(*) FROM outreach_suppressions WHERE business_id = :b", b=A) >= 1
     assert _count(pg, "SELECT count(*) FROM outreach_enrolments WHERE business_id = :b AND prospect_id = :p "
@@ -152,16 +172,16 @@ def test_erasure_and_the_drain_serialise(banked, monkeypatch):
     from services import outreach_erasure
     pg = banked
     later = NOW + timedelta(days=29)
-    drained, other, early = _held_drain(
+    drained, other, blocked = _held_drain(
         pg, monkeypatch, lambda s: outreach_erasure.erase_never_contacted(s, A, PROSPECT, later))
-    assert not early
+    assert blocked and not isinstance(other, Exception), other
     assert drained["enrolled"] == [PROSPECT] and other["erased"] is True, other
     assert _count(pg, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b", b=A) == 0
 
 
-def test_an_approval_during_the_drain_neither_deadlocks_nor_fails(banked, monkeypatch):
+def test_an_approval_waits_for_the_drain_and_then_sends(banked, monkeypatch):
     """The seeded contact back in a campaign with a card; the owner approves
-    it while the drain holds its lock."""
+    it while the drain holds its lock: it waits, then sends."""
     pg = banked
     with pg.engine.begin() as c:
         seq = c.execute(text("SELECT sequence_version FROM outreach_campaigns WHERE id = :c"), {"c": CAMPAIGN}).scalar()
@@ -169,7 +189,9 @@ def test_an_approval_during_the_drain_neither_deadlocks_nor_fails(banked, monkey
                        "state, next_step, next_due_at) VALUES (:e, :b, :p, :c, :v, 'active', 0, :t)"),
                   {"e": ENROLMENT, "b": A, "p": PROSPECT, "c": CAMPAIGN, "v": seq, "t": NOW})
     card = _propose(pg)
-    drained, other, early = _held_drain(pg, monkeypatch, lambda s: _approve(pg, card))
+    drained, other, blocked = _held_drain(
+        pg, monkeypatch, lambda s: pg.a.approve(s, pg.b, card["id"], OWNER, version=card["version"]))
     assert not isinstance(other, Exception), other
+    assert blocked, "the approval waited on the drain's lock"
     assert drained["skipped"] is None and drained["enrolled"] == []      # nothing banked: it was enrolled
     assert _count(pg, "SELECT state FROM outreach_messages WHERE business_id = :b", b=A) == "accepted"

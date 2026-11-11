@@ -561,3 +561,19 @@ def test_the_owner_is_told_when_outreach_is_not_on_their_plan(db, monkeypatch):
         raise HTTPException(403, "no")
     monkeypatch.setattr(auth, "assert_feature_access", refuse)
     assert "isn't available on this account" in shown(db, biz)["blocked"]
+
+
+# ------------------------------------------------ Codex code review 2 findings ---
+
+def test_mixed_blockers_are_each_named_and_promise_nothing_for_tomorrow(db, monkeypatch):
+    """P2: campaign A's pilot is full, campaign B's inbox is failing: both
+    reasons are shown, and neither is "more on the next weekday"."""
+    from test_outreach_research import own_inbox
+    biz, brand, lia, campaign, out = researched(db, 30)
+    box = own_inbox(db, brand, lia, address="second@newbody.example")
+    setting(db, "UPDATE outreach_mailboxes SET health_status = 'fail' WHERE mailbox_id = :m", m=box)
+    monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", "5")
+    assert len(drain(db, biz)["enrolled"]) == 5
+    blocked = shown(db, biz)["blocked"]
+    assert "during the pilot" in blocked and "isn't passing its checks" in blocked
+    assert "next weekday" not in blocked
