@@ -114,6 +114,7 @@ export function useDashboardData(businessId?: string) {
     },
     enabled,
     ...LIVE,
+    refetchInterval: 5 * 60 * 1000,   // OUT-13 core: a contact past their deadline leaves within 5 minutes
   });
 
   // OUT-17: no outreach requests (and no "unavailable" notices) without Outreach.

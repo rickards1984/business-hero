@@ -109,6 +109,10 @@ def database():
             conn.execute(text(f"CREATE TABLE outreach_{table} (id TEXT PRIMARY KEY, "
                               "business_id TEXT NOT NULL, created_at TEXT, updated_at TEXT, "
                               f"{columns})"))
+        # OUT-13 core (migration 041): read by the summary's erasure escalations.
+        conn.execute(text("CREATE TABLE outreach_erasure_exceptions (id TEXT PRIMARY KEY, business_id TEXT, "
+                          "prospect_id TEXT, reason TEXT, first_seen_at TEXT, last_checked_at TEXT, "
+                          "created_at TEXT, updated_at TEXT)"))
         conn.execute(text("CREATE TABLE email_accounts (id TEXT PRIMARY KEY, business_id TEXT, "
                           "token_ciphertext TEXT, refresh_token_ciphertext TEXT, smtp_config TEXT)"))
         conn.execute(text("CREATE TABLE email_messages (id TEXT PRIMARY KEY, business_id TEXT, email_account_id TEXT, subject TEXT, body_text TEXT, from_email TEXT, received_at TEXT)"))
@@ -242,7 +246,9 @@ def test_each_read_is_scoped_and_redacted(harness, surface, via):
             for index in range(5):
                 assert uid(other, table, index) not in encoded
         for item in items(surface, result):
-            assert set(item) == set(surface[4].split())
+            # OUT-13 core: a never-contacted contact's rows carry when the
+            # browser must hide them, and say when they are withheld.
+            assert set(item) - {"withhold_at", "details_withheld"} == set(surface[4].split())
         if surface[3]:
             assert items(surface, result), "Positive control: tenant's seeded row must be visible"
         assert "data_quality" in result

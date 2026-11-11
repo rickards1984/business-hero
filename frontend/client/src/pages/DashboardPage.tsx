@@ -123,6 +123,14 @@ function DashboardContent() {
         {outreachOn && (d.outreachPending.isError || d.outreachHandedOver.isError) && <Alert severity="info">Outreach replies unavailable. Outreach history access is required.</Alert>}
         {outreachOn && <ReplyCeilingBanner businessId={businessId} />}
         {outreachReplies.map(r => <OutreachReplyCard key={`${businessId}:${r.id}`} businessId={businessId} reply={r} />)}
+        {outreachOn && Object.keys(d.outreach.data?.erasure_escalations || {}).length > 0 && (
+          // OUT-13 core (T6): contacts past their 28-day deadline still held, long enough to need you.
+          <Alert severity="warning" sx={{ mb: 1 }}>
+            Some outreach contacts past their 28-day deadline haven't been erased yet
+            ({Object.entries(d.outreach.data?.erasure_escalations || {}).map(([reason, n]) =>
+              `${n} ${reason === 'may_have_sent' ? 'waiting to confirm whether an email was sent' : reason === 'error' ? 'failing to erase' : 'needing a check'}`).join(', ')}).
+            {' '}<button className="home-link" onClick={() => navigate('/app/outreach')}>Open outreach</button>
+          </Alert>)}
         {outreachOn && !!d.outreach.data?.totals?.unresolved_replies && <button className="home-link" onClick={() => navigate('/app/outreach/replies')}>View all {d.outreach.data.totals.unresolved_replies} unresolved outreach replies</button>}
         {replies.length > 0 && (
           <div className="home-cards" style={{ marginBottom: 16 }}>

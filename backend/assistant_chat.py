@@ -868,7 +868,9 @@ async def process_chat_message(
             except json.JSONDecodeError:
                 arguments = {}
 
-            logger.info(f"Executing tool (round {tool_round}): {tool_name} with args: {arguments}")
+            # OUT-13 core: arguments and results can hold personal data (a
+            # researched contact's name or address); only names and sizes are logged.
+            logger.info(f"Executing tool (round {tool_round}): {tool_name} ({len(arguments)} argument(s))")
 
             try:
                 tool_result = await _execute_tool_async(
@@ -881,7 +883,7 @@ async def process_chat_message(
                 tool_result = {"success": False, "error": str(e)}
 
             result_str = json.dumps(tool_result)
-            logger.info(f"Tool {tool_name} result: {result_str[:500]}{'...' if len(result_str) > 500 else ''}")
+            logger.info(f"Tool {tool_name} result: {len(result_str)} characters")
 
             if "error" in tool_result:
                 tool_content = f"ERROR: {tool_result['error']}"

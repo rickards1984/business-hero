@@ -5,6 +5,7 @@ import { useMe } from '@/hooks/useMe';
 import { useOutreachOwner } from '@/hooks/useOutreachData';
 import OutreachReplyCard from '@/components/OutreachReplyCard';
 import { apiRequest } from '@/lib/queryClient';
+import { pastWithholdAt, useClockTick, WITHHELD_TEXT } from '@/lib/outreachWithhold';
 
 /**
  * NS-B10 — one of Aria's drafts, awaiting the owner's tap.
@@ -23,6 +24,7 @@ export interface Proposal {
   version: string;
   expires_at: string;
   error?: string | null;
+  withhold_at?: string | null;   // OUT-13 core: the contact's first-email deadline
 }
 
 const KIND: Record<Proposal['action_type'], { label: string; colour: string; approve: string; done: string }> = {
@@ -70,6 +72,7 @@ function whenText(p: Record<string, any>): string {
 export default function ApprovalCard({ proposal, onChanged }: { proposal: Proposal; onChanged?: (card: Proposal) => void }) {
   const { data: me } = useMe();
   const owner = useOutreachOwner(me?.id);
+  const tick = useClockTick();   // re-render at the contact's deadline even with no refresh
   const [card, setCard] = useState<Proposal>(proposal);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -81,7 +84,10 @@ export default function ApprovalCard({ proposal, onChanged }: { proposal: Propos
   const kind = KIND[card.action_type];
   const p = card.preview || {};
   const expired = new Date(card.expires_at).getTime() <= Date.now();
-  const open = card.status === 'proposed' && !expired;
+  // OUT-13 core: past the contact's deadline nothing about them is shown and
+  // the email can't be approved, by the server's word or the browser's clock.
+  const withheldNow = !!p.withheld || pastWithholdAt(card, tick);
+  const open = card.status === 'proposed' && !expired && !withheldNow;
 
   // The server is the authority. After a conflict or a lost reply, re-read
   // the card rather than keep showing a live Approve button (Codex review 1).
@@ -128,6 +134,17 @@ export default function ApprovalCard({ proposal, onChanged }: { proposal: Propos
     setDraft(Object.fromEntries(EDITABLE[card.action_type].map((k) => [k, p[k] ?? ''])));
     setEditing(true);
   };
+
+  if (withheldNow) {
+    return (
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, maxWidth: 560, alignSelf: 'flex-start', width: '100%' }}>
+        <Typography variant="caption" sx={{ fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase', color: kind.colour }}>
+          {kind.label}
+        </Typography>
+        <Typography variant="body2">{p.withheld || WITHHELD_TEXT}</Typography>
+      </Paper>
+    );
+  }
 
   return (
     <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, maxWidth: 560, alignSelf: 'flex-start', width: '100%', overflowWrap: 'anywhere' }}>

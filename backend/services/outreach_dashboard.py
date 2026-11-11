@@ -92,7 +92,8 @@ def _records(session, bid: str) -> dict:
         "SELECT id, brand_id FROM outreach_compliance WHERE business_id = :b")}
     campaigns = {str(r["id"]): r for r in q(
         "SELECT id, brand_id, mailbox_id FROM outreach_campaigns WHERE business_id = :b")}
-    prospects = q("SELECT id, company, name, role, eligibility, lia_id, stage, captured_at, retention_due_at "
+    prospects = q("SELECT id, company, name, role, eligibility, lia_id, stage, captured_at, retention_due_at, "
+                  "notice_due_at, notice_provided_at "
                   "FROM outreach_prospects WHERE business_id = :b")
     messages = q("SELECT prospect_id, campaign_id, origin, direction, state, kind, accepted_at, created_at "
                  "FROM outreach_messages WHERE business_id = :b AND direction = 'outbound'")
@@ -253,8 +254,20 @@ def _needs_you(session, bid: str, rec: dict, brand: Optional[str], replies: list
         1 for b in rec["brands"] if (brand is None or str(b["id"]) == brand)
         and not (prices.get(str(b["id"])) or (0, False))[1]          # an included brand never waits for payment
         and (billing.get(str(b["id"])) or {}).get("state") in ("awaiting_payment", "pending"))
+    # OUT-13 core (T6): contacts whose erasure is held, by reason and age.
+    # Counts only: their details are already withheld.
+    held = {}
+    for reason, first_seen in session.execute(text(
+            "SELECT reason, first_seen_at FROM outreach_erasure_exceptions WHERE business_id = :b "
+            "AND reason <> 'contacted'"), {"b": bid}):   # contacted is not a problem (Codex code review 2)
+        entry = held.setdefault(reason, {"count": 0, "oldest_days": 0})
+        entry["count"] += 1
+        seen = _parse(first_seen)
+        if seen:
+            entry["oldest_days"] = max(entry["oldest_days"], (moment - seen).days)
     return {"replies_waiting": waiting, "approvals": approvals,
-            "failures": {"emails": failed, "paused_inboxes": paused, "awaiting_payment": awaiting}}
+            "failures": {"emails": failed, "paused_inboxes": paused, "awaiting_payment": awaiting},
+            "erasure_held": held}
 
 
 def _plural(n: int, one: str, many: str) -> str:
@@ -358,12 +371,21 @@ def stage_list(session, bid: str, stage: str, *, brand_id=None, limit: int = 20,
     chosen = sorted((pid for pid, s in stages.items() if s == stage),
                     key=lambda pid: (last[pid].isoformat() if last[pid] else "", pid), reverse=True)
     items = []
+    from services import outreach_erasure
+    contacted = outreach_erasure.contacted_ids(session, bid, chosen[int(offset):int(offset) + int(limit)])
     for pid in chosen[int(offset):int(offset) + int(limit)]:
         due = _parse(people[pid].get("retention_due_at"))
-        expired = due is not None and due <= moment
+        # OUT-13 core: past the first email's deadline, withheld at once too.
+        from services import outreach_erasure
+        never = not people[pid].get("notice_provided_at") and pid not in contacted
+        deadline = outreach_erasure.deadline(people[pid]) if people[pid].get("captured_at") else None
+        expired = (due is not None and due <= moment) or (never and deadline is not None and deadline <= moment)
         items.append({"id": pid, "company": None if expired else people[pid].get("company"),
                       "name": None if expired else people[pid].get("name"),
                       "role": None if expired else people[pid].get("role"), "details_withheld": expired,
+                      # The browser hides an item by its own clock at this moment
+                      # too, so a stale or failed refresh never keeps showing it.
+                      "withhold_at": deadline.isoformat() if never and deadline else None,
                       "last_activity_at": last[pid].isoformat() if last[pid] else None})
     return {"stage": stage, "items": items, "total": len(chosen)}
 

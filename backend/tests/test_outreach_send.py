@@ -133,6 +133,9 @@ def database(tmp_path):
         tables = re.findall(r'CREATE TABLE IF NOT EXISTS public\.(outreach_\w+) \(\n(.*?)\n\);',
                             migration, re.S)
         assert len(tables) == 17
+        # OUT-13 core: migration 041's tables too.
+        tables += re.findall(r'CREATE TABLE IF NOT EXISTS public\.(outreach_\w+) \(\n(.*?)\n\);',
+                             (Path(__file__).parents[1] / 'migrations/041_outreach_erasure.sql').read_text(), re.S)
         for name, body in tables:
             cols = []
             for line in body.splitlines():
@@ -1194,3 +1197,119 @@ def test_hook_ownership_removed_during_the_search_stops_the_claim(h):
         acts.approve(h.s, h.b, card['id'], OWNER, version=card['version'])
     assert not h.p.sends
     assert h.s.execute(text('SELECT count(*) FROM outreach_usage_events')).scalar() == 0
+
+
+# ---- OUT-13 core: the first email's deadline (docs/OUT-13-CORE-TICKET.md) ----
+# The prospect was collected at LAST (NOW - 10 days) with notice due at
+# NOW + 10 days, so its deadline is NOW + 10 days.
+
+DEADLINE = NOW + timedelta(days=10)
+
+
+def at(monkeypatch, h, moment):
+    monkeypatch.setattr(h.a, 'now', lambda: moment)
+    monkeypatch.setattr(h.m, 'now', lambda: moment)
+
+
+def claimed_only(h, card):
+    """Claim committed, card executing, dispatch never called: a crash."""
+    presearch(h, card)
+    claim(h, card)
+    h.s.execute(text("UPDATE aria_actions SET status='executing' WHERE id=:id"), {'id': card['id']})
+    h.s.commit()
+
+
+def test_no_card_is_made_past_the_deadline_and_no_token_is_left(h, monkeypatch):
+    at(monkeypatch, h, DEADLINE + timedelta(minutes=1))
+    result = h.a.propose(h.s, h.b, OWNER, 'send_outreach',
+                         dict(campaign_id=CAMPAIGN, enrolment_id=ENROLMENT, step_id=STEP), owner_name='Owner')
+    assert 'past its deadline' in result.get('error', ''), result
+    assert h.s.execute(text('SELECT count(*) FROM outreach_unsubscribe_tokens')).scalar() == 0
+
+
+def test_a_card_made_in_time_cannot_be_approved_after_the_deadline(h, monkeypatch):
+    card = propose(h)
+    at(monkeypatch, h, DEADLINE + timedelta(minutes=1))
+    with pytest.raises(h.a.ActionRefused, match='past its deadline'):
+        approve(h, card)
+    assert not h.p.sends
+
+
+def test_a_claim_made_in_time_is_stopped_before_transport_after_the_deadline(h, monkeypatch):
+    """Review 2, finding 1: dispatch's own recheck, fresh clock, despite the
+    claim and executing card it made."""
+    card = propose(h)
+    claimed_only(h, card)
+    at(monkeypatch, h, DEADLINE + timedelta(seconds=1))
+    result = h.m.dispatch(h.s, h.b, action_id=card['id'], payload=card['preview'])
+    assert result['status'] == 'failed' and result['outcome'] == 'definitely_not_accepted'
+    assert not h.p.sends
+    assert h.s.execute(text('SELECT state FROM outreach_usage_events')).scalar() == 'released'
+
+
+@pytest.mark.parametrize('noticed', [True, False])
+def test_past_the_deadline_only_a_contact_already_given_notice_is_emailed(h, noticed):
+    """Collected 30 days ago, so the deadline has passed today. A contact who
+    has had their first email (notice given) still gets the next one; a
+    contact who has not, gets nothing."""
+    change(h, 'outreach_prospects', captured_at=(NOW - timedelta(days=30)).isoformat(),
+           notice_due_at=(NOW - timedelta(days=2)).isoformat(),
+           notice_provided_at=(NOW - timedelta(days=25)).isoformat() if noticed else None)
+    result = h.a.propose(h.s, h.b, OWNER, 'send_outreach',
+                         dict(campaign_id=CAMPAIGN, enrolment_id=ENROLMENT, step_id=STEP), owner_name='Owner')
+    if noticed:
+        assert approve(h, result['proposal'])['status'] == 'done' and len(h.p.sends) == 1
+    else:
+        assert 'past its deadline' in result.get('error', '') and not h.p.sends
+
+
+# ---- OUT-13 core T3: a claim that never began sending ----------------------
+
+def test_an_interrupted_claim_is_settled_as_not_sent_after_an_hour(h, monkeypatch):
+    from services import outreach_erasure
+    card = propose(h)
+    claimed_only(h, card)
+    with Session(h.engine) as other:
+        assert outreach_erasure.reconcile_abandoned_claims(other, NOW + timedelta(minutes=59)) == 0
+    with Session(h.engine) as other:
+        assert outreach_erasure.reconcile_abandoned_claims(other, NOW + timedelta(hours=2)) == 1
+    states = h.s.execute(text('SELECT (SELECT status FROM outreach_dispatch_jobs), (SELECT state FROM outreach_messages), '
+                              '(SELECT status FROM aria_actions), (SELECT state FROM outreach_usage_events)')).one()
+    assert tuple(states) == ('failed', 'failed', 'failed', 'released')
+    with Session(h.engine) as other:
+        assert outreach_erasure.reconcile_abandoned_claims(other, NOW + timedelta(hours=3)) == 0   # idempotent
+    with pytest.raises(h.a.ActionRefused):
+        h.m.dispatch(h.s, h.b, action_id=card['id'], payload=card['preview'])
+    assert not h.p.sends
+
+
+def test_a_dispatcher_resuming_after_the_fence_never_sends(h, monkeypatch):
+    """The dispatcher passed its first checks; the reconciler fences before
+    the dispatcher's own compare-and-set. It must raise before transport."""
+    from services import outreach_erasure
+    card = propose(h)
+    claimed_only(h, card)
+    real = h.m.lock_business
+    fired = []
+
+    def lock_then_fence(session, bid):
+        if not fired and session is h.s:
+            fired.append(1)
+            with Session(h.engine) as other:
+                assert outreach_erasure.reconcile_abandoned_claims(other, NOW + timedelta(hours=2)) == 1
+        return real(session, bid)
+    monkeypatch.setattr(h.m, 'lock_business', lock_then_fence)
+    with pytest.raises(h.a.ActionRefused):
+        h.m.dispatch(h.s, h.b, action_id=card['id'], payload=card['preview'])
+    assert fired and not h.p.sends
+
+
+def test_a_claim_whose_sending_started_is_never_reconciled(h, monkeypatch):
+    from services import outreach_erasure
+    card = propose(h)
+    claimed_only(h, card)
+    h.s.execute(text("UPDATE outreach_dispatch_jobs SET dispatch_started_at=:at"), {'at': STAMP})
+    h.s.commit()
+    with Session(h.engine) as other:
+        assert outreach_erasure.reconcile_abandoned_claims(other, NOW + timedelta(hours=5)) == 0
+    assert h.s.execute(text('SELECT status FROM outreach_dispatch_jobs')).scalar() == 'claimed'

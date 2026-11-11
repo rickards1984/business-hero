@@ -425,6 +425,40 @@ def _view(row) -> dict:
 _COLUMNS = "id, action_type, payload, status, expires_at, error, result, created_at"
 
 
+WITHHELD = "This contact's deadline passed, so their details are withheld and the email can't be sent."
+
+
+def _shown(session, business, views: list) -> list:
+    """OUT-13 core: an outreach card whose contact is past their first email's
+    deadline shows nothing about them, from that moment, whatever the state
+    of erasure (R3). One query for the whole list."""
+    from services import outreach_erasure
+    ids = {str((v.get("preview") or {}).get("prospect_id")) for v in views
+           if v.get("action_type") in ("send_outreach", "reply_outreach") and isinstance(v.get("preview"), dict)
+           and (v.get("preview") or {}).get("prospect_id")}
+    if not ids:
+        return views
+    names = {f"p{i}": pid for i, pid in enumerate(sorted(ids))}
+    rows = session.execute(text(
+        "SELECT id, captured_at, notice_due_at, notice_provided_at FROM outreach_prospects WHERE business_id = :b "
+        f"AND id IN ({', '.join(':' + n for n in names)})"), {"b": str(business.id), **names}).mappings().all()
+    moment = now()
+    contacted = outreach_erasure.contacted_ids(session, str(business.id), ids)
+    rows = [r for r in rows if str(r["id"]) not in contacted]
+    hidden = {str(r["id"]) for r in rows if outreach_erasure.hidden(r, moment)}
+    # The browser hides a card at its contact's deadline by its own clock too.
+    deadlines = {str(r["id"]): outreach_erasure.deadline(r).isoformat() for r in rows if not r["notice_provided_at"]}
+    out = []
+    for v in views:
+        pid = str((v.get("preview") or {}).get("prospect_id") or "") if isinstance(v.get("preview"), dict) else ""
+        if pid in hidden:
+            v = dict(v, preview={"withheld": WITHHELD, "prospect_id": pid}, version=None, result=None, error=WITHHELD)
+        elif pid in deadlines:
+            v = dict(v, withhold_at=deadlines[pid])
+        out.append(v)
+    return out
+
+
 # ------------------------------------------------------------- the API ---
 
 def propose(session, business, user_id, action_type: str, args: dict, *,
@@ -659,7 +693,7 @@ def approve(session, business, action_id: str, user_id, version: Optional[str] =
         logger.error("[AriaActions] %s %s outcome unknown: %s", action_type, action_id, exc)
         _set(session, business, action_id, error=f"Outcome unknown: {exc}")
         session.commit()
-        return _view(_scoped(session, business, action_id))
+        return _shown(session, business, [_view(_scoped(session, business, action_id))])[0]
 
     if not _succeeded(result):
         error = str(result.get("error") if isinstance(result, dict) else result) or "Failed"
@@ -670,13 +704,13 @@ def approve(session, business, action_id: str, user_id, version: Optional[str] =
             _set(session, business, action_id, status="failed", error=error,
                  executed_at=now(), result=result if isinstance(result, dict) else None)
         session.commit()
-        return _view(_scoped(session, business, action_id))
+        return _shown(session, business, [_view(_scoped(session, business, action_id))])[0]
 
     if action_type in ("send_email", "send_invoice_chase"):
         _bookkeep_email(session, business, action_type, payload, result)
     _set(session, business, action_id, status="done", executed_at=now(), result=result)
     session.commit()
-    return _view(_scoped(session, business, action_id))
+    return _shown(session, business, [_view(_scoped(session, business, action_id))])[0]
 
 
 def _is_active_owner(session, business, user_id, lock: bool = False) -> bool:
@@ -789,7 +823,7 @@ def _approve_outreach(session, business, action_id: str, row, user_id, version) 
         session.info.get("outreach_dispatch", {}).pop(str(action_id), None)
         raise
     dispatch(session, business, action_id=str(action_id), payload=payload)
-    return _view(_scoped(session, business, action_id))
+    return _shown(session, business, [_view(_scoped(session, business, action_id))])[0]
 
 
 def _combined_out_of_date(session, business, payload) -> Optional[str]:
@@ -941,7 +975,7 @@ def edit(session, business, action_id: str, changes: dict) -> dict:
         {"payload": json.dumps(new_payload), "now": now(), "id": str(action_id),
          "business_id": str(business.id)})
     session.commit()
-    return _view(_scoped(session, business, action_id))
+    return _shown(session, business, [_view(_scoped(session, business, action_id))])[0]
 
 
 def dismiss(session, business, action_id: str) -> dict:
@@ -957,11 +991,11 @@ def dismiss(session, business, action_id: str) -> dict:
         current = _scoped(session, business, action_id)[3]
         raise ActionRefused(409, f"This card is already {current}.")
     session.commit()
-    return _view(_scoped(session, business, action_id))
+    return _shown(session, business, [_view(_scoped(session, business, action_id))])[0]
 
 
 def get(session, business, action_id: str) -> dict:
-    return _view(_scoped(session, business, action_id))
+    return _shown(session, business, [_view(_scoped(session, business, action_id))])[0]
 
 
 def list_open(session, business) -> list:
@@ -969,7 +1003,7 @@ def list_open(session, business) -> list:
         f"SELECT {_COLUMNS} FROM aria_actions WHERE business_id = :business_id "
         "AND status = 'proposed' AND expires_at > :now ORDER BY created_at DESC"),
         {"business_id": str(business.id), "now": now()}).fetchall()
-    return [_view(r) for r in rows]
+    return _shown(session, business, [_view(r) for r in rows])
 
 
 def propose_from_chat(business_id: str, user_id, action_type: str, args: dict, *,

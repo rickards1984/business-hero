@@ -6,6 +6,8 @@ import {
   ToggleButton, ToggleButtonGroup, Typography,
 } from '@mui/material';
 import { apiRequest } from '@/lib/queryClient';
+import { pastWithholdAt, useClockTick } from '@/lib/outreachWithhold';
+import { OUTREACH_REFRESH_MS } from '@/hooks/useOutreachData';
 
 // OUT-14 (Mike, 30 Oct 2026): the approved dashboard. Brand switcher, Aria's
 // summary, Needs you, the pipeline, results for a period and (owner only)
@@ -23,12 +25,21 @@ interface Dashboard {
   pipeline: Record<string, number>;
   results: { contacted: number; emails_sent: number; replied: number; positive: number; reply_rate: number | null;
     positive_rate: number | null; objections: number; bounces: number; meetings: number; wins: number };
-  needs_you: { replies_waiting: number; approvals: number; failures: { emails: number; paused_inboxes: number; awaiting_payment: number } };
+  needs_you: { replies_waiting: number; approvals: number; failures: { emails: number; paused_inboxes: number; awaiting_payment: number };
+    erasure_held?: Record<string, { count: number; oldest_days: number }> };
   definitions: Record<string, string>;
   spend?: { period: string; brands: { brand_id: string; name: string; allowance_pence: number; spent_pence: number; topups_pence: number; billing: string; live: boolean }[];
     budget: { budget_pence: number | null; committed_pence: number } };
 }
-interface StagePage { stage: string; total: number; items: { id: string; company?: string | null; name?: string | null; role?: string | null; details_withheld?: boolean; last_activity_at?: string }[] }
+// OUT-13 core (T6): why a contact past their deadline isn't erased yet.
+const HELD: Record<string, string> = {
+  may_have_sent: 'an email may have been sent, so Business Hero is waiting for confirmation',
+  cross_reference: "another contact's record refers to it; it's repaired automatically where safe",
+  orphaned_card: "an email card is in an unusual state; it's checked again daily",
+  error: "erasure didn't finish; it's retried daily",
+};
+
+interface StagePage { stage: string; total: number; items: { id: string; company?: string | null; name?: string | null; role?: string | null; details_withheld?: boolean; withhold_at?: string | null; last_activity_at?: string }[] }
 
 const pounds = (p: number) => `£${(p / 100).toFixed(2)}`;
 const rate = (r: number | null) => (r === null ? 'unavailable' : `${(r * 100).toFixed(1)}%`);
@@ -40,6 +51,7 @@ export default function OutreachDashboard({ businessId, owner }: { businessId: s
   const [stage, setStage] = useState('');
   const query = brand === 'all' ? `period=${period}` : `period=${period}&brand_id=${brand}`;
   const q = useQuery<Dashboard>({ queryKey: ['outreach-dashboard', businessId, brand, period], retry: false, staleTime: 30000,
+    refetchInterval: OUTREACH_REFRESH_MS,
     queryFn: async () => (await apiRequest('GET', `/v1/outreach/dashboard?${query}`)).json() });
   if (q.isError) return <Alert severity="warning">The dashboard couldn't load just now. Please try again.</Alert>;
   const d = q.data;
@@ -78,6 +90,11 @@ export default function OutreachDashboard({ businessId, owner }: { businessId: s
             n.failures.paused_inboxes && `${n.failures.paused_inboxes} inbox${n.failures.paused_inboxes === 1 ? '' : 'es'} paused`,
             n.failures.awaiting_payment && `${n.failures.awaiting_payment} brand${n.failures.awaiting_payment === 1 ? '' : 's'} waiting for payment`]
             .filter(Boolean).join(' · ')}.</Typography>}
+        {Object.entries(n.erasure_held || {}).map(([reason, h]) => (
+          <Typography key={reason} variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            {`${h.count} contact${h.count === 1 ? '' : 's'} past the 28-day deadline kept for now: ${HELD[reason] || 'being checked'}`}
+            {h.oldest_days > 0 ? ` (oldest ${h.oldest_days} day${h.oldest_days === 1 ? '' : 's'}).` : '.'}
+          </Typography>))}
       </Section>
 
       <Section title="Pipeline" note="Each person is counted once, at the furthest stage they've reached. Choose a stage to see who's there.">
@@ -143,11 +160,13 @@ function Metric({ label, value, hint }: { label: string; value: number | string;
 
 function StageDialog({ businessId, brand, stage, owner, close }: { businessId: string; brand: string; stage: string; owner: boolean; close: () => void }) {
   const client = useQueryClient();
+  const tick = useClockTick();   // OUT-13 core: hide at the deadline even with no refresh
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState('');   // the person being saved: one click, one change
   const brandParam = brand === 'all' ? '' : `&brand_id=${brand}`;
   const q = useQuery<StagePage>({ queryKey: ['outreach-dashboard-stage', businessId, brand, stage, offset], enabled: !!stage, retry: false,
+    refetchInterval: OUTREACH_REFRESH_MS,
     // (loading and error are shown below: an empty dialog never stands for "nobody")
     queryFn: async () => (await apiRequest('GET', `/v1/outreach/dashboard/stage/${stage}?limit=20&offset=${offset}${brandParam}`)).json() });
   async function mark(id: string, outcome: string | null) {
@@ -174,8 +193,8 @@ function StageDialog({ businessId, brand, stage, owner, close }: { businessId: s
         {q.isError && <Alert severity="warning">This list couldn't load just now. Please try again.</Alert>}
         {q.data?.items.length === 0 && <Typography variant="body2">Nobody is at this stage.</Typography>}
         {q.data?.items.map(p => <Paper key={p.id} variant="outlined" sx={{ p: 1.5 }}>
-          <Typography fontWeight={600}>{p.details_withheld ? 'Details removed after the retention period' : `${p.name || 'Unnamed'}${p.role ? `, ${p.role}` : ''}`}</Typography>
-          <Typography variant="body2">{p.details_withheld ? '' : p.company || ''}{p.last_activity_at ? ` · last activity ${new Date(p.last_activity_at).toLocaleDateString('en-GB')}` : ''}</Typography>
+          <Typography fontWeight={600}>{p.details_withheld || pastWithholdAt(p, tick) ? 'Details withheld' : `${p.name || 'Unnamed'}${p.role ? `, ${p.role}` : ''}`}</Typography>
+          <Typography variant="body2">{p.details_withheld || pastWithholdAt(p, tick) ? '' : p.company || ''}{p.last_activity_at ? ` · last activity ${new Date(p.last_activity_at).toLocaleDateString('en-GB')}` : ''}</Typography>
           {owner && <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
             {!marked && <Button size="small" variant="outlined" disabled={!!saving} onClick={() => mark(p.id, 'meeting')}>Meeting booked</Button>}
             {stage !== 'won' && <Button size="small" variant="outlined" disabled={!!saving} onClick={() => mark(p.id, 'won')}>Won</Button>}
