@@ -447,3 +447,172 @@ Hunter is always faked.
 
 ## B-8. No migration
 Evidence `source_type` is free text, the key lives in the settings document, and credits use `usage_meters`. `EMAIL_ENCRYPTION_KEY` is already set (mailboxes use it).
+
+---
+
+# Part B — revision 2 (answers Codex design review 1; supersedes revision 1 where they differ)
+
+Revision 1's B-0, B-1 (Mike's decisions), B-6 and B-8's "no migration for evidence" stand. Each item below is numbered by review 1's finding.
+
+**Hunter's contract**, checked on 11 Nov 2026:
+- `provenance` is `found` (seen on a public page) or `inferred` (built from a pattern). `previously_found` is coming: found, but not confirmed in the last 90 days. Domain Search accepts `provenance` as a filter.
+- Source fields are `domain`, `uri`, `extracted_on`, `last_seen_on` and `still_on_page`, with dates as `YYYY-MM-DD`.
+- The verification object has `date` and `status`.
+- `X-Credits-Used` may be fractional (0.5). `X-Credits-Unit` is `credit` (one pool) or `search`/`verification` (separate pools).
+- Finder and Verifier may return **451 `claimed_email`**: "you shouldn't process it yourself in any way".
+
+## R2.1 "Found published" (finding 1)
+- The request carries `provenance=found`. The response must say `provenance == "found"`; anything else, including missing or unknown, is rejected.
+- A **publication source** needs all of:
+  - `still_on_page == true`;
+  - `last_seen_on` parses, is not in the future, and is within 90 days;
+  - an `https` `uri`.
+- **We confirm it ourselves:** the chosen source page is fetched with the existing SSRF-guarded `fetch_page`, and `_address_on(page, email)` must hold. Sources on the company's own domain are tried first, then others; at most 2 fetches per person.
+- A third-party page (a directory) can prove publication, but never company ownership or permission. Those come only from the corporate checks (R2.9).
+- Tests: stale, future, malformed, `still_on_page` false, `inferred`, missing provenance, a page that no longer shows the address, and a login wall.
+
+## R2.2 The verification contract (finding 2)
+Typed and fail-closed. An address is valid only when one of these holds:
+- **(a)** Domain Search's `verification.status == "valid"` with a parsed, non-future `date` within **30 days**; or
+- **(b)** an Email Verifier call returns all of:
+  - `data.email` equal to the exact address (normalised);
+  - `status == "valid"`;
+  - `accept_all`, `webmail`, `disposable`, `block` and `gibberish` all `false`;
+  - `smtp_check == true`.
+
+If neither holds, the person is dropped. A failed Hunter result **never** falls through to web verification or review storage.
+
+The `email_verification` evidence row records `verification_status = "valid"`, `verified_at` = **Hunter's actual date** (a) or the verifier's date (b) (never `moment`), and `expires_at = verified_at + EVIDENCE_LIFE`. `_store` takes these as parameters; for web contacts it keeps today's values.
+
+Tests: missing or future dates, a mismatched address, contradictory flags, and the stored values checked in the database. A real prepare-and-claim test of a Hunter contact.
+
+## R2.3 Free checks before paid ones (finding 3)
+Per lead, in this order:
+1. A business domain that is not webmail, not held or contacted, and not suppressed or recently erased.
+2. **MX**.
+3. The corporate checks (R2.9).
+4. Only then the reservation and **Domain Search**.
+
+After the search, with no further charge:
+1. drop results whose domain isn't the company's;
+2. drop by provenance and publication-source freshness (R2.1 data only, no fetch yet);
+3. drop held or suppressed email keys, recently erased addresses, and anything over the gatekeeper quota;
+4. **rank** the survivors: decision-maker role, then seniority (executive before senior), then confidence;
+5. take each in rank order: fetch its publication page (R2.1), then verify (R2.2). **Stop at the first usable person.**
+
+Tests: an email-only suppression means zero Verifier calls, and nobody ranked lower is verified after a success.
+
+## R2.4 Reservations, leases and budgets (finding 4)
+Hunter work runs **per lead**, after the AI search has settled, inside the same run and claim.
+- **Before every billable call**, under the business lock in one transaction:
+  1. renew and check the search claim (`_claim_search(session, bid, claim) == claim`);
+  2. re-check `_still_allowed`, the brand's Hunter switch and notice binding (R2.8), the connection `generation` (R2.5) and the quota blocks (R2.6);
+  3. check the room: today's 40 and the bank, less this run's pending stores;
+  4. check that the brand cap's remaining credit is **at least the call's maximum cost** (search 1.0, verify 0.5);
+  5. **commit a reservation** of that maximum to `hunter_reserved:<unit>:<brand>` for the month.
+- **After the call:** settle with `X-Credits-Used`/`X-Credits-Unit` (R2.6), releasing the reservation, independently of whether anyone is stored.
+- **On a timeout or crash** the reservation stays as an estimated charge. A daily sweep releases reservations older than 1 hour into charged.
+- **Within a run:** a domain is tried once (a `pending_domains` set), and `remaining_slots` is kept in memory and re-checked under the store lock.
+- **Run budget:** at most `2 × room` searches, 2 verifications per lead, 60 Hunter calls in all, and **120 s** of Hunter time, polling included. A 202 is polled every 2 s within that budget, then the person is dropped.
+- **Tests:** PostgreSQL interleavings of two runs on the same domain; a lease takeover mid-call; disconnecting or pausing during a call; repeated domains; a crash after a charge; an insufficient remainder (0.5 left blocks a search but allows a verify).
+
+## R2.5 The key: a backend-only table (finding 5) — migration 042
+`outreach_provider_accounts`:
+
+| Column | Type / rule |
+|---|---|
+| `business_id` | FK |
+| `provider` | `CHECK IN ('hunter')`; `UNIQUE (business_id, provider)` |
+| `key_ciphertext` | text |
+| `key_last4` | text |
+| `generation` | int |
+| `status` | `CHECK IN ('connected', 'invalid')` |
+| `plan` | text |
+| `pools` | jsonb: used/available per unit |
+| `account_fetched_at` | timestamptz |
+| `blocked` | jsonb: `{unit: until}` |
+| `connected_by`, `connected_at`, `updated_at` | — |
+
+Row-level security is on, with no policies and no client grants, as in 041. The key **never** enters `business_settings`, so the generic GET and PUT cannot return or overwrite it. Per-brand settings (switch, cap, notice binding) are not secret and stay in the research config.
+
+- **Connect** (active owner only):
+  1. validate with `GET /account`;
+  2. encrypt (`encrypt_secret`; refuse if `EMAIL_ENCRYPTION_KEY` is missing);
+  3. upsert with `generation + 1`.
+- **Disconnect:** delete the row; `generation` is lost with it.
+- A run reads the generation at its start, and every reservation and store checks it is unchanged. A changed generation stops Hunter for the run and **discards** results not yet stored.
+- **Transport:**
+  - header `X-API-KEY` only, never a query string;
+  - `follow_redirects=False`;
+  - a fixed host;
+  - exceptions are logged as type and status code only;
+  - the key is redacted from any `repr`.
+- Tests: generic settings GET/PUT never show the key; failure logs carry no key or email; a missing encryption key; disconnect and key-replacement races; non-owners refused; another tenant's row never read.
+
+## R2.6 Units, metering and quota (finding 6)
+- **Units:** `X-Credits-Unit` ∈ {`credit`, `search`, `verification`}. Each is metered separately in `usage_meters` (`numeric(14,4)`, written exactly, **not** with the integer `_add_meter`): `hunter_credits:<unit>:<brand>` per UK calendar month.
+- **Missing or malformed headers:** charge the reserved maximum, marked estimated.
+- **The brand cap** is in credits. Under separate pools, a search counts 1 and a verification 0.5 towards it. A zero-cost repeat records 0.
+- **429:** block **that unit's pool** in `blocked[unit] = reset_date 00:00 UTC`. A missing or past reset date blocks for 24 h and refreshes `/account`. A failed refresh keeps the block.
+- **Blocks are persisted in the row**, never only in the cache.
+- **`/account` cache:** only `plan`, per-pool used/available and `reset_date` are kept, with `account_fetched_at` shown as "as of". It refreshes at most hourly and is invalidated on connect.
+- **Tests:** fractional charges, separate pools, a month boundary versus Hunter's billing period (shown as Hunter's own figures, labelled), a stale cache after a 429, and a missing header.
+
+## R2.7 Which evidence row the footer uses (finding 7) — RED: the send path
+- **The record:** the `email_verification` evidence row (one per prospect, written at acquisition) is authoritative. Its `source_url` is the page publishing the address (R2.1), even a directory. Company-registration facts are separate rows carrying the company page.
+- **`build_payload` selection:** `fact_type = 'email_verification' ORDER BY fetched_at DESC, id DESC`. If no such row exists (imported contacts), today's selection is unchanged.
+- **The footer** names Hunter only when that row's `source_type = 'hunter'`.
+- **Existing contacts:** every web contact's rows share one `source_url`, so their footer and payload hash are byte-identical. A test covers each existing kind: web, imported and manual.
+- Already-approved cards and claimed jobs dispatch their stored payload unchanged.
+- **Tests:** mixed and tied evidence; a later verification row; an old web card approved after deploy; manual and automatic claims; dispatch of an already-claimed payload.
+
+## R2.8 The notice and assessment binding (finding 8)
+- **Confirmation** stores `{owner, notice_hash}` per brand: the SHA-256 of the brand's current approved notice text. The owner confirms the notice states:
+  - that business contact details are obtained from public sources and from business contact databases including Hunter.io;
+  - the categories collected;
+  - retention (28 days unless emailed);
+  - the owner's own identity, purposes, legitimate interests, rights and opt-out.
+
+  Suggested wording is shown.
+- **Re-confirmation:** any `approve_privacy_notice` that changes the hash invalidates the confirmation, and Hunter stays off until it is re-confirmed.
+- **The assessment:** Hunter acquisition runs only for an audience whose **current approved assessment's `sources`** include `hunter.io`. The setup flow offers "re-approve this audience with Hunter as a source", a new version through the existing draft and approve path, with sourcing covered in the balancing test.
+- **Checks:** before every Hunter acquisition, and before the **first send** of a Hunter-sourced contact; a mismatch refuses with "This brand's privacy notice changed; confirm it still names Hunter.io".
+- Corporate-subscriber checks, sender identity and opt-out are unchanged.
+- **Tests:** a confirmed notice then replaced; an assessment without Hunter; a first send after a notice change.
+
+## R2.9 One corporate check, reused (finding 9)
+The corporate part of `_verify` becomes `_corporate(fetch, companies, company, number, domain, page_url)`, with today's code paths and every exclusion unchanged:
+- the final-host checks;
+- visible registration binding the registered name to the number;
+- sole trader and partnership detection;
+- `TRADING_AS` and designer `CREDIT` exclusions;
+- the trading-name domain fit;
+- the home-page fallback.
+
+Web candidates call it exactly as today. Hunter leads call it with Aria's cited company-owned page (contact or legal) when given, else the home page. Tests: a disclosure only on the contact page, an off-domain redirect, a designer's registration, and a trading name.
+
+## R2.10 451 is honoured everywhere (finding 10)
+- A 451 writes a tenant suppression: `key_type = 'email'`, the keyed digest only, reason `provider_claimed`. Nothing from the profile is stored.
+- Every acquisition path already refuses suppressed keys (`_suppressed`, before verification and again under the store lock), so a later web candidate for the same address is refused.
+- A pending candidate for that address in the same run is dropped.
+- Tests: 451, then web rediscovery; a concurrent pending candidate.
+
+## R2.11 Allowlist and erasure (finding 11)
+Everything Hunter-related that is persisted:
+
+| Where | What |
+|---|---|
+| The prospect row | As today. |
+| Evidence rows | `email_verification` (R2.2/R2.7), `contact_type`, `segment`, `region`, `role_verified`, `companies_house`, and `source = hunter`, all linked to the prospect. |
+| `usage_meters` | Aggregates only: business, unit, brand and month. |
+| `outreach_provider_accounts` | No personal data. |
+| Suppressions | A digest (R2.10). |
+
+**Never persisted or logged:** raw responses, other people at the domain, Hunter's profile fields (LinkedIn, phone, twitter), or diagnostic payloads.
+
+OUT-13 erasure already deletes never-contacted prospects with their evidence. Contacted subjects are retained under OUT-13's existing rules; that is a dependency, not something solved here.
+
+Tests: erasing a Hunter contact leaves no source URL, verification fact, learning fact, card or summary text, and nothing in the account row or meters names a person.
+
+## R2.12 Tests first (RED)
+Revision 1's B-7 list, plus each finding's tests above, plus migration 042 rehearsed on the local PostgreSQL harness with its runbook (`audits/042-PROD-RUNBOOK.md`, staging first).
