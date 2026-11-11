@@ -96,16 +96,18 @@ PAST_DEADLINE = "This contact's first email is past its deadline"
 
 
 def contacted_ids(session, bid: str, ids) -> set:
-    """Of these prospects, those with any sign of contact (a message that was,
-    or may have been, sent; a reply), whatever their notice_provided_at:
-    imported history may lack it. They are never hidden or erased (C1)."""
+    """Of these prospects, those actually contacted (an accepted or imported
+    message, or a reply), whatever their notice_provided_at: imported history
+    may lack it. Only these stay visible after the deadline. A send that only
+    MAY have happened (claimed, unknown) is protected from erasure by
+    `assess`, but its contact is still withheld (Codex code review 1, 3)."""
     ids = sorted({str(i) for i in ids if i})
     if not ids:
         return set()
     clause, params = _in("prospect_id", ids, "q")
     found = set()
     for sql in (f"SELECT DISTINCT prospect_id FROM outreach_messages WHERE business_id = :b AND {clause} "
-                f"AND state IN ('accepted', 'imported', 'claimed', 'unknown')",
+                f"AND state IN ('accepted', 'imported')",
                 # A reply slot always has its reply (migration 038's foreign key).
                 f"SELECT DISTINCT prospect_id FROM outreach_replies WHERE business_id = :b AND {clause}"):
         found.update(str(r[0]) for r in session.execute(text(sql), {"b": str(bid), **params}))
@@ -336,11 +338,10 @@ def erase_never_contacted(session, bid: str, prospect_id: str, moment: Optional[
             session.rollback()
             return {"erased": False, "reason": "not_due"}
         if found["reason"]:
-            if found["reason"] == "contacted":
-                session.execute(text("DELETE FROM outreach_erasure_exceptions WHERE business_id = :b "
-                                     "AND prospect_id = :p"), {"b": bid, "p": pid})
-            else:
-                _note_exception(session, bid, pid, found["reason"], moment)
+            # 'contacted' is recorded too (not shown to the owner): imported
+            # history can lack a notice date, and without this row it would be
+            # selected again every pass (Codex code review 1, finding 1).
+            _note_exception(session, bid, pid, found["reason"], moment)
             session.commit()
             return {"erased": False, "reason": found["reason"]}
         b = {"b": bid}
@@ -375,6 +376,8 @@ def erase_never_contacted(session, bid: str, prospect_id: str, moment: Optional[
         session.rollback()
         logger.warning("Erasure of a contact for business %s failed (%s); retried tomorrow", bid, type(exc).__name__)
         try:
+            _limits(session)        # SET LOCAL ended with the rollback
+            _lock(session, bid)
             _note_exception(session, bid, pid, "error", moment)
             session.commit()
         except Exception:
@@ -384,7 +387,8 @@ def erase_never_contacted(session, bid: str, prospect_id: str, moment: Optional[
 
 # --------------------------------------------------- abandoned first sends ---
 
-def reconcile_abandoned_claims(session, moment: Optional[datetime] = None, limit: int = 50) -> int:
+def reconcile_abandoned_claims(session, moment: Optional[datetime] = None, limit: int = 50,
+                               stop: Optional[float] = None) -> int:
     """T3/U2: a sequence email's claim that never began sending (its job
     `claimed`, no dispatch marker, over an hour old) is fenced with the
     dispatcher's own compare-and-set, then settled as not sent, in one
@@ -392,6 +396,7 @@ def reconcile_abandoned_claims(session, moment: Optional[datetime] = None, limit
     raises before transport. Replies are left to their own safeguards."""
     from types import SimpleNamespace
     moment = moment or now()
+    _limits(session, 10)
     rows = session.execute(text(
         "SELECT j.business_id, j.id, j.action_id FROM outreach_dispatch_jobs j JOIN aria_actions a "
         "ON a.business_id = j.business_id AND a.id = j.action_id WHERE j.status = 'claimed' "
@@ -400,6 +405,8 @@ def reconcile_abandoned_claims(session, moment: Optional[datetime] = None, limit
     session.rollback()
     settled = 0
     for bid, job_id, action_id in rows:
+        if stop is not None and _time.monotonic() >= stop:
+            break
         bid = str(bid)
         try:
             business = SimpleNamespace(id=bid)        # settlement uses only the id
@@ -445,13 +452,21 @@ def _prune(session, moment: datetime) -> None:
             logger.warning("Erasure pruning failed (%s)", type(exc).__name__)
 
 
-def _scrub_summaries(session) -> None:
+def _scrub_summaries(session, stop: Optional[float] = None, limit: int = 50) -> None:
     """Research summaries stored before OUT-13 core could name a domain
-    ("no mail server for …"); each is cleaned once, under the settings lock."""
+    ("no mail server for …"); each is cleaned once, under the settings lock.
+    Only rows that can need it are read, and at most `limit` per pass."""
     from services import outreach_research, outreach_setup
-    rows = session.execute(text("SELECT business_id, settings FROM business_settings")).fetchall()
+    _limits(session, 10)
+    rows = session.execute(text(
+        "SELECT business_id, settings FROM business_settings WHERE settings IS NOT NULL "
+        "AND CAST(settings AS TEXT) LIKE :research LIMIT :n"),
+        {"research": f'%"{outreach_research.KEY}"%', "n": limit * 4}).fetchall()
     session.rollback()
+    done = 0
     for bid, raw in rows:
+        if done >= limit or (stop is not None and _time.monotonic() >= stop):
+            break
         cfg = (send.loads(raw) or {}).get(outreach_research.KEY) or {}
         summary = cfg.get("summary") if isinstance(cfg, dict) else None
         if not isinstance(summary, str) or scrub(summary) == summary:
@@ -467,6 +482,7 @@ def _scrub_summaries(session) -> None:
             session.execute(text(f"UPDATE business_settings SET settings = {expr} WHERE business_id = :b"),
                             {"s": json.dumps(doc), "b": str(bid)})
             session.commit()
+            done += 1
         except Exception as exc:
             session.rollback()
             logger.warning("Could not clean a stored research summary (%s)", type(exc).__name__)
@@ -487,16 +503,25 @@ def _new_candidates(session, moment: datetime, after: Optional[tuple]) -> list:
     return [tuple(r) for r in rows]
 
 
-def run_due(session, moment: Optional[datetime] = None, *, pass_seconds: float = PASS_SECONDS) -> dict:
+HOUSEKEEPING_SECONDS = 30.0
+
+
+def run_due(session, moment: Optional[datetime] = None, *, pass_seconds: float = PASS_SECONDS,
+            housekeeping_seconds: float = HOUSEKEEPING_SECONDS) -> dict:
     """Every hourly pass, every day, every business, before anything that
-    calls a provider (R4). New candidates have the main budget; exceptions
-    are re-checked under their own small one, so neither starves (U1)."""
+    calls a provider (R4). Housekeeping has its own bounded budget; then new
+    candidates have the main budget, starting after it; exceptions are
+    re-checked under their own small one. None can starve another (U1;
+    Codex code review 1, finding 2)."""
     moment = moment or now()
-    stop = _time.monotonic() + pass_seconds
     out = {"erased": 0, "exceptions": {}, "rechecked": 0, "claims_settled": 0}
+    tidy_until = _time.monotonic() + housekeeping_seconds
     _prune(session, moment)
-    out["claims_settled"] = reconcile_abandoned_claims(session, moment)
-    _scrub_summaries(session)
+    if _time.monotonic() < tidy_until:
+        out["claims_settled"] = reconcile_abandoned_claims(session, moment, stop=tidy_until)
+    if _time.monotonic() < tidy_until:
+        _scrub_summaries(session, stop=tidy_until)
+    stop = _time.monotonic() + pass_seconds          # the candidates' own budget starts now
     after = None
     while _time.monotonic() < stop:
         page = _new_candidates(session, moment, after)
@@ -511,6 +536,7 @@ def run_due(session, moment: Optional[datetime] = None, *, pass_seconds: float =
             elif done["reason"] in REASONS:
                 out["exceptions"][done["reason"]] = out["exceptions"].get(done["reason"], 0) + 1
             after = (captured, bid, pid)
+    _limits(session, 10)
     due = session.execute(text(
         "SELECT business_id, prospect_id FROM outreach_erasure_exceptions WHERE last_checked_at <= :old "
         "ORDER BY last_checked_at LIMIT :n"), {"old": moment - RECHECK_AFTER, "n": RECHECKS_PER_PASS}).fetchall()
@@ -518,22 +544,49 @@ def run_due(session, moment: Optional[datetime] = None, *, pass_seconds: float =
     for bid, pid in due:
         erase_never_contacted(session, str(bid), str(pid), moment)
         out["rechecked"] += 1
-    oldest = session.execute(text(
-        "SELECT min(p.captured_at) FROM outreach_prospects p WHERE p.notice_provided_at IS NULL "
+    # The oldest effective deadline (as `deadline`: the earlier of notice due
+    # and capture + 28 days), Codex code review 1, finding 6.
+    _limits(session, 10)
+    captured, noticed = session.execute(text(
+        "SELECT min(p.captured_at), min(CASE WHEN p.notice_due_at <= :now THEN p.notice_due_at END) "
+        "FROM outreach_prospects p WHERE p.notice_provided_at IS NULL "
         "AND (p.captured_at <= :cut OR p.notice_due_at <= :now) AND NOT EXISTS (SELECT 1 FROM "
         "outreach_erasure_exceptions x WHERE x.business_id = p.business_id AND x.prospect_id = p.id)"),
-        {"cut": moment - DEADLINE, "now": moment}).scalar()
+        {"cut": moment - DEADLINE, "now": moment}).one()
     session.rollback()
-    out["oldest_overdue_hours"] = (round((moment - (_ts(oldest) + DEADLINE)).total_seconds() / 3600, 1)
-                                   if oldest else 0)
+    deadlines = [d for d in ((_ts(captured) + DEADLINE) if captured else None, _ts(noticed)) if d]
+    out["oldest_overdue_hours"] = round((moment - min(deadlines)).total_seconds() / 3600, 1) if deadlines else 0
     level = logging.WARNING if out["oldest_overdue_hours"] > 3 else logging.INFO
     logger.log(level, "[Erasure] erased=%d exceptions=%s rechecked=%d claims_settled=%d oldest_overdue_hours=%s",
                out["erased"], out["exceptions"], out["rechecked"], out["claims_settled"], out["oldest_overdue_hours"])
     return out
 
 
+OWNER_REASONS = ("may_have_sent", "cross_reference", "orphaned_card", "error")   # 'contacted' is not a problem
+
+
 def exceptions_for(session, bid: str) -> list:
     """The owner's list (T6): reason and age, never the person's details."""
     rows = session.execute(text("SELECT prospect_id, reason, first_seen_at FROM outreach_erasure_exceptions "
-                                "WHERE business_id = :b ORDER BY first_seen_at"), {"b": str(bid)}).fetchall()
+                                "WHERE business_id = :b AND reason <> 'contacted' ORDER BY first_seen_at"),
+                           {"b": str(bid)}).fetchall()
     return [{"prospect_id": str(r[0]), "reason": r[1], "since": _ts(r[2]).isoformat()} for r in rows]
+
+
+ESCALATE_AFTER = {"error": timedelta(days=3), "may_have_sent": timedelta(days=7),
+                  "cross_reference": timedelta(days=7), "orphaned_card": timedelta(days=3)}
+
+
+def escalations(conn, bid: str, moment: Optional[datetime] = None) -> dict:
+    """T6: held erasures old enough to put in front of the owner on the Aria
+    home, by reason. Counts only (Codex code review 1, finding 7)."""
+    moment = moment or now()
+    out = {}
+    for reason, first_seen in conn.execute(text(
+            "SELECT reason, first_seen_at FROM outreach_erasure_exceptions WHERE business_id = :b "
+            "AND reason <> 'contacted'"), {"b": str(bid)}):
+        after = ESCALATE_AFTER.get(reason)
+        seen = _ts(first_seen)
+        if after and seen and moment - seen >= after:
+            out[reason] = out.get(reason, 0) + 1
+    return out

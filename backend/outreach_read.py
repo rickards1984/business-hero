@@ -255,7 +255,11 @@ def _read(session, read, arguments, business_id):
         totals = {key: _count(session, "outreach_" + table,
                              where + " AND " + predicate, params)
                   for key, (table, predicate, _) in SUMMARY.items()}
-        return {"totals": totals, "as_of": now().isoformat(),
+        # OUT-13 core (T6): held erasures past their threshold, for the home's
+        # "Needs you" (Codex code review 1, finding 7). Counts only.
+        from services import outreach_erasure
+        escalations = outreach_erasure.escalations(session, str(business_id))
+        return {"totals": totals, "as_of": now().isoformat(), "erasure_escalations": escalations,
                 "sources": {key: "/v1/outreach/" + source for key, (_, _, source) in SUMMARY.items()},
                 "data_quality": "available" if any(totals.values()) else "none",
                 "message": "Stored outreach counts available." if any(totals.values()) else "None available."}

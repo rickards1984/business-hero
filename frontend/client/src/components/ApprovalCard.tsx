@@ -5,7 +5,7 @@ import { useMe } from '@/hooks/useMe';
 import { useOutreachOwner } from '@/hooks/useOutreachData';
 import OutreachReplyCard from '@/components/OutreachReplyCard';
 import { apiRequest } from '@/lib/queryClient';
-import { pastWithholdAt, WITHHELD_TEXT } from '@/lib/outreachWithhold';
+import { pastWithholdAt, useClockTick, WITHHELD_TEXT } from '@/lib/outreachWithhold';
 
 /**
  * NS-B10 — one of Aria's drafts, awaiting the owner's tap.
@@ -72,6 +72,7 @@ function whenText(p: Record<string, any>): string {
 export default function ApprovalCard({ proposal, onChanged }: { proposal: Proposal; onChanged?: (card: Proposal) => void }) {
   const { data: me } = useMe();
   const owner = useOutreachOwner(me?.id);
+  const tick = useClockTick();   // re-render at the contact's deadline even with no refresh
   const [card, setCard] = useState<Proposal>(proposal);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -85,7 +86,7 @@ export default function ApprovalCard({ proposal, onChanged }: { proposal: Propos
   const expired = new Date(card.expires_at).getTime() <= Date.now();
   // OUT-13 core: past the contact's deadline nothing about them is shown and
   // the email can't be approved, by the server's word or the browser's clock.
-  const withheldNow = !!p.withheld || pastWithholdAt(card);
+  const withheldNow = !!p.withheld || pastWithholdAt(card, tick);
   const open = card.status === 'proposed' && !expired && !withheldNow;
 
   // The server is the authority. After a conflict or a lost reply, re-read

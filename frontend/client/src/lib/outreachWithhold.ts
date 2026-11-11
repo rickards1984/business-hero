@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react';
+
 // OUT-13 core: a contact never emailed by their first email's deadline is
 // withheld from every screen at that moment, by the browser's own clock too,
 // so a stale page or a failed refresh never keeps showing them.
@@ -18,4 +20,16 @@ export function withheld<T extends Record<string, any>>(item: T, now = Date.now(
   const out: Record<string, any> = { details_withheld: true, withhold_at: item.withhold_at };
   for (const [k, v] of Object.entries(item)) if (KEEP.has(k)) out[k] = v;
   return out as T;
+}
+
+/** A clock that re-renders its component every `ms`, so withholding moves
+ * with time on an idle screen even when refreshes fail (Codex code review 1,
+ * finding 4: a query's select is memoised, so time alone never re-runs it). */
+export function useClockTick(ms = 30000): number {
+  const [tick, setTick] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setTick(Date.now()), ms);
+    return () => window.clearInterval(id);
+  }, [ms]);
+  return tick;
 }

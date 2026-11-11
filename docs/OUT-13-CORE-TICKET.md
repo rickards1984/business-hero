@@ -372,3 +372,12 @@ These remain OUT-13 proper, a launch gate.
 - Mutation-checked throughout.
 
 **Not testable here:** the frontend has no unit runner. The browser-clock rule is type-checked, and its server half is tested.
+
+## Codex code review 1 — CHANGES REQUESTED (7), all fixed
+1. **Contacted imports starved the work list.** A contacted prospect without a notice date is now recorded as a `contacted` exception, never shown to the owner as a problem. The new-candidate query skips it. Test: 25 imported contacts ahead, budget-limited passes with a fake clock; the never-emailed one is erased.
+2. **Housekeeping took the candidates' budget.** Prune, reconciliation and summary scrubbing share a separate 30 s budget. The candidates' 120 s starts after it. Scrubbing reads only documents with research config, at most 50 per pass. Test: reconciliation stuck for "10 minutes"; the overdue contact is still erased.
+3. **Uncertain sends stayed visible.** `contacted_ids` (what stays visible) now means accepted or imported, or a reply. Claimed or unknown remain protected from erasure (`assess`) but are withheld. Test: a claimed send past the deadline has its card withheld and is not erased.
+4. **The browser clock didn't advance.** `useClockTick` (30 s) gives `useOutreachData` a new `select` each tick, so TanStack recomputes from stale data with no refetch (checked against `@tanstack/query-core`'s `QueryObserver`). `ApprovalCard` and `StageDialog` re-render on the same tick.
+5. **Timeouts after a rollback.** `_limits` is re-applied before the error record, and before every scheduler query: reconciliation selection, summary scan, re-check selection and backlog age.
+6. **Backlog age.** It uses the effective deadline, the earlier of notice due and capture plus 28 days. Test: a day-20 deadline at day 24 is 96 hours.
+7. **No escalation.** `escalations` covers errors after 3 days, uncertain sends and cross-references after 7, and orphaned cards after 3. It goes in the outreach summary, and the Aria home's "Needs you" shows a warning with a link. This replaces T6's "daily briefing": the home is the owner's daily screen. Test: thresholds, with `contacted` excluded.

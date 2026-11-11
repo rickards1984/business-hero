@@ -109,6 +109,10 @@ def database():
             conn.execute(text(f"CREATE TABLE outreach_{table} (id TEXT PRIMARY KEY, "
                               "business_id TEXT NOT NULL, created_at TEXT, updated_at TEXT, "
                               f"{columns})"))
+        # OUT-13 core (migration 041): read by the summary's erasure escalations.
+        conn.execute(text("CREATE TABLE outreach_erasure_exceptions (id TEXT PRIMARY KEY, business_id TEXT, "
+                          "prospect_id TEXT, reason TEXT, first_seen_at TEXT, last_checked_at TEXT, "
+                          "created_at TEXT, updated_at TEXT)"))
         conn.execute(text("CREATE TABLE email_accounts (id TEXT PRIMARY KEY, business_id TEXT, "
                           "token_ciphertext TEXT, refresh_token_ciphertext TEXT, smtp_config TEXT)"))
         conn.execute(text("CREATE TABLE email_messages (id TEXT PRIMARY KEY, business_id TEXT, email_account_id TEXT, subject TEXT, body_text TEXT, from_email TEXT, received_at TEXT)"))

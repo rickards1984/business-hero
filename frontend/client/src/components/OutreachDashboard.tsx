@@ -6,7 +6,7 @@ import {
   ToggleButton, ToggleButtonGroup, Typography,
 } from '@mui/material';
 import { apiRequest } from '@/lib/queryClient';
-import { pastWithholdAt } from '@/lib/outreachWithhold';
+import { pastWithholdAt, useClockTick } from '@/lib/outreachWithhold';
 import { OUTREACH_REFRESH_MS } from '@/hooks/useOutreachData';
 
 // OUT-14 (Mike, 30 Oct 2026): the approved dashboard. Brand switcher, Aria's
@@ -160,6 +160,7 @@ function Metric({ label, value, hint }: { label: string; value: number | string;
 
 function StageDialog({ businessId, brand, stage, owner, close }: { businessId: string; brand: string; stage: string; owner: boolean; close: () => void }) {
   const client = useQueryClient();
+  const tick = useClockTick();   // OUT-13 core: hide at the deadline even with no refresh
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState('');   // the person being saved: one click, one change
@@ -192,8 +193,8 @@ function StageDialog({ businessId, brand, stage, owner, close }: { businessId: s
         {q.isError && <Alert severity="warning">This list couldn't load just now. Please try again.</Alert>}
         {q.data?.items.length === 0 && <Typography variant="body2">Nobody is at this stage.</Typography>}
         {q.data?.items.map(p => <Paper key={p.id} variant="outlined" sx={{ p: 1.5 }}>
-          <Typography fontWeight={600}>{p.details_withheld || pastWithholdAt(p) ? 'Details withheld' : `${p.name || 'Unnamed'}${p.role ? `, ${p.role}` : ''}`}</Typography>
-          <Typography variant="body2">{p.details_withheld || pastWithholdAt(p) ? '' : p.company || ''}{p.last_activity_at ? ` · last activity ${new Date(p.last_activity_at).toLocaleDateString('en-GB')}` : ''}</Typography>
+          <Typography fontWeight={600}>{p.details_withheld || pastWithholdAt(p, tick) ? 'Details withheld' : `${p.name || 'Unnamed'}${p.role ? `, ${p.role}` : ''}`}</Typography>
+          <Typography variant="body2">{p.details_withheld || pastWithholdAt(p, tick) ? '' : p.company || ''}{p.last_activity_at ? ` · last activity ${new Date(p.last_activity_at).toLocaleDateString('en-GB')}` : ''}</Typography>
           {owner && <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
             {!marked && <Button size="small" variant="outlined" disabled={!!saving} onClick={() => mark(p.id, 'meeting')}>Meeting booked</Button>}
             {stage !== 'won' && <Button size="small" variant="outlined" disabled={!!saving} onClick={() => mark(p.id, 'won')}>Won</Button>}

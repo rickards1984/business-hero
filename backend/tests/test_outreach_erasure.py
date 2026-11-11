@@ -129,8 +129,12 @@ def test_anyone_who_may_have_been_emailed_is_never_erased(db, state, reason):
     _message(db, pid, state)
     assert erase(db, pid) == {"erased": False, "reason": reason}
     assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b") == 1
-    exceptions = count(db, "SELECT count(*) FROM outreach_erasure_exceptions WHERE business_id = :b")
-    assert exceptions == (0 if reason == "contacted" else 1)
+    # Recorded either way, so the work list never re-selects it (code review 1,
+    # finding 1); a contacted one is not shown to the owner as a problem.
+    assert count(db, "SELECT reason FROM outreach_erasure_exceptions WHERE business_id = :b") == reason
+    with Session(db) as s:
+        shown = [x["reason"] for x in erasure().exceptions_for(s, A)]
+    assert shown == ([] if reason == "contacted" else [reason])
 
 
 def test_a_message_that_never_left_is_erased_and_its_metering_kept_unlinked(db):
@@ -337,3 +341,107 @@ def test_a_reference_from_another_contact_s_unsent_message_is_repaired_and_erase
     theirs = _message(db, first, "failed", retry_of=mine, other_prospect=second)
     assert erase(db, first)["erased"] is True
     assert count(db, "SELECT retry_of FROM outreach_messages WHERE id = :m", m=theirs) is None
+
+
+# ------------------------------------------------- Codex code review 1 ---
+
+class FakeClock:
+    """time.monotonic advancing one second per look, so budgets run out."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        self.t += 1.0
+        return self.t
+
+
+def _old_prospect(db, *, days, notice_days=None, company="Old"):
+    pid = str(uuid.uuid4())
+    with Session(db) as s:
+        _insert(s, "outreach_prospects", id=pid, business_id=A, company=company, email=None, email_key=None,
+                subscriber_type="corporate", eligibility="eligible", stage="ready",
+                captured_at=(DAY_28 - timedelta(days=days)).isoformat(),
+                notice_due_at=(DAY_28 - timedelta(days=days) + timedelta(days=notice_days)).isoformat()
+                if notice_days else None,
+                retention_due_at=(DAY_28 + timedelta(days=300)).isoformat(),
+                created_at=NOW.isoformat(), updated_at=NOW.isoformat())
+        s.commit()
+    return pid
+
+
+def test_contacted_imports_ahead_never_starve_a_never_emailed_contact(db, monkeypatch):
+    """Finding 1: imported history (accepted, no notice date) ahead of a
+    never-emailed contact, more than one budget-limited pass can classify."""
+    e = erasure()
+    biz, campaign, (pid,) = researched(db)
+    for i in range(25):
+        _message(db, _old_prospect(db, days=60 + i), "imported")
+    monkeypatch.setattr(e._time, "monotonic", FakeClock())
+    monkeypatch.setattr(e, "PAGE", 4)
+    for _ in range(12):
+        with Session(db) as s:
+            e.run_due(s, DAY_28 + timedelta(hours=1), pass_seconds=40, housekeeping_seconds=3)
+        if not count(db, "SELECT count(*) FROM outreach_prospects WHERE id = :p", p=pid):
+            break
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE id = :p", p=pid) == 0
+    assert count(db, "SELECT count(*) FROM outreach_erasure_exceptions WHERE reason = 'contacted'") == 25
+
+
+def test_slow_housekeeping_never_takes_the_candidates_budget(db, monkeypatch):
+    """Finding 2: reconciliation stuck for minutes; the overdue contact is
+    still erased in the same pass."""
+    e = erasure()
+    biz, campaign, (pid,) = researched(db)
+    clock = FakeClock()
+    monkeypatch.setattr(e._time, "monotonic", clock)
+
+    def stuck(session, moment, limit=50, stop=None):
+        clock.t += 600
+        return 0
+    monkeypatch.setattr(e, "reconcile_abandoned_claims", stuck)
+    with Session(db) as s:
+        out = e.run_due(s, DAY_28)
+    assert out["erased"] == 1
+
+
+def test_a_send_that_may_have_happened_is_kept_but_still_withheld(db, monkeypatch):
+    """Finding 3: protected from erasure is not permission to show."""
+    from services import aria_actions, outreach_send
+    biz, campaign, (pid,) = researched(db)
+    _message(db, pid, "claimed")
+    with db.begin() as c:
+        c.execute(text("UPDATE aria_actions SET expires_at = :later WHERE business_id = :b"),
+                  {"b": A, "later": DAY_28 + timedelta(days=5)})
+    for module in (outreach_send, aria_actions):
+        monkeypatch.setattr(module, "now", lambda: DAY_28)
+    with Session(db) as s:
+        cards = aria_actions.list_open(s, biz)
+    assert cards and "withheld" in cards[0]["preview"]
+    assert erase(db, pid) == {"erased": False, "reason": "may_have_sent"}
+
+
+def test_the_backlog_age_uses_an_earlier_notice_deadline(db):
+    """Finding 6: a day-20 notice deadline is overdue at day 24 by 96 hours."""
+    e = erasure()
+    started(db)
+    _old_prospect(db, days=24, notice_days=20)
+    with Session(db) as s:
+        out = e.run_due(s, DAY_28, pass_seconds=0)
+    assert out["oldest_overdue_hours"] == 96.0
+
+
+def test_held_erasures_are_escalated_on_the_home_after_their_threshold(db):
+    """Finding 7: an erasure failing for three days, an uncertain send held
+    for a week, are put in front of the owner."""
+    e = erasure()
+    started(db)
+    with Session(db) as s:
+        for reason, days in (("error", 4), ("error", 1), ("may_have_sent", 8), ("contacted", 30)):
+            _insert(s, "outreach_erasure_exceptions", id=str(uuid.uuid4()), business_id=A,
+                    prospect_id=str(uuid.uuid4()), reason=reason,
+                    first_seen_at=(DAY_28 - timedelta(days=days)).isoformat(),
+                    last_checked_at=DAY_28.isoformat(), created_at=NOW.isoformat(), updated_at=NOW.isoformat())
+        s.commit()
+    with db.connect() as c:
+        assert e.escalations(c, A, DAY_28) == {"error": 1, "may_have_sent": 1}
