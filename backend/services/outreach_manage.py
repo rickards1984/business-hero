@@ -80,6 +80,9 @@ def sequence(session, business, user, ident, data):
     c = campaign(session, business.id, ident, data['version'])
     version = c['sequence_version'] + 1
     for step in data['steps']:
+        found = send.placeholder(step['subject'], step['body'])     # OUT-25
+        send.require(not found, f"An email still contains the placeholder {found}. Replace it with the real words "
+                     "(your sign-off is added automatically)", 422)
         envelope = json.dumps(dict(schema_version=1, subject=step['subject'], body=step['body']))
         send.insert(session, 'outreach_sequence_steps', business.id, campaign_id=ident,
             sequence_version=version, ordinal=step['ordinal'], delay_business_days=step['delay_business_days'],
@@ -100,6 +103,10 @@ def approve_templates(session, business, user, ident, data):
     send.require(len(steps) == 3 and [s['ordinal'] for s in steps] == [0, 1, 2], 'Three sequence steps required')
     for step in steps:
         send.require(hashlib.sha256(step['template_text'].encode()).hexdigest() == step['template_hash'], 'Template hash changed')
+        body = send.loads(step['template_text']) or {}
+        found = send.placeholder(body.get('subject'), body.get('body'))     # OUT-25: never approve one
+        send.require(not found, f"Email {int(step['ordinal']) + 1} still contains the placeholder {found}. Edit it first "
+                     "(your sign-off is added automatically)", 422)
         if not step['approved_at']:
             send.update(session, 'outreach_sequence_steps', business.id, step['id'], approved_by=str(user), approved_at=send.now())
     # Ready means approved templates only; no first-batch permission or send.

@@ -13,6 +13,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -940,7 +941,51 @@ EMAIL_CRAFT = (
     "exclamation marks, no invented facts, numbers or names. Short subject lines a colleague might write "
     "(no clickbait, no capitals, no emojis). First email under 110 words; each follow-up shorter and adds "
     "something new (a fact, a useful angle or an easy way to say no), never just a reminder. British English. "
-    "No signature, footer or unsubscribe line: those are added for you.")
+    "No signature, footer or unsubscribe line: those are added for you. Never use placeholders such as "
+    "[YOUR NAME], [Company] or {first_name}: write every word as it will be sent.")
+
+
+# A model's own sign-off despite the rule above: at the very end, only lines
+# that are SENDER placeholders ([YOUR NAME], [Your Title], [Company Name],
+# [Signature]...), and the valediction just before them. Nothing else is ever
+# removed (Codex OUT-25 review 1); any other placeholder is left for the owner
+# and refused when saved.
+_VALEDICTION = re.compile(r"^(best( wishes| regards)?|kind regards|warm regards|regards|many thanks|thanks|"
+                          r"thank you|cheers|all the best|yours sincerely|yours faithfully|sincerely),?$", re.I)
+_SENDER_WORDS = {"your", "my", "sender", "senders", "s", "the", "full", "first", "last", "name", "title", "job",
+                 "position", "role", "signature", "company", "business", "phone", "mobile", "number", "email",
+                 "mail", "e", "address", "website", "web", "site", "contact", "details"}
+_SENDER_CORE = {"name", "title", "position", "role", "signature", "company", "business", "phone", "mobile",
+                "email", "mail", "website", "site", "details"}
+
+
+def _sender_placeholder(line: str) -> bool:
+    """A line that is ONLY a sender-field placeholder: [YOUR NAME],
+    {{senderName}}, [Job Title]. Never a sentence (Codex OUT-25 review 2)."""
+    found = re.fullmatch(r"(?:\[([^\[\]]{1,80})\]|\{\{([^{}]{1,80})\}\}|\{([^{}]{1,80})\}|<([^<>@/=]{1,80})>)", line)
+    if not found:
+        return False
+    words = send.label_words(next(g for g in found.groups() if g is not None))
+    return bool(words) and all(w in _SENDER_WORDS for w in words) and any(w in _SENDER_CORE for w in words)
+
+
+def _drop_placeholder_sign_off(body: str) -> str:
+    lines = (body or "").rstrip().split("\n")
+    end = len(lines)
+    while end and (not lines[end - 1].strip() or _sender_placeholder(lines[end - 1].strip())):
+        end -= 1
+    removed = [ln for ln in lines[end:] if ln.strip()]
+    if not removed:
+        return "\n".join(lines).rstrip()
+    keep = lines[:end]
+    if keep and _VALEDICTION.match(keep[-1].strip()):
+        keep = keep[:-1]
+    return "\n".join(keep).rstrip()
+
+
+def _tidy_drafts(emails) -> list:
+    return [dict(e, body=_drop_placeholder_sign_off(e.get("body") or "")) if isinstance(e, dict) else e
+            for e in (emails or [])]
 
 
 def model_draft_emails(context: dict) -> list:
@@ -948,7 +993,7 @@ def model_draft_emails(context: dict) -> list:
         "Draft three B2B outreach emails for the campaign given: a first email, a follow-up after 5 working "
         "days and a final one after 7 more. " + EMAIL_CRAFT +
         " Return JSON {\"emails\": [{\"subject\": ..., \"body\": ...}, x3]}.", context)
-    return list(out.get("emails") or [])
+    return _tidy_drafts(out.get("emails"))
 
 
 def model_redraft_emails(context: dict) -> list:
@@ -956,7 +1001,7 @@ def model_redraft_emails(context: dict) -> list:
         "Rewrite the three outreach emails in current_emails, following the owner's notes in owner_notes "
         "closely; they know their business and customers best. Keep what already works. " + EMAIL_CRAFT +
         " Return JSON {\"emails\": [{\"subject\": ..., \"body\": ...}, x3]} in the same order.", context)
-    return list(out.get("emails") or [])
+    return _tidy_drafts(out.get("emails"))
 
 
 def draft_audience(session, business, user, data: dict, *, draft: Callable = model_draft_audience) -> dict:
@@ -1079,9 +1124,12 @@ def _registered(session, bid: str, mailbox_id) -> dict:
 def _insert_steps(session, bid: str, campaign_id: str, sequence_version: int, emails: list) -> None:
     send.require(isinstance(emails, list) and len(emails) == 3, "Three emails are needed", 422)
     for ordinal, (email, delay) in enumerate(zip(emails, STEP_DELAYS)):
-        envelope = json.dumps(dict(schema_version=1,
-                                   subject=_clean(email.get("subject"), "Subject", 200),
-                                   body=_clean(email.get("body"), "Body", 20000, one_line=False)))
+        subject = _clean(email.get("subject"), "Subject", 200)
+        body = _clean(_drop_placeholder_sign_off(email.get("body") or ""), "Body", 20000, one_line=False)
+        found = send.placeholder(subject, body)
+        send.require(not found, f"Email {ordinal + 1} still contains the placeholder {found}. Replace it with the "
+                     "real words (your sign-off is added automatically)", 422)
+        envelope = json.dumps(dict(schema_version=1, subject=subject, body=body))
         send.insert(session, "outreach_sequence_steps", bid, campaign_id=campaign_id,
                     sequence_version=sequence_version, ordinal=ordinal, delay_business_days=delay,
                     template_text=envelope, template_hash=hashlib.sha256(envelope.encode()).hexdigest(),

@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,60 @@ def require(condition, detail='Outreach is not currently eligible', code=409):
 
 def loads(value):
     return json.loads(value) if isinstance(value, str) else value
+
+
+# OUT-25: templates take no variables (allowed_variables is always []), so a
+# placeholder-shaped token is an unfilled placeholder, e.g. a model's
+# "[YOUR NAME]". The real sign-off is added by sign_off(); a placeholder is
+# never sent. Placeholder-SHAPED means a bracketed, braced or angled token,
+# not glued to a word (so not "filter[sector]=" in a URL), whose inside is a
+# field name: one of the words below, an ALL-CAPS label, or a snake_case
+# name. Ordinary editorial brackets ("[ex VAT]") are left alone (Codex
+# OUT-25 review 1).
+_TOKEN = re.compile(r"(?<![\w/=?&%.-])(?:\[([^\[\]\n]{1,120})\]|\{\{([^{}\n]{1,120})\}\}|\{([^{}\n]{1,120})\}"
+                    r"|<([^<>@/=\n]{1,120})>)")
+# A field label is made ONLY of these words (Codex OUT-25 review 2: a field
+# word inside an ordinary sentence, "[by email only]", is not a label).
+_LABEL_WORDS = {
+    "insert", "add", "enter", "type", "the", "a", "an", "of", "for", "here", "your", "their", "my", "his", "her",
+    "s", "recipient", "recipients", "sender", "senders", "contact", "contacts", "prospect", "prospects", "client",
+    "customer", "lead", "first", "last", "full", "given", "family", "middle", "surname", "name", "names", "firstname",
+    "lastname", "fullname", "company", "companies", "business", "organisation", "organization", "org", "job", "title",
+    "role", "position", "signature", "phone", "mobile", "telephone", "tel", "number", "email", "e", "mail",
+    "emailaddress", "address", "website", "web", "site", "url", "link", "booking", "calendar", "city", "town",
+    "region", "details", "info", "date", "time"}
+_LABEL_CORE = {"name", "names", "firstname", "lastname", "fullname", "surname", "company", "business", "organisation",
+               "organization", "org", "title", "role", "position", "signature", "phone", "mobile", "telephone",
+               "number", "email", "mail", "emailaddress", "address", "website", "site", "url", "link", "city", "town",
+               "details", "recipient", "sender", "contact", "prospect", "client", "customer"}
+_HTML = {"b", "i", "u", "p", "br", "hr", "em", "strong", "div", "span", "ul", "ol", "li", "a", "html", "body"}
+PLACEHOLDER_REFUSED = ("This email still contains a placeholder such as [YOUR NAME]. "
+                       "Edit the campaign's emails to remove it: your sign-off is added automatically")
+
+
+def label_words(inner: str) -> list:
+    """Words of a token's inside: camelCase and snake_case split, lower case."""
+    spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", inner.strip())
+    return [w for w in re.split(r"[\s_\-'’.:]+", spaced.lower()) if w]
+
+
+def _is_field(inner: str, angled: bool) -> bool:
+    words = label_words(inner)
+    if not words or (angled and words[0] in _HTML):
+        return False
+    if re.fullmatch(r"[A-Z][A-Z0-9 _'-]{1,60}", inner.strip()):           # [YOUR NAME], <NAME>, [CITY]
+        return True
+    return all(w in _LABEL_WORDS for w in words) and any(w in _LABEL_CORE for w in words)
+
+
+def placeholder(*texts):
+    """The first unfilled placeholder in any of the texts, or None."""
+    for value in texts:
+        for match in _TOKEN.finditer(value or ""):
+            inner = next(g for g in match.groups() if g is not None)
+            if _is_field(inner, angled=match.group(0).startswith("<")):
+                return match.group(0)
+    return None
 
 
 def pg(session):
@@ -205,6 +260,7 @@ def build_payload(session, business, args, owner_name=None, timezone=None, *, on
         template = loads(s['template_text'])
         require(template['schema_version'] == 1 and set(template) == {'schema_version', 'subject', 'body'})
         require(isinstance(template['body'], str) and 0 < len(template['body']) <= 20000)
+        require(not placeholder(template['subject'], template['body']), PLACEHOLDER_REFUSED, 422)
     except (ValueError, KeyError, TypeError):
         raise ActionRefused(422, 'Approved template envelope unavailable') from None
     settings = one(session, 'outreach_settings', business.id)
@@ -321,6 +377,7 @@ def prepare_claim(session, business, *, action_id, payload, user_id, version, mo
     require('authority_snapshot' not in payload, 'Manual approval required', 403)
     for value in (payload['subject'], payload['to'], payload['from_email'], *payload['cc']):
         _safe_header(value)
+    require(not placeholder(payload['subject'], payload['body']), PLACEHOLDER_REFUSED, 422)   # OUT-25
     require(set(payload['headers']) == {'List-Unsubscribe', 'List-Unsubscribe-Post'})
     require(payload['headers']['List-Unsubscribe-Post'] == 'List-Unsubscribe=One-Click')
     link = _safe_header(payload['headers']['List-Unsubscribe']).strip('<>')
@@ -458,6 +515,7 @@ def dispatch(session, business, *, action_id, payload):
         require(outreach_erasure.first_send_allowed(prospect, now()))
         from services import outreach_hunter
         require(outreach_hunter.send_refused(session, bid, prospect) is None)   # OUT-23 R3.9
+        require(not placeholder(payload.get('subject'), payload.get('body')))     # OUT-25
         for kind, value in (('email', prospect['email']), ('domain', _address(prospect['email']).split('@')[-1])):
             require(not rows(session, 'outreach_suppressions', bid, 'AND key_type=:k AND key_digest=:d',
                              {'k': kind, 'd': suppression_digest(bid, kind, value)}))
