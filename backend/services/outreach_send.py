@@ -437,12 +437,16 @@ def prepare_claim(session, business, *, action_id, payload, user_id, version, mo
 
 def dispatch(session, business, *, action_id, payload):
     """Post-commit only, at most one adapter attempt. No recovery resend."""
-    bid = str(business.id)
-    permit = session.info.get('outreach_dispatch', {}).pop(str(action_id), None)
-    require(permit and permit[0] == version_of(payload), 'No fresh dispatch authority')
     # A caller must have committed the claim. A live transaction here could
     # accidentally commit a failed action CAS: refuse rather than rescue it.
+    # Checked FIRST, before anything reads the business: the API passes an
+    # ORM Business, expired by the claim's commit, and reading its id reloads
+    # it, which itself begins a transaction (OUT-26: every tapped approval in
+    # production was refused here).
     require(not session.in_transaction(), 'Dispatch requires committed claim')
+    permit = session.info.get('outreach_dispatch', {}).pop(str(action_id), None)
+    require(permit and permit[0] == version_of(payload), 'No fresh dispatch authority')
+    bid = str(business.id)
     action = one(session, 'aria_actions', bid, action_id)
     require(action['status'] == 'executing' and loads(action['payload']) == payload)
     job = rows(session, 'outreach_dispatch_jobs', bid, 'AND action_id=:a', {'a': str(action_id)})
