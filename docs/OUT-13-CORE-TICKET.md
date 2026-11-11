@@ -385,3 +385,5 @@ These remain OUT-13 proper, a launch gate.
 ## Codex code review 2 — all 7 earlier findings resolved; 2 new, fixed
 1. **Summary scrubbing could stall behind clean documents.** It now selects only documents still holding the one identifying phrase unscrubbed (`no mail server for <domain>`, the only reason that names a domain). Each document cleaned drops out, so every one is reached. Test: 210 clean documents ahead of one legacy summary; the old query fails it.
 2. **`contacted` showed as a dashboard warning.** It is now excluded from `erasure_held` too. Tested.
+
+**Codex code review 3** (targeted): both resolved, none new. **APPROVE.**
