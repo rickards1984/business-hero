@@ -774,3 +774,5 @@ Historical writes are separate from current-connection writes:
 
 ## R4.4 Implementation notes from review 3
 - The enrichment deadline (R3.5) bounds **DNS resolution and streaming reads** too. `fetch_page`'s resolver and body reads check the deadline, not only the per-request HTTP timeout. The Hunter client sets connect, read and total timeouts from the remaining budget.
+
+**Design approved:** Codex design review 4 (`audits/OUT-23B-CODEX-DESIGN-REVIEW-4.md`). Its implementation note is taken: the Hunter gate's reservation and storage checks call `_audience` and `_still_allowed` with **fresh time** (`now()`), never the run's starting `moment`, so an approval made mid-run is seen.
