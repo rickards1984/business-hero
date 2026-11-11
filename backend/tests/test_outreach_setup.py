@@ -58,12 +58,13 @@ def db(tmp_path, monkeypatch):
     engine = create_engine("sqlite:///" + str(tmp_path / "out15.sqlite"))
     migrations = Path(__file__).parents[1] / "migrations"
     with Session(engine) as s:
-        for name in ("037_outreach_core.sql", "038_outreach_replies.sql", "041_outreach_erasure.sql"):
+        for name in ("037_outreach_core.sql", "038_outreach_replies.sql", "041_outreach_erasure.sql",
+                     "042_outreach_provider_accounts.sql"):
             sql = (migrations / name).read_text()
             for table, body in re.findall(r"CREATE TABLE IF NOT EXISTS public\.(outreach_\w+) \(\n(.*?)\n\);", sql, re.S):
                 cols = []
                 for line in body.splitlines():
-                    m = re.match(r"  ([a-z_]+) (uuid|text\[\]|text|jsonb|integer|boolean|numeric|timestamptz|date)\b", line)
+                    m = re.match(r"  ([a-z_0-9]+) (uuid|text\[\]|text|jsonb|integer|boolean|numeric|timestamptz|date)\b", line)
                     if m:
                         col, kind = m.groups()
                         cols.append(f"{col} {'NUMERIC' if kind in ('integer', 'boolean', 'numeric') else 'TEXT'}"
@@ -87,6 +88,7 @@ def db(tmp_path, monkeypatch):
             "CREATE UNIQUE INDEX settings_once ON outreach_settings (business_id)",
             "CREATE UNIQUE INDEX brand_name_once ON outreach_brands (business_id, name)",
             "CREATE UNIQUE INDEX mailbox_once ON outreach_mailboxes (business_id, mailbox_id)",
+            "CREATE UNIQUE INDEX provider_once ON outreach_provider_accounts (business_id, provider)",
         ):
             s.execute(text(ddl))
         for bid, plan in ((A, "pro"), (B, "business")):

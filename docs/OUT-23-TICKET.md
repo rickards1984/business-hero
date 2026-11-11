@@ -776,3 +776,25 @@ Historical writes are separate from current-connection writes:
 - The enrichment deadline (R3.5) bounds **DNS resolution and streaming reads** too. `fetch_page`'s resolver and body reads check the deadline, not only the per-request HTTP timeout. The Hunter client sets connect, read and total timeouts from the remaining budget.
 
 **Design approved:** Codex design review 4 (`audits/OUT-23B-CODEX-DESIGN-REVIEW-4.md`). Its implementation note is taken: the Hunter gate's reservation and storage checks call `_audience` and `_still_allowed` with **fresh time** (`now()`), never the run's starting `moment`, so an approval made mid-run is seen.
+
+---
+
+## Part B — Implementation (revisions 1–4, built 11 Nov 2026)
+
+| Design | Code | Tests (`test_outreach_hunter.py` unless named) |
+|---|---|---|
+| R2.1 found published: `provenance == found`, `still_on_page`, ≤90 days, https; our own look at the page | `outreach_hunter.candidates`, `publication_sources`; `find_person` (fetch + `_address_on`) | "only an address Hunter found published recently", "no longer on its page", "another domain" |
+| R2.2/R3.6 typed valid: searched valid ≤30 days, else every Verifier field | `searched_valid`, `verifier_valid`; `_store` takes `verified_at` | each status, each Verifier field, stale re-verify, "never falls back" |
+| R2.3 free checks first; rank; stop at the first success | `research._enrich` (held, suppressed, erased, MX, `_corporate`), `allowed`, `rank` | "costs no credit" (8 causes), suppressed person, decision-maker first |
+| R2.4/R3.5 gate, reservation, lease, budget | `outreach_hunter._billable` (lock → gate → reserve → commit → call → settle), `Budget`; `research._enrich.gate`; `fetch_page(deadline=)` | room re-read ("stops when today's places are found"), deadline, Budget, polling |
+| R2.5/R3.1/R4.1 key in its own table; connection epoch; tombstone | migration 042; `connect`, `disconnect`, `connection`, `_current_write` | connect, tombstone generations, both connect races, mid-run disconnect, owner only, no encryption key |
+| R2.6/R3.2/R3.3/R4.3 ledger, pools, units, quota block | `reserve`, `settle`, `sweep`, `to_credits`, `expected`, `block`, `refresh_account` | reserve/settle units, header cases, duplicate/late settle, cap, outstanding balance, separate pools, 429 block, sweep age |
+| R2.7/R3.7 immutable acquisition row; footer | `research._store` (one `acquisition` row); `outreach_send.build_payload` | real send harness footer; web footer byte-identical |
+| R2.8/R3.8/R3.9/R4.2 notice hash; assessment sources; latest version; claim and dispatch | `configure_brand`, `notice_current`, `send_refused`; `outreach_setup._audience_sources`; `research.latest_approved`, `_hunter_refused`; `prepare_claim` and the `dispatch` gate | every gate, notice changed (card, claim, dispatch), unconfirmed brand, sources persisted with the same hash, `run_due` latest only |
+| R2.9 one corporate check | `research._corporate` (extracted unchanged from `_verify`) | the existing research suites unchanged; off-site redirect |
+| R2.10 451 suppressed everywhere | `_suppress_claimed` | 451, then web rediscovery |
+| R2.11 allowlist and erasure | `_store`; nothing else persisted | "nothing else is kept", erasure leaves nothing |
+| B-6 the owner sees it | `GET/POST /v1/outreach/setup/hunter*`; `HunterPanel`, `HunterBrandRow`; the audience form's Hunter tick and "Re-approve with Hunter.io" | status shows no key or person |
+| PostgreSQL | — | `test_outreach_hunter_pg.py`: RLS and grants, connect/reconnect, numeric ledger, footer query, every writer waits on the business lock (`pg_blocking_pids`) |
+
+Migration **042** with `audits/042-PROD-RUNBOOK.md` (rehearsed: applied, rolled back, applied twice; columns +31). Without 042, research carries on with web results only.

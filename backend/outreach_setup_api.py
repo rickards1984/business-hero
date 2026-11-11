@@ -3,7 +3,7 @@ never from the body; every write is owner-only in services.outreach_setup.
 The public privacy page is the only unauthenticated route, and it shows an
 approved notice and nothing else."""
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -19,6 +19,7 @@ from services import outreach_billing as billing
 from services import outreach_boost as boosting
 from services import outreach_launch as launching
 from services import outreach_autopilot as autopilot
+from services import outreach_hunter as hunter
 from services import outreach_research as research
 from services import outreach_setup as setup
 from rate_limiting import limiter
@@ -76,6 +77,8 @@ class Audience(Body):
     description: str = Field(min_length=1, max_length=2000)
     segments: list[str] = Field(default_factory=list, max_length=20)
     regions: list[str] = Field(default_factory=list, max_length=20)
+    # OUT-23 Part B (R3.8): where this audience's contacts may come from.
+    sources: list[Literal["public_websites", "hunter.io"]] = Field(default_factory=list, max_length=2)
 
 
 class AudienceApproval(Body):
@@ -227,6 +230,46 @@ def research_status(context=Depends(get_user_business_context), session: Session
 def research_configure(body: ResearchConfig, context=Depends(get_user_business_context),
                        session: Session = Depends(get_session)):
     return _run(research.configure, session, context, _body(body))
+
+
+class HunterKey(Body):
+    # Checked in services.outreach_hunter, whose refusals never repeat the key.
+    key: str = Field(max_length=500)
+
+
+class HunterBrand(Body):
+    brand_id: UUID
+    enabled: Optional[bool] = None
+    cap_credits: Optional[float] = Field(default=None, gt=0, le=100000)
+    clear_cap: Optional[bool] = None
+    confirm_notice: Optional[bool] = None
+
+
+@router.get("/hunter")
+def hunter_status(context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    """OUT-23 Part B: the connection, credits and per-brand settings. Never the key."""
+    return hunter.status(session, auth._load_business(session, context["business_id"]))
+
+
+@router.post("/hunter/connect")
+@limiter.limit("5/minute")
+def hunter_connect(request: Request, body: HunterKey, context=Depends(get_user_business_context),
+                   session: Session = Depends(get_session)):
+    return _run(hunter.connect, session, context, body.key)
+
+
+@router.post("/hunter/disconnect")
+def hunter_disconnect(context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    return _run(hunter.disconnect, session, context)
+
+
+@router.post("/hunter/brand")
+def hunter_brand(body: HunterBrand, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    data = _body(body)
+    brand_id = data.pop("brand_id")
+    if data.pop("clear_cap", False):
+        data["cap_credits"] = None
+    return _run(hunter.configure_brand, session, context, brand_id, data)
 
 
 @router.post("/research/lessons")

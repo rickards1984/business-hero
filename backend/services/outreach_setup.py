@@ -916,7 +916,10 @@ def model_draft_audience(context: dict) -> dict:
         "You draft a UK GDPR legitimate-interests assessment for business-to-business outreach. "
         "Return JSON with purpose, necessity, balancing_test, safeguards: plain English, specific to "
         "the business and audience given, each under 120 words. Safeguards must include an opt-out in "
-        "every email, honouring opt-outs at once, business contact details only, and a privacy notice.",
+        "every email, honouring opt-outs at once, business contact details only, and a privacy notice. "
+        "Contacts come only from the sources listed in `sources`: the necessity and balancing test must "
+        "address each one (a business contact database means the person did not give their details to "
+        "this business directly).",
         context)
 
 
@@ -964,7 +967,11 @@ def draft_audience(session, business, user, data: dict, *, draft: Callable = mod
              "segments": [str(s)[:80] for s in (data.get("segments") or [])][:20],
              "regions": [str(r)[:80] for r in (data.get("regions") or [])][:20]}
     audience_hash = hashlib.sha256(_canonical(rules).encode()).hexdigest()
-    drafted = _ai_draft(session, business, draft, {"business": getattr(business, "name", None), "brand": brand["name"], **rules},
+    # OUT-23 Part B (R3.8): where contacts come from. Not part of `rules`, so
+    # the audience hash (and every campaign's target) is unchanged by it.
+    sources = _audience_sources(data.get("sources"))
+    drafted = _ai_draft(session, business, draft, {"business": getattr(business, "name", None), "brand": brand["name"],
+                                                   **rules, "sources": _source_labels(sources)},
                         brand_id=str(brand["id"]))
     fields = {k: _clean(drafted.get(k), k.replace("_", " ").capitalize(), 4000, one_line=False)
               for k in ("purpose", "necessity", "balancing_test", "safeguards")}
@@ -972,13 +979,29 @@ def draft_audience(session, business, user, data: dict, *, draft: Callable = mod
     versions = send.rows(session, "outreach_compliance", bid, "AND brand_id = :br AND audience_hash = :h",
                          {"br": str(brand["id"]), "h": audience_hash}, True)
     ident = send.insert(session, "outreach_compliance", bid, brand_id=str(brand["id"]), audience_hash=audience_hash,
-                        version=max([int(v["version"]) for v in versions] or [0]) + 1, sources=[],
+                        version=max([int(v["version"]) for v in versions] or [0]) + 1, sources=sources,
                         decision="draft", review_due_at=now() + LIA_REVIEW, **fields)
     doc = _settings_doc(session, bid)
     doc.setdefault(AUDIENCE_KEY, {})[ident] = rules
     _save_settings_doc(session, bid, doc)
     session.commit()
     return {"id": ident, "audience_hash": audience_hash, "decision": "draft", **fields}
+
+
+SOURCE_LABELS = {"public_websites": "the organisations' own public websites",
+                 "hunter.io": "Hunter.io, a business contact database (only addresses it found published and verifies)"}
+
+
+def _audience_sources(value) -> list:
+    """R3.8: a fixed vocabulary; public websites always, Hunter.io on request."""
+    from services.outreach_hunter import SOURCES
+    asked = value if isinstance(value, list) else []
+    send.require(all(isinstance(v, str) and v in SOURCES for v in asked), "Unknown contact source", 422)
+    return ["public_websites"] + (["hunter.io"] if "hunter.io" in asked else [])
+
+
+def _source_labels(sources: list) -> list:
+    return [SOURCE_LABELS[s] for s in sources]
 
 
 def approve_audience(session, business, user, compliance_id, edits: dict) -> dict:
@@ -1173,6 +1196,9 @@ def _brand_status(brand, notices, rules, boxes, accounts, healthy_ids, lias, cam
             or (found[-1] if found else None)
         audiences.append({
             "id": str(lia["id"]), "description": ((rules.get(str(lia["id"])) or {}).get("description") or ""),
+            "segments": list((rules.get(str(lia["id"])) or {}).get("segments") or []),
+            "regions": list((rules.get(str(lia["id"])) or {}).get("regions") or []),
+            "sources": list(send.loads(lia.get("sources")) or []),       # OUT-23 Part B
             "approved": lia["decision"] == "approved",
             "campaign": None if not best else {
                 "id": str(best["id"]), "name": best["name"], "mailbox_id": str(best["mailbox_id"]),

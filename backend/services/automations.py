@@ -643,6 +643,13 @@ def run_all_due(session) -> int:
     except Exception as exc:  # never stops invoice chasing
         session.rollback()
         logger.error("[Autopilot] outreach card preparation failed: %s", type(exc).__name__)
+    try:
+        # OUT-23 Part B (R3.2): a Hunter reservation older than an hour is charged.
+        from services import outreach_hunter
+        outreach_hunter.sweep(session)
+    except Exception as exc:  # never stops invoice chasing
+        session.rollback()
+        logger.error("[Autopilot] Hunter reservation sweep failed: %s", type(exc).__name__)
     rows = session.execute(text("SELECT business_id, settings FROM business_settings")).fetchall()
     total = 0
     done_here = set()

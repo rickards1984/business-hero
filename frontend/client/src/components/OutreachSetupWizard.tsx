@@ -15,7 +15,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { outreachError } from '@/hooks/useOutreachData';
 
 type StepState = 'done' | 'todo' | 'blocked';
-export interface BrandAudience { id: string; description: string; approved: boolean; campaign: null | { id: string; name: string; mailbox_id: string; approved: boolean; other_inbox: boolean; ready: boolean } }
+export interface BrandAudience { id: string; description: string; segments?: string[]; regions?: string[]; sources?: string[]; approved: boolean; campaign: null | { id: string; name: string; mailbox_id: string; approved: boolean; other_inbox: boolean; ready: boolean } }
 export interface BrandProfile { offer?: string; audience?: string; proof?: string; tone?: string; ask?: string; website?: string }
 export interface BrandSetup { id: string; name: string; sender_identity: string; profile?: BrandProfile; mailbox_id: string | null; mailbox_address: string | null; mailbox_ok: boolean; privacy: boolean; audiences: BrandAudience[]; ready: boolean }
 export interface SetupStatus { steps: Record<string, StepState>; next: string | null; complete: boolean; started: boolean; brands?: BrandSetup[] }
@@ -617,6 +617,7 @@ function DnsHelp({ guide }: { guide: Guide }) {
 
 function AudiencesStep({ api, brand }: { api: Api; brand: BrandSetup }) {
   const [adding, setAdding] = useState(brand.audiences.length === 0);
+  const [again, setAgain] = useState<BrandAudience | null>(null);    // OUT-23 Part B: re-approve with Hunter
   return (
     <Stack spacing={1.5}>
       <Typography variant="body2">
@@ -632,7 +633,11 @@ function AudiencesStep({ api, brand }: { api: Api; brand: BrandSetup }) {
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
             <Typography sx={{ overflowWrap: 'anywhere' }}>{a.description}</Typography>
             <Chip size="small" color={a.approved ? 'success' : 'default'} label={a.approved ? 'Approved' : 'Draft'} />
+            {(a.sources || []).includes('hunter.io') && <Chip size="small" variant="outlined" label="Hunter.io" />}
+            {a.approved && !(a.sources || []).includes('hunter.io') && again?.id !== a.id &&
+              <Button size="small" onClick={() => setAgain(a)}>Re-approve with Hunter.io</Button>}
           </Stack>
+          {again?.id === a.id && <AudienceForm api={api} brand={brand} initial={a} onApproved={() => setAgain(null)} />}
         </Paper>
       ))}
       {adding ? <AudienceForm api={api} brand={brand} onApproved={() => setAdding(false)} />
@@ -641,10 +646,12 @@ function AudiencesStep({ api, brand }: { api: Api; brand: BrandSetup }) {
   );
 }
 
-function AudienceForm({ api, brand, onApproved }: { api: Api; brand: BrandSetup; onApproved: () => void }) {
-  const [description, setDescription] = useState('');
-  const [segments, setSegments] = useState('');
-  const [regions, setRegions] = useState('');
+function AudienceForm({ api, brand, onApproved, initial }: { api: Api; brand: BrandSetup; onApproved: () => void; initial?: BrandAudience }) {
+  // With `initial`, the same audience (same wording: its campaigns stay linked) re-approved with Hunter.io.
+  const [description, setDescription] = useState(initial?.description ?? '');
+  const [segments, setSegments] = useState((initial?.segments ?? []).join(', '));
+  const [regions, setRegions] = useState((initial?.regions ?? []).join(', '));
+  const [useHunter, setUseHunter] = useState(Boolean(initial));     // OUT-23 Part B: Hunter.io as a source
   const [draft, setDraft] = useState<Record<string, string> | null>(null);
   // Decision A: 12 months by default; the owner may choose a different date.
   const [reviewDate, setReviewDate] = useState(() => {
@@ -659,8 +666,11 @@ function AudienceForm({ api, brand, onApproved }: { api: Api; brand: BrandSetup;
           onChange={e => setDescription(e.target.value)} />
         <TextField label="Sectors (comma separated)" value={segments} onChange={e => setSegments(e.target.value)} />
         <TextField label="Areas (comma separated)" value={regions} onChange={e => setRegions(e.target.value)} />
+        <FormControlLabel control={<Checkbox checked={useHunter} onChange={(_, v) => setUseHunter(v)} />}
+          label="Also find named decision-makers through Hunter.io (if you connect it)" />
         <Button variant="outlined" disabled={api.busy || !description} onClick={async () => {
-          const out = await api.call<Record<string, string>>('POST', 'audience/draft', { brand_id: brand.id, description, segments: list(segments), regions: list(regions) });
+          const out = await api.call<Record<string, string>>('POST', 'audience/draft', { brand_id: brand.id, description, segments: list(segments), regions: list(regions),
+            sources: useHunter ? ['public_websites', 'hunter.io'] : ['public_websites'] });
           if (out) setDraft(out);
         }}>Ask Aria to draft the justification</Button>
         {draft && (
@@ -676,7 +686,7 @@ function AudienceForm({ api, brand, onApproved }: { api: Api; brand: BrandSetup;
               const { purpose, necessity, balancing_test, safeguards } = draft;
               const out = await api.call<{ id: string }>('POST', `audience/${draft.id}/approve`,
                 { purpose, necessity, balancing_test, safeguards, review_due_at: `${reviewDate}T23:59:59Z` });
-              if (out) { setDraft(null); setDescription(''); setSegments(''); setRegions(''); onApproved(); }
+              if (out) { setDraft(null); setDescription(''); setSegments(''); setRegions(''); setUseHunter(false); onApproved(); }
             }}>Approve</Button>
           </Stack>
         )}
@@ -1104,6 +1114,104 @@ export function ResearchSummary({ businessId }: { businessId: string }) {
   return <Alert severity="info" icon={false}><strong>Aria:</strong> {research.data.summary}</Alert>;
 }
 
+// OUT-23 Part B: the Hunter.io add-on. The key is sent once and never shown again.
+interface HunterBrandState { name: string; enabled: boolean; cap_credits: string | null; used_credits: string; notice_confirmed: boolean; suggested_wording: string }
+interface HunterPool { used: string; available: string }
+interface HunterState { connected: boolean; status: string; last4: string | null; plan: string | null; as_of: string | null;
+  pools: { credit?: HunterPool; search?: HunterPool; verification?: HunterPool; model?: string; reset_date?: string | null };
+  blocked: Record<string, string>; brands: Record<string, HunterBrandState> }
+
+function HunterPanel({ businessId }: { businessId: string }) {
+  const client = useQueryClient();
+  const api = useCall(businessId);
+  const [key, setKey] = useState('');
+  const hunter = useQuery<HunterState>({
+    queryKey: ['outreach-hunter', businessId],
+    queryFn: async () => (await apiRequest('GET', setupPath('hunter'))).json(),
+    staleTime: 60000, retry: false,
+  });
+  const data = hunter.data;
+  const refresh = () => client.invalidateQueries({ queryKey: ['outreach-hunter', businessId] });
+  if (hunter.isError) return null;
+  if (!data) return null;
+  const pools = data.pools || {};
+  const left = pools.credit ? `${Number(pools.credit.available)} credits left`
+    : pools.search ? `${Number(pools.search.available)} searches and ${Number(pools.verification?.available ?? 0)} verifications left` : null;
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Stack spacing={1.25}>
+        <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>Hunter.io (optional add-on)</Typography>
+        <Typography variant="body2" color="text.secondary">
+          Hunter finds the named decision-makers at the companies Aria finds. Aria keeps only addresses Hunter found
+          published on a public page, that she sees on that page herself, and that Hunter verifies as valid. You pay
+          Hunter directly; each search is one Hunter credit and each verification half a credit.
+        </Typography>
+        {data.status === 'invalid' && <Alert severity="warning">Hunter no longer accepts the saved key. Paste a new one below.</Alert>}
+        {data.connected ? (
+          <Stack spacing={0.5}>
+            <Typography variant="body2">Connected (key ending {data.last4}){data.plan ? ` · ${data.plan} plan` : ''}{left ? ` · ${left}` : ''}
+              {data.as_of ? ` (as of ${new Date(data.as_of).toLocaleString('en-GB')})` : ''}.</Typography>
+            {Object.keys(data.blocked || {}).some(k => new Date(data.blocked[k]) > new Date()) &&
+              <Alert severity="warning">Hunter's credits for this month are used. Aria carries on with web research until they reset.</Alert>}
+            <Button variant="text" color="error" sx={{ alignSelf: 'flex-start' }} disabled={api.busy}
+              onClick={async () => { if (await api.call('POST', 'hunter/disconnect')) refresh(); }}>Disconnect Hunter</Button>
+          </Stack>
+        ) : (
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            <TextField size="small" type="password" label="Hunter API key" value={key} autoComplete="off"
+              onChange={e => setKey(e.target.value)} helperText="From Hunter: API in your dashboard" />
+            <Button variant="contained" disabled={api.busy || key.trim().length < 20}
+              onClick={async () => { const ok = await api.call('POST', 'hunter/connect', { key: key.trim() }); setKey(''); if (ok) refresh(); }}>Connect</Button>
+          </Stack>
+        )}
+        {data.connected && Object.entries(data.brands).map(([brandId, b]) =>
+          <HunterBrandRow key={brandId} businessId={businessId} brandId={brandId} brand={b} onChange={refresh} />)}
+        {api.error && <Alert severity="error">{api.error}</Alert>}
+      </Stack>
+    </Paper>
+  );
+}
+
+function HunterBrandRow({ businessId, brandId, brand, onChange }: { businessId: string; brandId: string; brand: HunterBrandState; onChange: () => void }) {
+  const api = useCall(businessId);
+  const [confirm, setConfirm] = useState(false);
+  const [cap, setCap] = useState('');
+  async function save(body: Record<string, unknown>) {
+    if (await api.call('POST', 'hunter/brand', { brand_id: brandId, ...body })) onChange();
+  }
+  return (
+    <Paper variant="outlined" sx={{ p: 1.5 }}>
+      <Stack spacing={1}>
+        <Typography variant="subtitle2">{brand.name}</Typography>
+        {!brand.notice_confirmed ? (
+          <Stack spacing={1}>
+            <Typography variant="body2">Before Hunter is used for {brand.name}, its privacy notice must say where contact details come from. Suggested wording to include:</Typography>
+            <Alert severity="info" icon={false}>{brand.suggested_wording}</Alert>
+            <FormControlLabel control={<Checkbox checked={confirm} onChange={(_, v) => setConfirm(v)} />}
+              label={`${brand.name}'s published privacy notice says this`} />
+            <Button variant="outlined" sx={{ alignSelf: 'flex-start' }} disabled={api.busy || !confirm}
+              onClick={() => save({ confirm_notice: true })}>Confirm</Button>
+          </Stack>
+        ) : (
+          <FormControlLabel control={<Checkbox checked={brand.enabled} disabled={api.busy}
+            onChange={(_, v) => save({ enabled: v })} />} label={`Use Hunter for ${brand.name}`} />
+        )}
+        <Typography variant="body2">This month: {Number(brand.used_credits)} credits{brand.cap_credits ? ` of a ${Number(brand.cap_credits)}-credit cap` : ''}.</Typography>
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          <TextField size="small" type="number" label="Monthly credit cap (optional)" value={cap} inputProps={{ min: 1 }}
+            onChange={e => setCap(e.target.value)} />
+          <Button variant="outlined" disabled={api.busy || !(Number(cap) > 0)} onClick={async () => { await save({ cap_credits: Number(cap) }); setCap(''); }}>Save cap</Button>
+          {brand.cap_credits && <Button variant="text" disabled={api.busy} onClick={() => save({ clear_cap: true })}>Remove cap</Button>}
+        </Stack>
+        <Typography variant="caption" color="text.secondary">
+          Hunter is used only for audiences approved with Hunter.io as a source. If you change {brand.name}'s privacy notice, confirm it again here.
+        </Typography>
+        {api.error && <Alert severity="error">{api.error}</Alert>}
+      </Stack>
+    </Paper>
+  );
+}
+
 export function ResearchPanel({ businessId }: { businessId: string }) {
   const research = useResearchStatus(businessId);
   const data = research.data;
@@ -1120,6 +1228,7 @@ export function ResearchPanel({ businessId }: { businessId: string }) {
         {data.summary && <Alert severity="info" icon={false}><strong>Latest:</strong> {data.summary}</Alert>}
         {data.brands.length === 0 && <Typography variant="body2">Add a brand in setup to start research.</Typography>}
         {data.brands.map(b => <BrandResearchCard key={b.brand_id} businessId={businessId} brand={b} minCap={data.min_cap_pence} />)}
+        <HunterPanel businessId={businessId} />
         <OutreachBudget businessId={businessId} />
       </Stack>
     </Paper>

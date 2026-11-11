@@ -209,7 +209,12 @@ def build_payload(session, business, args, owner_name=None, timezone=None, *, on
         raise ActionRefused(422, 'Approved template envelope unavailable') from None
     settings = one(session, 'outreach_settings', business.id)
     cc = [_safe_header(settings['owner_cc_address'])] if settings['owner_cc_default'] else []
-    source = rows(session, 'outreach_evidence', business.id, 'AND prospect_id=:p AND source_url IS NOT NULL ORDER BY fetched_at DESC', {'p': str(p['id'])})
+    # OUT-23 R3.7: the immutable acquisition row names where the address was
+    # found published; older contacts have none, and keep today's selection.
+    source = rows(session, 'outreach_evidence', business.id, "AND prospect_id=:p AND fact_type='acquisition' AND source_url IS NOT NULL ORDER BY fetched_at DESC, id DESC", {'p': str(p['id'])}) \
+        or rows(session, 'outreach_evidence', business.id, 'AND prospect_id=:p AND source_url IS NOT NULL ORDER BY fetched_at DESC', {'p': str(p['id'])})
+    via = ' (found via Hunter.io, a business contact database)' if source and source[0].get('fact_type') == 'acquisition' \
+        and source[0]['source_type'] == 'hunter' and source[0]['fact_value'] == 'hunter' else ''
     require(source and urlparse(b['privacy_url']).scheme == 'https')
     base = unsubscribe_base()
     parsed = urlparse(base)
@@ -224,7 +229,7 @@ def build_payload(session, business, args, owner_name=None, timezone=None, *, on
     payload = _binding(c, e, s, p, b, a)
     payload.update(source_url=source[0]['source_url'], subject=_safe_header(template['subject']), body=template['body'], cc=cc,
                    sign_off=sign_off('Aria', owner_name, b['name']),
-                   footer=f"Sent on behalf of {b['sender_identity']}. Source: {source[0]['source_url']}\nPrivacy: {b['privacy_url']}\nUnsubscribe: {link}",
+                   footer=f"Sent on behalf of {b['sender_identity']}. Source: {source[0]['source_url']}{via}\nPrivacy: {b['privacy_url']}\nUnsubscribe: {link}",
                    headers={'List-Unsubscribe': f'<{link}>', 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'},
                    rfc_message_id=f"<{uuid.uuid4()}@{_address(a['email_address']).split('@')[-1]}>",
                    in_reply_to=None, references=[], provider_thread_id=None,
@@ -344,6 +349,9 @@ def prepare_claim(session, business, *, action_id, payload, user_id, version, mo
     settings = one(session, 'outreach_settings', bid, lock=True)
     lia = one(session, 'outreach_compliance', bid, p['lia_id'], True)
     evidence = rows(session, 'outreach_evidence', bid, 'AND prospect_id=:p', {'p': str(p['id'])}, True)
+    from services import outreach_hunter
+    why = outreach_hunter.send_refused(session, bid, p)   # OUT-23 R3.9: a Hunter contact's notice
+    require(why is None, why or '')
     checked_at = max(moment, now())
     require(checked_at.astimezone(LONDON).date() == moment.astimezone(LONDON).date(), 'Sending period changed; search again')
     require(checked_at - receipt[1] <= timedelta(minutes=2), 'Reply search expired while waiting for locks')
@@ -448,6 +456,8 @@ def dispatch(session, business, *, action_id, payload):
         # email past its deadline takes the blocked path, never transport.
         from services import outreach_erasure
         require(outreach_erasure.first_send_allowed(prospect, now()))
+        from services import outreach_hunter
+        require(outreach_hunter.send_refused(session, bid, prospect) is None)   # OUT-23 R3.9
         for kind, value in (('email', prospect['email']), ('domain', _address(prospect['email']).split('@')[-1])):
             require(not rows(session, 'outreach_suppressions', bid, 'AND key_type=:k AND key_digest=:d',
                              {'k': kind, 'd': suppression_digest(bid, kind, value)}))
