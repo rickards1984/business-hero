@@ -344,3 +344,31 @@ These remain OUT-13 proper, a launch gate.
 - **PostgreSQL:**
   - erasure against concurrent approve, prepare, unsubscribe and research store, with no deadlock (the documented lock order);
   - foreign-key order on a prospect with messages, dispatch jobs and usage events.
+
+---
+
+## Implementation (against Revision 3.1)
+
+| Design | Code |
+|---|---|
+| Predicates (T1, U3) | `services/outreach_erasure.py`: `deadline` = min(notice_due_at, captured_at + 28 days); `first_send_allowed`; `hidden`; `contacted_ids` (any accepted, imported, claimed or unknown message, or a reply; never hidden or erased, even without a notice date) |
+| Send admission (T2) | The claim (`outreach_send.prepare_claim`), card creation (`build_payload(one_card=True)`, before the token), dispatch's under-lock recheck with a fresh clock (the existing blocked path), and `outreach_manage.qualified`. New contacts are stored at 28 days (`NOTICE_WITHIN`). |
+| Interrupted claims (T3, U2) | `reconcile_abandoned_claims`: sequence-email jobs only, over 1 hour, `dispatch_started_at IS NULL`; the dispatcher's own compare-and-set as a fence, then `_settle(definitely_not_accepted)`, in one transaction |
+| Uncertain sends (T4) | `assess` returns `may_have_sent`; there is no owner override |
+| Work list (T5, U1) | `run_due`: prune; reconcile; scrub stored summaries; new candidates in keyset pages (main budget); at most 20 exception re-checks (separate budget); oldest-overdue logged, with a warning above 3 hours. Wired **first** in `automations.run_all_due` (hourly, every day). |
+| Owner view (T6) | `exceptions_for`; the dashboard's "Needs you" lists held erasures by reason and age. An unsent cross-reference is repaired (`_repair_references`). |
+| Deletion order (T7) | jobs → usage unlinked → own self-references → messages → cards → tokens → enrolments → evidence → prospect → outcome entry → guard; one commit; an error records `error` and rolls everything back |
+| Lock (T8) | `_lock` takes existing rows only, never creates settings |
+| Logging (T9) | `assistant_chat` logs tool names and sizes only |
+| Read boundary (R3) | `aria_actions._shown` (every card view), `outreach_read._withhold_past_deadline` (prospect, evidence including source URL, timeline), `outreach_dashboard.stage_list`; `withhold_at` is sent with each record and card |
+| Screens (T9) | `lib/outreachWithhold.ts`, applied in `useOutreachData`'s select, `ApprovalCard` and `StageDialog`; 5-minute `refetchInterval` on the outreach, dashboard and card queries |
+| Guard (R6) | `outreach_recently_erased`, checked after verification and again under research's store lock (eligible and review alike) |
+| Migration 041 | Two partial indexes and two backend-only tables. Runbook `audits/041-PROD-RUNBOOK.md`, rehearsed (apply, rollback, apply) on the local harness. The schema record gained the 16 columns by hand, as 039's did. |
+
+**Tests:**
+- `test_outreach_erasure.py` (26): predicates, erasure, hiding, the guard, scheduling and fairness.
+- `test_outreach_send.py`, OUT-13 section (8): the deadline at the card, approval and dispatch; follow-ups; interrupted claims, including a fenced dispatcher.
+- `test_outreach_erasure_pg.py` (4): foreign-key order, contacted, uncertain, and backend-only tables.
+- Mutation-checked throughout.
+
+**Not testable here:** the frontend has no unit runner. The browser-clock rule is type-checked, and its server half is tested.

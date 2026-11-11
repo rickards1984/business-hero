@@ -58,7 +58,7 @@ def db(tmp_path, monkeypatch):
     engine = create_engine("sqlite:///" + str(tmp_path / "out15.sqlite"))
     migrations = Path(__file__).parents[1] / "migrations"
     with Session(engine) as s:
-        for name in ("037_outreach_core.sql", "038_outreach_replies.sql"):
+        for name in ("037_outreach_core.sql", "038_outreach_replies.sql", "041_outreach_erasure.sql"):
             sql = (migrations / name).read_text()
             for table, body in re.findall(r"CREATE TABLE IF NOT EXISTS public\.(outreach_\w+) \(\n(.*?)\n\);", sql, re.S):
                 cols = []

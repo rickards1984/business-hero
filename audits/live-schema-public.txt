@@ -9,6 +9,10 @@
 # hand and match production's STEP 2 verification (4 columns, columns 1143 -> 1147). The next
 # regeneration with scripts/dump-live-schema.sql will include them natively.
 #
+# 041 (OUT-13 core): the 16 rows of outreach_recently_erased and outreach_erasure_exceptions
+# were added by hand from the local harness (identical format), BEFORE production runs 041;
+# audits/041-PROD-RUNBOOK.md STEP 2 confirms columns +16. Regenerate after it is live.
+#
 # FULL means this file describes every table, so the guard checks every column
 # the backend writes and `test_full_coverage_leaves_nothing_unguarded` requires
 # that nothing is left unchecked. Keep UNGUARDED_BUDGET at 0 while this says
@@ -674,6 +678,14 @@ col   outreach_enrolments.state text null=NO def='pending'::text
 col   outreach_enrolments.stop_reason text null=YES def=-
 col   outreach_enrolments.takeover_at timestamp with time zone null=YES def=-
 col   outreach_enrolments.updated_at timestamp with time zone null=NO def=now()
+col   outreach_erasure_exceptions.business_id uuid null=NO def=-
+col   outreach_erasure_exceptions.created_at timestamp with time zone null=NO def=now()
+col   outreach_erasure_exceptions.first_seen_at timestamp with time zone null=NO def=-
+col   outreach_erasure_exceptions.id uuid null=NO def=gen_random_uuid()
+col   outreach_erasure_exceptions.last_checked_at timestamp with time zone null=NO def=-
+col   outreach_erasure_exceptions.prospect_id uuid null=NO def=-
+col   outreach_erasure_exceptions.reason text null=NO def=-
+col   outreach_erasure_exceptions.updated_at timestamp with time zone null=NO def=now()
 col   outreach_evidence.adapter_version text null=YES def=-
 col   outreach_evidence.business_id uuid null=NO def=-
 col   outreach_evidence.confidence numeric null=YES def=-
@@ -785,6 +797,14 @@ col   outreach_prospects.stage text null=NO def='new'::text
 col   outreach_prospects.subscriber_type text null=NO def='unknown'::text
 col   outreach_prospects.updated_at timestamp with time zone null=NO def=now()
 col   outreach_prospects.why_now text null=YES def=-
+col   outreach_recently_erased.business_id uuid null=NO def=-
+col   outreach_recently_erased.created_at timestamp with time zone null=NO def=now()
+col   outreach_recently_erased.digest_version integer null=NO def=1
+col   outreach_recently_erased.id uuid null=NO def=gen_random_uuid()
+col   outreach_recently_erased.key_digest text null=NO def=-
+col   outreach_recently_erased.key_type text null=NO def=-
+col   outreach_recently_erased.until timestamp with time zone null=NO def=-
+col   outreach_recently_erased.updated_at timestamp with time zone null=NO def=now()
 col   outreach_replies.business_id uuid null=NO def=-
 col   outreach_replies.category text null=YES def=-
 col   outreach_replies.classification_version integer(32,0) null=YES def=-

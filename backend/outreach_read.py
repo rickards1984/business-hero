@@ -171,6 +171,36 @@ def _project(read, row, clock):
     return item, stale
 
 
+def _withhold_past_deadline(session, business_id, read, rows, projected):
+    """OUT-13 core: a contact past their first email's deadline is withheld
+    from every read, from that moment, whatever the state of erasure: their
+    own record, evidence (its source URL too) and timeline (R3)."""
+    from services import outreach_erasure
+    owner = (lambda row: row.get("id")) if read.table == "prospects" else (lambda row: row.get("prospect_id"))
+    ids = sorted({str(owner(r)) for r in rows if owner(r)})
+    if not ids:
+        return
+    names = {f"p{i}": pid for i, pid in enumerate(ids)}
+    people = session.execute(text(
+        "SELECT id, captured_at, notice_due_at, notice_provided_at FROM outreach_prospects "
+        f"WHERE business_id=:business_id AND id IN ({', '.join(':' + n for n in names)})"),
+        {"business_id": str(business_id), **names}).mappings().all()
+    moment = now()
+    contacted = outreach_erasure.contacted_ids(session, str(business_id), ids)
+    people = [p for p in people if str(p["id"]) not in contacted]
+    hidden = {str(p["id"]) for p in people if outreach_erasure.hidden(p, moment)}
+    deadlines = {str(p["id"]): outreach_erasure.deadline(p).isoformat() for p in people if not p["notice_provided_at"]}
+    for row, (item, _) in zip(rows, projected):
+        key = str(owner(row) or "")
+        if key in hidden:
+            for field in list(item):
+                if field in TEXT_FIELDS:
+                    item[field] = None
+            item["details_withheld"] = True
+        elif key in deadlines:
+            item["withhold_at"] = deadlines[key]   # the browser hides it then, by its own clock
+
+
 def _count(session, table, where, params):
     return session.execute(text(f"SELECT count(*) FROM {table} WHERE {where}"), params).scalar_one()
 
@@ -254,6 +284,7 @@ def _read(session, read, arguments, business_id):
     if read.parent and read.detail and not rows:
         raise HTTPException(404, "Not found")
     projected = [_project(read, row, now()) for row in rows]
+    _withhold_past_deadline(session, business_id, read, rows, projected)
     if read.table == "suppressions":
         for row, (item, _) in zip(rows, projected):
             match = session.execute(text(

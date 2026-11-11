@@ -195,6 +195,10 @@ def build_payload(session, business, args, owner_name=None, timezone=None, *, on
         require(open_card(session, bid, args['enrolment_id'], True) is None,
                 'A card for this email is already waiting', 409)
     c, e, s, p, b, a = _records(session, business, args)
+    if one_card:
+        # OUT-13 core: no card, and so no unsubscribe token, past the deadline.
+        from services import outreach_erasure
+        require(outreach_erasure.first_send_allowed(p, now()), outreach_erasure.PAST_DEADLINE, 409)
     require(s['approved_by'] and s['approved_at'])
     require(hashlib.sha256(s['template_text'].encode()).hexdigest() == s['template_hash'])
     try:
@@ -358,7 +362,9 @@ def prepare_claim(session, business, *, action_id, payload, user_id, version, mo
     require(p['email_key'] == suppression_digest(bid, 'email', p['email']), 'Address verification binding is stale')
     require(p['eligibility'] == 'eligible' and p['subscriber_type'] == 'corporate' and p['lawful_basis'] == 'legitimate_interests')
     require(_parse(p['retention_due_at']) and moment < _parse(p['retention_due_at']))
-    require(p['notice_provided_at'] or (_parse(p['notice_due_at']) and moment < _parse(p['notice_due_at'])))
+    # OUT-13 core: the first email no later than 28 days from collection.
+    from services import outreach_erasure
+    require(outreach_erasure.first_send_allowed(p, moment), outreach_erasure.PAST_DEADLINE, 409)
     require(lia['decision'] == 'approved' and lia['reviewer'] and lia['reviewed_at'] and
             _parse(lia['reviewed_at']) <= moment and str(lia['brand_id']) == str(b['id']) and lia['audience_hash'] == c['target_hash'] and
             _parse(lia['review_due_at']) and moment < _parse(lia['review_due_at']))
@@ -438,6 +444,10 @@ def dispatch(session, business, *, action_id, payload):
     blocked = False
     try:
         prospect = one(session, 'outreach_prospects', bid, payload['prospect_id'])
+        # OUT-13 core: re-read with a fresh clock after every lock wait; a first
+        # email past its deadline takes the blocked path, never transport.
+        from services import outreach_erasure
+        require(outreach_erasure.first_send_allowed(prospect, now()))
         for kind, value in (('email', prospect['email']), ('domain', _address(prospect['email']).split('@')[-1])):
             require(not rows(session, 'outreach_suppressions', bid, 'AND key_type=:k AND key_digest=:d',
                              {'k': kind, 'd': suppression_digest(bid, kind, value)}))

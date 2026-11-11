@@ -462,7 +462,8 @@ def test_a_stage_opens_the_people_in_it(h):
     out = dash().stage_list(h.s, A, "interested", brand_id=None, limit=20, offset=0)
     h.s.rollback()
     assert out["total"] == 1 and out["items"][0]["id"] == keen
-    assert set(out["items"][0]) == {"id", "company", "name", "role", "details_withheld", "last_activity_at"}
+    assert set(out["items"][0]) == {"id", "company", "name", "role", "details_withheld", "withhold_at",
+                                    "last_activity_at"}   # OUT-13 core: withhold_at for the browser
 
 
 def test_stage_lists_page_and_refuse_unknown_stages(h):

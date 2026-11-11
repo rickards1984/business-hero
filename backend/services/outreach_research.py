@@ -31,7 +31,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
-from services import outreach_send as send
+from services import outreach_erasure, outreach_send as send
 from services import outreach_setup as setup
 from services.chase_replies import _address, _parse
 from services import ai_costs, ai_router
@@ -98,7 +98,7 @@ def pilot_enrolments() -> int:
         value = PILOT_ENROLMENTS
     return value if value >= 0 else PILOT_ENROLMENTS
 EXCLUSION_CAP = 400                      # steers the model; code checks guarantee
-NOTICE_WITHIN = timedelta(days=30)       # UK GDPR Article 14: within a month
+NOTICE_WITHIN = timedelta(days=28)       # UK GDPR Article 14: within a month; 28 days fits every month (OUT-13 core)
 RETENTION = timedelta(days=365)
 EVIDENCE_LIFE = timedelta(days=90)
 ROLE_LOCALS = {"info", "hello", "contact", "enquiries", "enquiry", "admin", "office", "reception", "sales",
@@ -833,6 +833,8 @@ def _unstore(session, bid: str, prospect_id: str) -> None:
     session.execute(text("DELETE FROM outreach_prospects WHERE business_id = :b AND id = :p"), {"b": bid, "p": prospect_id})
 
 
+RECENTLY_ERASED = "erased in the past 90 days"   # OUT-13 core: Mike, 10 Nov 2026
+
 SEARCH_KEY = "outreach_research_search"     # one paid search per business at a time
 SEARCH_CLAIM = timedelta(minutes=15)
 
@@ -1114,6 +1116,9 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
         verified, reviews = [], []
         for c in [c for c in (result.get("candidates") or []) if isinstance(c, dict)]:
             v = _verify(session, bid, c, held, fetch, mx, companies)   # no lock held: network
+            if v.get("email") and outreach_erasure.recently_erased(session, bid, v.get("email"), v.get("domain"), moment):
+                # OUT-13 core: erased in the past 90 days; not collected again yet.
+                v = dict(v, ok=False, review=False, reason=RECENTLY_ERASED)
             session.rollback()
             held["seen"].add(v.get("email") or "")
             if v.get("review"):
@@ -1150,6 +1155,10 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
             if _suppressed(session, bid, v["email_key"], v["domain"]):
                 out["rejected"].append({"company": v["company"], "reason": "opted out"})
                 continue
+            if outreach_erasure.recently_erased(session, bid, v["email"], v["domain"], moment):
+                # Again under the store lock: erasure may have run mid-search.
+                out["rejected"].append({"company": v["company"], "reason": RECENTLY_ERASED})
+                continue
             if total >= DAILY_TARGET or left <= 0 or (
                     v["contact_type"] == "gatekeeper" and counts["gatekeeper"] >= MAX_GATEKEEPERS):
                 out["rejected"].append({"company": v["company"], "reason": "today's quota is full"})
@@ -1173,6 +1182,8 @@ def _run(session, business, compliance_id, holder: dict, *, search: Optional[Cal
         # count toward the brand's daily limits and come after eligible ones.
         for c, v in reviews:
             if v["email_key"] in stored_keys or _suppressed(session, bid, v["email_key"], v["domain"]):
+                continue
+            if outreach_erasure.recently_erased(session, bid, v.get("email"), v.get("domain"), moment):
                 continue
             kind = v["contact_type"] if v["contact_type"] in counts else "decision_maker"
             if counts["decision_maker"] + counts["gatekeeper"] >= DAILY_TARGET or left <= 0 or (
@@ -1253,7 +1264,8 @@ def summary(business, out: dict) -> str:
     """Aria's one-line report."""
     reasons = {}
     for r in out["rejected"]:
-        label = r["reason"].split(" — ")[0].split(" (")[0]
+        # OUT-13 core: a reason can name a domain; what is kept never does.
+        label = outreach_erasure.scrub(r["reason"].split(" — ")[0].split(" (")[0])
         reasons[label] = reasons.get(label, 0) + 1
     why = ", ".join(f"{n} {label}" for label, n in sorted(reasons.items(), key=lambda x: -x[1])[:4])
     line = (f"I found {len(out['accepted'])} new contacts for {getattr(business, 'name', 'the business')}: "

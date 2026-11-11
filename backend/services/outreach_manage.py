@@ -163,6 +163,8 @@ def qualified(session, bid, c, p):
     send.require(p['eligibility'] == 'eligible' and p['subscriber_type'] == 'corporate' and p['lawful_basis'] == 'legitimate_interests', 'Prospect is not eligible')
     send.require(p['email'] and p['email_key'] == send.suppression_digest(bid, 'email', p['email']), 'Address verification binding is stale')
     send.require(_parse(p['retention_due_at']) and _parse(p['retention_due_at']) > moment, 'Prospect retention expired')
+    from services import outreach_erasure     # OUT-13 core
+    send.require(outreach_erasure.first_send_allowed(p, moment), outreach_erasure.PAST_DEADLINE, 409)
     send.require(not send.rows(session, 'outreach_suppressions', bid,
         "AND ((key_type='email' AND key_digest=:e) OR (key_type='domain' AND key_digest=:d))",
         {'e': p['email_key'], 'd': send.suppression_digest(bid, 'domain', _address(p['email']).split('@')[-1])}), 'Prospect is suppressed')

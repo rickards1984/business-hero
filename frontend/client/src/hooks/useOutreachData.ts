@@ -2,13 +2,21 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
+import { withheld } from '@/lib/outreachWithhold';
 
 export type OutreachRecord = Record<string, any>;
 export interface OutreachResult { item?: OutreachRecord | null; items?: OutreachRecord[]; total?: number; data_quality?: string; message?: string; totals?: Record<string, number>; sources?: Record<string, string>; as_of?: string }
 const LIVE = { staleTime: 30000, refetchOnMount: 'always' as const, refetchOnWindowFocus: true, retry: false };
+// OUT-13 core: refreshed every 5 minutes, and withheld by the browser's clock
+// at each contact's deadline (the select runs on every render).
+export const OUTREACH_REFRESH_MS = 5 * 60 * 1000;
+function hideByClock(data: OutreachResult): OutreachResult {
+  return { ...data, item: data.item ? withheld(data.item) : data.item, items: data.items?.map((i) => withheld(i)) };
+}
 export function useOutreachData(businessId: string | undefined, path: string, enabled = true) {
   return useQuery<OutreachResult>({ queryKey: ['outreach', businessId, path], enabled: !!businessId && enabled,
-    queryFn: async () => (await apiRequest('GET', `/v1/outreach/${path}`)).json(), ...LIVE });
+    queryFn: async () => (await apiRequest('GET', `/v1/outreach/${path}`)).json(), ...LIVE,
+    refetchInterval: OUTREACH_REFRESH_MS, select: hideByClock });
 }
 export function useOutreachSummary(businessId?: string) { return useOutreachData(businessId, 'summary'); }
 export function useOutreachOwner(businessId?: string) {
