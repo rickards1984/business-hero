@@ -731,3 +731,46 @@ Path (b) accepts the person only when all of these hold:
 - Indexes: `(business_id, brand_id, period)` on charges, and a partial index on `state = 'reserved'` for the sweep.
 - No change to existing tables: the acquisition row and assessment `sources` use existing columns.
 - Rehearsed on the local harness; runbook `audits/042-PROD-RUNBOOK.md` (staging first). The persistence allowlist (R2.11) adds both tables, neither of which holds personal data.
+
+---
+
+# Part B — revision 4 (answers Codex design review 3; supersedes earlier revisions where they differ)
+
+## R4.1 Disconnect always leaves a tombstone (finding 1)
+Disconnect runs under the locks (R3.4). It is an upsert:
+- an existing row becomes `generation + 1`, `status = 'disconnected'`, `key_ciphertext = NULL`;
+- **no row** inserts a tombstone with `generation = 1`, `status = 'disconnected'`.
+
+A first connect that read `seen = 0` then finds a row and writes nothing (`ON CONFLICT DO NOTHING` affects 0 rows), so it is refused.
+
+Tests:
+- the initial-connect race (no row; disconnect during `/account`) is refused;
+- disconnect then reconnect with an existing row is refused, as R3.1.
+
+Historical writes are separate from current-connection writes:
+- **settlement and the sweep** act on charge rows by `id` and `state` only, whatever the connection's generation now (a charge stays a charge);
+- **current-connection writes** (account refresh, error and quota states, storing a Hunter contact) are conditional on the run's generation.
+
+## R4.2 The latest approved version is the only one that counts (finding 2)
+- **Authoritative version:** for a business, brand and `audience_hash`, the approved row with the **highest `version`** (`decision = 'approved'`, current by `_audience`'s date rules).
+- `run_due` selects only those rows, one per audience. This also stops older approved versions of the same audience running web research twice.
+- The Hunter gate re-checks, at reservation and again at storage, that the run's `compliance_id` **is** that version and that its `sources` include `hunter.io`. A newer approval without Hunter therefore stops Hunter mid-run.
+- First sends keep the historical rule: the prospect's own `lia_id` version must include `hunter.io` (R3.8/R3.9).
+- Tests:
+  - v1 with Hunter then v2 without: no Hunter calls;
+  - v2 approved mid-run: stops at the next reservation;
+  - `run_due` runs one version per audience;
+  - a web contact collected under v1 still sends.
+
+## R4.3 Settlement sets the brand credits too (finding 3)
+- **Settlement** is one atomic `UPDATE ... SET state = 'settled', used_native, pool_actual, brand_credits = :settled_credits ... WHERE id = :id AND state = 'reserved'`, where `settled_credits = to_credits(pool_actual, operation, used_native)`:
+  - in a single pool, `credit` units are already brand credits;
+  - in separate pools, `search` × 1 and `verification` × 0.5 (one verification request is 0.5 credit equivalent).
+- **Zero-cost** responses settle at 0 and free the cap.
+- **A mismatched unit:** convert each amount (reserved, as `brand_credits`; reported, via `to_credits`) and settle at the larger. The native `used_native` is the reported figure in its own unit, and the account refresh follows.
+- **A missing or malformed header, or a swept row:** `brand_credits` stays at the reservation and `state` is `charged`.
+- **A duplicate settlement** affects 0 rows.
+- Tests: zero-cost, fractional (0.5), a mismatched unit, a duplicate, settling after a sweep, a missing header.
+
+## R4.4 Implementation notes from review 3
+- The enrichment deadline (R3.5) bounds **DNS resolution and streaming reads** too. `fetch_page`'s resolver and body reads check the deadline, not only the per-request HTTP timeout. The Hunter client sets connect, read and total timeouts from the remaining budget.
