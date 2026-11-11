@@ -344,3 +344,106 @@ The research panel shows, for example: "Prospect bank: 42 of about 100 (an estim
 | PostgreSQL | — | `test_outreach_bank_pg.py` (sizing, ledger, drain, cards, `drain_due`) |
 
 No migration: the bank is the existing `outreach_prospects` rows that have no enrolment.
+
+---
+
+# Part B — the Hunter.io add-on (design, revision 1, 11 Nov 2026)
+
+## B-0. Why
+Research keeps an address only if it is published on the company's own website, so most companies Aria finds yield only a gatekeeper (`info@`) or nothing. Hunter supplies the **named people** at a company's domain: their role, seniority, the public pages where each address was found, and a verification status. Mike is connecting it for MSC first.
+
+## B-1. Mike's decisions (11 Nov 2026)
+1. **Which emails:** only addresses Hunter **found published publicly** (at least one source) **and** that verify as **`valid`**. No Email Finder guesses and no `accept_all` addresses: bounces would damage inbox health and the boost.
+2. **Key:** one Hunter API key per business, switched on **per brand**.
+3. **Credits:** the Hunter plan's quota is the hard limit, plus an **optional monthly credit cap per brand**. The app shows credits used and left.
+4. **Plans:** any plan with outreach. It costs Business Hero nothing; the customer pays Hunter, and AI drafting stays inside the per-brand allowance (profit rule).
+
+Facts checked against Hunter's documentation on 11 Nov 2026:
+- Base URL `https://api.hunter.io/v2/`, key sent in the `X-API-KEY` header.
+- Domain Search costs 1 credit per request returning 1–10 addresses; Verifier costs 0.5. `X-Credits-Used` reports the actual charge.
+- Errors: 401 bad key, 403 rate limit, 429 quota used, 451 the person has claimed their address with Hunter (opted out).
+- Starter plan: £28/month, 2,000 credits. Estimated use at 40 contacts a day for one brand: 1,300–1,800 credits.
+
+## B-2. Where Hunter sits in a research run
+Nothing changes for a candidate with a published email: it follows today's `_verify`.
+
+With Hunter on for the brand:
+1. **The brief** also asks Aria for *company leads*: real, fitting limited companies with their website domain and Companies House number, even when no named email is published (`contact_email` empty, `website` given). A lead whose only published address is a role address is also a lead.
+2. **Free checks first, before any credit is spent**, in this order:
+   - a business domain, not webmail;
+   - not already held or contacted;
+   - the domain is not suppressed or recently erased;
+   - the **corporate checks**, run on the company's home page: Companies House active and corporate, the name matches, the website discloses its registration, and the domain fits the name.
+
+   A lead that would only be kept for review (a sole trader or partnership) never reaches Hunter.
+3. **The room and credit gate**, under the business lock with the spend reservation:
+   - today's 40 and the bank have room;
+   - the brand's credit cap is not reached;
+   - the business is not quota-blocked.
+
+   At most `2 × room` Hunter searches are made in a run, and calls stop as soon as the room is filled.
+4. **Domain Search:** `domain`, `type=personal`, `seniority=executive,senior`, `limit=10`. From the results, keep only an address that meets all of these:
+   - its domain is the company's;
+   - it has at least one source with `still_on_page = true` (found published);
+   - it is **valid**: Hunter's own `verification.status == "valid"` dated within the last 90 days, otherwise an Email Verifier call that returns `valid`. Anything else is dropped (`accept_all`, `unknown`, `invalid`, `webmail`, `disposable`). A 202 means "still verifying"; poll it within the run's time budget, then drop it if unresolved.
+5. **One person per company**, as today. Pick by:
+   - decision-maker role (the existing `_contact_type` applied to `position`);
+   - then seniority, executive before senior;
+   - then Hunter's confidence.
+
+   Then the existing per-contact checks: not suppressed by email key, not recently erased, a mail server exists.
+6. **Store** it as today: role from `position`, `role_verified` by the Companies House officer match, confidence 85/65. The evidence is recorded with:
+   - `source_type = "hunter"`;
+   - `source_url` = the chosen source page;
+   - `adapter_version = "out23b-v1"`;
+   - the verification fact (`hunter:valid`, with its date);
+   - a `source` fact of `hunter` for the learning table.
+
+   Nothing else from Hunter's response is kept: the other people at the domain are discarded in memory.
+
+## B-3. The first email names Hunter (RED: the send path)
+For a contact whose source evidence is `source_type = "hunter"`, the footer reads:
+
+`Source: <page> (found via Hunter.io, a business contact database)`
+
+instead of `Source: <page>`. It is computed in `build_payload` from the same evidence row that supplies `source_url`, so the payload hash binds it. Every other contact's footer is byte-for-byte unchanged.
+
+## B-4. Privacy notice gate
+Article 14 requires the source categories to be named. Switching Hunter on for a brand needs the owner to confirm that brand's privacy notice names "business contact databases such as Hunter.io" as a source. Suggested wording is shown; `notice_confirmed_at` is recorded. Hunter stays off for the brand until then.
+
+## B-5. The key and credits
+- **Connect:** the owner pastes the key. It is validated with `GET /account` (free) and stored **Fernet-encrypted** (`app/email/crypto.encrypt_secret`) in the business settings document under `outreach_hunter`: `{key_ciphertext, last4, plan, connected_at, status}`. It is never returned to the browser or logged. Disconnecting deletes it.
+- **Per brand:** `{enabled, monthly_credit_cap (optional), notice_confirmed_at}`.
+- **Metering:** each call's `X-Credits-Used` goes to `usage_meters`, `hunter_credits:<brand>` for the month, checked against the brand's cap before each call.
+- **Error handling:**
+  - 429: the business is blocked until Hunter's `reset_date` and the owner is told;
+  - 401: the key is marked invalid, Hunter stops, and the owner is told;
+  - 403 (rate limit): this run's Hunter calls stop;
+  - 451: that person is skipped and nothing is stored;
+  - 5xx or a timeout: that company is skipped, with no retry storm.
+- **Speed rule:** the timeout is 15 s per call and the host is fixed. Credits left come from `/account`, cached for at most an hour, and the settings page reads the cache.
+
+## B-6. The owner sees it
+- In Outreach settings, under "Hunter.io (optional add-on)": connect or disconnect, the plan, and credits used and left this month.
+- Per brand: an on/off switch with the notice confirmation, and the credit cap.
+- Research's summary line adds "N found via Hunter". `performance()` splits results by source, so the owner sees whether Hunter contacts reply.
+
+## B-7. Tests first (RED: paid third-party lookups, personal data, the send path)
+Hunter is always faked.
+- **Gates:**
+  - Hunter off for the brand, no key, an unconfirmed notice, the cap reached, quota-blocked, or a full room: no Hunter call;
+  - a lead that fails the corporate checks, is held, is suppressed or was recently erased never costs a credit.
+- **Selection:**
+  - only found and valid addresses are kept;
+  - each of `accept_all`, `unknown`, `invalid`, `webmail`, `disposable`, no sources, and a foreign domain is dropped;
+  - a stale `valid` is re-verified;
+  - 202 is polled, then dropped;
+  - a decision-maker beats a more confident gatekeeper;
+  - one person per company.
+- **Errors:** 401, 403, 429 (blocked until the reset date) and 451 each behave as in B-5.
+- **Metering:** credits are recorded from `X-Credits-Used`, the cap binds, and the key never appears in a log, a response or a stored row other than its ciphertext.
+- **The send path:** a Hunter contact's footer names Hunter and is bound by the payload hash; every other footer is unchanged; erasure removes Hunter contacts like any other.
+- **Bounds:** the day's 40, the bank and the gatekeeper rules are unchanged.
+
+## B-8. No migration
+Evidence `source_type` is free text, the key lives in the settings document, and credits use `usage_meters`. `EMAIL_ENCRYPTION_KEY` is already set (mailboxes use it).
