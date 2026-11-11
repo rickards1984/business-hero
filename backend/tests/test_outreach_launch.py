@@ -250,8 +250,9 @@ def test_no_provider_or_the_platform_limit_blocks_launch(db, monkeypatch, gate):
 def test_no_room_today_is_shown_but_never_blocks_launch(db, monkeypatch):
     from services import outreach_research
     biz, brand = finished(db)
-    real = outreach_research.capacity
-    monkeypatch.setattr(outreach_research, "capacity", lambda *a, **k: {**real(*a, **k), "room": 0})
+    real = outreach_research._bank_room          # OUT-23: research's gate is the bank's room
+    monkeypatch.setattr(outreach_research, "_bank_room",
+                        lambda *a, **k: {**real(*a, **k), "room": 0, "why": "No search today: the prospect bank is full"})
     with Session(db) as s:
         b, _ = items(launch().checklist(s, biz), brand["id"])
     assert b["can_launch"] is True and b["room_today"] == 0 and b["no_room_reason"]

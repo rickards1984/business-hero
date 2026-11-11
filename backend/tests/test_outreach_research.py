@@ -201,9 +201,18 @@ def count(db, sql, **params):
         return c.execute(text(sql), {"b": A, **params}).scalar()
 
 
-def run(db, biz, lia, world):
+def run(db, biz, lia, world, drain=True):
+    """Research, then (OUT-23) the bank's drain and card preparation, as the
+    hourly pass does: research only banks; the drain enrols."""
     with run_clock(), Session(db) as s:
-        return research().run(s, biz, lia["id"], **world.kwargs())
+        out = research().run(s, biz, lia["id"], **world.kwargs())
+    if drain:
+        from services import outreach_bank
+        with run_clock(), Session(db) as s:
+            out["drained"] = outreach_bank.drain_business(s, biz, NOW)
+        with run_clock(), Session(db) as s:
+            out["cards"] = research().prepare_due_cards(s, biz, NOW)
+    return out
 
 
 # ------------------------------------------------------------ verification ---
@@ -305,24 +314,26 @@ def test_duplicates_and_opt_outs_are_never_stored_again(db, kind):
 
 # ------------------------------------------------------------------ quota ---
 
-def test_up_to_twenty_decision_makers_a_day(db):
+def test_up_to_forty_decision_makers_a_day_into_the_bank(db):
+    """OUT-23: up to 40 a day per brand into the bank (was 20 a day)."""
     biz, brand, lia, campaign = started(db)
-    out = run(db, biz, lia, World([[person(i) for i in range(25)]]))
-    assert len(out["accepted"]) == 20 and out["decision_makers"] == 20
+    out = run(db, biz, lia, World([[person(i) for i in range(45)]]))
+    assert len(out["accepted"]) == 40 and out["decision_makers"] == 40
 
 
-def test_gatekeepers_never_more_than_ten(db):
+def test_gatekeepers_never_more_than_half(db):
+    """OUT-23: gatekeepers at most 20 of the day's 40."""
     biz, brand, lia, campaign = started(db)
-    out = run(db, biz, lia, World([[gatekeeper(i) for i in range(15)]] * 3))
-    assert out["gatekeepers"] == 10 and len(out["accepted"]) == 10
+    out = run(db, biz, lia, World([[gatekeeper(i) for i in range(25)]] * 3))
+    assert out["gatekeepers"] == 20 and len(out["accepted"]) == 20
 
 
 def test_decision_makers_first_then_gatekeepers_fill_the_rest(db):
-    """Mike: 20 a day, at least 10 decision-makers; gatekeepers only fill."""
+    """OUT-23: 40 a day; decision-makers first; gatekeepers only fill, at most half."""
     biz, brand, lia, campaign = started(db)
-    batch = [person(i) for i in range(12)] + [gatekeeper(100 + i) for i in range(15)]
+    batch = [person(i) for i in range(25)] + [gatekeeper(100 + i) for i in range(30)]
     out = run(db, biz, lia, World([batch]))
-    assert out["decision_makers"] == 12 and out["gatekeepers"] == 8 and len(out["accepted"]) == 20
+    assert out["decision_makers"] == 25 and out["gatekeepers"] == 15 and len(out["accepted"]) == 40
 
 
 def test_a_short_run_retries_wider_and_counts_only_new(db):
@@ -397,7 +408,7 @@ def test_the_monthly_cap_stops_research_before_it_spends(db):
 
 def test_spend_is_recorded_per_month(db):
     biz, brand, lia, campaign = started(db)
-    run(db, biz, lia, World([[person(i) for i in range(20)]], cost=37))
+    run(db, biz, lia, World([[person(i) for i in range(40)]], cost=37))   # one search fills the day
     assert int(float(count(db, "SELECT value FROM usage_meters WHERE business_id = :b "
                                "AND meter = :m AND period = '2026-10'", m=f"outreach_research_pence:{brand['id']}"))) == 37
 
@@ -437,14 +448,14 @@ def test_research_switched_off_or_outreach_paused_never_runs(db):
         assert r.run_due(s, moment=NOW, runner=lambda *a, **k: pytest.fail("ran while switched off")) == []
 
 
-def test_new_contacts_are_enrolled_into_the_audience_campaign_within_its_limit(db, monkeypatch):
-    """Decision E: verified contacts join the active campaign for their
-    audience (pilot limit 5 for now); research never sends. OUT-19 D: only
-    as many are kept as can join, so none is collected only to wait."""
+def test_new_contacts_are_banked_and_drained_into_the_campaign_within_its_limit(db, monkeypatch):
+    """OUT-23: research banks every good contact (no longer only as many as
+    can join today); the drain enrols within the campaign's limits, the pilot
+    limit of 5 included while it lasts; the rest wait in the bank."""
     monkeypatch.setenv("OUTREACH_PILOT_ENROLMENTS", "5")
     biz, brand, lia, campaign = started(db)
     out = run(db, biz, lia, World([[person(i) for i in range(8)]]))
-    assert len(out["accepted"]) == 5
+    assert len(out["accepted"]) == 8 and len(out["drained"]["enrolled"]) == 5
     assert count(db, "SELECT count(*) FROM outreach_enrolments WHERE business_id = :b AND campaign_id = :c",
                  c=campaign["id"]) == 5
     assert count(db, "SELECT count(*) FROM aria_actions WHERE business_id = :b AND status <> 'proposed'") == 0
@@ -579,18 +590,26 @@ def test_a_failed_search_keeps_its_reserved_spend_and_never_retries(db):
 
 
 def test_the_daily_quota_is_shared_across_audiences(db):
-    """P1 5: two audiences never make more than 20 a day, 10 gatekeepers."""
+    """P1 5: two audiences never make more than 40 a day (OUT-23), 20 gatekeepers."""
     m = setup_module_or_missing()
     biz, brand, lia, campaign = started(db)
-    with Session(db) as s:
+    with setup_clock(), Session(db) as s:      # approved on the harness's day, not the wall clock
         lia2 = m.draft_audience(s, biz, OWNER, {"brand_id": brand["id"], "description": "Studios in Kent",
                                                "segments": ["gym"], "regions": ["Kent"]},
                                 draft=lambda ctx: {k: k for k in ("purpose", "necessity", "balancing_test", "safeguards")})
         m.approve_audience(s, biz, OWNER, lia2["id"], {})
+        # OUT-23: research needs a campaign for its audience; the second
+        # audience's is a copy of the first's, pointed at it.
+        hash2 = s.execute(text("SELECT audience_hash FROM outreach_compliance WHERE id = :l"), {"l": lia2["id"]}).scalar()
+        cols = [r[1] for r in s.execute(text("PRAGMA table_info(outreach_campaigns)"))]
+        picked = ", ".join(":id" if c == "id" else ":h" if c == "target_hash" else c for c in cols)
+        s.execute(text(f"INSERT INTO outreach_campaigns ({', '.join(cols)}) SELECT {picked} FROM outreach_campaigns "
+                       "WHERE id = :src"), {"id": str(uuid.uuid4()), "h": hash2, "src": campaign["id"]})
+        s.commit()
     run(db, biz, lia, World([[person(i) for i in range(15)] + [gatekeeper(100 + i) for i in range(10)]]))
     second = run(db, biz, lia2, World([[person(200 + i) for i in range(15)] + [gatekeeper(300 + i) for i in range(10)]]))
-    assert len(second["accepted"]) == 0
-    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'eligible'") == 20
+    assert len(second["accepted"]) == 15, second["stopped"]   # the rest of the brand's 40
+    assert count(db, "SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND eligibility = 'eligible'") == 40
 
 
 @pytest.mark.parametrize("change", ["inactive", "cancelled", "grant_removed", "lia_expired", "not_finished"])

@@ -354,9 +354,9 @@ def test_research_sizes_itself_to_the_boosted_inbox(h):
     """Research never finds more contacts than the inbox can email (D), and
     never fewer because of a stale 20."""
     import inspect
-    from services import outreach_research
+    from services import outreach_bank        # OUT-23: the bank sizes research and bounds the drain
     qualified(h)
-    source = inspect.getsource(outreach_research)
+    source = inspect.getsource(outreach_bank)
     assert "outreach_boost" in source and "mailbox_daily_cap(boxes[0], boost=" in source
 
 
@@ -586,15 +586,19 @@ def test_research_and_sending_agree_for_a_brand_with_mixed_inboxes(h):
 @pytest.mark.parametrize("boosted", [True, False])
 def test_research_capacity_itself_follows_the_brands_boost(h, boosted):
     """Review 2: research capacity, not only sending, for mixed-level inboxes."""
-    from services import outreach_research
+    from services import outreach_bank, outreach_send
     mixed_brand(h)
     if not boosted:
         h.s.execute(text("UPDATE business_settings SET settings = '{}' WHERE business_id = :b"), {"b": A})
         h.s.commit()
     with mock_now(NOW):
-        room = outreach_research.capacity(h.s, A, BRAND, NOW)["room"]
+        # OUT-23: the drain's ledger is what now admits new contacts.
+        settings = outreach_send.one(h.s, "outreach_settings", A)
+        campaigns = [c for c in outreach_bank._ready(h.s, A) if str(c["brand_id"]) == str(BRAND)]
+        ledger = outreach_bank._ledger(h.s, A, settings, NOW)
+        room = any(outreach_bank._room(ledger, c) for c in campaigns)
     h.s.rollback()
-    assert (room > 0) is boosted
+    assert room is boosted
 
 
 def test_the_evidence_window_is_whole_uk_days_for_every_measure(h):

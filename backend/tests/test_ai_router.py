@@ -239,7 +239,7 @@ def test_a_research_run_records_each_attempt_in_the_ledger(db):
     from test_outreach_research import World, person, run, started
     from test_outreach_setup import A
     biz, brand, lia, campaign = started(db)
-    world = World([[person(i) for i in range(20)]], cost=0)
+    world = World([[person(i) for i in range(40)]], cost=0)
     real = world.search
 
     def failed_over(brief):

@@ -1,0 +1,17 @@
+# OUT-23 Part A — Codex code review 1 (verbatim)
+
+Commit reviewed: eb6e350. Prompt: diff 8d58202...HEAD, design revision 4.
+
+---
+
+1. **P1 — Queued work from paused/unpaid campaigns disappears from shared budgets.** [outreach_bank.py:197](/Users/michaelrickards/dev/bh2-BANK/backend/services/outreach_bank.py:197) resolves queued commitments through `by_id`, but `drain_business` supplies only ready/running, paid campaigns. Other campaigns’ queued work therefore consumes neither inbox cold/total capacity nor brand daily/monthly capacity. For example, five waiting enrolments in a paused campaign sharing a five-a-day inbox leave the drain free to admit another five; resuming the campaign oversubscribes that day. R4.2 requires those commitments to remain counted. **Fix:** build the ledger from every tenant campaign, filtering only the destinations eligible for new enrolments. Add a paused-campaign **queue** regression; the existing test covers only sends.
+
+2. **P2 — Drain priority follows collection time rather than the actual deadline.** [outreach_bank.py:289](/Users/michaelrickards/dev/bh2-BANK/backend/services/outreach_bank.py:289) orders candidates by `captured_at`, although OUT-13’s deadline is the earlier of the stored notice deadline and capture plus 28 days. A recently captured prospect with six days remaining can lose the final place to an older prospect with eighteen days remaining, then enter the non-drainable margin. **Fix:** sort by `outreach_erasure.deadline(p)`, with deterministic tie-breakers. Test differing stored deadlines; the current oldest-first test changes only capture time.
+
+3. **P2 — Status reports no blocker when the drain cannot admit anyone.** [outreach_bank.py:337](/Users/michaelrickards/dev/bh2-BANK/backend/services/outreach_bank.py:337) checks monthly allowance and inbox health, then returns `None` without testing campaign, inbox cold/total, brand daily or pilot exhaustion. After twenty enrolments fill today’s capacity, remaining banked prospects consequently show no explanation. Entitlement failure is also omitted, and the audience-filtered ledger misses other audiences’ queued monthly commitments. **Fix:** derive blockers from the complete business ledger and the drain’s authority checks, returning no blocker only when a matching campaign has room. Reuse that ledger across audiences instead of repeatedly scanning the same usage and enrolments for the GET.
+
+4. **P2 — Removing `capacity()` leaves the PostgreSQL regression test broken.** [test_outreach_setup_rls.py:137](/Users/michaelrickards/dev/bh2-BANK/backend/tests/test_outreach_setup_rls.py:137) and line 143 still call `outreach_research.capacity`, which this diff removes. With the PostgreSQL harness enabled, the test raises `AttributeError`; its later assertion also still expects research itself to enrol twelve contacts. **Fix:** migrate this test to bank sizing → research → drain → preparation, retaining its real-schema storage, evidence and spend assertions. The three new serial PostgreSQL tests also do not supply the promised drain interleavings with manual enrolment, approval, unsubscribe and erasure.
+
+Read-only review completed; nothing modified, committed or pushed. Tests were not run: the repository fixtures write databases/files, and this session is read-only.
+
+VERDICT: CHANGES REQUESTED

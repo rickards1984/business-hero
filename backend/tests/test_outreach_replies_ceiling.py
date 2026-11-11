@@ -133,12 +133,21 @@ def test_headroom_says_when_replies_are_close_to_the_ceiling(h):
 
 def test_research_room_ignores_replies(h):
     """OUT-19 D and E together: replies never shrink the room for new contacts."""
-    from services import outreach_research
-    before = outreach_research.capacity(h.s, A, BRAND, NOW)
-    h.s.rollback()
+    from services import outreach_bank, outreach_send
+
+    def ledger():
+        # OUT-23: the drain's ledger is what now admits new contacts.
+        settings = outreach_send.one(h.s, "outreach_settings", A)
+        out = outreach_bank._ledger(h.s, A, settings, NOW)
+        h.s.rollback()
+        return out
+    before = ledger()
     emails_today(h, 12, kind="bespoke")
-    after = outreach_research.capacity(h.s, A, BRAND, NOW)
-    assert after["sent_today"] == before["sent_today"] == 0 and after["room"] == before["room"]
+    after = ledger()
+    for bound in ("campaign", "cold", "brand_day", "brand_month"):
+        assert after[bound] == before[bound], bound
+    # Only the inbox's total (replies included) moves, and stays above its cold room.
+    assert all(after["total"][m] >= after["cold"][m] for m in after["cold"])
 
 
 # ------------------------------------------ "I'll reply myself" and headroom ---
