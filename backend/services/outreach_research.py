@@ -1547,6 +1547,22 @@ def _resolve_within(resolve: Callable, host: str, seconds: float) -> list:
 def fetch_page(url: str, *, resolve: Optional[Callable] = None, transport=None,
                limit: int = 2_000_000, deadline: Optional[float] = None,
                clock: Optional[Callable] = None) -> Optional[dict]:
+    """See _fetch_page. With a deadline the whole fetch (DNS, every hop,
+    every read) is abandoned when it passes (Codex OUT-23B code review 2)."""
+    if deadline is None:
+        return _fetch_page(url, resolve=resolve, transport=transport, limit=limit)
+    import time as _time
+    clock = clock or _time.monotonic
+    try:
+        return within(deadline - clock(), _fetch_page, url, resolve=resolve, transport=transport, limit=limit,
+                      deadline=deadline, clock=clock)
+    except TimeoutError:
+        return None
+
+
+def _fetch_page(url: str, *, resolve: Optional[Callable] = None, transport=None,
+                limit: int = 2_000_000, deadline: Optional[float] = None,
+                clock: Optional[Callable] = None) -> Optional[dict]:
     """GET a public web page. The model names the URL, so every hop resolves
     the host ONCE, refuses any non-public address, and connects to exactly
     that checked address (Host header and TLS name kept), so DNS rebinding
@@ -1612,6 +1628,23 @@ def has_mail_server(domain: str, *, lifetime: float = 5.0) -> bool:
         return False
 
 
+def within(seconds: float, fn: Callable, *args, **kwargs):
+    """Run `fn` and give up at an ABSOLUTE limit (Codex OUT-23B code review
+    2): a blocking read is abandoned when the time is up, never waited on.
+    The abandoned worker ends at its own per-read timeout; its result is
+    discarded."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as Late
+    if seconds <= 0:
+        raise TimeoutError("deadline")
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(fn, *args, **kwargs).result(timeout=seconds)
+    except Late:
+        raise TimeoutError("deadline") from None
+    finally:
+        pool.shutdown(wait=False)
+
+
 def get_json_within(client, url: str, *, params: Optional[dict] = None, headers: Optional[dict] = None,
                     end: Optional[float] = None, clock: Optional[Callable] = None, limit: int = 2_000_000,
                     cap: float = 10.0) -> tuple:
@@ -1626,19 +1659,22 @@ def get_json_within(client, url: str, *, params: Optional[dict] = None, headers:
         return cap if end is None else min(cap, end - clock())
     if left() < 0.5:
         raise TimeoutError("deadline")
-    with client.stream("GET", url, params=params, headers=headers, timeout=max(0.5, left())) as response:
-        body = bytearray()
-        for chunk in response.iter_bytes():
-            body.extend(chunk)
-            if len(body) > limit:
-                raise ValueError("too large")
-            if end is not None and clock() >= end:
-                raise TimeoutError("deadline")
-        try:
-            data = _json.loads(bytes(body)) if body else None
-        except ValueError:
-            data = None
-        return response.status_code, data, dict(response.headers)
+
+    def fetch():
+        with client.stream("GET", url, params=params, headers=headers, timeout=max(0.5, left())) as response:
+            body = bytearray()
+            for chunk in response.iter_bytes():
+                body.extend(chunk)
+                if len(body) > limit:
+                    raise ValueError("too large")
+                if end is not None and clock() >= end:
+                    raise TimeoutError("deadline")
+            try:
+                data = _json.loads(bytes(body)) if body else None
+            except ValueError:
+                data = None
+            return response.status_code, data, dict(response.headers)
+    return fetch() if end is None else within(end - clock(), fetch)
 
 
 def companies_house(query: str, *, end: Optional[float] = None, clock: Optional[Callable] = None) -> Optional[dict]:

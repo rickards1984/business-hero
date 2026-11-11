@@ -305,8 +305,12 @@ def block(session, bid: str, generation: int, pool: str, reset: Optional[str], m
     return not known                        # a missing or past reset date: refresh /account (R2.6)
 
 
-def refresh_account(session, bid: str, generation: int, transport: Callable, key: str, *, force: bool = False) -> None:
-    """At most hourly, unless forced; network outside any transaction."""
+def refresh_account(session, bid: str, generation: int, transport: Callable, key: str, *, force: bool = False,
+                    timeout: float = CALL_TIMEOUT) -> None:
+    """At most hourly, unless forced; network outside any transaction; within
+    the caller's remaining time. The snapshot is stamped with when it was
+    ASKED FOR, and an older answer never replaces a newer one (Codex code
+    review 2)."""
     import json
     r = _row(session, bid)
     session.rollback()
@@ -315,14 +319,19 @@ def refresh_account(session, bid: str, generation: int, transport: Callable, key
     fetched = send._parse(r["account_fetched_at"]) if r.get("account_fetched_at") else None
     if not force and fetched and now() - fetched < ACCOUNT_TTL:
         return
+    asked = now()
     try:
-        data, _, _ = call(transport, key, "account", {}, CALL_TIMEOUT)
+        data, _, _ = call(transport, key, "account", {}, min(timeout, CALL_TIMEOUT))
     except HunterError:
         return                                  # a failed refresh keeps any block
     account = parse_account(data)
     _lock(session, bid)
-    _current_write(session, bid, generation, "plan = :plan, pools = " + _json(session, "pools") + ", account_fetched_at = :f",
-                   {"plan": account["plan"], "pools": json.dumps(account["pools"]), "f": now()})
+    session.execute(text(
+        "UPDATE outreach_provider_accounts SET plan = :plan, pools = " + _json(session, "pools") + ", "
+        "account_fetched_at = :asked, updated_at = :t WHERE business_id = :b AND provider = :p AND generation = :g "
+        "AND status = 'connected' AND (account_fetched_at IS NULL OR account_fetched_at < :asked)"),
+        {"plan": account["plan"], "pools": json.dumps(account["pools"]), "asked": asked, "t": now(), "b": bid,
+         "p": PROVIDER, "g": generation})
     session.commit()
 
 
@@ -501,11 +510,15 @@ def reserve(session, bid: str, brand_id, conn: Connection, operation: str, momen
         # The snapshot's balance less everything this connection has used
         # since it was taken, and every reservation still open (Codex code
         # review 1: a settled call must not free its credit again).
+        # `account_fetched_at` is when the snapshot was ASKED FOR. A charge
+        # counts unless it was completed before that: one still open, or
+        # settled after the ask (in flight across a refresh), is always
+        # counted (Codex code review 2). Conservative by design.
         fetched = r.get("account_fetched_at")
         spent = Decimal(str(session.execute(text(
             "SELECT COALESCE(SUM(CASE WHEN state = 'settled' THEN COALESCE(used_native, 0) ELSE reserved_native END), 0) "
             "FROM outreach_provider_charges WHERE business_id = :b AND COALESCE(pool_actual, pool) = :pool "
-            "AND generation = :g AND (state = 'reserved'" + (" OR created_at >= :f" if fetched else "") + ")"),
+            "AND generation = :g AND (settled_at IS NULL" + (" OR settled_at >= :f" if fetched else " OR TRUE") + ")"),
             {"b": bid, "pool": pool, "g": conn.generation, **({"f": fetched} if fetched else {})}).scalar() or 0))
         if available - spent < native:
             return None, "Hunter's monthly credits are used"
@@ -745,13 +758,14 @@ def _billable(session, bid: str, brand_id, conn: Connection, operation: str, pat
             data, credits, status_code = call(transport, conn.key, path, params, budget.timeout())
         except HunterError as exc:
             if settle(session, bid, charge, exc.credits):
-                refresh_account(session, bid, conn.generation, transport, conn.key, force=True)
+                refresh_account(session, bid, conn.generation, transport, conn.key, force=True, timeout=budget.timeout())
             if exc.kind == "key":
                 mark_invalid(session, bid, conn.generation)
                 return None, ("Hunter no longer accepts the saved key; reconnect it in Outreach settings", True)
             if exc.kind == "quota":
                 if block(session, bid, conn.generation, plan[0] if plan else "credit", conn.pools.get("reset_date"), moment):
-                    refresh_account(session, bid, conn.generation, transport, conn.key, force=True)
+                    refresh_account(session, bid, conn.generation, transport, conn.key, force=True,
+                                    timeout=budget.timeout())
                 return None, ("Hunter's monthly credits are used", True)
             if exc.kind == "rate":
                 return None, ("Hunter is busy; it carries on next run", True)
@@ -760,7 +774,7 @@ def _billable(session, bid: str, brand_id, conn: Connection, operation: str, pat
                 return None, ("asked Hunter not to be contacted", False)
             return None, ("Hunter couldn't be reached for this company", False)
         if settle(session, bid, charge, credits):
-            refresh_account(session, bid, conn.generation, transport, conn.key, force=True)
+            refresh_account(session, bid, conn.generation, transport, conn.key, force=True, timeout=budget.timeout())
         if status_code != 202:
             return data, None
         # Still verifying: poll, each poll its own gated, reserved call.

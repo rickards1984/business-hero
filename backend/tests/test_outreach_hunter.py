@@ -1246,3 +1246,85 @@ def test_every_network_step_is_bounded_by_the_run_s_deadline(monkeypatch):
     assert seen == {"mx": 5.0, "ch": budget.end} and seen["mx"] <= budget.left()
     clock[0] = 16.5
     assert rs._bounded(rs.has_mail_server, budget)("x.example") is None     # under the minimum: never started
+
+
+# ------------------------------------------------ Codex code review 2 findings ---
+
+def test_a_charge_in_flight_across_a_refresh_still_counts(db):
+    """Reserved before the snapshot was asked for, settled after it: the
+    snapshot can't include it, so it still comes off the balance."""
+    biz, brand, lia, campaign = with_hunter(db, available="1")
+    fake = Hunter()
+    fake.account = {"plan_name": "Starter", "reset_date": "2026-11-15", "requests": {"credits": {"used": 10, "available": 1}}}
+    with clocks(), Session(db) as s:
+        hunter()._lock(s, A)
+        conn = hunter().connection(s, A)
+        charge = hunter().reserve(s, A, brand["id"], conn, "search", NOW)[0]
+        s.commit()
+    later = NOW + timedelta(minutes=5)
+    with mock.patch.object(hunter().send, "now", lambda: later), Session(db) as s:
+        hunter().refresh_account(s, A, conn.generation, fake, KEY, force=True)       # mid-flight
+    with mock.patch.object(hunter().send, "now", lambda: later + timedelta(seconds=1)), Session(db) as s:
+        hunter().settle(s, A, charge, (hunter()._number("1"), "credit"))            # lands after the ask
+    with mock.patch.object(hunter().send, "now", lambda: later + timedelta(seconds=2)), Session(db) as s:
+        hunter()._lock(s, A)
+        assert hunter().reserve(s, A, brand["id"], conn, "search", later)[1] == "Hunter's monthly credits are used"
+        s.rollback()
+
+
+def test_an_older_account_answer_never_replaces_a_newer_one(db):
+    biz, brand, lia, campaign = with_hunter(db)
+    newer = (NOW + timedelta(minutes=10)).isoformat()
+    with Session(db) as s:
+        s.execute(text("UPDATE outreach_provider_accounts SET account_fetched_at = :t, plan = 'Newer'"), {"t": newer})
+        s.commit()
+    with clocks(), Session(db) as s:
+        hunter().refresh_account(s, A, 1, Hunter(), KEY, force=True)                # asked at NOW: older
+    with db.connect() as c:
+        assert c.execute(text("SELECT plan FROM outreach_provider_accounts")).scalar() == "Newer"
+
+
+def test_a_refresh_near_the_end_of_the_budget_makes_no_call(db):
+    biz, brand, lia, campaign = with_hunter(db)
+    fake = Hunter()
+    with clocks(), Session(db) as s:
+        hunter().refresh_account(s, A, 1, fake, KEY, force=True, timeout=0.5)
+    assert fake.count("account") == 0
+
+
+def _stalling(stall=2.0):
+    import time as _time
+    import httpx
+
+    def body():
+        yield b'{"data": '
+        _time.sleep(stall)                 # the final read stalls
+        yield b"{}}"
+    return httpx.MockTransport(lambda request: httpx.Response(200, content=body()))
+
+
+def test_a_stalled_final_read_is_abandoned_at_the_deadline():
+    import time as _time
+    import httpx
+    from services.outreach_research import get_json_within
+    start = _time.monotonic()
+    with httpx.Client(transport=_stalling()) as client, pytest.raises(TimeoutError):
+        get_json_within(client, "https://api.example/x", end=start + 0.6)
+    assert _time.monotonic() - start < 1.2
+
+
+def test_a_page_fetch_is_abandoned_at_the_deadline():
+    import time as _time
+    from services.outreach_research import fetch_page
+    start = _time.monotonic()
+    # Time enough to start (over a second left), then a 3 s stall: abandoned at 1.5 s.
+    got = fetch_page("https://studio1.example/team", resolve=lambda host: [("93.184.216.34",)],
+                     transport=_stalling(3.0), deadline=start + 1.5)
+    assert got is None and _time.monotonic() - start < 2.2
+
+
+def test_a_padded_connect_body_over_the_limit_is_refused(api):
+    body = b'{"key": "' + KEY.encode() + b'"' + b" " * 3000 + b"}"
+    response = api.post("/v1/outreach/setup/hunter/connect", content=body, headers={"content-type": "application/json"})
+    assert response.status_code == 422 and KEY not in response.text
+    assert api.get("/v1/outreach/setup/hunter").json()["connected"] is False
