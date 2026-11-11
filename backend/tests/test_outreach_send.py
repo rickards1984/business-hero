@@ -1316,3 +1316,29 @@ def test_a_claim_whose_sending_started_is_never_reconciled(h, monkeypatch):
     with Session(h.engine) as other:
         assert outreach_erasure.reconcile_abandoned_claims(other, NOW + timedelta(hours=5)) == 0
     assert h.s.execute(text('SELECT status FROM outreach_dispatch_jobs')).scalar() == 'claimed'
+
+
+# ------------------------------------------------------------- OUT-26 ---
+
+class _ExpiringBusiness:
+    """Behaves like the ORM Business the API passes: after a commit, reading
+    any attribute reloads it from the database, which begins a transaction."""
+
+    def __init__(self, session, plain):
+        self._session, self._plain = session, plain
+
+    def __getattr__(self, name):
+        self._session.execute(text('SELECT 1'))
+        return getattr(self._plain, name)
+
+
+def test_a_tapped_card_is_sent_when_the_business_reloads_after_the_claim(h):
+    """OUT-26 (Mike, 11 Nov 2026): the dispatcher refused every tapped
+    approval with "Dispatch requires committed claim", because reading the
+    expired business began a transaction before that check."""
+    card = propose(h)
+    business = _ExpiringBusiness(h.s, h.b)
+    h.s.commit()
+    out = h.a.approve(h.s, business, card['id'], OWNER, version=card['version'])
+    assert out['status'] == 'done', out
+    assert len(h.p.sends) == 1
