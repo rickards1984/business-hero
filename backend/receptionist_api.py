@@ -14,7 +14,8 @@ if TYPE_CHECKING:
     from collections import OrderedDict
 
 import pytz
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from starlette.concurrency import run_in_threadpool
 from rate_limiting import limiter, LIMIT_TTS
 from pydantic import BaseModel
 from sqlmodel import Session, SQLModel, Field as SQLField, select
@@ -37,10 +38,12 @@ from services.voice_presets import (
 from auth import (
     _is_feature_enabled,
     get_platform_admin_context,
+    get_user_business_context,
     is_platform_admin_user,
     strip_plan_defaults,
 )
 from dependencies import get_current_user_business
+from services.aria_actions import ActionRefused
 
 _logger = logging.getLogger("receptionist")
 
@@ -451,13 +454,63 @@ async def toggle_receptionist(
         raise HTTPException(status_code=404, detail="Receptionist not configured yet. Please set up your receptionist first.")
 
     if not cfg.enabled and not cfg.twilio_phone_number:
-        raise HTTPException(status_code=400, detail="Cannot enable receptionist without a phone number assigned. Please contact support.")
+        raise HTTPException(status_code=400, detail="Your receptionist needs a phone number first. Request one under Phone number on this page.")
 
     cfg.enabled = not cfg.enabled
     cfg.updated_at = datetime.utcnow()
     session.add(cfg)
     session.commit()
     return {"enabled": cfg.enabled}
+
+
+# ======================== Phone number requests (RCP-1) ========================
+# The owner asks for a number TYPE and AREA, never a number (R2); Mike's Approve
+# buys and configures it (admin endpoints below). docs/RCP-1-TICKET.md.
+
+def _refused(exc: ActionRefused):
+    return HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/number-request")
+async def get_number_request(
+    business: Business = Depends(get_current_user_business),
+    session: Session = Depends(get_session),
+):
+    """The latest number request, the number if any, and the forwarding guides."""
+    assert_feature_access(business, "receptionist")
+    from services import receptionist_numbers as numbers
+    return numbers.current(session, business)
+
+
+@router.post("/number-request", status_code=201)
+async def create_number_request(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    auth_ctx=Depends(get_user_business_context),
+    business: Business = Depends(get_current_user_business),
+    session: Session = Depends(get_session),
+):
+    """Ask for a receptionist number. Spends nothing: Mike approves the purchase."""
+    assert_feature_access(business, "receptionist")
+    from services import receptionist_numbers as numbers
+    try:
+        return numbers.request_number(session, business, auth_ctx["user_id"], payload)
+    except ActionRefused as exc:
+        raise _refused(exc)
+
+
+@router.delete("/number-request")
+async def cancel_number_request(
+    auth_ctx=Depends(get_user_business_context),
+    business: Business = Depends(get_current_user_business),
+    session: Session = Depends(get_session),
+):
+    """Withdraw a request before anything is bought."""
+    assert_feature_access(business, "receptionist")
+    from services import receptionist_numbers as numbers
+    try:
+        return numbers.cancel(session, business, auth_ctx["user_id"])
+    except ActionRefused as exc:
+        raise _refused(exc)
 
 
 # ======================== Knowledge base endpoints ========================
@@ -1020,27 +1073,18 @@ async def admin_assign_phone_number(
     auth_ctx=Depends(get_platform_admin_context),
     session: Session = Depends(get_session),
 ):
-    """Admin: Assign a Twilio phone number to a business's receptionist."""
+    """Admin: Assign a Twilio phone number to a business's receptionist.
+
+    RCP-1 R1: one number, one business. A number another business has is
+    refused (409), here and by migration 043's unique index."""
     _require_platform_admin(auth_ctx, session)
 
+    from services import receptionist_numbers as numbers
     clean_number = body.twilio_phone_number.replace(" ", "").strip() if body.twilio_phone_number else body.twilio_phone_number
-
-    cfg = session.exec(
-        select(ReceptionistConfig).where(ReceptionistConfig.business_id == business_id)
-    ).first()
-
-    if cfg:
-        cfg.twilio_phone_number = clean_number
-        cfg.twilio_phone_sid = body.twilio_phone_sid
-        cfg.updated_at = datetime.utcnow()
-    else:
-        cfg = ReceptionistConfig(
-            business_id=business_id,
-            twilio_phone_number=clean_number,
-            twilio_phone_sid=body.twilio_phone_sid,
-        )
-
-    session.add(cfg)
+    try:
+        numbers.assign(session, business_id, clean_number, body.twilio_phone_sid)
+    except ActionRefused as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
     session.commit()
     return {"business_id": business_id, "twilio_phone_number": clean_number}
 
@@ -1244,3 +1288,104 @@ END OF INSTRUCTIONS. Begin the conversation by answering the phone with your gre
         "accent": accent_name,
         "preset_verified": bool(preset.get("verified", True)),
     }
+
+
+# ---------------------------------------------- Phone number requests (RCP-1) ---
+
+# Check, Buy, Retry and Notify call Twilio (or send email) synchronously, with
+# 30-second timeouts: they run in the thread pool, so the event loop, which also
+# carries live receptionist calls, is never held up (RCP-1 review 2, finding 5).
+# The request's session is used by that one thread only, start to finish.
+
+def _admin_numbers(auth_ctx, session):
+    _require_platform_admin(auth_ctx, session)
+    from services import receptionist_numbers as numbers
+    return numbers
+
+
+@admin_router.get("/number-requests")
+async def admin_list_number_requests(
+    auth_ctx=Depends(get_platform_admin_context),
+    session: Session = Depends(get_session),
+):
+    """Admin: every receptionist number request, open ones first."""
+    numbers = _admin_numbers(auth_ctx, session)
+    try:
+        return {"requests": numbers.admin_list(session)}
+    except ActionRefused as exc:
+        raise _refused(exc)
+
+
+@admin_router.post("/number-requests/{request_id}/prepare")
+async def admin_prepare_number_request(
+    request_id: str,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    auth_ctx=Depends(get_platform_admin_context),
+    session: Session = Depends(get_session),
+):
+    """Admin: save the regulatory bundle, check it, and list numbers. Spends nothing."""
+    numbers = _admin_numbers(auth_ctx, session)
+    try:
+        return await run_in_threadpool(numbers.admin_prepare, session, request_id, payload, auth_ctx["user_id"])
+    except ActionRefused as exc:
+        raise _refused(exc)
+
+
+@admin_router.post("/number-requests/{request_id}/approve")
+async def admin_approve_number_request(
+    request_id: str,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    auth_ctx=Depends(get_platform_admin_context),
+    session: Session = Depends(get_session),
+):
+    """Admin: buy the chosen number, set its webhook, check it, assign it."""
+    numbers = _admin_numbers(auth_ctx, session)
+    try:
+        return await run_in_threadpool(numbers.admin_approve, session, request_id, payload, auth_ctx["user_id"])
+    except ActionRefused as exc:
+        raise _refused(exc)
+
+
+@admin_router.post("/number-requests/{request_id}/retry")
+async def admin_retry_number_request(
+    request_id: str,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    auth_ctx=Depends(get_platform_admin_context),
+    session: Session = Depends(get_session),
+):
+    """Admin: finish a purchase that didn't complete, never buying twice."""
+    numbers = _admin_numbers(auth_ctx, session)
+    try:
+        return await run_in_threadpool(numbers.admin_retry, session, request_id, payload, auth_ctx["user_id"])
+    except ActionRefused as exc:
+        raise _refused(exc)
+
+
+@admin_router.post("/number-requests/{request_id}/decline")
+async def admin_decline_number_request(
+    request_id: str,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    auth_ctx=Depends(get_platform_admin_context),
+    session: Session = Depends(get_session),
+):
+    """Admin: decline a request, with a reason the owner sees."""
+    numbers = _admin_numbers(auth_ctx, session)
+    try:
+        return numbers.admin_decline(session, request_id, payload, auth_ctx["user_id"])
+    except ActionRefused as exc:
+        raise _refused(exc)
+
+
+@admin_router.post("/number-requests/{request_id}/notify")
+async def admin_notify_number_request(
+    request_id: str,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    auth_ctx=Depends(get_platform_admin_context),
+    session: Session = Depends(get_session),
+):
+    """Admin: email the owner that their number is live, again."""
+    numbers = _admin_numbers(auth_ctx, session)
+    try:
+        return await run_in_threadpool(numbers.admin_notify, session, request_id, payload, auth_ctx["user_id"])
+    except ActionRefused as exc:
+        raise _refused(exc)
