@@ -30,11 +30,10 @@ In **AI hub → Receptionist**, the "no number" state becomes a short guided pan
 1. **Choose how callers will reach you:**
    - **Keep my existing number** (recommended for most). We give you a new number behind the scenes, and you forward your current line to it, either always or only when you don't answer. Step-by-step forwarding instructions are shown for the common UK providers (BT, Virgin Media, Vodafone, EE, O2, Three, and VoIP systems in general), with links to each provider's own help page.
    - **A new local number:** pick an area (town, or area code).
-   - **A new non-geographic number** (03…) **or mobile** (07…), if Twilio offers that type at the time of building.
 2. **Business details for the UK regulator:** the business's legal name and registered address, prefilled from the business profile. UK numbers need a Twilio regulatory bundle; the panel explains why in one sentence and says approval can take a few days.
 3. **Who sets it up:**
    - receptionist **in the plan**: "We'll set this up for you." No charge.
-   - receptionist **as an add-on**: either "I'll follow the steps" (free), or **"Set this up for me"** (paid; price to be decided by Mike, see below).
+   - receptionist **as an add-on**: either "I'll follow the steps" (free), or **"Set this up for me"** (£50, one-off).
 4. **Submit.** The panel then shows the request's status: *Requested → Waiting for UK approval → Live*, with a **Test call** button once the number is live.
 
 The toggle stays refused until a number is live, but the message points to this panel, not to "contact support".
@@ -63,12 +62,12 @@ The toggle stays refused until a number is live, but the message points to this 
 - **R7. Release.** When a business stops paying, or the receptionist is removed, the number is listed for Mike to release. It is never released automatically in RCP-1, because a released number can't be got back.
 - **R8. No secrets in the browser.** Twilio is called only from the backend, with the existing `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`.
 
-## Decisions for Mike (defaults proposed)
+## Decided by Mike (13 Nov 2026)
 
-1. **Price of "Set this up for me" for add-on customers.** Proposed: a one-off fee covering your time plus margin, charged through Stripe like other add-ons. Name a figure.
-2. **Who pays the number's monthly cost** (roughly £1–£5 per month depending on type; check current Twilio pricing). Proposed: included in the plan or add-on price, and recorded as a cost (R6).
-3. **One Twilio account, or a subaccount per business.** Proposed: **one account** for RC1, which is simpler. Subaccounts later, if per-customer billing or isolation is needed.
-4. **Number types offered.** Proposed: local (geographic) only at first, plus "keep my number" by forwarding.
+1. **"Set this up for me" costs £50, one-off**, for add-on customers. It is charged through Stripe like other add-ons, at about an hour of Mike's time. It is free when the receptionist is in the plan.
+2. **The number's monthly Twilio cost (about £1–£5) is included, never shown as a separate charge.** Competing platforms make a line-item fee for a phone number look petty. The cost is still recorded against the business (R6), so the profit view shows it. **The pre-launch price modelling must confirm that every plan or add-on with the receptionist covers it with net profit** (the profit rule). If a type costs more than £5 a month, it isn't offered.
+3. **One Twilio account** for every business in RC1. Subaccounts later, if needed.
+4. **Local (geographic) numbers only at first**, plus "keep my number" by forwarding.
 
 ## Out of scope
 
