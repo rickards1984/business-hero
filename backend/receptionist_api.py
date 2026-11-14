@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from collections import OrderedDict
 
 import pytz
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request
 from starlette.concurrency import run_in_threadpool
 from rate_limiting import limiter, LIMIT_TTS
 from pydantic import BaseModel
@@ -484,18 +484,22 @@ async def get_number_request(
 
 @router.post("/number-request", status_code=201)
 async def create_number_request(
+    background_tasks: BackgroundTasks,
     payload: Dict[str, Any] = Body(default_factory=dict),
     auth_ctx=Depends(get_user_business_context),
     business: Business = Depends(get_current_user_business),
     session: Session = Depends(get_session),
 ):
-    """Ask for a receptionist number. Spends nothing: Mike approves the purchase."""
+    """Ask for a receptionist number. Spends nothing: Mike approves the purchase.
+    Mike is emailed once it's saved (RCP-2), after the response."""
     assert_feature_access(business, "receptionist")
     from services import receptionist_numbers as numbers
     try:
-        return numbers.request_number(session, business, auth_ctx["user_id"], payload)
+        saved = numbers.request_number(session, business, auth_ctx["user_id"], payload)
     except ActionRefused as exc:
         raise _refused(exc)
+    background_tasks.add_task(numbers.alert_new_request, saved, getattr(business, "name", None) or "A business")
+    return saved
 
 
 @router.delete("/number-request")

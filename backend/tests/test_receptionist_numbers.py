@@ -1010,3 +1010,101 @@ def test_without_migration_043_the_owner_is_told_it_is_not_ready(tmp_path):
     engine = create_engine("sqlite:///" + str(tmp_path / "bare.sqlite"))
     with Session(engine) as s:
         assert rn().ready(s) is False
+
+
+# ------------------------------------------- Mike hears about a new request (RCP-2) ---
+
+def test_a_new_request_emails_mike_with_what_he_needs(db, tw, monkeypatch):
+    """Mike, 14 Nov 2026: without an alert he'd only know if the customer told him."""
+    from services import profit_guard
+    sent = []
+    monkeypatch.setattr(profit_guard, "send_alert", lambda subject, body: sent.append((subject, body)))
+    monkeypatch.setenv("APP_BASE_URL", "https://app.example.invalid")
+    out = request(db, B, mode="keep_existing", existing_number="0161 496 0000", setup="done_for_you")
+    rn().alert_new_request(out, "Multi Skilled Contractors LTD")
+    (subject, body), = sent
+    assert "Multi Skilled Contractors LTD" in subject and "receptionist number" in subject.lower()
+    assert "https://app.example.invalid/admin" in body
+    assert "+441614960000" in body and "0161" in body and "£50" in body
+    assert "Regulatory Compliance" in body              # what to do next
+
+
+def test_the_alert_never_breaks_the_request(db, tw, monkeypatch):
+    from services import profit_guard
+
+    def broken(*a):
+        raise RuntimeError("mail down")
+    monkeypatch.setattr(profit_guard, "send_alert", broken)
+    out = request(db)
+    rn().alert_new_request(out, "Biz")                 # logged, not raised
+    assert row(db, out["id"])["state"] == "requested"
+
+
+def test_the_endpoint_sends_the_alert_after_the_request_is_saved(monkeypatch):
+    """In the background, after the response: never on the owner's click, never for a refusal."""
+    import asyncio
+    from fastapi import BackgroundTasks, HTTPException
+    import receptionist_api as api
+    monkeypatch.setattr(api, "assert_feature_access", lambda *a: None)
+    saved = {"id": "r1", "state": "requested"}
+    monkeypatch.setattr(rn(), "request_number", lambda *a, **k: saved)
+    tasks = BackgroundTasks()
+    business = SimpleNamespace(id=A, name="Biz A")
+    out = asyncio.run(api.create_number_request(tasks, {}, auth_ctx={"user_id": OWNER}, business=business, session=None))
+    assert out is saved
+    assert [(t.func, t.args) for t in tasks.tasks] == [(rn().alert_new_request, (saved, "Biz A"))]
+
+    def refuse(*a, **k):
+        raise refused()(409, "already")
+    monkeypatch.setattr(rn(), "request_number", refuse)
+    tasks = BackgroundTasks()
+    import pytest as _pytest
+    with _pytest.raises(HTTPException):
+        asyncio.run(api.create_number_request(tasks, {}, auth_ctx={"user_id": OWNER}, business=business, session=None))
+    assert tasks.tasks == []
+
+
+def test_fastapi_runs_the_alert_for_a_real_request(monkeypatch):
+    """Through the real router: the alert runs after the 201 is sent."""
+    import asyncio
+    import httpx
+    from fastapi import FastAPI
+    import auth
+    import db as dbmod
+    import dependencies
+    import receptionist_api as api
+    from rate_limiting import limiter
+    monkeypatch.setattr(limiter, "enabled", False)
+    monkeypatch.setattr(api, "assert_feature_access", lambda *a: None)
+    monkeypatch.setattr(rn(), "request_number", lambda *a, **k: {"id": "r1", "state": "requested"})
+    alerted = []
+    monkeypatch.setattr(rn(), "alert_new_request", lambda r, name: alerted.append((r["id"], name)))
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides = {
+        auth.get_user_business_context: lambda: {"user_id": OWNER, "business_id": A},
+        dependencies.get_current_user_business: lambda: SimpleNamespace(id=A, name="Biz A"),
+        dbmod.get_session: lambda: None,
+    }
+
+    async def post():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            return await c.post("/v1/receptionist/number-request", json={"mode": "new_local"})
+    response = asyncio.run(post())
+    assert response.status_code == 201 and alerted == [("r1", "Biz A")]
+
+
+def test_the_alert_never_links_to_the_api_host(db, tw, monkeypatch):
+    """Codex RCP-2 review, nit: PUBLIC_BASE_URL is the API, not the dashboard."""
+    from services import profit_guard
+    sent = []
+    monkeypatch.setattr(profit_guard, "send_alert", lambda subject, body: sent.append(body))
+    monkeypatch.delenv("APP_BASE_URL", raising=False)
+    monkeypatch.delenv("FRONTEND_URL", raising=False)
+    rn().alert_new_request(request(db), "Biz")
+    assert "api.example.invalid" not in sent[0] and "Business Hero admin dashboard" in sent[0]
+    monkeypatch.setenv("FRONTEND_URL", "https://front.example.invalid/")
+    with Session(db) as s:
+        r = rn().admin_list(s)[0]
+    rn().alert_new_request(r, "Biz")
+    assert "https://front.example.invalid/admin" in sent[1]
