@@ -56,6 +56,7 @@ import AdminRunningCosts from '@/components/AdminRunningCosts';
 import { ReceptionistStatusChip } from '@/components/AdminReceptionistSection';
 import { fetchAdminWhatsAppOverview } from '@/lib/whatsappApi';
 import AdminBoardMeetingOverviewCard from '@/components/board-meeting/AdminBoardMeetingOverviewCard';
+import AdminNumberRequests from '@/components/AdminNumberRequests';
 
 const TIMEZONES = [
   'America/New_York',
@@ -824,6 +825,7 @@ export default function AdminDashboard() {
             </Box>
           ) : activeTab === 'businesses' ? (
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <AdminNumberRequests />
               <AdminBoardMeetingOverviewCard />
               <Paper sx={{ p: 2, overflow: 'hidden' }}>
                 <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5 }}>

@@ -17,6 +17,10 @@
 # outreach_provider_charges were added the same way from the local harness, BEFORE production
 # runs 042; audits/042-PROD-RUNBOOK.md STEP 2 confirms columns +31. Regenerate after it is live.
 #
+# 043 (RCP-1, receptionist numbers): the 34 rows of receptionist_number_requests were added the
+# same way from the local harness, BEFORE production runs 043; audits/043-PROD-RUNBOOK.md STEP 2
+# confirms columns +34. Regenerate after it is live.
+#
 # FULL means this file describes every table, so the guard checks every column
 # the backend writes and `test_full_coverage_leaves_nothing_unguarded` requires
 # that nothing is left unchecked. Keep UNGUARDED_BUDGET at 0 while this says
@@ -1069,6 +1073,40 @@ col   receptionist_configs.twilio_phone_sid text null=YES def=-
 col   receptionist_configs.updated_at timestamp with time zone null=NO def=now()
 col   receptionist_configs.voice text null=NO def='shimmer'::text
 col   receptionist_configs.voice_preset_id text null=YES def='shimmer_british'::text
+col   receptionist_number_requests.address_line1 text null=NO def=-
+col   receptionist_number_requests.address_line2 text null=YES def=-
+col   receptionist_number_requests.address_sid text null=YES def=-
+col   receptionist_number_requests.area_code text null=YES def=-
+col   receptionist_number_requests.bought_at timestamp with time zone null=YES def=-
+col   receptionist_number_requests.bundle_sid text null=YES def=-
+col   receptionist_number_requests.business_id uuid null=NO def=-
+col   receptionist_number_requests.candidates text null=YES def=-
+col   receptionist_number_requests.chosen_number text null=YES def=-
+col   receptionist_number_requests.city text null=NO def=-
+col   receptionist_number_requests.claim_token text null=YES def=-
+col   receptionist_number_requests.claimed_at timestamp with time zone null=YES def=-
+col   receptionist_number_requests.created_at timestamp with time zone null=NO def=now()
+col   receptionist_number_requests.decided_at timestamp with time zone null=YES def=-
+col   receptionist_number_requests.decided_by uuid null=YES def=-
+col   receptionist_number_requests.decline_reason text null=YES def=-
+col   receptionist_number_requests.existing_number text null=YES def=-
+col   receptionist_number_requests.id uuid null=NO def=gen_random_uuid()
+col   receptionist_number_requests.in_plan boolean null=NO def=-
+col   receptionist_number_requests.last_error text null=YES def=-
+col   receptionist_number_requests.legal_name text null=NO def=-
+col   receptionist_number_requests.live_at timestamp with time zone null=YES def=-
+col   receptionist_number_requests.mode text null=NO def=-
+col   receptionist_number_requests.monthly_pence integer(32,0) null=YES def=-
+col   receptionist_number_requests.number_sid text null=YES def=-
+col   receptionist_number_requests.owner_told_at timestamp with time zone null=YES def=-
+col   receptionist_number_requests.phone_number text null=YES def=-
+col   receptionist_number_requests.postcode text null=NO def=-
+col   receptionist_number_requests.requested_by uuid null=YES def=-
+col   receptionist_number_requests.setup text null=NO def=-
+col   receptionist_number_requests.setup_fee_pence integer(32,0) null=NO def=0
+col   receptionist_number_requests.state text null=NO def=-
+col   receptionist_number_requests.updated_at timestamp with time zone null=NO def=now()
+col   receptionist_number_requests.version integer(32,0) null=NO def=1
 col   stripe_events.business_id uuid null=YES def=-
 col   stripe_events.created_at timestamp with time zone null=NO def=now()
 col   stripe_events.event_id text null=NO def=-

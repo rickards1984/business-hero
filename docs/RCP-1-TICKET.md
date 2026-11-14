@@ -59,6 +59,7 @@ The toggle stays refused until a number is live, but the message points to this 
 - **R4. Webhook check.** After buying, read the number back from Twilio and confirm `VoiceUrl` and method match. If they don't, the request shows "bought, not configured" with a retry, and the number is not assigned.
 - **R5. Entitlement.** A request needs the `receptionist` feature (plan or add-on) and a paying business (the DECISION 3 resolver). A suspended business can't request.
 - **R6. Costs.** Each number's monthly Twilio cost goes to the running-costs ledger (`services/running_costs.py`) against the business, so the profit view shows it (profit rule).
+  *As built:* the cost is **Twilio's own price** (its price list, converted to pence and rounded up), checked against the £5 cap. It counts **from purchase**, so a number bought but not yet set up counts too. It is recorded as one platform line, "Receptionist numbers", with each request row holding its business and price.
 - **R7. Release.** When a business stops paying, or the receptionist is removed, the number is listed for Mike to release. It is never released automatically in RCP-1, because a released number can't be got back.
 - **R8. No secrets in the browser.** Twilio is called only from the backend, with the existing `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`.
 
@@ -69,6 +70,12 @@ The toggle stays refused until a number is live, but the message points to this 
 3. **One Twilio account** for every business in RC1. Subaccounts later, if needed.
 4. **Local (geographic) numbers only at first**, plus "keep my number" by forwarding.
 
+## Amendments in build (13 Nov 2026)
+
+- **The £50 payment (decision 1): approved deferral, Mike, 13 Nov 2026.** The £50 applies only when a business adds the receptionist *after* signing up; the sign-up setup fee already covers it at the start. Later add-on fees, this one included, can be paid by BACS, Stripe or similar, and are set up later. RCP-1 records the choice and shows Mike "£50 to collect". The £50 goes in the price catalogue (`docs/BACKLOG.md`) that will become the website's price list.
+- **Local numbers only (decision 4), enforced.** Only 01 and 02 numbers can be requested or bought, and Buy accepts only a number that Check listed for this request.
+- **A Retry that might buy asks first**, and shows the number and its price.
+
 ## Out of scope
 
 - Porting a customer's existing number into Twilio. Forwarding covers "keep my number".
@@ -78,7 +85,12 @@ The toggle stays refused until a number is live, but the message points to this 
 ## Acceptance
 
 - [ ] An MSC owner (non-admin) requests a local number in the app, and sees the forwarding steps.
-- [ ] Mike approves on staging with Twilio test credentials (test credentials can't buy real numbers; use Twilio's documented test number `+15005550006`). The request reaches *Live*, and the toggle then works.
+- [ ] ~~Mike approves on staging with Twilio test credentials~~ *Amended in build (Codex review 1, finding 12):* Twilio's test credentials can't search for, price or bundle UK numbers, so a staging run proves nothing about them. The purchase path is instead proven by:
+  - the fake-Twilio tests (every rule, every failure order);
+  - the PostgreSQL harness (races, unique indexes);
+  - **the first real purchase: MSC's, in production**, with Mike confirming the number and price in the dialog.
+
+  The request reaches *Live*, and the toggle then works.
 - [ ] R1–R8 have tests. The purchase path is tested with a fake Twilio client, including a timeout after purchase (R3) and a wrong `VoiceUrl` (R4).
 - [ ] The UNIQUE migration is run from a runbook, staging first.
 - [ ] Production: one real number bought for MSC through Approve, and Mike's test call is answered.

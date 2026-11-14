@@ -446,44 +446,53 @@ async def save_wizard_step(
 
         if not step_data.get("skip", False):
             phone = step_data.get("twilio_phone_number", "")
+            # RCP-1 R1: one number, one business (migration 043's index is the guarantee).
+            from services import receptionist_numbers as numbers
             if phone:
                 phone = phone.replace(" ", "").strip()
+                if numbers.number_taken(session, phone, business_id):
+                    raise HTTPException(status_code=409, detail="That number belongs to another business.")
 
-            existing = session.execute(
-                text("SELECT id FROM receptionist_configs WHERE business_id = CAST(:biz AS uuid)"),
-                {"biz": business_id},
-            ).fetchone()
+            from services.aria_actions import ActionRefused
+            try:
+                with numbers.number_writes(session):
+                    existing = session.execute(
+                        text("SELECT id FROM receptionist_configs WHERE business_id = CAST(:biz AS uuid)"),
+                        {"biz": business_id},
+                    ).fetchone()
 
-            config_params = {
-                "biz": business_id,
-                "voice": step_data.get("voice", "shimmer"),
-                "greeting": step_data.get("greeting_message", "Hello, thank you for calling. How can I help you today?"),
-                "tone": step_data.get("tone", "professional"),
-                "language": step_data.get("language", "en-GB"),
-                "phone": phone or None,
-                "now": now,
-            }
+                    config_params = {
+                        "biz": business_id,
+                        "voice": step_data.get("voice", "shimmer"),
+                        "greeting": step_data.get("greeting_message", "Hello, thank you for calling. How can I help you today?"),
+                        "tone": step_data.get("tone", "professional"),
+                        "language": step_data.get("language", "en-GB"),
+                        "phone": phone or None,
+                        "now": now,
+                    }
 
-            if existing:
-                session.execute(
-                    text("""
-                        UPDATE receptionist_configs SET
-                            voice = :voice, greeting_message = :greeting, tone = :tone,
-                            language = :language, twilio_phone_number = :phone,
-                            enabled = FALSE, updated_at = :now
-                        WHERE business_id = CAST(:biz AS uuid)
-                    """),
-                    config_params,
-                )
-            else:
-                session.execute(
-                    text("""
-                        INSERT INTO receptionist_configs
-                            (business_id, voice, greeting_message, tone, language, twilio_phone_number, enabled, updated_at)
-                        VALUES (CAST(:biz AS uuid), :voice, :greeting, :tone, :language, :phone, FALSE, :now)
-                    """),
-                    config_params,
-                )
+                    if existing:
+                        session.execute(
+                            text("""
+                                UPDATE receptionist_configs SET
+                                    voice = :voice, greeting_message = :greeting, tone = :tone,
+                                    language = :language, twilio_phone_number = :phone,
+                                    enabled = FALSE, updated_at = :now
+                                WHERE business_id = CAST(:biz AS uuid)
+                            """),
+                            config_params,
+                        )
+                    else:
+                        session.execute(
+                            text("""
+                                INSERT INTO receptionist_configs
+                                    (business_id, voice, greeting_message, tone, language, twilio_phone_number, enabled, updated_at)
+                                VALUES (CAST(:biz AS uuid), :voice, :greeting, :tone, :language, :phone, FALSE, :now)
+                            """),
+                            config_params,
+                        )
+            except ActionRefused as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
             for item in (step_data.get("knowledge_base_items") or []):
                 if item.get("content"):

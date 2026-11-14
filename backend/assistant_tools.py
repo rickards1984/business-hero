@@ -382,6 +382,14 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "get_receptionist_number",
+            "description": "The AI receptionist's phone number, or the progress of the owner's request for one (requested, waiting for UK approval, being set up, live, declined with the reason), and how to forward an existing number to it. Read-only.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_quotes",
             "description": "List recent quotes. Use when the user asks about their quotes, estimates, or pricing.",
             "parameters": {
@@ -724,6 +732,8 @@ def execute_tool(tool_name: str, arguments: dict, business_id: str, timezone: st
         return _list_quotes(engine, business_id, arguments)
     elif tool_name == "get_receptionist_usage":
         return _get_receptionist_usage(engine, business_id, arguments)
+    elif tool_name == "get_receptionist_number":
+        return _get_receptionist_number(engine, business_id, arguments)
     elif tool_name == "list_aria_actions":
         return _list_aria_actions(engine, business_id, arguments)
     elif tool_name == "send_quote":
@@ -3099,6 +3109,22 @@ def _get_receptionist_usage(engine, business_id: str, args: dict) -> dict:
         if business is None:
             return {"error": "Business not found"}
         return metering.display(metering.usage(session, business))
+
+
+def _get_receptionist_number(engine, business_id: str, args: dict) -> dict:
+    """The receptionist's number, or the owner's request for one (RCP-1;
+    North Star rule 3). Tenant-scoped: the business is the caller's, never an
+    argument; only what the owner's own settings page shows."""
+    from sqlmodel import Session as _Session
+    from services import receptionist_numbers
+
+    from services.aria_actions import ActionRefused
+    with _Session(engine) as session:
+        try:
+            business = receptionist_numbers._business(session, business_id)
+        except ActionRefused as exc:
+            return {"error": exc.detail}
+        return receptionist_numbers.current(session, business)
 
 
 def _list_quotes(engine, business_id: str, args: dict) -> dict:

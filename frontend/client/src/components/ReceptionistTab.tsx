@@ -43,6 +43,7 @@ import {
 } from '@mui/icons-material';
 import { apiRequest } from '@/lib/queryClient';
 import ReceptionistUsage from '@/components/ReceptionistUsage';
+import ReceptionistNumberRequest, { errorDetail } from '@/components/ReceptionistNumberRequest';
 
 interface ReceptionistTabProps {
   businessId: string;
@@ -414,7 +415,7 @@ export default function ReceptionistTab({ onViewCalls }: ReceptionistTabProps) {
       setConfig((prev) => prev ? { ...prev, enabled: data.enabled } : prev);
       showSnack(data.enabled ? 'Receptionist enabled' : 'Receptionist disabled', 'success');
     } catch (err: any) {
-      showSnack(`Failed to toggle: ${err.message}`, 'error');
+      showSnack(errorDetail(err), 'error');
     }
   };
 
@@ -802,7 +803,7 @@ export default function ReceptionistTab({ onViewCalls }: ReceptionistTabProps) {
               </Box>
             ) : (
               <Typography variant="body2" color="text.secondary">
-                No phone number assigned — contact support
+                No phone number yet. Request one below.
               </Typography>
             )}
             {config && (
@@ -859,6 +860,8 @@ export default function ReceptionistTab({ onViewCalls }: ReceptionistTabProps) {
           <Typography variant="caption" color="text.secondary">Avg Duration</Typography>
         </Card>
       </Box>
+
+      <ReceptionistNumberRequest onLive={fetchConfig} />
 
       {/* ================================================================
           SECTION 2: Configuration Panel
