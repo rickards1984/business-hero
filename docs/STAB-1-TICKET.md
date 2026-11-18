@@ -77,4 +77,7 @@ Just before it, Mike had approved 5 outreach emails (15:56–15:58). Each approv
 - [x] A non-member is still refused (403).
 - [x] Pool defaults and overrides are tested.
 - [x] `./check.sh` passes.
-- [ ] Codex review preserved in `audits/`.
+- [x] Codex reviews 1–3 are preserved in `audits/STAB-1-CODEX-CODE-REVIEW-{1,2,3}.md`.
+  - Reviews 1 and 2 asked for changes, and all their findings were acted on.
+  - Review 3 approved.
+- **Accepted residual (review 3, finding 1, Low):** the Aria heartbeat test uses a fake client, so it does not go through the PROFIT-1 SDK hook. Codex executed the real context managers and wrapper and confirmed that attribution and the hook's context carry into the thread. No ledger-level test was added.
