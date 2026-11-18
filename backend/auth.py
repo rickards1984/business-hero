@@ -6,6 +6,7 @@ import re
 from typing import Any, Optional, Dict
 from datetime import datetime, timezone
 from fastapi import Header, HTTPException, Depends, Request, Query, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from sqlmodel import Session, select
 from sqlalchemy import text
@@ -114,7 +115,7 @@ async def get_user_auth_context(
     return {
         "user_id": user.id,
         "email": user.email,
-        "is_platform_admin": is_platform_admin_user(user.id, session),
+        "is_platform_admin": await run_in_threadpool(is_platform_admin_user, user.id, session),
         "access_token": token,
     }
 
@@ -248,6 +249,13 @@ async def get_user_business_context(
     admins are exempt — they are how a read-only account gets fixed.
     """
     user = await verify_supabase_token(token)
+    # STAB-1: the database work runs off the event loop, on the request's own
+    # connection. In the loop, one request waiting for a pooled connection
+    # froze every other request (production, 18 Nov 2026).
+    return await run_in_threadpool(_business_context, request, user, business_id, session)
+
+
+def _business_context(request: Request, user, business_id: Optional[str], session: Session) -> dict:
     is_platform_admin = is_platform_admin_user(user.id, session)
     if is_platform_admin:
         request.state.user_email = user.email
@@ -258,7 +266,7 @@ async def get_user_business_context(
                 "is_platform_admin": True,
             }
         try:
-            business_ctx = get_business_for_user(user.id)
+            business_ctx = get_business_for_user(user.id, session=session)
         except ValueError as exc:
             args = exc.args
             if len(args) >= 2 and args[0] == "NO_BUSINESS":
@@ -274,7 +282,7 @@ async def get_user_business_context(
             "is_platform_admin": True,
         }
     try:
-        business_ctx = get_business_for_user(user.id, requested_business_id=business_id)
+        business_ctx = get_business_for_user(user.id, requested_business_id=business_id, session=session)
     except ValueError as exc:
         args = exc.args
         if len(args) >= 2:
@@ -306,7 +314,7 @@ async def get_platform_admin_context(
     user_ctx: dict = Depends(get_user_context_no_business),
     session: Session = Depends(get_session),
 ) -> dict:
-    if not is_platform_admin_user(user_ctx["user_id"], session):
+    if not await run_in_threadpool(is_platform_admin_user, user_ctx["user_id"], session):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Platform admin required")
     return user_ctx
 
@@ -339,8 +347,7 @@ async def get_current_business(
             detail="Missing authentication. Use x-api-key header or Authorization: Bearer <key>"
         )
     
-    statement = select(Business).where(Business.api_key == token)
-    business = session.exec(statement).first()
+    business = await run_in_threadpool(_business_by_api_key, session, token)
     
     if not business:
         raise HTTPException(
@@ -349,6 +356,10 @@ async def get_current_business(
         )
     
     return business
+
+
+def _business_by_api_key(session: Session, token: str) -> Optional[Business]:
+    return session.exec(select(Business).where(Business.api_key == token)).first()
 
 
 def is_platform_admin_user(user_id: str, session: Session) -> bool:
@@ -775,12 +786,14 @@ def require_feature(feature_name: str, *, retained_history: bool = False):
         auth_ctx: dict = Depends(get_user_business_context),
         session: Session = Depends(get_session),
     ):
-        if is_platform_admin_user(auth_ctx["user_id"], session):
-            return True
-        business = session.exec(
-            select(Business).where(Business.id == auth_ctx["business_id"])
-        ).first()
-        assert_feature_access(business, feature_name, retained_history=retained_history)
-        return True
+        return await run_in_threadpool(_feature_check, auth_ctx, session, feature_name, retained_history)
 
     return _dependency
+
+
+def _feature_check(auth_ctx: dict, session: Session, feature_name: str, retained_history: bool) -> bool:
+    if is_platform_admin_user(auth_ctx["user_id"], session):
+        return True
+    business = _load_business(session, auth_ctx["business_id"])
+    assert_feature_access(business, feature_name, retained_history=retained_history)
+    return True

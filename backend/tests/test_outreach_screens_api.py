@@ -477,7 +477,7 @@ def test_real_request_authentication_chain(api, monkeypatch, role, expected):
         assert token == 'synthetic-jwt'
         return SimpleNamespace(id=user, email='synthetic@example.invalid')
 
-    def business_for_user(user_id, requested_business_id=None):
+    def business_for_user(user_id, requested_business_id=None, **_):
         assert requested_business_id == A
         if role == 'foreign':
             raise ValueError('FORBIDDEN', 'Not a member')

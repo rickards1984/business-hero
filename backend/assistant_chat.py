@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 import asyncio
 from typing import Optional, Tuple
@@ -495,18 +496,31 @@ def get_user_display_name(user_id: str) -> Optional[str]:
     return None
 
 
-def is_platform_admin(user_id: str) -> bool:
-    """Check if user is a platform admin."""
+@contextmanager
+def _reading(session=None):
+    """STAB-1: the caller's session when it has one, so a request's auth uses
+    the connection it already holds instead of taking a second from the pool
+    (production ran out of connections on 18 Nov 2026). Alone, a short
+    connection of its own, as before."""
+    if session is not None:
+        yield session
+        return
     with engine.connect() as conn:
+        yield conn
+
+
+def is_platform_admin(user_id: str, session=None) -> bool:
+    """Check if user is a platform admin."""
+    with _reading(session) as conn:
         result = conn.execute(text("""
             SELECT 1 FROM platform_admins WHERE user_id = :user_id LIMIT 1
         """), {"user_id": user_id})
         return result.fetchone() is not None
 
 
-def get_business_by_id(business_id: str) -> Optional[BusinessContext]:
+def get_business_by_id(business_id: str, session=None) -> Optional[BusinessContext]:
     """Fetch business by ID."""
-    with engine.connect() as conn:
+    with _reading(session) as conn:
         result = conn.execute(text("""
             SELECT id, name, timezone, logo_url FROM businesses WHERE id = :business_id LIMIT 1
         """), {"business_id": business_id})
@@ -516,12 +530,14 @@ def get_business_by_id(business_id: str) -> Optional[BusinessContext]:
         return None
 
 
-def get_business_for_user(user_id: str, requested_business_id: Optional[str] = None) -> BusinessContext:
+def get_business_for_user(user_id: str, requested_business_id: Optional[str] = None,
+                          session=None) -> BusinessContext:
     """Get business context for a user.
     
     Args:
         user_id: The authenticated user's UUID
         requested_business_id: Optional specific business ID if user has multiple
+        session: Optional; the request's own session, whose connection is reused
         
     Returns:
         BusinessContext with id, name, and timezone
@@ -529,17 +545,17 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
     Raises:
         ValueError: If no business found, access denied, or business not found
     """
-    is_admin = is_platform_admin(user_id)
+    is_admin = is_platform_admin(user_id, session)
     
     if requested_business_id:
         if is_admin:
-            business = get_business_by_id(requested_business_id)
+            business = get_business_by_id(requested_business_id, session)
             if not business:
                 raise ValueError("NOT_FOUND", f"Business {requested_business_id} not found")
             logger.info(f"Platform admin {user_id} accessing business {business.name} ({business.id})")
             return business
         
-        with engine.connect() as conn:
+        with _reading(session) as conn:
             result = conn.execute(text("""
                 SELECT b.id, b.name, b.timezone, b.logo_url
                 FROM business_members bm
@@ -556,7 +572,7 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
         
         return BusinessContext(id=str(row[0]), name=row[1], timezone=row[2], logo_url=row[3])
     
-    with engine.connect() as conn:
+    with _reading(session) as conn:
         result = conn.execute(text("""
             SELECT bm.business_id, b.name, b.timezone, b.logo_url, bm.role, bm.created_at
             FROM business_members bm
@@ -580,6 +596,16 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
     
     m = memberships[0]
     return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2], logo_url=m[3])
+
+
+def _complete(client, business_id, **request):
+    """STAB-1: one OpenAI chat call, attributed to the business, for running in
+    a thread. On the event loop it froze every request in the app for as long
+    as Aria took to answer, often tens of seconds. The attribution is entered
+    here, in the thread, around the call its SDK hook records."""
+    from services import profit_guard
+    with profit_guard.attributed(business_id, "chat"):
+        return client.chat.completions.create(**request)
 
 
 @dataclass
@@ -747,12 +773,14 @@ async def process_chat_message(
     """
     logger.info(f"[DEBUG] process_chat_message called: user_id={user.id}, conversation_id={conversation_id}, requested_business_id={business_id}")
     
-    is_admin = is_platform_admin(user.id)
+    # STAB-1: these lookups use their own short connections; off the event
+    # loop, so waiting for one never freezes every other request.
+    is_admin = await asyncio.to_thread(is_platform_admin, user.id)
     
     # Step 1: Resolve conversation if provided
     try:
-        resolved_conv_id, conv_business_id = resolve_conversation(
-            user.id, conversation_id, business_id, is_admin
+        resolved_conv_id, conv_business_id = await asyncio.to_thread(
+            resolve_conversation, user.id, conversation_id, business_id, is_admin
         )
     except ValueError as e:
         error_type = e.args[0] if e.args else "UNKNOWN"
@@ -775,7 +803,7 @@ async def process_chat_message(
     
     # Step 2: Resolve business context
     try:
-        business = get_business_for_user(user.id, effective_business_id)
+        business = await asyncio.to_thread(get_business_for_user, user.id, effective_business_id)
     except ValueError as e:
         error_type = e.args[0] if e.args else "UNKNOWN"
         error_msg = e.args[1] if len(e.args) > 1 else str(e)
@@ -792,7 +820,7 @@ async def process_chat_message(
     
     # Step 3: Create conversation if not provided
     if not resolved_conv_id:
-        resolved_conv_id = create_conversation(user.id, business.id)
+        resolved_conv_id = await asyncio.to_thread(create_conversation, user.id, business.id)
     
     logger.info(f"[DEBUG] Context resolved: user_id={user.id}, conversation_id={resolved_conv_id}, business_id={business.id}, business_name={business.name}, timezone={business.timezone}")
     
@@ -800,20 +828,19 @@ async def process_chat_message(
         return {"error": "OpenAI API key not configured", "status": 500}
     
     # Step 4: Load conversation history BEFORE saving new message
-    history = load_conversation_history(resolved_conv_id, user.id, is_admin, limit=20)
+    history = await asyncio.to_thread(load_conversation_history, resolved_conv_id, user.id, is_admin, limit=20)
     
     # Step 5: Save user message to DB
-    save_message(resolved_conv_id, business.id, user.id, "user", message)
+    await asyncio.to_thread(save_message, resolved_conv_id, business.id, user.id, "user", message)
     logger.info(f"[DEBUG] Saved user message to conversation {resolved_conv_id}")
     
     # Step 6: Build messages array with system prompt + history + current message
-    user_name = get_user_display_name(user.id)
+    user_name = await asyncio.to_thread(get_user_display_name, user.id)
     user_email = user.email if hasattr(user, 'email') else None
     system_prompt = build_system_prompt(business, voice_mode=voice_mode, user_name=user_name, user_email=user_email)
     logger.info(f"[DEBUG] System prompt built for {business.name} (voice_mode={voice_mode}, user_name={user_name}). History has {len(history)} messages.")
     
     client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
-    from services import profit_guard
     
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
@@ -826,14 +853,14 @@ async def process_chat_message(
 
     while tool_round < MAX_TOOL_ROUNDS:
         try:
-            with profit_guard.attributed(business.id, "chat"):
-                response = client.chat.completions.create(
-                    model="gpt-5",
-                    messages=messages,
-                    tools=TOOL_DEFINITIONS,
-                    tool_choice="auto",
-                    timeout=120
-                )
+            response = await asyncio.to_thread(
+                _complete, client, business.id,
+                model="gpt-5",
+                messages=messages,
+                tools=TOOL_DEFINITIONS,
+                tool_choice="auto",
+                timeout=120
+            )
         except Exception as e:
             logger.error(f"OpenAI API error on round {tool_round}: {e}")
             return {"error": f"AI service error: {str(e)}", "status": 500}
@@ -900,19 +927,19 @@ async def process_chat_message(
 
     if assistant_reply is None:
         try:
-            with profit_guard.attributed(business.id, "chat"):
-                final_response = client.chat.completions.create(
-                    model="gpt-5",
-                    messages=messages,
-                    timeout=120
-                )
+            final_response = await asyncio.to_thread(
+                _complete, client, business.id,
+                model="gpt-5",
+                messages=messages,
+                timeout=120
+            )
             assistant_reply = final_response.choices[0].message.content or "I've completed the requested actions."
         except Exception as e:
             logger.error(f"OpenAI API error on final response: {e}")
             assistant_reply = "I encountered an error generating a response. Please try again."
     
     # Step 7: Save assistant reply to DB
-    save_message(resolved_conv_id, business.id, user.id, "assistant", assistant_reply or "")
+    await asyncio.to_thread(save_message, resolved_conv_id, business.id, user.id, "assistant", assistant_reply or "")
     logger.info(f"[DEBUG] Saved assistant reply to conversation {resolved_conv_id}")
     
     return {

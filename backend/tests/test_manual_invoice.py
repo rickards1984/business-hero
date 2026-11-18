@@ -152,7 +152,7 @@ def client_for(database, monkeypatch, business=A, status="active", is_active=Tru
     monkeypatch.setattr(auth, "verify_supabase_token", _verify)
     monkeypatch.setattr(auth, "is_platform_admin_user", lambda *a, **k: False)
     monkeypatch.setattr(auth, "get_business_for_user",
-                        lambda user_id, requested_business_id=None: SimpleNamespace(id=business))
+                        lambda user_id, requested_business_id=None, **_: SimpleNamespace(id=business))
     monkeypatch.setattr(auth, "_load_business", lambda session, bid: entitlement)
 
     class GateSession(Session):

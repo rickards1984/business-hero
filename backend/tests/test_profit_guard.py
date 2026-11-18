@@ -357,7 +357,13 @@ def test_chat_costs_are_attributed_to_the_business_within_the_call_only():
     guard()
     import assistant_chat
     source = inspect.getsource(assistant_chat.process_chat_message)
-    assert source.count('with profit_guard.attributed(business.id, "chat"):') == 2 and "label(" not in source
+    # STAB-1: both OpenAI calls run in a thread through _complete, which
+    # enters the attribution around the call (behaviour tested in
+    # test_stab1_connections.test_a_slow_aria_reply_never_freezes_the_server).
+    assert source.count("_complete, client, business.id,") == 2 and "label(" not in source
+    assert "completions.create" not in source
+    complete = inspect.getsource(assistant_chat._complete)
+    assert 'with profit_guard.attributed(business_id, "chat"):' in complete
 
 
 
