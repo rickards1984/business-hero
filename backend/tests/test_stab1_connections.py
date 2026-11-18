@@ -358,3 +358,42 @@ def test_production_runs_one_process_so_the_budget_holds():
 def test_silly_pool_settings_fall_back_to_the_defaults(monkeypatch, bad):
     monkeypatch.setenv("DB_POOL_SIZE", bad)
     assert db.pool_options()["pool_size"] == 10
+
+
+# ------------------------------------- Aria's OpenAI call (review 2, finding 4) ---
+
+def test_a_slow_aria_reply_never_freezes_the_server(pg_like, monkeypatch):
+    """The OpenAI client is synchronous: on the event loop, every request in
+    the app waited for as long as Aria took to answer."""
+    from services import profit_guard
+    seen = []
+
+    class Completions:
+        def create(self, **request):
+            seen.append(profit_guard._attribution.get())
+            time.sleep(0.4)
+            message = SimpleNamespace(content="Hello", tool_calls=None)
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class Client:
+        def __init__(self, *a, **k):
+            self.chat = SimpleNamespace(completions=Completions())
+
+    ctx = assistant_chat.BusinessContext(id=A, name="Biz", timezone="Europe/London")
+    monkeypatch.setattr(assistant_chat, "OpenAI", Client)
+    monkeypatch.setattr(assistant_chat, "OPENAI_API_KEY", "test")
+    monkeypatch.setattr(assistant_chat, "is_platform_admin", lambda *a, **k: False)
+    monkeypatch.setattr(assistant_chat, "resolve_conversation", lambda *a, **k: ("c1", A))
+    monkeypatch.setattr(assistant_chat, "get_business_for_user", lambda *a, **k: ctx)
+    monkeypatch.setattr(assistant_chat, "load_conversation_history", lambda *a, **k: [])
+    monkeypatch.setattr(assistant_chat, "save_message", lambda *a, **k: "m1")
+    monkeypatch.setattr(assistant_chat, "get_user_display_name", lambda *a, **k: "Mike")
+    monkeypatch.setattr(assistant_chat, "build_system_prompt", lambda *a, **k: "system")
+
+    async def go():
+        return await _with_heartbeat(assistant_chat.process_chat_message(
+            user=SimpleNamespace(id=OWNER, email=None), message="hi"))
+    out, worst = run(go)
+    assert out.get("reply") == "Hello", out
+    assert seen == [(A, "chat")]               # still charged to the business, as chat
+    assert worst < 0.2, f"the event loop stalled for {worst:.2f}s"

@@ -44,6 +44,11 @@ Just before it, Mike had approved 5 outreach emails (15:56–15:58). Each approv
   - Aria chat's own lookups in `process_chat_message` (`is_platform_admin`, `resolve_conversation` and `get_business_for_user`) now run in `asyncio.to_thread`.
 
   The realtime voice path already ran its lookup in a thread.
+- **F2c. Aria's OpenAI call** (Codex code review 2, finding 4).
+  - **What was wrong:** `process_chat_message` called the synchronous OpenAI client on the event loop, for both the tool rounds and the final reply. While Aria answered, often for tens of seconds, every request in the app waited.
+  - **The fix:**
+    - The call now runs in `asyncio.to_thread`, through `_complete`. That function enters `profit_guard.attributed` inside the thread, so the cost is still charged to the business as `chat`.
+    - The chat's database helpers also run in threads: `create_conversation`, `load_conversation_history`, `save_message` (both calls) and `get_user_display_name`.
 - **F3. Pool size.** `db.pool_options()` sets 10 + 10, with a 10-second wait, `pre_ping` and recycling every 1800 seconds.
   - `DB_POOL_SIZE`, `DB_MAX_OVERFLOW` and `DB_POOL_TIMEOUT` tune it without a release.
   - An unparseable or out-of-range value falls back to the default.

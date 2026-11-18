@@ -598,6 +598,16 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
     return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2], logo_url=m[3])
 
 
+def _complete(client, business_id, **request):
+    """STAB-1: one OpenAI chat call, attributed to the business, for running in
+    a thread. On the event loop it froze every request in the app for as long
+    as Aria took to answer, often tens of seconds. The attribution is entered
+    here, in the thread, around the call its SDK hook records."""
+    from services import profit_guard
+    with profit_guard.attributed(business_id, "chat"):
+        return client.chat.completions.create(**request)
+
+
 @dataclass
 class ConversationContext:
     """Conversation context for continuity."""
@@ -810,7 +820,7 @@ async def process_chat_message(
     
     # Step 3: Create conversation if not provided
     if not resolved_conv_id:
-        resolved_conv_id = create_conversation(user.id, business.id)
+        resolved_conv_id = await asyncio.to_thread(create_conversation, user.id, business.id)
     
     logger.info(f"[DEBUG] Context resolved: user_id={user.id}, conversation_id={resolved_conv_id}, business_id={business.id}, business_name={business.name}, timezone={business.timezone}")
     
@@ -818,20 +828,19 @@ async def process_chat_message(
         return {"error": "OpenAI API key not configured", "status": 500}
     
     # Step 4: Load conversation history BEFORE saving new message
-    history = load_conversation_history(resolved_conv_id, user.id, is_admin, limit=20)
+    history = await asyncio.to_thread(load_conversation_history, resolved_conv_id, user.id, is_admin, limit=20)
     
     # Step 5: Save user message to DB
-    save_message(resolved_conv_id, business.id, user.id, "user", message)
+    await asyncio.to_thread(save_message, resolved_conv_id, business.id, user.id, "user", message)
     logger.info(f"[DEBUG] Saved user message to conversation {resolved_conv_id}")
     
     # Step 6: Build messages array with system prompt + history + current message
-    user_name = get_user_display_name(user.id)
+    user_name = await asyncio.to_thread(get_user_display_name, user.id)
     user_email = user.email if hasattr(user, 'email') else None
     system_prompt = build_system_prompt(business, voice_mode=voice_mode, user_name=user_name, user_email=user_email)
     logger.info(f"[DEBUG] System prompt built for {business.name} (voice_mode={voice_mode}, user_name={user_name}). History has {len(history)} messages.")
     
     client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
-    from services import profit_guard
     
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
@@ -844,14 +853,14 @@ async def process_chat_message(
 
     while tool_round < MAX_TOOL_ROUNDS:
         try:
-            with profit_guard.attributed(business.id, "chat"):
-                response = client.chat.completions.create(
-                    model="gpt-5",
-                    messages=messages,
-                    tools=TOOL_DEFINITIONS,
-                    tool_choice="auto",
-                    timeout=120
-                )
+            response = await asyncio.to_thread(
+                _complete, client, business.id,
+                model="gpt-5",
+                messages=messages,
+                tools=TOOL_DEFINITIONS,
+                tool_choice="auto",
+                timeout=120
+            )
         except Exception as e:
             logger.error(f"OpenAI API error on round {tool_round}: {e}")
             return {"error": f"AI service error: {str(e)}", "status": 500}
@@ -918,19 +927,19 @@ async def process_chat_message(
 
     if assistant_reply is None:
         try:
-            with profit_guard.attributed(business.id, "chat"):
-                final_response = client.chat.completions.create(
-                    model="gpt-5",
-                    messages=messages,
-                    timeout=120
-                )
+            final_response = await asyncio.to_thread(
+                _complete, client, business.id,
+                model="gpt-5",
+                messages=messages,
+                timeout=120
+            )
             assistant_reply = final_response.choices[0].message.content or "I've completed the requested actions."
         except Exception as e:
             logger.error(f"OpenAI API error on final response: {e}")
             assistant_reply = "I encountered an error generating a response. Please try again."
     
     # Step 7: Save assistant reply to DB
-    save_message(resolved_conv_id, business.id, user.id, "assistant", assistant_reply or "")
+    await asyncio.to_thread(save_message, resolved_conv_id, business.id, user.id, "assistant", assistant_reply or "")
     logger.info(f"[DEBUG] Saved assistant reply to conversation {resolved_conv_id}")
     
     return {
