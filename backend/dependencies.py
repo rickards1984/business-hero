@@ -4,6 +4,7 @@ Extracted to avoid circular imports between main.py and feature routers.
 """
 
 from fastapi import Depends, HTTPException, Request, status
+from fastapi.concurrency import run_in_threadpool
 from sqlmodel import Session, select
 
 from db import get_session
@@ -33,34 +34,7 @@ async def get_current_user_business(
     business could write through every one.
     """
     user = await verify_supabase_token(token)
-    
-    try:
-        business_ctx = get_business_for_user(user.id)
-    except ValueError as e:
-        args = e.args
-        if len(args) >= 2:
-            error_type, message = args[0], args[1]
-            if error_type == "NO_BUSINESS":
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
-            elif error_type == "FORBIDDEN":
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=message)
-            elif error_type == "NOT_FOUND":
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    
-    statement = select(Business).where(Business.id == business_ctx.id)
-    business = session.exec(statement).first()
-    
-    if not business:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Business not found"
-        )
-
-    if not is_platform_admin_user(user.id, session):
-        enforce_access(request, business)
-
-    return business
+    return await run_in_threadpool(_owned_business, request, user, session)
 
 
 async def get_current_user_and_business(
@@ -77,9 +51,19 @@ async def get_current_user_and_business(
     a non-paying customer's writes.
     """
     user = await verify_supabase_token(token)
+    return user, await run_in_threadpool(_owned_business, request, user, session)
 
+
+def _load_business_row(session: Session, business_id) -> Business:
+    return session.exec(select(Business).where(Business.id == business_id)).first()
+
+
+def _owned_business(request: Request, user, session: Session) -> Business:
+    """STAB-1: both dependencies' database work, off the event loop and on the
+    request's own connection: one connection, never two. Production ran out of
+    them on 18 Nov 2026, and the wait, in the loop, froze every request."""
     try:
-        business_ctx = get_business_for_user(user.id)
+        business_ctx = get_business_for_user(user.id, session=session)
     except ValueError as e:
         args = e.args
         if len(args) >= 2:
@@ -92,9 +76,7 @@ async def get_current_user_and_business(
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-    statement = select(Business).where(Business.id == business_ctx.id)
-    business = session.exec(statement).first()
-
+    business = _load_business_row(session, business_ctx.id)
     if not business:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -104,4 +86,4 @@ async def get_current_user_and_business(
     if not is_platform_admin_user(user.id, session):
         enforce_access(request, business)
 
-    return user, business
+    return business

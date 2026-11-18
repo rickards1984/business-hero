@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 import asyncio
 from typing import Optional, Tuple
@@ -495,18 +496,31 @@ def get_user_display_name(user_id: str) -> Optional[str]:
     return None
 
 
-def is_platform_admin(user_id: str) -> bool:
-    """Check if user is a platform admin."""
+@contextmanager
+def _reading(session=None):
+    """STAB-1: the caller's session when it has one, so a request's auth uses
+    the connection it already holds instead of taking a second from the pool
+    (production ran out of connections on 18 Nov 2026). Alone, a short
+    connection of its own, as before."""
+    if session is not None:
+        yield session
+        return
     with engine.connect() as conn:
+        yield conn
+
+
+def is_platform_admin(user_id: str, session=None) -> bool:
+    """Check if user is a platform admin."""
+    with _reading(session) as conn:
         result = conn.execute(text("""
             SELECT 1 FROM platform_admins WHERE user_id = :user_id LIMIT 1
         """), {"user_id": user_id})
         return result.fetchone() is not None
 
 
-def get_business_by_id(business_id: str) -> Optional[BusinessContext]:
+def get_business_by_id(business_id: str, session=None) -> Optional[BusinessContext]:
     """Fetch business by ID."""
-    with engine.connect() as conn:
+    with _reading(session) as conn:
         result = conn.execute(text("""
             SELECT id, name, timezone, logo_url FROM businesses WHERE id = :business_id LIMIT 1
         """), {"business_id": business_id})
@@ -516,12 +530,14 @@ def get_business_by_id(business_id: str) -> Optional[BusinessContext]:
         return None
 
 
-def get_business_for_user(user_id: str, requested_business_id: Optional[str] = None) -> BusinessContext:
+def get_business_for_user(user_id: str, requested_business_id: Optional[str] = None,
+                          session=None) -> BusinessContext:
     """Get business context for a user.
     
     Args:
         user_id: The authenticated user's UUID
         requested_business_id: Optional specific business ID if user has multiple
+        session: Optional; the request's own session, whose connection is reused
         
     Returns:
         BusinessContext with id, name, and timezone
@@ -529,17 +545,17 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
     Raises:
         ValueError: If no business found, access denied, or business not found
     """
-    is_admin = is_platform_admin(user_id)
+    is_admin = is_platform_admin(user_id, session)
     
     if requested_business_id:
         if is_admin:
-            business = get_business_by_id(requested_business_id)
+            business = get_business_by_id(requested_business_id, session)
             if not business:
                 raise ValueError("NOT_FOUND", f"Business {requested_business_id} not found")
             logger.info(f"Platform admin {user_id} accessing business {business.name} ({business.id})")
             return business
         
-        with engine.connect() as conn:
+        with _reading(session) as conn:
             result = conn.execute(text("""
                 SELECT b.id, b.name, b.timezone, b.logo_url
                 FROM business_members bm
@@ -556,7 +572,7 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
         
         return BusinessContext(id=str(row[0]), name=row[1], timezone=row[2], logo_url=row[3])
     
-    with engine.connect() as conn:
+    with _reading(session) as conn:
         result = conn.execute(text("""
             SELECT bm.business_id, b.name, b.timezone, b.logo_url, bm.role, bm.created_at
             FROM business_members bm

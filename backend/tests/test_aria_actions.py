@@ -539,7 +539,7 @@ def client_for(database, monkeypatch, biz):
     monkeypatch.setattr(auth, "verify_supabase_token", _verify)
     monkeypatch.setattr(auth, "is_platform_admin_user", lambda *a, **k: False)
     monkeypatch.setattr(auth, "get_business_for_user",
-                        lambda user_id, requested_business_id=None: SimpleNamespace(id=biz.id))
+                        lambda user_id, requested_business_id=None, **_: SimpleNamespace(id=biz.id))
     monkeypatch.setattr(auth, "_load_business", lambda session, bid: biz)
     monkeypatch.setattr(module, "_load_business", lambda session, bid: biz, raising=False)
 
