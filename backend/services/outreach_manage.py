@@ -26,6 +26,19 @@ def start(session, business, user_id):
     return fresh
 
 
+def _locked_authority(session, business, user_id):
+    """start()'s entitlement and owner checks again, under lock, for a caller
+    that has first taken the shared business lock (OUT-28a)."""
+    current = session.execute(text('SELECT plan_tier,feature_flags,subscription_status,is_active,trial_ends_at FROM businesses WHERE id=:b' + (' FOR UPDATE' if send.pg(session) else '')), {'b': str(business.id)}).mappings().first()
+    send.require(current, 'Business unavailable', 404)
+    fresh = SimpleNamespace(**current)
+    fresh.feature_flags = send.loads(fresh.feature_flags) or {}
+    fresh.trial_ends_at = _parse(fresh.trial_ends_at)
+    assert_feature_access(fresh, 'outreach', retained_history=True)
+    send.require(aria_actions._is_active_owner(session, business, user_id, lock=True), 'Active owner required', 403)
+    return fresh
+
+
 def growth(business, fresh):
     assert_feature_access(business, 'outreach')
     assert_feature_access(fresh, 'outreach')
@@ -96,6 +109,12 @@ def sequence(session, business, user, ident, data):
 def approve_templates(session, business, user, ident, data):
     fresh = start(session, business, user)
     growth(business, fresh)
+    session.rollback()
+    bid = str(business.id)
+    send.lock_business(session, bid)        # OUT-28a: the send path's lock order, as save_emails
+    fresh = _locked_authority(session, business, user)
+    growth(business, fresh)
+    moving, cards = _in_flight(session, bid, ident)
     c = campaign(session, business.id, ident, data['version'])
     send.require(c['sequence_version'] == data['sequence_version'], 'Sequence version changed; reload')
     steps = send.rows(session, 'outreach_sequence_steps', business.id,
@@ -111,6 +130,8 @@ def approve_templates(session, business, user, ident, data):
             send.update(session, 'outreach_sequence_steps', business.id, step['id'], approved_by=str(user), approved_at=send.now())
     # Ready means approved templates only; no first-batch permission or send.
     send.update(session, 'outreach_campaigns', business.id, ident, status='ready', updated_at=send.now())
+    # OUT-28a: nobody part way through is stranded on an older wording.
+    _move(session, bid, moving, cards, int(c['sequence_version']), send.now())
     session.commit()
     return {'id': ident, 'version': c['version'], 'sequence_version': c['sequence_version']}
 
@@ -260,3 +281,146 @@ def prepare(session, business, user, ident, data):
             result['skipped'].append({'enrolment_id': eid, 'reason': exc.detail})
     session.rollback()
     return result
+
+
+# ------------------------------------------------ OUT-28a: edit at any time ---
+
+def save_emails(session, business, user, ident, data):
+    """OUT-28a (docs/OUT-28-TICKET.md): the owner's "Save and use from now on".
+
+    One transaction, one owner action. The new wording is written as the next
+    sequence version AND approved (Mike, 18 Nov 2026: saving is approving, E2);
+    everyone still part way through the campaign moves to it at the same step,
+    so their next email uses it (E1) instead of being stranded on a version the
+    send path will never send again; any waiting card built on the old wording
+    is withdrawn so a fresh one is made. Emails already sent are never touched.
+    If this owner had let Aria send the campaign automatically, that permission
+    moves to the new wording with it (E3); anyone else's does not."""
+    from services import outreach_autopilot, outreach_setup
+    fresh = start(session, business, user)          # the checks, then (below) the send path's lock order
+    growth(business, fresh)
+    session.rollback()
+    bid = str(business.id)
+    # The same order as prepare_claim (outreach_send.lock_business's comment):
+    # settings, then the business row, then enrolments before the campaign,
+    # cards last, so a save and an approval at the same moment queue rather
+    # than deadlock.
+    send.lock_business(session, bid)
+    fresh = _locked_authority(session, business, user)
+    growth(business, fresh)
+    moving, cards = _in_flight(session, bid, ident)
+    c = campaign(session, bid, ident, data['version'])
+    emails = data['emails']
+    send.require(len(emails) == 3 and sorted(int(e['ordinal']) for e in emails) == [0, 1, 2],
+                 'All three emails are needed', 422)
+    for e in sorted(emails, key=lambda e: int(e['ordinal'])):
+        send.require(str(e.get('subject') or '').strip() and str(e.get('body') or '').strip(),
+                     f"Email {int(e['ordinal']) + 1} needs a subject and a message", 422)
+        found = send.placeholder(e['subject'], e['body'])
+        send.require(not found, f"Email {int(e['ordinal']) + 1} still contains {found}. Replace it with the real words "
+                     "(your name and sign-off are added for you)", 422)
+    old = send.rows(session, 'outreach_sequence_steps', bid, 'AND campaign_id=:c AND sequence_version=:v',
+                    {'c': str(ident), 'v': c['sequence_version']})
+    delays = {int(s['ordinal']): int(s['delay_business_days']) for s in old}
+    version, moment = int(c['sequence_version']) + 1, send.now()
+    for e in sorted(emails, key=lambda e: int(e['ordinal'])):
+        ordinal = int(e['ordinal'])
+        envelope = json.dumps(dict(schema_version=1, subject=e['subject'], body=e['body']))
+        send.insert(session, 'outreach_sequence_steps', bid, campaign_id=str(ident), sequence_version=version,
+                    ordinal=ordinal, delay_business_days=delays.get(ordinal, (0, 5, 7)[ordinal]),
+                    template_text=envelope, template_hash=hashlib.sha256(envelope.encode()).hexdigest(),
+                    allowed_variables=[], approved_by=str(user), approved_at=moment)
+    send.update(session, 'outreach_campaigns', bid, str(ident), sequence_version=version,
+                version=int(c['version']) + 1, status='ready', first_batch_review_id=None, updated_at=moment)
+    _move(session, bid, moving, cards, version, moment)
+    automatic = None
+    grant = outreach_autopilot._grants(session, bid).get(str(ident))
+    if grant:
+        automatic = 'off'
+        if str(grant.get('granted_by')) == str(user) and str(grant.get('mailbox_id')) == str(c['mailbox_id']):
+            doc = outreach_setup._settings_doc(session, bid)
+            doc[outreach_autopilot.KEY][str(ident)] = dict(grant, campaign_version=int(c['version']) + 1,
+                                                           sequence_version=version)
+            outreach_setup._save_settings_doc(session, bid, doc)
+            automatic = 'on'
+    session.commit()
+    return {'id': str(ident), 'version': int(c['version']) + 1, 'sequence_version': version,
+            'moved': len(moving), 'withdrawn': len(cards), 'automatic': automatic}
+
+
+def _in_flight(session, bid, ident):
+    """Under the caller's locks (enrolments before the campaign, cards last, as
+    prepare_claim): everyone still part way through the campaign, and its open
+    cards. Refuses while one of its emails is being sent."""
+    moving = send.rows(session, 'outreach_enrolments', bid,
+                       "AND campaign_id=:c AND state IN ('pending', 'active')", {'c': str(ident)}, True)
+    cards = [r for r in send.rows(session, 'aria_actions', bid,
+                                  "AND action_type='send_outreach' AND status IN ('proposed', 'executing')", {}, True)
+             if str((send.loads(r['payload']) or {}).get('campaign_id')) == str(ident)]
+    send.require(not any(r['status'] == 'executing' for r in cards),
+                 'An email from this campaign is sending right now. Try again in a minute', 409)
+    return moving, cards
+
+
+def _move(session, bid, moving, cards, version, moment):
+    """E1: everyone part way through gets the approved wording from their next
+    email, at the same step and time; every waiting card, built on the old
+    wording, is withdrawn so a fresh one is made."""
+    for e in moving:
+        if int(e['sequence_version']) != int(version):
+            send.update(session, 'outreach_enrolments', bid, str(e['id']), sequence_version=version, updated_at=moment)
+    for r in cards:
+        if r['status'] == 'proposed' and int((send.loads(r['payload']) or {}).get('sequence_version') or -1) != int(version):
+            session.execute(text("UPDATE aria_actions SET status = 'dismissed', updated_at = :now "
+                                 "WHERE id = :id AND business_id = :b AND status = 'proposed'"),
+                            {'now': moment, 'id': str(r['id']), 'b': bid})
+
+
+def emails(session, business, ident):
+    """OUT-28a: the campaign's three emails in plain words, with how each did
+    under each wording it has had (sent = accepted by the provider; replied and
+    interested = distinct people whose reply matched that email)."""
+    from services.outreach_dashboard import POSITIVE
+    bid = str(business.id)
+    c = campaign(session, bid, ident)
+    session.rollback()
+    steps = send.rows(session, 'outreach_sequence_steps', bid, 'AND campaign_id=:c ORDER BY sequence_version, ordinal',
+                      {'c': str(ident)})
+    sent = session.execute(text(
+        "SELECT m.id, m.prospect_id, s.ordinal, s.sequence_version FROM outreach_messages m "
+        "JOIN outreach_sequence_steps s ON s.business_id = m.business_id AND s.id = m.step_id "
+        "WHERE m.business_id = :b AND m.campaign_id = :c AND m.direction = 'outbound' AND m.state = 'accepted' "
+        "AND m.accepted_at IS NOT NULL"), {'b': bid, 'c': str(ident)}).fetchall()
+    replies = {}
+    for message_id, category in session.execute(text(
+            "SELECT matched_message_id, category FROM outreach_replies WHERE business_id = :b "
+            "AND matched_message_id IS NOT NULL"), {'b': bid}):
+        replies.setdefault(str(message_id), set()).add(category)
+    session.rollback()
+    since = {}
+    for s in steps:
+        key = (int(s['sequence_version']), int(s['ordinal']))
+        since[key] = min(filter(None, [since.get(key), str(s['created_at'])]))
+    tally = {}
+    for message_id, prospect, ordinal, version in sent:
+        t = tally.setdefault((int(version), int(ordinal)), {'sent': 0, 'replied': set(), 'interested': set()})
+        t['sent'] += 1
+        cats = replies.get(str(message_id))
+        if cats:
+            t['replied'].add(str(prospect))
+            if cats & set(POSITIVE):
+                t['interested'].add(str(prospect))
+    current = int(c['sequence_version'])
+    out = []
+    for s in [s for s in steps if int(s['sequence_version']) == current]:
+        body = send.loads(s['template_text']) or {}
+        ordinal = int(s['ordinal'])
+        results = [{'wording': v, 'current': v == current, 'sent': t['sent'], 'replied': len(t['replied']),
+                    'interested': len(t['interested']), 'since': since.get((v, o))}
+                   for (v, o), t in sorted(tally.items(), key=lambda kv: -kv[0][0]) if o == ordinal]
+        out.append({'ordinal': ordinal, 'delay_business_days': int(s['delay_business_days']),
+                    'subject': body.get('subject') or '', 'body': body.get('body') or '',
+                    'placeholder': send.placeholder(body.get('subject'), body.get('body')),
+                    'approved': bool(s['approved_at']), 'results': results})
+    return {'id': str(ident), 'name': c['name'], 'status': c['status'], 'version': int(c['version']),
+            'sequence_version': current, 'emails': sorted(out, key=lambda e: e['ordinal'])}
