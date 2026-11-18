@@ -473,6 +473,37 @@ def request_number(session, business, user_id: str, payload: dict, *, now: Optio
     return _for_owner(_row(session, rid))
 
 
+def alert_new_request(r: dict, business_name: str) -> None:
+    """Email Mike that a business has asked for a number (RCP-2; Mike, 14 Nov
+    2026). Same mailbox and address as the profit alerts (PROFIT_ALERT_FROM_ACCOUNT,
+    PROFIT_ALERT_TO). Run after the request is saved, in the background. Never
+    raises: the request stands, and the admin card lists it, either way."""
+    try:
+        from services import profit_guard
+        base = (os.environ.get("APP_BASE_URL") or os.environ.get("FRONTEND_URL") or "").strip().rstrip("/")   # the app, not the API
+        how = (f"Keep their existing number {r.get('existing_number')}, forwarded to a new one"
+               if r.get("mode") == "keep_existing" else "A new local number")
+        setup = ("In their plan: set it up with them (no charge)" if r.get("in_plan") else
+                 f"Add-on: {'set it all up for them, £' + format(r['setup_fee_pence'] / 100, 'g') + ' to collect' if r.get('setup') == 'done_for_you' else 'they set it up themselves'}")
+        body = "\n".join([
+            f"{business_name} has asked for an AI receptionist phone number.",
+            "",
+            f"What: {how}" + (f", area {r['area_code']}" if r.get("area_code") else ""),
+            f"Set-up: {setup}",
+            f"Business: {r.get('legal_name')}, {r.get('address_line1')}"
+            + (f", {r['address_line2']}" if r.get("address_line2") else "") + f", {r.get('city')} {r.get('postcode')}",
+            "",
+            "Next:",
+            "1. In Twilio, Phone Numbers > Regulatory Compliance: create the address and bundle with these details.",
+            "2. In Business Hero admin, the Receptionist number requests card: paste the SIDs, Check, then Buy and set up.",
+            "",
+            f"{base}/admin" if base else "Business Hero admin dashboard",
+        ])
+        profit_guard.send_alert(f"New receptionist number request: {business_name}", body)
+    except Exception:
+        logger.exception("[RCP-2] couldn't alert Mike about request %s", r.get("id"))
+
+
 def current(session, business) -> dict:
     """What the receptionist settings page shows: the latest request, the
     number if there is one, and the forwarding guides."""
