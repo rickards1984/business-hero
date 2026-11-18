@@ -19,6 +19,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query, Request, status, Upl
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel as PydanticBaseModel, ValidationError
 from sqlmodel import Session, select
 from sqlalchemy import text, func, or_
@@ -1365,6 +1366,23 @@ async def update_support_ticket_admin(
     return ticket
 
 
+def _my_business(user_id: str, session: Session):
+    business_ctx = None
+    try:
+        business_ctx = get_business_for_user(user_id, session=session)
+    except ValueError as exc:
+        args = exc.args
+        if not (len(args) >= 2 and args[0] == "NO_BUSINESS"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    business = None
+    if business_ctx is not None:
+        business = session.exec(
+            select(Business).where(Business.id == business_ctx.id)
+        ).first()
+    return business_ctx, business
+
+
 @app.get("/v1/me", tags=["Business"])
 async def get_my_profile(
     auth_ctx=Depends(get_user_auth_context),
@@ -1399,19 +1417,9 @@ async def get_my_profile(
     The fix is to load the real row and read it. `getattr` defaults are gone;
     if a column is missing now, that is a schema problem and it should say so.
     """
-    business_ctx = None
-    try:
-        business_ctx = get_business_for_user(auth_ctx["user_id"])
-    except ValueError as exc:
-        args = exc.args
-        if not (len(args) >= 2 and args[0] == "NO_BUSINESS"):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-
-    business = None
-    if business_ctx is not None:
-        business = session.exec(
-            select(Business).where(Business.id == business_ctx.id)
-        ).first()
+    # STAB-1: on the request's own connection, off the event loop. This is the
+    # first request of every page; it used to take a second connection.
+    business_ctx, business = await run_in_threadpool(_my_business, auth_ctx["user_id"], session)
 
     # Build response with user info and business profile
     response = {
@@ -2452,7 +2460,7 @@ async def assistant_chat(
     # JWT itself rather than using a shared context dependency, so it was
     # reaching OpenAI with no subscription check at all — the most expensive
     # thing a non-paying account can do. Codex found it.
-    _assert_ai_access(session, user.id, data.business_id, "aria_chat")
+    await run_in_threadpool(_assert_ai_access, session, user.id, data.business_id, "aria_chat")
     
     result = await process_chat_message(
         user=user,
@@ -2490,8 +2498,8 @@ def _assert_ai_access(session, user_id, requested_business_id, feature_name):
         return
     try:
         business_ctx = get_business_for_user(
-            user_id, requested_business_id=requested_business_id
-        ) if requested_business_id else get_business_for_user(user_id)
+            user_id, requested_business_id=requested_business_id, session=session
+        ) if requested_business_id else get_business_for_user(user_id, session=session)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     business = session.exec(
@@ -2518,7 +2526,7 @@ async def text_to_speech(
     user = await verify_supabase_token(token)
 
     # DECISION 3: no AI for a read-only business. TTS spends money per call.
-    _assert_ai_access(session, user.id, None, "aria_voice")
+    await run_in_threadpool(_assert_ai_access, session, user.id, None, "aria_voice")
     
     try:
         data = await request.json()

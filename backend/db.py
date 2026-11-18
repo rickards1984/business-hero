@@ -41,17 +41,27 @@ def _pool_setting(name: str, default: int, highest: int) -> int:
     return value if 1 <= value <= highest else default
 
 
+# The most connections one process may hold. Supabase allows about 60 on the
+# Micro compute (session mode and direct alike), and Supabase's own services
+# use some. Production runs ONE uvicorn process (Procfile, railway.json): a
+# second process or replica doubles the total, so halve this before adding one.
+POOL_BUDGET = 30
+
+
 def pool_options() -> dict:
-    """STAB-1: sized for Supabase's direct connection (port 5432, no pooler),
-    which allows about 60 on the current compute; 20 leaves room for Supabase's
-    own services and a second Railway replica. The old default, 5 + 10 with a
-    30-second wait, ran out on 18 Nov 2026 and froze the app. A wait of 10
-    seconds fails one request quickly instead of queueing all of them.
-    DB_POOL_SIZE, DB_MAX_OVERFLOW and DB_POOL_TIMEOUT tune it without a
-    release; a value that isn't a sensible number is ignored."""
+    """STAB-1: the old default, 5 + 10 with a 30-second wait, ran out on 18 Nov
+    2026 and froze the app. 10 + 10 is 20 connections, inside POOL_BUDGET; a
+    wait of 10 seconds fails one request quickly instead of queueing all of
+    them. DB_POOL_SIZE, DB_MAX_OVERFLOW and DB_POOL_TIMEOUT tune it without a
+    release; a value that isn't a sensible number, or a pair over the budget,
+    is ignored in favour of the defaults (Codex code review 1, finding 3)."""
+    size = _pool_setting("DB_POOL_SIZE", 10, POOL_BUDGET)
+    overflow = _pool_setting("DB_MAX_OVERFLOW", 10, POOL_BUDGET)
+    if size + overflow > POOL_BUDGET:
+        size, overflow = 10, 10
     return {
-        "pool_size": _pool_setting("DB_POOL_SIZE", 10, 40),
-        "max_overflow": _pool_setting("DB_MAX_OVERFLOW", 10, 40),
+        "pool_size": size,
+        "max_overflow": overflow,
         "pool_timeout": _pool_setting("DB_POOL_TIMEOUT", 10, 60),
         "pool_pre_ping": True,
         "pool_recycle": 1800,

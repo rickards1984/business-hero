@@ -83,6 +83,16 @@ def _sqlite_business(session, bid):
                            subscription_status=r[3], is_active=bool(r[4]), trial_ends_at=r[5])
 
 
+def used(engine):
+    """A request session that already holds its connection, as it does once an
+    earlier dependency has queried. An unused one checks out nothing, so a
+    second, standalone connection would finish first and never overlap it
+    (Codex code review 1, finding 2)."""
+    s = Session(engine)
+    s.execute(text("SELECT 1"))
+    return s
+
+
 def request(method="GET", path="/v1/home/summary"):
     return SimpleNamespace(method=method, url=SimpleNamespace(path=path), state=SimpleNamespace())
 
@@ -96,7 +106,7 @@ def run(coro_fn):
 @pytest.mark.parametrize("token,business_id", [("owner", None), ("owner", A), ("admin", None), ("admin", B)])
 def test_the_business_context_uses_one_connection(pg_like, token, business_id):
     async def go():
-        with Session(pg_like.engine) as s:
+        with used(pg_like.engine) as s:
             return await auth.get_user_business_context(request(), token=token, business_id=business_id, session=s)
     out = run(go)
     assert pg_like.peak == 1, f"{pg_like.peak} connections held at once"
@@ -104,7 +114,7 @@ def test_the_business_context_uses_one_connection(pg_like, token, business_id):
 
 
 def test_the_business_lookup_can_share_the_session(pg_like):
-    with Session(pg_like.engine) as s:
+    with used(pg_like.engine) as s:
         ctx = assistant_chat.get_business_for_user(OWNER, session=s)
         assert assistant_chat.is_platform_admin(ADMIN, session=s) is True
         assert assistant_chat.get_business_by_id(B, session=s).id == B
@@ -117,7 +127,7 @@ def test_the_business_lookup_still_works_alone(pg_like):
 
 def test_a_non_member_is_still_refused(pg_like):
     async def go():
-        with Session(pg_like.engine) as s:
+        with used(pg_like.engine) as s:
             return await auth.get_user_business_context(request(), token="owner", business_id=B, session=s)
     with pytest.raises(HTTPException) as exc:
         run(go)
@@ -127,7 +137,7 @@ def test_a_non_member_is_still_refused(pg_like):
 @pytest.mark.parametrize("dep", ["get_current_user_business", "get_current_user_and_business"])
 def test_the_other_owner_dependencies_use_one_connection(pg_like, monkeypatch, dep):
     async def go():
-        with Session(pg_like.engine) as s:
+        with used(pg_like.engine) as s:
             return await getattr(dependencies, dep)(request(), token="owner", session=s)
     run(go)
     assert pg_like.peak == 1
@@ -135,7 +145,7 @@ def test_the_other_owner_dependencies_use_one_connection(pg_like, monkeypatch, d
 
 def test_the_admin_and_auth_contexts_use_one_connection(pg_like):
     async def go():
-        with Session(pg_like.engine) as s:
+        with used(pg_like.engine) as s:
             ctx = await auth.get_user_auth_context(request(), token="admin", session=s)
             admin = await auth.get_platform_admin_context({"user_id": ADMIN}, session=s)
             return ctx, admin
@@ -177,7 +187,7 @@ def test_a_slow_database_never_freezes_the_server(pg_like, monkeypatch, which):
     _slow(monkeypatch)
 
     async def go():
-        with Session(pg_like.engine) as s:
+        with used(pg_like.engine) as s:
             call = {
                 "business_context": lambda: auth.get_user_business_context(request(), token="owner", business_id=None,
                                                                            session=s),
@@ -198,7 +208,7 @@ def test_require_feature_never_freezes_the_server(pg_like, monkeypatch):
     dep = auth.require_feature("receptionist")
 
     async def go():
-        with Session(pg_like.engine) as s:
+        with used(pg_like.engine) as s:
             return await _with_heartbeat(dep({"user_id": OWNER, "business_id": A}, session=s))
     monkeypatch.setattr(auth, "assert_feature_access", lambda *a, **k: None)
     monkeypatch.setattr(auth, "_load_business", lambda session, bid: _sqlite_business(session, bid))
@@ -213,11 +223,100 @@ def test_the_api_key_business_never_freezes_the_server(pg_like, monkeypatch):
     monkeypatch.setattr(auth, "_business_by_api_key", slow)
 
     async def go():
-        with Session(pg_like.engine) as s:
+        with used(pg_like.engine) as s:
             return await _with_heartbeat(auth.get_current_business(x_api_key="key-" + A, authorization=None,
                                                                    auth_header=None, session=s))
     out, worst = run(go)
     assert out.id == A and worst < 0.2
+
+
+# ------------------------------------- /v1/me and the AI gate (review 1) ---
+
+@pytest.fixture
+def main_module(pg_like, monkeypatch):
+    import main
+    return main
+
+
+def test_me_uses_the_requests_connection(pg_like, main_module):
+    """The admin has no membership: the lookup runs both its queries and the
+    page still answers, on the one connection the request already holds."""
+    async def go():
+        with used(pg_like.engine) as s:
+            return await main_module.get_my_profile({"user_id": ADMIN, "is_platform_admin": True}, session=s)
+    out = run(go)
+    assert out["business_id"] is None and pg_like.peak == 1
+
+
+def test_me_never_freezes_the_server(pg_like, main_module, monkeypatch):
+    real = main_module.get_business_for_user
+
+    def slow(*a, **k):
+        time.sleep(0.4)
+        return real(*a, **k)
+    monkeypatch.setattr(main_module, "get_business_for_user", slow)
+
+    async def go():
+        with used(pg_like.engine) as s:
+            return await _with_heartbeat(main_module.get_my_profile({"user_id": ADMIN}, session=s))
+    _, worst = run(go)
+    assert worst < 0.2
+
+
+def test_the_ai_gate_uses_the_requests_connection(pg_like, main_module):
+    with used(pg_like.engine) as s:
+        with pytest.raises(HTTPException) as exc:
+            main_module._assert_ai_access(s, OWNER, B, "aria_chat")      # not a member of B
+    assert exc.value.status_code == 404 and pg_like.peak == 1
+
+
+@pytest.mark.parametrize("endpoint", ["chat", "tts"])
+def test_the_ai_gate_never_freezes_the_server(pg_like, main_module, monkeypatch, endpoint):
+    def slow(*a, **k):
+        time.sleep(0.4)
+        raise HTTPException(status_code=403, detail="stop here")
+    monkeypatch.setattr(main_module, "_assert_ai_access", slow)
+
+    async def verify(token):
+        return SimpleNamespace(id=OWNER, email="owner@example.invalid")
+    monkeypatch.setattr(main_module, "verify_supabase_token", verify)
+
+    async def go():
+        with used(pg_like.engine) as s:
+            if endpoint == "chat":
+                call = main_module.assistant_chat.__wrapped__ if hasattr(main_module.assistant_chat, "__wrapped__") \
+                    else main_module.assistant_chat
+                coro = call(request(), SimpleNamespace(business_id=None), token="t", session=s)
+            else:
+                call = main_module.text_to_speech.__wrapped__ if hasattr(main_module.text_to_speech, "__wrapped__") \
+                    else main_module.text_to_speech
+                coro = call(request(), token="t", session=s)
+
+            async def guarded():
+                try:
+                    return await coro
+                except HTTPException as exc:
+                    return exc.status_code
+            return await _with_heartbeat(guarded())
+    status_code, worst = run(go)
+    assert status_code == 403 and worst < 0.2
+
+
+def test_aria_chat_looks_up_off_the_event_loop(pg_like, monkeypatch):
+    def slow_admin(*a, **k):
+        time.sleep(0.4)
+        raise RuntimeError("stop here")
+    monkeypatch.setattr(assistant_chat, "is_platform_admin", slow_admin)
+
+    async def go():
+        async def guarded():
+            try:
+                await assistant_chat.process_chat_message(user=SimpleNamespace(id=OWNER, email=None), message="hi")
+            except RuntimeError:
+                return "stopped"
+        return await _with_heartbeat(guarded())
+    out, worst = run(go)
+    assert out == "stopped" and worst < 0.2
 
 
 # ------------------------------------------------------------ the pool ---
@@ -235,6 +334,24 @@ def test_the_pool_can_be_tuned_without_a_release(monkeypatch):
     monkeypatch.setenv("DB_POOL_TIMEOUT", "8")
     opts = db.pool_options()
     assert (opts["pool_size"], opts["max_overflow"], opts["pool_timeout"]) == (15, 5, 8)
+
+
+@pytest.mark.parametrize("size,overflow", [("30", "10"), ("40", "40"), ("25", "6")])
+def test_a_pool_over_the_budget_falls_back_to_the_defaults(monkeypatch, size, overflow):
+    monkeypatch.setenv("DB_POOL_SIZE", size)
+    monkeypatch.setenv("DB_MAX_OVERFLOW", overflow)
+    opts = db.pool_options()
+    assert (opts["pool_size"], opts["max_overflow"]) == (10, 10)
+    assert opts["pool_size"] + opts["max_overflow"] <= db.POOL_BUDGET
+
+
+def test_production_runs_one_process_so_the_budget_holds():
+    """POOL_BUDGET is per process. A second worker doubles the total."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[2]
+    for name in ("Procfile", "railway.json"):
+        text_ = (root / name).read_text()
+        assert "uvicorn main:app" in text_ and "--workers" not in text_, name
 
 
 @pytest.mark.parametrize("bad", ["0", "-1", "abc", "500"])

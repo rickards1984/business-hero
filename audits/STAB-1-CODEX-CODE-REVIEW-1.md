@@ -1,0 +1,17 @@
+# STAB-1 — Codex code review 1 (verbatim)
+
+Commit 667b29b. Model gpt-6-astra, read-only sandbox, 18 Nov 2026.
+
+---
+
+REQUEST CHANGES
+
+1. **High — Dashboard bootstrap still reproduces the original connection stall.** [backend/main.py:1404](/Users/michaelrickards/dev/bh2-STAB1/backend/main.py:1404). `/v1/me` receives a session already holding a connection from `get_user_auth_context`, then calls `get_business_for_user()` without that session, synchronously on the event loop. If the pool is exhausted, this second checkout blocks the server for up to 10 seconds, preventing other requests from progressing. `_assert_ai_access` at `main.py:2492` retains the same pattern for chat/TTS. These are **pre-existing paths outside the seven dependency bodies**, but the dashboard incident remains reproducible; the ticket’s request-wide claims overstate coverage. Pass the session and offload the complete DB operation, or explicitly record these unresolved paths.
+
+2. **Medium — Two connection regression tests pass when session forwarding is removed.** [backend/tests/test_stab1_connections.py:128](/Users/michaelrickards/dev/bh2-STAB1/backend/tests/test_stab1_connections.py:128). These tests start with an unused Session, which has not checked out a connection. The standalone lookup therefore finishes before the session acquires its connection. I removed forwarding in memory: both tests still passed with peak usage of one. Performing `SELECT 1` on the request session first produced peak usage of **two** with the same mutation. Add an already-used-session case, ideally through sibling FastAPI dependencies. Otherwise the regression these tests claim to prevent can return undetected.
+
+3. **Medium — Pool validation permits exceeding the stated database budget.** [backend/db.py:53](/Users/michaelrickards/dev/bh2-STAB1/backend/db.py:53). `DB_POOL_SIZE=40` and `DB_MAX_OVERFLOW=40` both pass validation, allowing **80 connections per process** against the ticket’s approximately 60-connection server, before Supabase services. Under sufficient concurrency, requests receive database connection failures. Validate the combined budget and document process/worker multiplication. The default 10+10 is reasonable for one process under that assumption; actual available capacity remains unverified. Supabase documents 60 connections for Micro, and port 5432 alone does not establish direct connectivity—it also serves session pooling. [Capacity documentation](https://supabase.com/docs/guides/platform/compute-and-disk), [connection modes](https://supabase.com/docs/guides/database/connecting-to-postgres).
+
+The line-by-line comparison found **no behavior regression in the seven changed dependencies**: membership checks, admin exemptions, DECISION 3 enforcement, `request.state.user_email`, and error mappings are preserved. Installed FastAPI 0.141.1 awaits sibling dependencies sequentially; the changed paths do not concurrently use the cached Session.
+
+Verification: six pool tests passed normally; all 17 remaining cases passed with an in-memory SQLite fixture substituted to respect read-only access. The owner business-context checkout tests detect the old double-checkout behavior; several other tests are compatibility checks or depend on newly introduced helpers, rather than clean old-code regression tests. Full `check.sh` was not run because it writes artifacts. No files were modified.

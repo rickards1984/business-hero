@@ -763,12 +763,14 @@ async def process_chat_message(
     """
     logger.info(f"[DEBUG] process_chat_message called: user_id={user.id}, conversation_id={conversation_id}, requested_business_id={business_id}")
     
-    is_admin = is_platform_admin(user.id)
+    # STAB-1: these lookups use their own short connections; off the event
+    # loop, so waiting for one never freezes every other request.
+    is_admin = await asyncio.to_thread(is_platform_admin, user.id)
     
     # Step 1: Resolve conversation if provided
     try:
-        resolved_conv_id, conv_business_id = resolve_conversation(
-            user.id, conversation_id, business_id, is_admin
+        resolved_conv_id, conv_business_id = await asyncio.to_thread(
+            resolve_conversation, user.id, conversation_id, business_id, is_admin
         )
     except ValueError as e:
         error_type = e.args[0] if e.args else "UNKNOWN"
@@ -791,7 +793,7 @@ async def process_chat_message(
     
     # Step 2: Resolve business context
     try:
-        business = get_business_for_user(user.id, effective_business_id)
+        business = await asyncio.to_thread(get_business_for_user, user.id, effective_business_id)
     except ValueError as e:
         error_type = e.args[0] if e.args else "UNKNOWN"
         error_msg = e.args[1] if len(e.args) > 1 else str(e)

@@ -114,9 +114,9 @@ def call_me(monkeypatch):
             ctx = BusinessContext(
                 id=str(BUSINESS_ID), name="New Body Gym LTD",
                 timezone="Europe/London", logo_url="https://example.invalid/logo.png")
-            monkeypatch.setattr(main, "get_business_for_user", lambda _uid: ctx)
+            monkeypatch.setattr(main, "get_business_for_user", lambda _uid, **_: ctx)
         else:
-            def _raise(_uid):
+            def _raise(_uid, **_):
                 raise ValueError("NO_BUSINESS", "no business for this user")
             monkeypatch.setattr(main, "get_business_for_user", _raise)
 
@@ -207,7 +207,7 @@ def test_the_business_row_is_actually_loaded(call_me):
         "user_id": USER_ID, "email": "e", "is_platform_admin": False}
     main_module.app.dependency_overrides[get_session] = lambda: session
     original = main_module.get_business_for_user
-    main_module.get_business_for_user = lambda _uid: ctx
+    main_module.get_business_for_user = lambda _uid, **_: ctx
     try:
         response = TestClient(main_module.app).get("/v1/me")
     finally:
