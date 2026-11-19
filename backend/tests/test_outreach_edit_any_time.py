@@ -245,6 +245,24 @@ def test_automatic_sending_carries_on_with_the_new_wording(three):
     assert held["sequence_version"] == 2 and held["granted_by"] == OWNER and out["automatic"] == "on"
 
 
+@pytest.mark.parametrize("stale", ["campaign_version", "sequence_version", "mailbox_id"])
+def test_a_permission_that_had_already_lapsed_stays_lapsed(three, stale):
+    """Codex OUT-28 review 1, finding 1: a daily-limit or sender change had
+    already switched automatic sending off; saving wording must not revive it."""
+    from services import outreach_autopilot, outreach_setup
+    h = three
+    _grant(h)
+    doc = outreach_setup._settings_doc(h.s, A)
+    grant = doc[outreach_autopilot.KEY][CAMPAIGN]
+    grant[stale] = str(uuid.uuid4()) if stale == "mailbox_id" else int(grant[stale]) - 1 if int(grant[stale]) > 1 else 99
+    outreach_setup._save_settings_doc(h.s, A, doc)
+    h.s.commit()
+    assert outreach_autopilot.valid_grant(h.s, h.b, CAMPAIGN)[0] is None
+    h.s.rollback()
+    out = save(h)
+    assert outreach_autopilot.valid_grant(h.s, h.b, CAMPAIGN)[0] is None and out["automatic"] == "off"
+
+
 def test_another_owners_permission_is_not_carried(three):
     """Only the owner saving can vouch for the new wording."""
     from services import outreach_autopilot
@@ -286,7 +304,8 @@ def _sent(h, version, ordinal, *, reply=None):
     step = h.s.execute(text("SELECT id FROM outreach_sequence_steps WHERE campaign_id = :c AND sequence_version = :v "
                             "AND ordinal = :o"), {"c": CAMPAIGN, "v": version, "o": ordinal}).scalar()
     message = add(h.s, "messages", campaign_id=CAMPAIGN, prospect_id=prospect, enrolment_id=str(uuid.uuid4()),
-                  step_id=str(step), sequence_version=version, mailbox_id=BOX, kind="sequence", origin="live",
+                  step_id=str(step), sequence_version=version, mailbox_id=BOX, kind="followup" if ordinal else "initial",
+                  origin="live",
                   direction="outbound", state="accepted", accepted_at=STAMP, subject="s", body="b")
     if reply:
         add(h.s, "replies", prospect_id=prospect, mailbox_id=BOX, matched_message_id=message, category=reply,
@@ -320,6 +339,17 @@ def test_unsent_and_failed_emails_are_not_counted(three, state, accepted):
     h.s.execute(text("UPDATE outreach_messages SET state = :s, accepted_at = :a"), {"s": state, "a": accepted})
     h.s.commit()
     assert manage().emails(h.s, h.b, CAMPAIGN)["emails"][0]["results"] == []
+
+
+def test_aria_s_answers_to_replies_never_count_as_sends_of_an_email(three):
+    """Codex OUT-28 review 1, finding 4: a bespoke reply is stored against the
+    first step; it is not a send of that email's wording."""
+    h = three
+    _sent(h, 1, 0, reply="question")
+    h.s.execute(text("UPDATE outreach_messages SET kind = 'bespoke'"))
+    _sent(h, 1, 0)
+    first = manage().emails(h.s, h.b, CAMPAIGN)["emails"][0]
+    assert [(r["sent"], r["replied"]) for r in first["results"]] == [(1, 0)]
 
 
 def test_another_businesss_campaign_is_not_found(three):

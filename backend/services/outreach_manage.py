@@ -337,7 +337,13 @@ def save_emails(session, business, user, ident, data):
     grant = outreach_autopilot._grants(session, bid).get(str(ident))
     if grant:
         automatic = 'off'
-        if str(grant.get('granted_by')) == str(user) and str(grant.get('mailbox_id')) == str(c['mailbox_id']):
+        # Only a permission still valid for the campaign as it was (OUT-11:
+        # same versions, same sender), granted by the owner saving now. One
+        # that had already lapsed, say after a sender or daily-limit change,
+        # stays lapsed (Codex OUT-28 review 1, finding 1).
+        if (str(grant.get('granted_by')) == str(user) and str(grant.get('mailbox_id')) == str(c['mailbox_id'])
+                and int(grant.get('campaign_version', -1)) == int(c['version'])
+                and int(grant.get('sequence_version', -1)) == int(c['sequence_version'])):
             doc = outreach_setup._settings_doc(session, bid)
             doc[outreach_autopilot.KEY][str(ident)] = dict(grant, campaign_version=int(c['version']) + 1,
                                                            sequence_version=version)
@@ -390,6 +396,7 @@ def emails(session, business, ident):
         "SELECT m.id, m.prospect_id, s.ordinal, s.sequence_version FROM outreach_messages m "
         "JOIN outreach_sequence_steps s ON s.business_id = m.business_id AND s.id = m.step_id "
         "WHERE m.business_id = :b AND m.campaign_id = :c AND m.direction = 'outbound' AND m.state = 'accepted' "
+        "AND m.kind IN ('initial', 'followup') "
         "AND m.accepted_at IS NOT NULL"), {'b': bid, 'c': str(ident)}).fetchall()
     replies = {}
     for message_id, category in session.execute(text(

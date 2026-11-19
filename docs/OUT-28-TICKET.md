@@ -43,7 +43,7 @@
 - leaves replied, paused, stopped, completed and suppressed enrolments alone;
 - withdraws every waiting (`proposed`) card of the campaign that was made from older wording (status `dismissed`), so a fresh one is made;
 - refuses with 409 while one of the campaign's emails is being sent (`executing`): "Try again in a minute";
-- if the campaign has an automatic-sending grant **from this same owner**, with the same sender, moves the grant to the new campaign and sequence version (E3, `automatic: "on"`). Anyone else's grant is left to lapse, as OUT-11 already does on a change (`automatic: "off"`), and the screen says so.
+- if the campaign has an automatic-sending grant **from this same owner**, with the same sender, **and still valid for the campaign as it was** (same campaign and sequence versions: Codex review 1, finding 1), moves the grant to the new campaign and sequence version (E3, `automatic: "on"`). Anyone else's grant is left to lapse, as OUT-11 already does on a change (`automatic: "off"`), and the screen says so.
 - **Locks in the send path's order** (`prepare_claim`):
   1. `lock_business` (the settings rows);
   2. the business row and owner membership (`_locked_authority`);
@@ -58,13 +58,15 @@
 - the subject and message;
 - the gap before it;
 - any placeholder found;
-- **results for each wording it has had**: sent (provider-accepted only), replied (distinct people), interested (`interested` or `referral`), and the date that wording started.
+- **results for each wording it has had**: sent (provider-accepted `initial` and `followup` only; Aria's `bespoke` answers to replies never count, per Codex review 1, finding 4), replied (distinct people), interested (`interested` or `referral`), and the date that wording started.
 
 It needs outreach (with retained history) and is scoped to the business.
 
 **A4. The Emails tab (`OutreachEmails.tsx`):**
 - the campaigns as cards, with a plain status: Sending, Waiting for your approval, or Not started;
 - the 3 emails as readable cards: Email N, when it's sent, subject, a preview, and results now and for earlier wordings;
+- **Changes to all three emails build up into one save** (Codex review 1, finding 2): New Body's three "[Your Name]"s are fixed one by one, then saved once. A bar at the bottom lists what still needs fixing, each with a **Fix** button, alongside **Discard changes** and **Save and use from now on**.
+- **The save uses the snapshot taken when editing began** (review 1, finding 3): its three emails and its version (`lib/outreachEmailDraft.ts`). If the emails change elsewhere meanwhile, saving is blocked with a plain warning, and the server would refuse it anyway (409).
 - **Edit** opens an inline editor:
   - placeholder and curly-bracket warnings as you type (the server's check is final);
   - **Ask Aria to improve it**, which uses the existing redraft endpoint and saves nothing until the owner chooses "Use this version";
@@ -104,14 +106,20 @@ Built to the mockup:
   - The grant carries for the same owner only.
   - Per-wording results count only accepted emails.
   - The wizard path moves people too.
-- [x] 14 mutations, each removing one rule, are each caught.
+- [x] 14 mutations, each removing one rule, are each caught. Review 1 added 2 more (a lapsed grant, bespoke counting), and both are caught.
+- [x] `test_outreach_email_draft.py`: the editor's draft logic, bundled with esbuild and run under Node.
+  - New Body's three placeholders are fixed in one save.
+  - The snapshot version is the one saved.
+  - Out-of-date drafts are detected.
+  - 4 mutations, all caught.
 - [x] `test_outreach_edit_any_time_pg.py`: 2 tests on the local PostgreSQL harness.
   - A save on Postgres: native jsonb, and the next email sent with the new wording.
   - A save racing an approval at the shared lock: never stuck, never stale wording.
     - In every run (6 of 6) the approval won and the save was refused with "sending right now".
     - The deadlock the lock reorder guards against was **not** reproduced: the test passed with the old order too. The reorder is argued from `prepare_claim`'s order, not proven by this test.
 - [x] `./check.sh full` is green, and the production build passes.
-- [ ] Codex review preserved in `audits/`.
+- [x] Codex review 1 preserved (`audits/OUT-28-CODEX-CODE-REVIEW-1.md`): it requested changes, and all 4 findings were acted on.
+- [ ] Codex review 2.
 - [ ] Mike: edit one email on MSC or New Body, and see "N people will get the new wording from their next email".
 
 ### Part B

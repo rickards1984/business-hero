@@ -6,6 +6,7 @@ import {
 } from '@mui/material';
 import { apiRequest } from '@/lib/queryClient';
 import { outreachError, useOutreachData, useRefreshOutreach } from '@/hooks/useOutreachData';
+import { changed, Draft, DraftEmail, edit, payload, Problem, problems, stale, startDraft } from '@/lib/outreachEmailDraft';
 import { useShellMobile } from '@/hooks/useShellMobile';
 
 // OUT-28a (Mike, 18 Nov 2026): edit an outreach email at any time, in plain
@@ -19,9 +20,6 @@ export interface CampaignEmails { id: string; name: string; status: string; vers
 interface Campaign { id: string; name: string; status: string; brand_id: string }
 
 const WHEN = ['Sent first', '5 working days later', '7 more working days later'];
-// A first warning while typing. The server's check is the one that counts.
-const PLACEHOLDER = /\[[^\]\n]{1,40}\]|\{\{?[^}\n]{0,40}\}\}?|<[A-Z][A-Z _]{1,30}>/;
-const CURLY = /[{}]/;
 
 export function campaignLabel(status: string): { text: string; tone: 'success' | 'warning' | 'default' } {
   if (status === 'ready' || status === 'running') return { text: 'Sending', tone: 'success' };
@@ -78,28 +76,89 @@ export default function OutreachEmails({ businessId, owner, onSettings }: { busi
 function CampaignEmailsPanel({ businessId, campaignId, owner, onSettings }: { businessId: string; campaignId: string; owner: boolean; onSettings: () => void }) {
   const q = useOutreachData(businessId, `campaigns/${campaignId}/emails`);
   const data = q.data as unknown as CampaignEmails | undefined;
-  const [editing, setEditing] = useState<number | null>(null);
-  const [notice, setNotice] = useState('');
+  const refresh = useRefreshOutreach(businessId);
+  const client = useQueryClient();
+  // The snapshot is taken when editing begins and never follows a background
+  // refresh: what is saved is what the owner started from (review 1, finding 3).
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [open, setOpen] = useState<number | null>(null);
+  const [notice, setNotice] = useState(''), [error, setError] = useState(''), [busy, setBusy] = useState(false);
   if (q.isLoading) return <Typography>Loading the emails…</Typography>;
   if (q.isError || !data) return <Alert severity="warning">{outreachError(q.error)} <Button onClick={() => q.refetch()}>Try again</Button></Alert>;
   const fixes = data.emails.filter(e => e.placeholder);
+  const issues = draft ? problems(draft) : [];
+  const outOfDate = !!draft && stale(draft, data.version);
+  const begin = (ordinal: number) => {
+    setNotice(''); setError('');
+    if (!draft) setDraft(startDraft(data));
+    setOpen(ordinal);
+  };
+  const discard = () => { setDraft(null); setOpen(null); setError(''); };
+
+  async function save() {
+    if (!draft) return;
+    setBusy(true); setError('');
+    try {
+      const out = await (await apiRequest('POST', `/v1/outreach/campaigns/${campaignId}/emails`, payload(draft))).json();
+      setDraft(null); setOpen(null);
+      refresh();
+      client.invalidateQueries({ queryKey: ['outreach-dashboard', businessId] });
+      const people = out.moved === 1 ? '1 person' : `${out.moved} people`;
+      setNotice(
+        (out.moved ? `Saved. ${people} already in this campaign will get the new wording from their next email.` : 'Saved. Everyone you email from now on gets the new wording.')
+        + (out.automatic === 'off' ? ' Automatic sending for this campaign is off: switch it back on in Campaign settings if you want Aria to carry on by herself.' : '')
+        + (out.automatic === 'on' ? ' Aria carries on sending it for you.' : ''));
+    } catch (e) { setError(outreachError(e)); } finally { setBusy(false); }
+  }
+
   return (
     <Stack spacing={1.75}>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} justifyContent="space-between" alignItems={{ sm: 'baseline' }}>
         <Typography variant="h2">Your 3 emails</Typography>
         <Typography variant="body2">Change any of them whenever you like. Each one stops if the person replies.</Typography>
       </Stack>
-      {fixes.length > 0 && (
+      {fixes.length > 0 && !draft && (
         <Alert severity="warning">
           {fixes.length === 1 ? `Email ${fixes[0].ordinal + 1} still says` : `${fixes.length} emails still say`} “{fixes[0].placeholder}”.
-          Nothing is sent from this campaign until it's replaced. Open the email, delete it (your name and sign-off are added for you), then save.
+          Nothing is sent from this campaign until it's replaced. Press Edit on {fixes.length === 1 ? 'it' : 'each one'}, delete it
+          (your name and sign-off are added for you), then save once at the end.
         </Alert>
       )}
       {notice && <Alert severity="success" onClose={() => setNotice('')}>{notice}</Alert>}
-      {data.emails.map(email => editing === email.ordinal
-        ? <EmailEditor key={email.ordinal} businessId={businessId} campaign={data} email={email}
-            onCancel={() => setEditing(null)} onSaved={(message) => { setEditing(null); setNotice(message); }} />
-        : <EmailCard key={email.ordinal} email={email} owner={owner} busy={editing !== null} onEdit={() => { setNotice(''); setEditing(email.ordinal); }} />)}
+      {data.emails.map(email => {
+        const current = draft?.emails.find(e => e.ordinal === email.ordinal);
+        return open === email.ordinal && draft && current
+          ? <EmailEditor key={email.ordinal} campaignId={campaignId} draft={draft} email={email} value={current} busy={busy}
+              onChange={change => setDraft(edit(draft, email.ordinal, change))} onDone={() => setOpen(null)} />
+          : <EmailCard key={email.ordinal} email={email} owner={owner} busy={busy}
+              pending={!!draft && changed(draft, email.ordinal)} problem={issues.find(i => i.ordinal === email.ordinal)}
+              shown={current} onEdit={() => begin(email.ordinal)} />;
+      })}
+      {draft && (
+        <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, position: 'sticky', bottom: 'calc(12px + env(safe-area-inset-bottom, 0px))', bgcolor: 'background.paper', boxShadow: 3 }}>
+          <Stack spacing={1.25}>
+            {outOfDate && <Alert severity="warning">These emails were changed somewhere else since you started. Discard your changes to see the latest wording, then edit again.</Alert>}
+            {issues.map(i => (
+              <Alert key={i.ordinal} severity="warning" action={<Button color="inherit" size="small" onClick={() => setOpen(i.ordinal)}>Fix</Button>}>
+                Email {i.ordinal + 1} {i.kind === 'placeholder' ? `still says “${i.text}”` : i.kind === 'curly' ? "has curly brackets { }, which can't be sent" : i.text}.
+              </Alert>
+            ))}
+            {error && <Alert severity="error">{error}</Alert>}
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} justifyContent="space-between" alignItems={{ sm: 'center' }}>
+              <Typography variant="body2">
+                {changed(draft) ? `${draft.emails.filter(e => changed(draft, e.ordinal)).length} of 3 emails changed, not saved yet.` : 'No changes yet.'}
+                {' '}People already waiting get the new wording from their next email. Emails already sent don't change.
+              </Typography>
+              <Stack direction="row" spacing={1} sx={{ flexShrink: 0 }}>
+                <Button onClick={discard} disabled={busy}>Discard changes</Button>
+                <Button variant="contained" onClick={save} disabled={busy || outOfDate || issues.length > 0 || !changed(draft)}>
+                  {busy ? <CircularProgress size={18} color="inherit" /> : 'Save and use from now on'}
+                </Button>
+              </Stack>
+            </Stack>
+          </Stack>
+        </Paper>
+      )}
       <Stack direction="row" justifyContent="flex-end">
         <Button onClick={onSettings}>Campaign settings: name, sender, daily limit, automatic sending</Button>
       </Stack>
@@ -107,20 +166,24 @@ function CampaignEmailsPanel({ businessId, campaignId, owner, onSettings }: { bu
   );
 }
 
-function EmailCard({ email, owner, busy, onEdit }: { email: CampaignEmail; owner: boolean; busy: boolean; onEdit: () => void }) {
+function EmailCard({ email, owner, busy, pending, problem, shown, onEdit }: { email: CampaignEmail; owner: boolean; busy: boolean; pending: boolean; problem?: Problem; shown?: DraftEmail; onEdit: () => void }) {
   const current = email.results.find(r => r.current);
   const earlier = email.results.filter(r => !r.current);
-  const preview = email.body.split('\n').map(l => l.trim()).filter(Boolean).slice(0, 2).join(' ');
+  const subject = shown?.subject ?? email.subject, body = shown?.body ?? email.body;
+  const preview = body.split('\n').map(l => l.trim()).filter(Boolean).slice(0, 2).join(' ');
+  const flag = problem ? (problem.kind === 'placeholder' ? `Says “${problem.text}”` : problem.kind === 'curly' ? 'Has { }' : 'Incomplete')
+    : (!shown && email.placeholder ? `Says “${email.placeholder}”` : null);
   return (
-    <Paper variant="outlined" component="article" aria-label={`Email ${email.ordinal + 1}`} sx={{ p: { xs: 2, sm: 2.5 }, borderRadius: 4 }}>
+    <Paper variant="outlined" component="article" aria-label={`Email ${email.ordinal + 1}`} sx={{ p: { xs: 2, sm: 2.5 }, borderRadius: 4, borderColor: pending ? 'primary.main' : 'divider' }}>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} justifyContent="space-between" alignItems={{ sm: 'center' }}>
         <Stack spacing={0.75} sx={{ minWidth: 0 }}>
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
             <Chip size="small" color="primary" label={`Email ${email.ordinal + 1}`} />
             <Typography variant="body2">{WHEN[email.ordinal]}</Typography>
-            {email.placeholder && <Chip size="small" color="warning" variant="outlined" label={`Says “${email.placeholder}”`} />}
+            {pending && <Chip size="small" color="primary" variant="outlined" label="Changed, not saved yet" />}
+            {flag && <Chip size="small" color="warning" variant="outlined" label={flag} />}
           </Stack>
-          <Typography sx={{ fontWeight: 700, color: 'text.primary' }}>{email.subject}</Typography>
+          <Typography sx={{ fontWeight: 700, color: 'text.primary' }}>{subject}</Typography>
           <Typography variant="body2" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{preview}</Typography>
           <Typography variant="body2" sx={{ color: 'text.primary', fontWeight: 600 }}>
             {current ? resultsLine(current) : 'Not sent with this wording yet'}
@@ -135,40 +198,17 @@ function EmailCard({ email, owner, busy, onEdit }: { email: CampaignEmail; owner
   );
 }
 
-function EmailEditor({ businessId, campaign, email, onCancel, onSaved }: { businessId: string; campaign: CampaignEmails; email: CampaignEmail; onCancel: () => void; onSaved: (message: string) => void }) {
-  const refresh = useRefreshOutreach(businessId);
-  const client = useQueryClient();
+function EmailEditor({ campaignId, draft, email, value, busy, onChange, onDone }: { campaignId: string; draft: Draft; email: CampaignEmail; value: DraftEmail; busy: boolean; onChange: (change: { subject?: string; body?: string }) => void; onDone: () => void }) {
   const mobile = useShellMobile();
-  const [subject, setSubject] = useState(email.subject);
-  const [body, setBody] = useState(email.body);
-  const [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [asking, setAsking] = useState(false), [notes, setNotes] = useState(''), [thinking, setThinking] = useState(false);
-  const [suggestion, setSuggestion] = useState<{ subject: string; body: string } | null>(null);
-  const found = (subject + '\n' + body).match(PLACEHOLDER)?.[0];
-  const curly = CURLY.test(subject + body) && !found;
-  const blank = !subject.trim() || !body.trim();
-  const unchanged = subject === email.subject && body === email.body;
-  const others = campaign.emails.map(e => e.ordinal === email.ordinal ? { ordinal: e.ordinal, subject, body } : { ordinal: e.ordinal, subject: e.subject, body: e.body });
-
-  async function save() {
-    setBusy(true); setError('');
-    try {
-      const out = await (await apiRequest('POST', `/v1/outreach/campaigns/${campaign.id}/emails`, { version: campaign.version, emails: others })).json();
-      refresh();
-      client.invalidateQueries({ queryKey: ['outreach-dashboard', businessId] });
-      const people = out.moved === 1 ? '1 person' : `${out.moved} people`;
-      onSaved(
-        (out.moved ? `Saved. ${people} already in this campaign will get the new wording from their next email.` : 'Saved. Everyone you email from now on gets the new wording.')
-        + (out.automatic === 'off' ? ' Automatic sending was switched on by someone else, so it is now off for this campaign: switch it back on in Campaign settings.' : '')
-        + (out.automatic === 'on' ? ' Aria carries on sending it for you.' : ''));
-    } catch (e) { setError(outreachError(e)); } finally { setBusy(false); }
-  }
+  const [suggestion, setSuggestion] = useState<{ subject: string; body: string } | null>(null), [error, setError] = useState('');
+  const problem = problems(draft).find(p => p.ordinal === email.ordinal);
 
   async function askAria() {
     setThinking(true); setError(''); setSuggestion(null);
     try {
-      const current = campaign.emails.map(e => e.ordinal === email.ordinal ? { subject, body } : { subject: e.subject, body: e.body });
-      const out = await (await apiRequest('POST', `/v1/outreach/setup/campaigns/${campaign.id}/redraft`,
+      const current = draft.emails.map(e => ({ subject: e.subject, body: e.body }));
+      const out = await (await apiRequest('POST', `/v1/outreach/setup/campaigns/${campaignId}/redraft`,
         { notes: `Only improve email ${email.ordinal + 1}; keep the others as they are. ${notes}`.trim(), current })).json();
       setSuggestion(out.emails?.[email.ordinal] || null);
     } catch (e) { setError(outreachError(e)); } finally { setThinking(false); }
@@ -177,31 +217,23 @@ function EmailEditor({ businessId, campaign, email, onCancel, onSaved }: { busin
   return (
     <Paper variant="outlined" component="article" aria-label={`Email ${email.ordinal + 1}, being edited`} sx={{ p: { xs: 2, sm: 3 }, borderRadius: 4, borderWidth: 2, borderColor: 'primary.main' }}>
       <Stack spacing={2}>
-        <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between" flexWrap="wrap" useFlexGap>
-          <Stack direction="row" spacing={1} alignItems="center"><Chip size="small" color="primary" label={`Email ${email.ordinal + 1}`} /><Typography variant="body2">{WHEN[email.ordinal]}</Typography></Stack>
-        </Stack>
-        <TextField label="Subject" value={subject} onChange={e => setSubject(e.target.value.replace(/\n/g, ' '))} disabled={busy} fullWidth />
-        <TextField label="Message" value={body} onChange={e => setBody(e.target.value)} disabled={busy} fullWidth multiline minRows={8}
+        <Stack direction="row" spacing={1} alignItems="center"><Chip size="small" color="primary" label={`Email ${email.ordinal + 1}`} /><Typography variant="body2">{WHEN[email.ordinal]}</Typography></Stack>
+        <TextField label="Subject" value={value.subject} onChange={e => onChange({ subject: e.target.value })} disabled={busy} fullWidth />
+        <TextField label="Message" value={value.body} onChange={e => onChange({ body: e.target.value })} disabled={busy} fullWidth multiline minRows={8}
           helperText="Write it exactly as it should arrive. Your name and sign-off are added at the bottom for you." />
-        {found && <Alert severity="warning">“{found}” needs replacing with the real words. If it's your name or sign-off, just delete it.</Alert>}
-        {curly && <Alert severity="warning">Emails are sent exactly as written, so curly brackets {'{ }'} can't be used. Write the words out instead.</Alert>}
+        {problem?.kind === 'placeholder' && <Alert severity="warning">“{problem.text}” needs replacing with the real words. If it's your name or sign-off, just delete it.</Alert>}
+        {problem?.kind === 'curly' && <Alert severity="warning">Emails are sent exactly as written, so curly brackets {'{ }'} can't be used. Write the words out instead.</Alert>}
         {error && <Alert severity="error">{error}</Alert>}
-        <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} justifyContent="space-between" alignItems={{ md: 'center' }}>
-          <Typography variant="body2" sx={{ maxWidth: 440 }}>People already waiting get the new wording from their next email. Emails already sent don't change.</Typography>
-          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-            <Button variant="outlined" onClick={() => setAsking(true)} disabled={busy}>Ask Aria to improve it</Button>
-            <Button onClick={onCancel} disabled={busy}>Cancel</Button>
-            <Button variant="contained" onClick={save} disabled={busy || blank || !!found || curly || unchanged}>
-              {busy ? <CircularProgress size={18} color="inherit" /> : 'Save and use from now on'}
-            </Button>
-          </Stack>
+        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap justifyContent="flex-end">
+          <Button variant="outlined" onClick={() => setAsking(true)} disabled={busy}>Ask Aria to improve it</Button>
+          <Button variant="contained" onClick={onDone} disabled={busy}>Done with this email</Button>
         </Stack>
       </Stack>
       <Dialog open={asking} onClose={() => !thinking && setAsking(false)} fullScreen={mobile} fullWidth maxWidth="sm">
         <DialogTitle>Ask Aria to improve email {email.ordinal + 1}</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ pt: 1 }}>
-            <Typography variant="body2">Tell Aria what you'd like: shorter, warmer, more direct, something to mention. Nothing is saved until you choose to use her version and save it.</Typography>
+            <Typography variant="body2">Tell Aria what you'd like: shorter, warmer, more direct, something to mention. Nothing is saved until you use her version and press Save.</Typography>
             <TextField multiline minRows={2} value={notes} onChange={e => setNotes(e.target.value)} disabled={thinking}
               placeholder="e.g. Make it shorter and mention our free trial week." />
             {thinking && <Stack direction="row" spacing={1} alignItems="center"><CircularProgress size={18} /><Typography variant="body2">Aria is rewriting it…</Typography></Stack>}
@@ -216,7 +248,7 @@ function EmailEditor({ businessId, campaign, email, onCancel, onSaved }: { busin
         <DialogActions>
           <Button onClick={() => setAsking(false)} disabled={thinking}>Close</Button>
           <Button variant="outlined" onClick={askAria} disabled={thinking}>{suggestion ? 'Try again' : 'Ask Aria'}</Button>
-          {suggestion && <Button variant="contained" onClick={() => { setSubject(suggestion.subject); setBody(suggestion.body); setAsking(false); setSuggestion(null); }}>Use this version</Button>}
+          {suggestion && <Button variant="contained" onClick={() => { onChange({ subject: suggestion.subject, body: suggestion.body }); setAsking(false); setSuggestion(null); }}>Use this version</Button>}
         </DialogActions>
       </Dialog>
     </Paper>
