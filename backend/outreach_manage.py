@@ -83,6 +83,34 @@ class Sequence(Body):
         return self
 
 
+class EmailText(Body):
+    ordinal: int = Field(ge=0, le=2, strict=True)
+    subject: str = Field(min_length=1, max_length=998)
+    body: str = Field(min_length=1, max_length=20000)
+
+    @model_validator(mode='after')
+    def valid(self):
+        if not self.subject.strip() or not self.body.strip():
+            raise ValueError('Each email needs a subject and a message')
+        if '\r' in self.subject or '\n' in self.subject:
+            raise ValueError('A subject is one line')
+        if any(token in self.subject + self.body for token in ('{', '}', '${', '<%')):
+            raise ValueError('Emails are sent exactly as written: curly brackets { } aren\'t supported')
+        return self
+
+
+class SaveEmails(Body):
+    """OUT-28a: the owner's "Save and use from now on" (saving approves)."""
+    version: int = Field(ge=1, strict=True)
+    emails: list[EmailText] = Field(min_length=3, max_length=3)
+
+    @model_validator(mode='after')
+    def ordered(self):
+        if sorted(e.ordinal for e in self.emails) != [0, 1, 2]:
+            raise ValueError('All three emails are needed')
+        return self
+
+
 class Approval(Body):
     version: int = Field(ge=1, strict=True)
     sequence_version: int = Field(ge=1, strict=True)
@@ -151,6 +179,40 @@ def edit(campaign_id: UUID, body: CampaignPatch, context=Depends(get_user_busine
 @router.put('/campaigns/{campaign_id}/sequence')
 def sequence(campaign_id: UUID, body: Sequence, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
     return execute(manage.sequence, session, context, body, campaign_id)
+
+
+@router.get('/campaigns/{campaign_id}/emails')
+def campaign_emails(campaign_id: UUID, context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    """OUT-28a: the three emails in plain words, with how each has done."""
+    business = auth._load_business(session, context['business_id'])
+    auth.assert_feature_access(business, 'outreach', retained_history=True)
+    try:
+        return manage.emails(session, business, str(campaign_id))
+    except ActionRefused as exc:
+        session.rollback()
+        raise HTTPException(exc.status_code, exc.detail) from None
+
+
+@router.post('/campaigns/{campaign_id}/emails')
+def save_campaign_emails(campaign_id: UUID, body: SaveEmails, context=Depends(get_user_business_context),
+                         session: Session = Depends(get_session)):
+    """OUT-28a: save and approve the wording; people part way through get it next."""
+    out = execute(manage.save_emails, session, context, body, campaign_id)
+    _prepare_now(session, context)
+    return out
+
+
+def _prepare_now(session, context):
+    """Cards for anyone now due, straight away rather than at the next hourly
+    pass. Best effort: the hourly pass makes them anyway."""
+    import logging
+    from services import outreach_research
+    try:
+        business = auth._load_business(session, context['business_id'])
+        outreach_research.prepare_due_cards(session, business)
+    except Exception as exc:
+        session.rollback()
+        logging.getLogger(__name__).warning('[Outreach] cards after an edit deferred: %s', type(exc).__name__)
 
 
 @router.post('/campaigns/{campaign_id}/approve-templates')
