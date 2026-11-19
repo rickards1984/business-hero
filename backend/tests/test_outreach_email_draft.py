@@ -7,8 +7,10 @@ own esbuild and runs it under Node. Codex OUT-28 review 1:
               one picked up by a background refresh.
 """
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -60,15 +62,20 @@ console.log(JSON.stringify(out));
 @pytest.fixture(scope="module")
 def result(tmp_path_factory):
     work = tmp_path_factory.mktemp("draft")
-    entry = CLIENT / "draft-scenarios.test-entry.ts"
-    entry.write_text(SCENARIOS)
+    # The entry must sit in the client folder so './src/…' resolves. A unique,
+    # exclusively created name: never overwrites a real file, and parallel runs
+    # never remove each other's (Codex OUT-28 review 2, finding 5).
+    fd, name = tempfile.mkstemp(prefix=".draft-scenarios-", suffix=".ts", dir=CLIENT)
+    entry = Path(name)
     try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(SCENARIOS)
         bundle = work / "bundle.mjs"
         subprocess.run([str(ESBUILD), str(entry), "--bundle", "--platform=node", "--format=esm",
                         f"--outfile={bundle}", "--log-level=error"], check=True, cwd=CLIENT)
         run = subprocess.run([NODE, str(bundle)], check=True, capture_output=True, text=True)
     finally:
-        entry.unlink()
+        entry.unlink(missing_ok=True)
     return json.loads(run.stdout)
 
 

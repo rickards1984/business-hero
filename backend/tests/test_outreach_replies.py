@@ -839,3 +839,16 @@ def test_a_reply_already_recorded_is_not_read_again(r, monkeypatch):
     scan(r)
     assert not [1 for t, w, locked in reads if t == 'email_messages' and locked]
     assert r.s.execute(text('SELECT count(*) FROM outreach_replies')).scalar_one() == 1
+
+
+def test_an_answer_sent_through_the_real_reply_path_never_counts_as_a_send_of_an_email(r):
+    """OUT-28a (Codex OUT-28 review 2, finding 4): the per-email results on the
+    Emails tab are unchanged by Aria's bespoke answer, which is stored against
+    the first step."""
+    from services import outreach_manage
+    card = ready_answer(r)
+    before = outreach_manage.emails(r.s, r.b, CAMPAIGN)["emails"][0]["results"]
+    service_approve(r, card)
+    assert r.s.execute(text("SELECT kind, state FROM outreach_messages WHERE action_id=:a"),
+                       {'a': card['id']}).one() == ('bespoke', 'accepted')
+    assert outreach_manage.emails(r.s, r.b, CAMPAIGN)["emails"][0]["results"] == before
