@@ -122,7 +122,7 @@ Built to the mockup:
 - [x] Codex review 2 (`audits/OUT-28-CODEX-CODE-REVIEW-2.md`): findings 1–4 confirmed resolved. It requested changes for:
   - **finding 5:** the Node test's temporary entry file. It is now created exclusively, under a unique name, and only that file is removed;
   - **its note on finding 4:** a test now sends Aria's answer through the real reply path, and the per-email results are unchanged. The test is mutation-checked.
-- [ ] Codex review 3.
+- [x] Codex review 3 (`audits/OUT-28-CODEX-CODE-REVIEW-3.md`): APPROVE.
 - [ ] Mike: edit one email on MSC or New Body, and see "N people will get the new wording from their next email".
 
 ### Part B
