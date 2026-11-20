@@ -456,3 +456,24 @@ def test_preflight_trap5_catches_a_secret_in_a_binary_file(tmp_path):
     run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "blob"], cwd=d)
     trap = run([str(d / "scripts" / "preflight.sh")], cwd=d, env={"PREFLIGHT_BASE": base}).stdout.split("TRAP 5")[1]
     assert "possible secret" in trap and "backend/blob.bin" in trap, trap
+
+
+
+def test_preflight_trap5_fails_when_the_scanner_itself_errors(tmp_path):
+    """Codex AI-1a review 2, finding 1: a grep error (exit 2) was read as
+    'no secret'. A grep that fails on the secret pattern must fail the scan."""
+    d = _trap5_repo(tmp_path)
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    real = run(["sh", "-c", "command -v grep"]).stdout.strip()
+    (shim / "grep").write_text(f'#!/bin/sh\ncase "$*" in *-acEi*) exit 2;; esac\nexec {real} "$@"\n')
+    (shim / "grep").chmod(0o755)
+    (d / "backend" / "clean.py").write_text("X = 1\n")
+    base = run(["git", "rev-parse", "HEAD"], cwd=d).stdout.strip()
+    run(["git", "add", "-A"], cwd=d)
+    run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "clean"], cwd=d)
+    import os
+    out = run([str(d / "scripts" / "preflight.sh")], cwd=d,
+              env={"PREFLIGHT_BASE": base, "PATH": f"{shim}:{os.environ['PATH']}"}).stdout
+    trap = out.split("TRAP 5")[1]
+    assert "UNREADABLE backend/clean.py" in trap and "possible secret" in trap, trap

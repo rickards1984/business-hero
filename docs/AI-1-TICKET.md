@@ -110,6 +110,13 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
   - **Finding 4, voice and speech.** These are pinned to models their code is known to serve (`compatible`). Speech stays on `tts-1`, because it's costed at that rate.
   - **Finding 5, the refresh race.** `invalidate()` bumps a generation, so a load that began before a change is dropped. Loads are serialised, so an older read never overwrites a newer one.
   - **Finding 6, the guard.** It is now syntax-aware (it parses the code): spacing, line breaks and constants are caught, comments and plain text are not, with 12 regression examples.
+- **Codex AI-1a review 2:** findings 2 and 3 confirmed. Changes made for:
+  - **finding 1:** a scanner error now fails TRAP 5, tested with a failing `grep` shim;
+  - **finding 4:** speech is costed per model (`tts-1-hd` and `gpt-4o-mini-tts` at 2.4p per 1,000 characters, an unknown model at the highest rate). That also mends voice previews' existing under-recording;
+  - **finding 5:** invalidation and a load's publication share one lock;
+  - **finding 6:** the guard resolves model-id constants anywhere, annotated or not.
+
+  All are mutation-checked.
 - **AI-1b: chat on the router.**
   - `chat` / `chat_complex` rules and "Think harder";
   - tool calls translated for Anthropic and xAI;

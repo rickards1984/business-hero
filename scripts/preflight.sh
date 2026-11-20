@@ -194,9 +194,23 @@ if [ -n "$RANGE" ] && [ "$DIFF_OK" -eq 1 ] && [ -n "$CHANGED" ]; then
       printf 'UNREADABLE %s\n' "$f"
       continue
     fi
-    N=$(printf '%s\n' "$ADDED" | grep -aE '^\+' | grep -avE '^\+\+\+ ' \
-      | grep -acEi 'sk-ant-[a-z0-9]|sk-proj-[a-z0-9]|xai-[a-z0-9]{20}|SUPABASE_SERVICE_ROLE|service_role.*ey[A-Za-z0-9]' || true)
-    [ -n "$N" ] && [ "$N" -gt 0 ] 2>/dev/null && printf '%s\n' "$f"
+    # grep exits 1 for "no lines" and 2 or more for an error: only 0 and 1
+    # are results; anything else reports the file (review 2, finding 1).
+    LINES=$(printf '%s\n' "$ADDED" | grep -aE '^\+')
+    RC=$?
+    if [ "$RC" -le 1 ]; then
+      LINES=$(printf '%s\n' "$LINES" | grep -avE '^\+\+\+ ')
+      RC=$?
+    fi
+    if [ "$RC" -le 1 ]; then
+      N=$(printf '%s\n' "$LINES" | grep -acEi 'sk-ant-[a-z0-9]|sk-proj-[a-z0-9]|xai-[a-z0-9]{20}|SUPABASE_SERVICE_ROLE|service_role.*ey[A-Za-z0-9]')
+      RC=$?
+    fi
+    if [ "$RC" -gt 1 ]; then
+      printf 'UNREADABLE %s\n' "$f"
+    elif [ "$N" -gt 0 ]; then
+      printf '%s\n' "$f"
+    fi
   done)
   if [ -n "$HITS" ]; then
     bad "possible secret in changed files:"

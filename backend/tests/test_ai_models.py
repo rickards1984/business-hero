@@ -229,14 +229,21 @@ import ast
 
 ALLOWED = {"services/ai_models.py", "services/ai_router.py", "services/ai_costs.py", "services/profit_guard.py"}
 MODEL_SETTING = re.compile(r"MODEL$")
+# A constant that looks like an AI model id, wherever it is assigned
+# (Codex AI-1a review 2, finding 6: annotated and function-local constants).
+MODEL_ID = re.compile(r"^(gpt|chatgpt|o\d|claude|grok|whisper|tts|text-embedding|dall-e|gemini)", re.I)
 
 
 def named_models(source: str) -> list:
     """Line numbers where code names an AI model instead of a task."""
     tree = ast.parse(source)
-    consts = {t.id for n in tree.body if isinstance(n, ast.Assign)
-              and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)
-              for t in n.targets if isinstance(t, ast.Name)}
+    consts = set()
+    for n in ast.walk(tree):
+        targets = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, ast.AnnAssign) else []
+        value = getattr(n, "value", None)
+        if (targets and isinstance(value, ast.Constant) and isinstance(value.value, str)
+                and MODEL_ID.match(value.value)):
+            consts |= {t.id for t in targets if isinstance(t, ast.Name)}
     hits = []
 
     def literal(node):
@@ -270,6 +277,9 @@ def named_models(source: str) -> list:
     ('client.create(model=ai_models.openai_model("chat"))', 0),
     ('client.create(**ai_models.chat_request("support", max_tokens=1))', 0),
     ('plan = "single"\nbilling(model=plan_kind)', 0),
+    ('M: str = "gpt-5"\nclient.create(model=M)', 1),                       # annotated (review 2)
+    ('def f():\n    M = "gpt-5"\n    client.create(model=M)', 1),          # function-local (review 2)
+    ('model = "single"\nbilling(model=model)', 0),                         # not a model id
 ])
 def test_the_guard_reads_code_not_text(source, count):
     assert len(named_models(source)) == count
@@ -420,3 +430,48 @@ def test_an_older_read_never_overwrites_a_newer_one(m, monkeypatch):
     old.join(5)
     newer.join(5)
     assert m.mod._cache["choices"]["briefing"] == [("openai", "gpt-4.1")]
+
+
+
+def test_an_invalidate_during_publication_is_never_undone(m, monkeypatch):
+    """Codex AI-1a review 2, finding 5: a loader past its generation check,
+    then paused, published old choices after invalidate()."""
+    import threading
+    import time
+    choose(m, "briefing", [("openai", "gpt-4o-mini")])
+    real_now = m.mod._now
+    fired = {"done": False}
+    worker = {}
+
+    def now_during_publish():
+        if not fired["done"]:
+            fired["done"] = True
+            worker["t"] = threading.Thread(target=m.mod.invalidate)
+            worker["t"].start()
+            time.sleep(0.2)              # let invalidate() run, if it can
+        return real_now()
+    monkeypatch.setattr(m.mod, "_now", now_during_publish)
+    m.mod._load()
+    worker["t"].join(5)
+    monkeypatch.setattr(m.mod, "_now", real_now)
+    assert m.mod._cache["at"] is None and m.mod._cache["choices"] == {}   # the invalidate stands
+
+
+@pytest.mark.parametrize("model,rate", [("tts-1", 1.2), ("tts-1-hd", 2.4), ("gpt-4o-mini-tts", 2.4),
+                                        ("tts-9-ultra", 2.4)])
+def test_speech_is_costed_at_its_own_model_s_rate(monkeypatch, model, rate):
+    """Codex AI-1a review 2, finding 4: every speech model was recorded at
+    tts-1's rate, so a dearer preview voice was under-recorded."""
+    from services import ai_costs, profit_guard
+    seen = {}
+
+    class S:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def commit(self): pass
+    monkeypatch.setattr("sqlmodel.Session", S)
+    monkeypatch.setattr(profit_guard, "_engine", lambda: None)
+    monkeypatch.setattr(ai_costs, "record", lambda s, bid, **kw: seen.update(kw))
+    profit_guard._record_speech(None, {"model": model, "input": "x" * 1000})
+    assert seen["pence"] == pytest.approx(rate) and seen["model"] == model

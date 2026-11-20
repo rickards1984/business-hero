@@ -91,7 +91,8 @@ ROUTER_PURPOSES = {"draft", "research", "classify", "wording"}
 
 _cache = {"at": None, "choices": {}, "generation": 0}
 _refreshing = threading.Lock()        # one background refresh at a time
-_loading = threading.Lock()           # one load (background or not) publishes at a time
+_loading = threading.Lock()           # one load (background or not) at a time
+_state = threading.Lock()             # invalidate() and a load's publication never overlap
 
 
 def _now() -> float:
@@ -107,9 +108,10 @@ def invalidate() -> None:
     """Forget the cached choices (the admin page calls this after a change).
     A load already under way was reading the old choices: its result is
     dropped, never published (Codex AI-1a review 1, finding 5)."""
-    _cache["generation"] += 1
-    _cache["at"] = None
-    _cache["choices"] = {}
+    with _state:
+        _cache["generation"] += 1
+        _cache["at"] = None
+        _cache["choices"] = {}
 
 
 def _parse(raw) -> Optional[list]:
@@ -164,8 +166,9 @@ def _load() -> dict:
     with _loading:
         generation = _cache["generation"]
         loaded = _read()
-        if generation == _cache["generation"]:
-            _cache["at"], _cache["choices"] = _now(), loaded
+        with _state:                   # the check and the publication are one step (review 2, finding 5)
+            if generation == _cache["generation"]:
+                _cache["at"], _cache["choices"] = _now(), loaded
         return loaded
 
 
