@@ -382,20 +382,36 @@ def test_the_api_refuses_a_malformed_save(change):
         api.SaveEmails(**_body(**change))
 
 
-def test_saving_makes_due_cards_straight_away(monkeypatch):
+def test_saving_answers_first_and_makes_the_cards_just_after(monkeypatch):
+    """Mike, 20 Nov 2026: the save took 30 seconds waiting for the cards."""
+    from contextlib import contextmanager
+    from fastapi import BackgroundTasks
     import outreach_manage as api
     calls = []
     monkeypatch.setattr(api.auth, "_load_business", lambda session, bid: f"business-{bid}")
     monkeypatch.setattr(api, "execute", lambda fn, session, context, body, ident: calls.append(("save", fn)) or {"ok": 1})
+
+    @contextmanager
+    def own_session():
+        calls.append(("own session",))
+        yield "background-session"
+    monkeypatch.setattr(api, "get_session_context", own_session)
     from services import outreach_research
-    monkeypatch.setattr(outreach_research, "prepare_due_cards", lambda session, business: calls.append(("prepare", business)))
-    out = api.save_campaign_emails(uuid.uuid4(), api.SaveEmails(**_body()), context={"business_id": A, "user_id": OWNER},
-                                   session=type("S", (), {"rollback": lambda self: None})())
+    monkeypatch.setattr(outreach_research, "prepare_due_cards",
+                        lambda session, business: calls.append(("prepare", session, business)))
+    tasks = BackgroundTasks()
+    out = api.save_campaign_emails(uuid.uuid4(), api.SaveEmails(**_body()), tasks,
+                                   context={"business_id": A, "user_id": OWNER}, session="request-session")
     assert out == {"ok": 1}
-    assert calls[0] == ("save", api.manage.save_emails) and calls[1] == ("prepare", f"business-{A}")
+    assert calls == [("save", api.manage.save_emails)]            # answered before any card is made
+    import asyncio
+    asyncio.run(tasks())
+    assert calls[1:] == [("own session",), ("prepare", "background-session", f"business-{A}")]
 
 
 def test_a_card_problem_never_undoes_the_save(monkeypatch):
+    import asyncio
+    from fastapi import BackgroundTasks
     import outreach_manage as api
     monkeypatch.setattr(api.auth, "_load_business", lambda session, bid: "business")
     monkeypatch.setattr(api, "execute", lambda *a, **k: {"saved": True})
@@ -404,11 +420,11 @@ def test_a_card_problem_never_undoes_the_save(monkeypatch):
     def broken(session, business):
         raise RuntimeError("provider down")
     monkeypatch.setattr(outreach_research, "prepare_due_cards", broken)
-    rolled = []
-    session = type("S", (), {"rollback": lambda self: rolled.append(True)})()
-    out = api.save_campaign_emails(uuid.uuid4(), api.SaveEmails(**_body()), context={"business_id": A, "user_id": OWNER},
-                                   session=session)
-    assert out == {"saved": True} and rolled
+    tasks = BackgroundTasks()
+    out = api.save_campaign_emails(uuid.uuid4(), api.SaveEmails(**_body()), tasks,
+                                   context={"business_id": A, "user_id": OWNER}, session=None)
+    assert out == {"saved": True}
+    asyncio.run(tasks())                                          # logged, never raised
 
 
 def test_reading_the_emails_needs_outreach(monkeypatch):
