@@ -14,6 +14,7 @@ Resilience: the orchestrator NEVER raises. Worst case is a graceful Aria
 fallback message and a logged error. A meeting must never get stuck.
 """
 from __future__ import annotations
+from services import ai_models  # AI-1: every AI call names a task
 
 import asyncio
 import json
@@ -38,7 +39,8 @@ from services.executive_meeting_scheduling import compute_next_meeting_time
 logger = logging.getLogger(__name__)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-EXECUTIVE_MEETING_AI_MODEL = os.getenv("EXECUTIVE_MEETING_AI_MODEL", "gpt-5")
+# AI-1: the "meeting" task (gpt-5 by default; EXECUTIVE_MEETING_AI_MODEL still chooses it).
+EXECUTIVE_MEETING_AI_MODEL = None   # an override for tests only; None means ask the switchboard
 
 # Token budgets. tiktoken isn't a project dependency, so we estimate using
 # the same len/4 heuristic Prompt 2 uses for its prep-data warning.
@@ -490,9 +492,10 @@ async def _gpt_chat_completion(
     if not profit_guard.permits("meeting"):
         logger.warning("[ExecMeeting] paused by the profit guard (PROFIT-1)")
         return None, 0
-    if _responses_only(EXECUTIVE_MEETING_AI_MODEL):
+    model = EXECUTIVE_MEETING_AI_MODEL or ai_models.openai_model("meeting")   # AI-1
+    if _responses_only(model):
         logger.error("[ExecMeeting] EXECUTIVE_MEETING_AI_MODEL=%s cannot answer chat requests; "
-                     "set it to a chat model such as gpt-5", EXECUTIVE_MEETING_AI_MODEL)
+                     "set it to a chat model such as gpt-5", model)
         return None, 0
     client = _get_async_client()
     if client is None:
@@ -502,11 +505,11 @@ async def _gpt_chat_completion(
     # max_completion_tokens is accepted by every current OpenAI chat model;
     # max_tokens is refused by the reasoning ones (BM-1).
     kwargs: Dict[str, Any] = {
-        "model": EXECUTIVE_MEETING_AI_MODEL,
+        "model": model,
         "messages": messages,
         "max_completion_tokens": max_tokens,
     }
-    if _is_reasoning_model(EXECUTIVE_MEETING_AI_MODEL):
+    if _is_reasoning_model(model):
         # Reasoning counts against the budget: kept short, with headroom.
         kwargs["reasoning_effort"] = "low"
         kwargs["max_completion_tokens"] = max_tokens + REASONING_HEADROOM
@@ -525,7 +528,7 @@ async def _gpt_chat_completion(
         else:
             kwargs.pop("tools", None)
         if "reasoning_effort" in kwargs:
-            kwargs["reasoning_effort"] = ("none" if offer and _tools_need_no_reasoning(EXECUTIVE_MEETING_AI_MODEL)
+            kwargs["reasoning_effort"] = ("none" if offer and _tools_need_no_reasoning(model)
                                           else "low")
         try:
             try:
@@ -538,8 +541,8 @@ async def _gpt_chat_completion(
                 # A model we did not know refuses the pair: ask once more without
                 # reasoning, and remember it for every later turn.
                 logger.warning("[ExecMeeting] %s refuses tools with reasoning; retrying with none",
-                               EXECUTIVE_MEETING_AI_MODEL)
-                _TOOLS_REFUSE_REASONING.add(_base_model(EXECUTIVE_MEETING_AI_MODEL))
+                               model)
+                _TOOLS_REFUSE_REASONING.add(_base_model(model))
                 kwargs["reasoning_effort"] = "none"
                 with profit_guard.attributed(business_id, "meeting"):
                     response = await client.chat.completions.create(**kwargs)

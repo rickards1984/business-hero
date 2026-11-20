@@ -49,12 +49,22 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 # OpenAI permanently removed the Realtime API Beta interface on 12 May 2026
 # (4000-code close with `beta_api_shape_disabled`). This module uses the GA
 # shape ONLY. See the session.update payload below for the canonical schema.
-RECEPTIONIST_REALTIME_MODEL = os.getenv("RECEPTIONIST_REALTIME_MODEL", "gpt-realtime-2")
-# Belt-and-braces: we set model in BOTH the URL query string AND inside the
-# session.update payload. GA accepts either route as the canonical source.
-OPENAI_REALTIME_URL = (
-    f"wss://api.openai.com/v1/realtime?model={RECEPTIONIST_REALTIME_MODEL}"
-)
+# AI-1: the model is the "voice_receptionist" task (gpt-realtime-2 by default;
+# RECEPTIONIST_REALTIME_MODEL still chooses it), read once per call.
+RECEPTIONIST_REALTIME_MODEL = None   # an override for tests only; None means ask the switchboard
+
+
+def _voice_models() -> tuple:
+    """(realtime model, transcription model) for one call."""
+    from services import ai_models
+    return (RECEPTIONIST_REALTIME_MODEL or ai_models.openai_model("voice_receptionist"),
+            ai_models.openai_model("transcribe"))
+
+
+def _realtime_url(model: str) -> str:
+    # Belt-and-braces: we set model in BOTH the URL query string AND inside the
+    # session.update payload. GA accepts either route as the canonical source.
+    return f"wss://api.openai.com/v1/realtime?model={model}"
 # Twilio Media Streams sends G.711 μ-law audio at 8 kHz. In OpenAI's GA
 # Realtime schema, the audio format is a discriminated-union OBJECT — the
 # Beta-shape string `"g711_ulaw"` was rejected with "Invalid type for
@@ -68,11 +78,7 @@ OPENAI_REALTIME_URL = (
 # PCMU/PCMA take ONLY the `type` field — no `rate`.
 OPENAI_AUDIO_FORMAT = {"type": "audio/pcmu"}
 
-logger.info(
-    "[Receptionist] Realtime API mode: GA, model=%s, endpoint=%s",
-    RECEPTIONIST_REALTIME_MODEL,
-    OPENAI_REALTIME_URL,
-)
+logger.info("[Receptionist] Realtime API mode: GA; model per call from the AI switchboard (voice_receptionist)")
 
 if not OPENAI_API_KEY:
     logger.warning("[Receptionist] OPENAI_API_KEY not set — receptionist calls will fail")
@@ -766,6 +772,7 @@ async def receptionist_media_stream(ws: WebSocket):
             return
 
         system_prompt = prompt_data["system_prompt"]
+        realtime_model, transcribe_model = await asyncio.to_thread(_voice_models)   # AI-1: off the loop
         voice = prompt_data["voice"]
         greeting = prompt_data["greeting"]
         config_data = prompt_data["config"]
@@ -788,13 +795,13 @@ async def receptionist_media_stream(ws: WebSocket):
                 "switch to a verified preset (e.g. shimmer_british, echo_british).",
                 voice,
                 preset_id,
-                RECEPTIONIST_REALTIME_MODEL,
+                realtime_model,
             )
 
         logger.info(
             "[Receptionist WS] System prompt built "
             "(model=%s, preset=%s, voice=%s, accent=%s, %d chars)",
-            RECEPTIONIST_REALTIME_MODEL,
+            realtime_model,
             preset_id,
             voice,
             accent_name,
@@ -814,7 +821,7 @@ async def receptionist_media_stream(ws: WebSocket):
 
         try:
             openai_ws = await websockets.connect(
-                OPENAI_REALTIME_URL,
+                _realtime_url(realtime_model),
                 additional_headers=openai_headers,
                 ping_interval=20,
                 ping_timeout=20,
@@ -840,13 +847,13 @@ async def receptionist_media_stream(ws: WebSocket):
             "type": "session.update",
             "session": {
                 "type": "realtime",
-                "model": RECEPTIONIST_REALTIME_MODEL,
+                "model": realtime_model,
                 "output_modalities": ["audio"],
                 "instructions": system_prompt,
                 "audio": {
                     "input": {
                         "format": OPENAI_AUDIO_FORMAT,
-                        "transcription": {"model": "whisper-1"},
+                        "transcription": {"model": transcribe_model},
                         "turn_detection": {
                             "type": "server_vad",
                             "threshold": 0.5,
@@ -1014,7 +1021,7 @@ async def receptionist_media_stream(ws: WebSocket):
             await openai_ws.send(json.dumps(session_config))
             logger.info(
                 "[Receptionist WS] Session configured (GA shape, model=%s, voice=%s)",
-                RECEPTIONIST_REALTIME_MODEL,
+                realtime_model,
                 voice,
             )
             logger.debug(

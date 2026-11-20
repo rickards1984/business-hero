@@ -91,7 +91,7 @@ def test_the_session_is_configured_in_the_ga_shape():
     event = rv.build_session_config("You are Aria.", "marin", False, [{"type": "function", "name": "x"}])
     assert event["type"] == "session.update"
     s = event["session"]
-    assert s["type"] == "realtime" and s["model"] == rv.ARIA_REALTIME_MODEL
+    assert s["type"] == "realtime" and s["model"] == rv.realtime_model() == "gpt-realtime-2"   # AI-1: voice_aria
     assert s["instructions"] == "You are Aria."
     assert s["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24000}
     assert s["audio"]["output"]["format"] == {"type": "audio/pcm", "rate": 24000}

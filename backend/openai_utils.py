@@ -1,5 +1,6 @@
 """Optional OpenAI utilities for call summarization."""
 
+from services import ai_models  # AI-1: every AI call names a task
 import os
 from typing import Optional
 
@@ -33,7 +34,7 @@ async def generate_call_summary(transcript: str) -> Optional[str]:
         from services import profit_guard   # PROFIT-1
         with profit_guard.attributed(None, "call_summary"):
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=ai_models.openai_model("call_summary"),
                 messages=[
                     {
                         "role": "system",

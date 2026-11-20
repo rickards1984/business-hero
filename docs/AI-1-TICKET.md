@@ -92,6 +92,22 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
 - when the allowance runs short, Aria uses `chat` and says so;
 - no model choice can make Aria send anything without the owner's approval.
 
+## Build in three PRs
+
+- **AI-1a (this PR): foundations.**
+  - `services/ai_models.py`: the tasks, their day-one defaults (today's models and old Railway settings), saved choices (cached for a minute; never read on the event loop), and the key and price rules.
+  - Every call site now names a task. A guard test fails on any hard-coded model.
+  - Outreach's router reads saved choices.
+  - Migration 045, with a runbook.
+  - Prices added: gpt-5, Claude Opus 5.5, Sonnet 5.5. Before this, gpt-5 had no price, so chats were recorded at the "unknown model" rate.
+- **AI-1b: chat on the router.**
+  - `chat` / `chat_complex` rules and "Think harder";
+  - tool calls translated for Anthropic and xAI;
+  - whole-turn failover.
+- **AI-1c: the admin page.**
+  - choices, Revert, "Test this model" and the evaluation set;
+  - briefings, support and the board meeting moved onto the router, so they can also use other providers.
+
 ## Out of scope
 
 - Choosing models per business, which is platform-wide for now.

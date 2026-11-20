@@ -3,6 +3,7 @@ AI Receptionist — Backend API
 Handles config, knowledge base, voice options, call history, stats, and admin operations.
 """
 
+from services import ai_models  # AI-1: every AI call names a task
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -657,9 +658,11 @@ async def preview_voice(
         raise HTTPException(status_code=503, detail="Voice previews are paused for now. Live calls are unaffected.")
     try:
         client = _openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""), timeout=30.0, max_retries=1)
+        _chosen = ai_models.openai_models("voice_preview")   # AI-1: best first, then fallbacks
+        _preview_models = (_chosen + [_chosen[-1]] * 3)[:3]
         try:
             response = client.audio.speech.create(
-                model="gpt-4o-mini-tts",
+                model=_preview_models[0],
                 voice=voice_id,
                 input=preview_text,
                 response_format="mp3",
@@ -669,7 +672,7 @@ async def preview_voice(
             _logger.warning("[Voice Preview] gpt-4o-mini-tts failed for %s, trying tts-1-hd: %s", voice_id, _e1)
             try:
                 response = client.audio.speech.create(
-                    model="tts-1-hd",
+                    model=_preview_models[1],
                     voice=voice_id,
                     input=preview_text,
                     response_format="mp3",
@@ -678,7 +681,7 @@ async def preview_voice(
             except Exception as _e2:
                 _logger.warning("[Voice Preview] tts-1-hd failed for %s, trying tts-1: %s", voice_id, _e2)
                 response = client.audio.speech.create(
-                    model="tts-1",
+                    model=_preview_models[2],
                     voice=voice_id,
                     input=preview_text,
                     response_format="mp3",
@@ -781,6 +784,8 @@ async def preview_voice_preset(
         raise HTTPException(status_code=503, detail="Voice previews are paused for now. Live calls are unaffected.")
     try:
         client = _openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""), timeout=30.0, max_retries=1)
+        _chosen = ai_models.openai_models("voice_preview")   # AI-1: best first, then fallbacks
+        _preview_models = (_chosen + [_chosen[-1]] * 3)[:3]
         # `gpt-4o-mini-tts` accepts an `instructions` parameter that steers
         # delivery — accent, tone, pace — without changing the text. This is
         # the same accent block we feed the Realtime API for live calls.
@@ -792,7 +797,7 @@ async def preview_voice_preset(
         }
         try:
             response = client.audio.speech.create(
-                model="gpt-4o-mini-tts",
+                model=_preview_models[0],
                 instructions=accent_instructions or None,
                 **common_kwargs,
             )
@@ -806,7 +811,7 @@ async def preview_voice_preset(
                 # steering on the preview but the call itself will still
                 # use accent instructions via the Realtime API.
                 response = client.audio.speech.create(
-                    model="tts-1-hd",
+                    model=_preview_models[1],
                     **common_kwargs,
                 )
             except Exception as _e2:
@@ -815,7 +820,7 @@ async def preview_voice_preset(
                     body.voice_preset_id, _e2,
                 )
                 response = client.audio.speech.create(
-                    model="tts-1",
+                    model=_preview_models[2],
                     **common_kwargs,
                 )
 

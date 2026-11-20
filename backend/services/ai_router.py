@@ -144,7 +144,13 @@ def _priced(provider: str, model: str) -> bool:
 
 
 def chain(purpose: str, *, include_down: bool = False) -> list:
-    """(provider, model) pairs to try, in order: keyed, priced, not cooling down."""
+    """(provider, model) pairs to try, in order: keyed, priced, not cooling down.
+    AI-1: a choice saved on the admin page (services.ai_models) wins, in its
+    own order; otherwise the configuration below, as before."""
+    from services import ai_models
+    saved = ai_models.choice(purpose) if purpose in ai_models.TASKS else None
+    if saved:
+        return [(p, m) for p, m in saved if p in KEYS and (include_down or not _is_down(p))]
     chosen = models(purpose)
     out = []
     for p in order():

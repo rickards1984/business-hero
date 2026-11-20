@@ -3,6 +3,7 @@ AI-powered briefing generator.
 Uses GPT to produce strategic business analysis from raw data.
 """
 
+from services import ai_models  # AI-1: every AI call names a task
 import os
 import json
 import logging
@@ -103,7 +104,7 @@ Also return a JSON block at the end (after the briefing text) with this structur
         try:
             with profit_guard.attributed(business_id, "briefing"):
                 response = await client.chat.completions.create(
-                    model="gpt-4o",
+                    model=ai_models.openai_model("briefing"),
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
@@ -163,7 +164,7 @@ RULES:
 """
             with profit_guard.attributed(business_id, "briefing"):
                 response = await client.chat.completions.create(
-                    model="gpt-4o",
+                    model=ai_models.openai_model("briefing"),
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {

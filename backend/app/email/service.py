@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from services import ai_models  # AI-1: every AI call names a task
 import json
 import os
 import smtplib
@@ -404,7 +405,7 @@ def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
     try:
         client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=ai_models.openai_model("inbox_classify"),
             messages=[
                 {"role": "system", "content": CATEGORIZE_SYSTEM_PROMPT},
                 {"role": "user", "content": "Analyze these emails:\n\n" + "\n---\n".join(email_items)},
@@ -498,7 +499,7 @@ def generate_email_briefing_markdown(
             )
         prompt = "\n---\n".join(items)
         response = client.chat.completions.create(
-            model="gpt-5",
+            model=ai_models.openai_model("email_briefing"),
             messages=[
                 {
                     "role": "system",
@@ -560,7 +561,7 @@ def generate_email_reply_draft(message: EmailMessageModel, business: Business) -
             f"Body:\n{message.body_text or ''}"
         )
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=ai_models.openai_model("reply_draft"),
             messages=[
                 {
                     "role": "system",
@@ -631,7 +632,7 @@ def generate_email_reply_drafts(
         )
 
         response = client.chat.completions.create(
-            model="gpt-5",
+            model=ai_models.openai_model("reply_drafts"),
             messages=[
                 {
                     "role": "system",
