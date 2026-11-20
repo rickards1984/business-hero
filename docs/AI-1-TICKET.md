@@ -101,7 +101,7 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
   - Migration 045, with a runbook.
   - Prices added: gpt-5, Claude Opus 5.5, Sonnet 5.5. Before this, gpt-5 had no price, so chats were recorded at the "unknown model" rate.
   - **The preflight secret scan (TRAP 5) was fixed so it could push at all.**
-    - **The problem:** the scan flagged any changed file that *names* `SUPABASE_SERVICE_ROLE_KEY`, so `app/email/service.py`, which has always imported that setting, could never be edited.
+    - **The problem:** the scan flagged any changed file that *names* the Supabase service-role key setting, so `app/email/service.py`, which has always imported that setting, could never be edited.
     - **The fix:** it now scans only the lines a change adds, both committed and staged. A pasted key on any added line, or in a new file, is still caught.
     - **The test:** `test_harness_gates.py` TRAP 5 has 7 tests. The old behaviour fails the false-positive test.
 - **AI-1b: chat on the router.**
