@@ -48,25 +48,31 @@ The PostgreSQL tests in `backend/tests/test_outreach_edit_any_time_pg.py`:
 SELECT c.conname,
        c.confrelid::regclass AS points_at,
        ARRAY(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY k(n, i)
-             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.n ORDER BY k.i) AS columns
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.n ORDER BY k.i) AS columns,
+       ARRAY(SELECT a.attname FROM unnest(c.confkey) WITH ORDINALITY k(n, i)
+             JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.n ORDER BY k.i) AS refers_to
 FROM pg_constraint c
 WHERE c.conrelid = 'public.outreach_messages'::regclass AND c.contype = 'f'
   AND c.confrelid IN ('public.outreach_enrolments'::regclass, 'public.outreach_sequence_steps'::regclass)
 UNION ALL
-SELECT 'trigger: ' || CASE WHEN position('044' in prosrc) > 0 THEN 'new' ELSE 'old' END, NULL, NULL
-FROM pg_proc WHERE proname = 'outreach_bind_message_version'
+SELECT 'trigger: ' || CASE WHEN position('044' in f.prosrc) > 0 THEN 'new' ELSE 'old' END
+         || CASE WHEN t.tgenabled = 'D' THEN ', DISABLED' ELSE ', enabled' END,
+       NULL, NULL, NULL
+FROM pg_trigger t JOIN pg_proc f ON f.oid = t.tgfoid JOIN pg_namespace n ON n.oid = f.pronamespace
+WHERE t.tgrelid = 'public.outreach_messages'::regclass AND t.tgname = 'outreach_message_version'
+  AND n.nspname = 'public'
 ORDER BY 1;
 ```
 
-**EXPECT:** these rows, in any order.
+**EXPECT:** these rows, in any order. Check both column lists.
 - **Pointing at `outreach_enrolments`:**
-  - `{business_id,enrolment_id}`;
-  - `{business_id,campaign_id,prospect_id,enrolment_id}`;
-  - **`{business_id,campaign_id,sequence_version,enrolment_id}`**: the rule 044 removes.
-- **Pointing at `outreach_sequence_steps`:** three rows, including `{business_id,campaign_id,sequence_version,step_id}`.
-- **One last row:** `trigger: old`.
+  - `{business_id,enrolment_id}`, refers to `{business_id,id}`;
+  - `{business_id,campaign_id,prospect_id,enrolment_id}`, refers to `{business_id,campaign_id,prospect_id,id}`;
+  - **`{business_id,campaign_id,sequence_version,enrolment_id}`, refers to `{business_id,campaign_id,sequence_version,id}`**: the rule 044 removes.
+- **Pointing at `outreach_sequence_steps`:** three rows, including `{business_id,campaign_id,sequence_version,step_id}` referring to `{business_id,campaign_id,sequence_version,id}`.
+- **One last row:** `trigger: old, enabled`.
 
-**STOP IF:** the `sequence_version, enrolment_id` row is missing, or there's no `trigger:` row. Send me the output.
+**STOP IF:** the `sequence_version, enrolment_id` row is missing, any `refers_to` differs from the above, or the trigger row is missing or says `DISABLED`. Send me the output.
 
 ---
 
@@ -90,11 +96,11 @@ Run the STEP 0 query again.
 
 **EXPECT:** the same rows, except:
 - the **`{business_id,campaign_id,sequence_version,enrolment_id}`** row is **gone**;
-- the last row now reads **`trigger: new`**.
+- the last row now reads **`trigger: new, enabled`**.
 
 All the other rows, including the step key `{business_id,campaign_id,sequence_version,step_id}`, are still there.
 
-**STOP IF:** any other row changed, or it still says `trigger: old`.
+**STOP IF:** any other row changed, or the last row isn't `trigger: new, enabled`.
 
 ---
 
@@ -111,7 +117,7 @@ ALTER TABLE public.outreach_messages
 COMMIT;
 ```
 
-**EXPECT:** `COMMIT`. STEP 0 then shows the `sequence_version, enrolment_id` row again. The trigger stays `new`: it is safe under either version of the rule.
+**EXPECT:** `COMMIT`. STEP 0 then shows the `sequence_version, enrolment_id` row again. The trigger stays `new, enabled`: it is safe under either version of the rule.
 
 **This is for the staging rehearsal. Don't run it on production.**
 - Once anyone has edited wording on production, their earlier emails sit on an older version than their contact. Re-adding the rule would then fail, and that failure is the right outcome.

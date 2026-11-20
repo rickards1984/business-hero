@@ -64,19 +64,36 @@ BEGIN
     RAISE EXCEPTION '044: an unexpected version key from outreach_messages to outreach_enrolments exists';
   END IF;
 
-  -- What must remain: the contact key and the step key, by their columns.
+  -- What must remain: the contact key and the step key, by their columns on
+  -- BOTH sides (Codex fix review 2, finding 2).
   SELECT count(*) INTO identity FROM pg_constraint c
   WHERE c.conrelid = messages AND c.confrelid = enrolments AND c.contype = 'f'
     AND ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(n, i)
               JOIN pg_attribute a ON a.attrelid = messages AND a.attnum = k.n ORDER BY k.i)
-        = ARRAY['business_id', 'campaign_id', 'prospect_id', 'enrolment_id'];
+        = ARRAY['business_id', 'campaign_id', 'prospect_id', 'enrolment_id']
+    AND ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY k(n, i)
+              JOIN pg_attribute a ON a.attrelid = enrolments AND a.attnum = k.n ORDER BY k.i)
+        = ARRAY['business_id', 'campaign_id', 'prospect_id', 'id'];
   SELECT count(*) INTO kept FROM pg_constraint c
   WHERE c.conrelid = messages AND c.confrelid = steps AND c.contype = 'f'
     AND ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(n, i)
               JOIN pg_attribute a ON a.attrelid = messages AND a.attnum = k.n ORDER BY k.i)
-        = ARRAY['business_id', 'campaign_id', 'sequence_version', 'step_id'];
+        = ARRAY['business_id', 'campaign_id', 'sequence_version', 'step_id']
+    AND ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY k(n, i)
+              JOIN pg_attribute a ON a.attrelid = steps AND a.attnum = k.n ORDER BY k.i)
+        = ARRAY['business_id', 'campaign_id', 'sequence_version', 'id'];
   IF identity <> 1 OR kept <> 1 THEN
     RAISE EXCEPTION '044: expected the contact key and the step key to exist (found %, %)', identity, kept;
+  END IF;
+  -- The trigger that binds a new email's version must be attached and enabled
+  -- for INSERT and UPDATE (review 2, finding 5).
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger t JOIN pg_proc f ON f.oid = t.tgfoid
+    JOIN pg_namespace n ON n.oid = f.pronamespace
+    WHERE t.tgrelid = messages AND t.tgname = 'outreach_message_version' AND NOT t.tgisinternal
+      AND t.tgenabled <> 'D' AND n.nspname = 'public' AND f.proname = 'outreach_bind_message_version'
+      AND (t.tgtype & 4) <> 0 AND (t.tgtype & 16) <> 0) THEN
+    RAISE EXCEPTION '044: trigger outreach_message_version is missing or disabled';
   END IF;
 
   IF pinned IS NULL THEN

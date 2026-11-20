@@ -96,6 +96,10 @@ It needs outreach (with retained history) and is scoped to the business.
   - **Finding 2, matching.** Constraints are matched by their columns (`conkey`/`confkey`), not by printed text. An unexpected version key, or a missing contact or step key, stops the migration.
   - **Finding 3, wording.** A 5xx now says "We couldn't confirm the result" rather than "nothing was saved".
   - **Finding 4, the harness.** `scripts/rls-local.sh up` now replays 040–044.
+- **Codex fix review 2:** findings 1, 3 and 4 were confirmed resolved. It requested changes for:
+  - **finding 2:** the kept keys are now checked on both sides (`confkey` too);
+  - **finding 5:** the binding trigger must be attached and enabled for INSERT and UPDATE, or the migration stops. This is mutation-checked: a disabled trigger is refused.
+  - The runbook query shows the referenced columns and the trigger's live state.
 
 ## Part B: the redesign (next PR, AMBER)
 
