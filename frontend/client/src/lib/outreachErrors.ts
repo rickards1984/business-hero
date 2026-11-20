@@ -21,6 +21,8 @@ export function outreachError(error: unknown) {
   if (text.startsWith('404:')) return 'This record is unavailable in the current business.';
   if (text.startsWith('409:')) return 'The record changed or this action is blocked. Reload and review the current state before continuing.';
   if (text.startsWith('422:')) return 'Check the entered values. This request was not accepted.';
-  if (status >= 500) return "Something went wrong on our side and nothing was saved. Please try again in a minute; if it keeps happening, tell support.";
+  // A 5xx can arrive after the server finished (a gateway timeout), so never
+  // promise nothing was saved (Codex OUT-28 fix review 1, finding 3).
+  if (status >= 500) return "We couldn't confirm the result. Refresh to check the saved state before trying again; if it keeps happening, tell support.";
   return 'Unavailable. Refresh to check the saved state before trying again.';
 }

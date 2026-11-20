@@ -123,6 +123,6 @@ def test_the_server_s_own_reason_is_shown(result):
     assert e[0] == "Email 2 still contains [Your Name]. Replace it with the real words"
     assert e[1].startswith("An email from this campaign is sending right now")
     assert e[2] == "Check the entered values. This request was not accepted."      # a validation list: general wording
-    assert e[3].startswith("Something went wrong on our side and nothing was saved")
+    assert e[3].startswith("We couldn't confirm the result. Refresh to check")        # never "nothing was saved"
     assert e[4] == "Only the business owner can approve outreach."
     assert "psycopg2" not in e[5]                                                    # never a raw server error

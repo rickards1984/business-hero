@@ -85,7 +85,17 @@ It needs outreach (with retained history) and is scoped to the business.
 - **What changed:**
   - **Migration 044** (`audits/044-PROD-RUNBOOK.md`) drops that one constraint. An email record still names its contact and still must match the exact wording it was sent with (`…_fkey1`).
   - **New PostgreSQL tests** use real send-path history (accepted and failed). They failed with the production error before 044 and pass after it.
-  - The screen shows the server's plain-words reason for any refusal (`lib/outreachErrors.ts`). A server failure says "nothing was saved".
+  - The screen shows the server's plain-words reason for any refusal (`lib/outreachErrors.ts`).
+- **Codex fix review 1 requested changes**, and all of them were made:
+  - **Finding 1, the trigger.** 037's `outreach_bind_message_version` reset a message's version to its contact's current one on every update. After a move, any update of an old message (outcome settling, reply matching, erasure) would have hit the step key. 044 now binds only on insert, or when the message is re-pointed to another contact.
+  - **New PostgreSQL tests, run on a fresh harness:**
+    - failed send → edit → deadline erasure works;
+    - old messages can still be updated and keep version 1;
+    - the next email after a failed send and an edit sends the new wording;
+    - 5 of these fail with the old trigger.
+  - **Finding 2, matching.** Constraints are matched by their columns (`conkey`/`confkey`), not by printed text. An unexpected version key, or a missing contact or step key, stops the migration.
+  - **Finding 3, wording.** A 5xx now says "We couldn't confirm the result" rather than "nothing was saved".
+  - **Finding 4, the harness.** `scripts/rls-local.sh up` now replays 040–044.
 
 ## Part B: the redesign (next PR, AMBER)
 
