@@ -3,13 +3,13 @@ import re
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator, field_validator
 from sqlmodel import Session
 
 import auth
 from auth import get_user_business_context
-from db import get_session
+from db import get_session, get_session_context
 from services import outreach_manage as manage
 from services.aria_actions import ActionRefused
 
@@ -194,24 +194,29 @@ def campaign_emails(campaign_id: UUID, context=Depends(get_user_business_context
 
 
 @router.post('/campaigns/{campaign_id}/emails')
-def save_campaign_emails(campaign_id: UUID, body: SaveEmails, context=Depends(get_user_business_context),
-                         session: Session = Depends(get_session)):
-    """OUT-28a: save and approve the wording; people part way through get it next."""
+def save_campaign_emails(campaign_id: UUID, body: SaveEmails, background_tasks: BackgroundTasks,
+                         context=Depends(get_user_business_context), session: Session = Depends(get_session)):
+    """OUT-28a: save and approve the wording; people part way through get it next.
+    The save answers at once; the new cards are made just after, in the
+    background (Mike, 20 Nov 2026: saving New Body's emails took 30 seconds
+    because it waited for every card)."""
     out = execute(manage.save_emails, session, context, body, campaign_id)
-    _prepare_now(session, context)
+    background_tasks.add_task(_prepare_now, str(context['business_id']))
     return out
 
 
-def _prepare_now(session, context):
+def _prepare_now(business_id: str):
     """Cards for anyone now due, straight away rather than at the next hourly
-    pass. Best effort: the hourly pass makes them anyway."""
+    pass. Best effort, on its own connection after the response: the hourly
+    pass makes them anyway."""
     import logging
     from services import outreach_research
     try:
-        business = auth._load_business(session, context['business_id'])
-        outreach_research.prepare_due_cards(session, business)
+        with get_session_context() as session:
+            business = auth._load_business(session, business_id)
+            if business is not None:
+                outreach_research.prepare_due_cards(session, business)
     except Exception as exc:
-        session.rollback()
         logging.getLogger(__name__).warning('[Outreach] cards after an edit deferred: %s', type(exc).__name__)
 
 

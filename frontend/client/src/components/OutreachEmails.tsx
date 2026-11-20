@@ -103,9 +103,17 @@ function CampaignEmailsPanel({ businessId, campaignId, owner, onSettings }: { bu
       setDraft(null); setOpen(null);
       refresh();
       client.invalidateQueries({ queryKey: ['outreach-dashboard', businessId] });
+      // The new cards are made just after the save, in the background: look
+      // again shortly so they appear without waiting for the 5-minute refresh.
+      for (const wait of [4000, 12000, 30000]) {
+        window.setTimeout(() => {
+          client.invalidateQueries({ queryKey: ['aria-actions', businessId] });
+          client.invalidateQueries({ queryKey: ['outreach-dashboard', businessId] });
+        }, wait);
+      }
       const people = out.moved === 1 ? '1 person' : `${out.moved} people`;
       setNotice(
-        (out.moved ? `Saved. ${people} already in this campaign will get the new wording from their next email.` : 'Saved. Everyone you email from now on gets the new wording.')
+        (out.moved ? `Saved. ${people} already in this campaign will get the new wording from their next email; Aria is preparing any that are due now, so their cards appear in a moment.` : 'Saved. Everyone you email from now on gets the new wording.')
         + (out.automatic === 'off' ? ' Automatic sending for this campaign is off: switch it back on in Campaign settings if you want Aria to carry on by herself.' : '')
         + (out.automatic === 'on' ? ' Aria carries on sending it for you.' : ''));
     } catch (e) { setError(outreachError(e)); } finally { setBusy(false); }
