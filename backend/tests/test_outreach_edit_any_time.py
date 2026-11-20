@@ -413,11 +413,23 @@ def test_a_card_problem_never_undoes_the_save(monkeypatch):
     import asyncio
     from fastapi import BackgroundTasks
     import outreach_manage as api
+    from contextlib import contextmanager
     monkeypatch.setattr(api.auth, "_load_business", lambda session, bid: "business")
     monkeypatch.setattr(api, "execute", lambda *a, **k: {"saved": True})
+    seen = []
+
+    @contextmanager
+    def own_session():
+        seen.append("opened")
+        try:
+            yield "background-session"
+        finally:
+            seen.append("closed")
+    monkeypatch.setattr(api, "get_session_context", own_session)
     from services import outreach_research
 
     def broken(session, business):
+        seen.append("prepare")
         raise RuntimeError("provider down")
     monkeypatch.setattr(outreach_research, "prepare_due_cards", broken)
     tasks = BackgroundTasks()
@@ -425,6 +437,7 @@ def test_a_card_problem_never_undoes_the_save(monkeypatch):
                                    context={"business_id": A, "user_id": OWNER}, session=None)
     assert out == {"saved": True}
     asyncio.run(tasks())                                          # logged, never raised
+    assert seen == ["opened", "prepare", "closed"]                # it really ran, and its session closed
 
 
 def test_reading_the_emails_needs_outreach(monkeypatch):
