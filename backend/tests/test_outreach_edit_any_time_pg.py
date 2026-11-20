@@ -112,3 +112,97 @@ def test_a_save_racing_an_approval_never_deadlocks_or_sends_stale_wording(pg):
         assert "save" in results and "approve" in refused
     if "save" in results:
         assert _one(pg, "SELECT sequence_version FROM outreach_enrolments WHERE id = :e")[0] == 2
+
+
+def _history(pg, outcome):
+    """A real email record for the harness contact on wording v1, made by the
+    real send path: accepted (as MSC's), or refused by the provider (as New
+    Body's two failed cards of 11 Nov)."""
+    pg.p.outcome = outcome
+    _approve(pg, _propose(pg))
+    pg.p.outcome = "accepted"
+    with pg.engine.connect() as c:
+        return c.execute(text("SELECT state FROM outreach_messages WHERE business_id = :b"), {"b": A}).scalar()
+
+
+@pytest.mark.parametrize("outcome", ["definitely_not_accepted", "accepted"])
+def test_a_contact_with_email_history_moves_to_the_new_wording(pg, outcome):
+    """OUT-28a fix (production, 19 Nov 2026): New Body's save failed with
+    ForeignKeyViolation outreach_messages_business_id_campaign_id_sequence_version_fkey,
+    because a contact with any email record could not change wording version.
+    Migration 044 drops that constraint; each email keeps its own wording."""
+    _three(pg)
+    recorded = _history(pg, outcome)
+    assert recorded in ("accepted", "failed"), recorded
+    before = _one(pg, "SELECT next_step FROM outreach_enrolments WHERE id = :e")[0]
+    out = _save(pg)
+    assert out["moved"] == 1
+    assert _one(pg, "SELECT sequence_version, next_step FROM outreach_enrolments WHERE id = :e") == (2, before)
+    # the email already recorded keeps the wording it had
+    assert _one(pg, "SELECT sequence_version, subject FROM outreach_messages WHERE business_id = :b") == (1, "Synthetic offer")
+
+
+def test_an_email_record_keeps_the_wording_it_was_sent_with(pg):
+    """044's trigger: once written, an email record's version is never reset,
+    by the contact's move or by a caller (Codex fix review 1, finding 1)."""
+    _three(pg)
+    _history(pg, "accepted")
+    _save(pg)
+    with pg.engine.begin() as c:
+        c.execute(text("UPDATE outreach_messages SET sequence_version = 2 WHERE business_id = :b"), {"b": A})
+    assert _one(pg, "SELECT sequence_version FROM outreach_messages WHERE business_id = :b")[0] == 1
+
+
+@pytest.mark.parametrize("change", ["state = state", "retry_of = NULL, reply_target_id = NULL",
+                                    "updated_at = now()"])
+def test_an_old_email_can_still_be_updated_after_an_edit(pg, change):
+    """Before 044's trigger change, any update of an old email after a move was
+    rebound to the new version and refused by the step key."""
+    _three(pg)
+    _history(pg, "definitely_not_accepted")
+    _save(pg)
+    with pg.engine.begin() as c:
+        c.execute(text(f"UPDATE outreach_messages SET {change} WHERE business_id = :b"), {"b": A})
+    assert _one(pg, "SELECT sequence_version FROM outreach_messages WHERE business_id = :b")[0] == 1
+
+
+def test_failed_send_then_edit_then_deadline_erasure(pg):
+    """Codex fix review 1, finding 1's scenario, through the real erasure."""
+    from datetime import timedelta
+    from services import outreach_erasure
+    _three(pg)
+    assert _history(pg, "definitely_not_accepted") == "failed"
+    _save(pg)
+    try:
+        with Session(pg.engine) as s:
+            out = outreach_erasure.erase_never_contacted(s, A, base.PROSPECT, base.NOW + timedelta(days=60))
+        assert out.get("erased") is True, out
+        with pg.engine.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM outreach_messages WHERE business_id = :b"), {"b": A}).scalar() == 0
+            assert c.execute(text("SELECT count(*) FROM outreach_prospects WHERE business_id = :b AND id = :p"),
+                             {"b": A, "p": base.PROSPECT}).scalar() == 0
+    finally:                       # erasure's own records, which the shared teardown doesn't know
+        with pg.engine.begin() as c:
+            for table in ("outreach_recently_erased", "outreach_erasure_exceptions"):
+                c.execute(text(f"DELETE FROM public.{table} WHERE business_id = :b"), {"b": A})
+
+
+def test_after_a_failed_send_and_an_edit_the_next_email_uses_the_new_wording(pg):
+    """The contact's first email failed on the old wording; after the edit
+    their (re-made) first email is the new one, and its record is on v2."""
+    _three(pg)
+    _history(pg, "definitely_not_accepted")
+    _save(pg)
+    step = _one(pg, "SELECT id FROM outreach_sequence_steps WHERE campaign_id = :c AND sequence_version = 2 "
+                    "AND ordinal = 0")[0]
+    with Session(pg.engine) as s:
+        made = pg.a.propose(s, pg.b, OWNER, "send_outreach",
+                            dict(campaign_id=CAMPAIGN, enrolment_id=ENROLMENT, step_id=str(step)), owner_name="Owner")
+    assert "proposal" in made, made
+    pg.p.message_id = "second-provider-id"        # the fake's id is otherwise reused; Gmail's never is
+    done = _approve(pg, made["proposal"])
+    assert done["status"] == "done" and pg.p.sends[-1][1]["subject"] == "A better offer"
+    with pg.engine.connect() as c:
+        versions = sorted(r[0] for r in c.execute(text(
+            "SELECT sequence_version FROM outreach_messages WHERE business_id = :b"), {"b": A}))
+    assert versions == [1, 2]          # the failed one keeps v1; the new one is v2

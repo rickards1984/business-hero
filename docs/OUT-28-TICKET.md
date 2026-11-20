@@ -74,6 +74,35 @@ It needs outreach (with retained history) and is scoped to the business.
 - The old sequence editor is removed from campaign settings, which now points to the Emails tab.
 - Tabs get plain names: Home, Prospects, Emails, Replies, Opt-outs, Settings. The paths are unchanged.
 
+## Part A fix: migration 044 (20 Nov, RED)
+
+**Production, 19 Nov.** Mike's first save on New Body returned 500. The error was:
+
+`ForeignKeyViolation outreach_messages_business_id_campaign_id_sequence_version_fkey`
+
+- **The cause:** 037 tied every email record to its contact's current wording version, so a contact with any email history (New Body's 2 failed sends, MSC's sent emails) could not move.
+- **Why the tests missed it:** the SQLite suite enforces no foreign keys, and the PostgreSQL test contact had no email history before the save.
+- **What changed:**
+  - **Migration 044** (`audits/044-PROD-RUNBOOK.md`) drops that one constraint. An email record still names its contact and still must match the exact wording it was sent with (`…_fkey1`).
+  - **New PostgreSQL tests** use real send-path history (accepted and failed). They failed with the production error before 044 and pass after it.
+  - The screen shows the server's plain-words reason for any refusal (`lib/outreachErrors.ts`).
+- **Codex fix review 1 requested changes**, and all of them were made:
+  - **Finding 1, the trigger.** 037's `outreach_bind_message_version` reset a message's version to its contact's current one on every update. After a move, any update of an old message (outcome settling, reply matching, erasure) would have hit the step key. 044 now binds only on insert, or when the message is re-pointed to another contact.
+  - **New PostgreSQL tests, run on a fresh harness:**
+    - failed send → edit → deadline erasure works;
+    - old messages can still be updated and keep version 1;
+    - the next email after a failed send and an edit sends the new wording;
+    - 5 of these fail with the old trigger.
+  - **Finding 2, matching.** Constraints are matched by their columns (`conkey`/`confkey`), not by printed text. An unexpected version key, or a missing contact or step key, stops the migration.
+  - **Finding 3, wording.** A 5xx now says "We couldn't confirm the result" rather than "nothing was saved".
+  - **Finding 4, the harness.** `scripts/rls-local.sh up` now replays 040–044.
+- **Codex fix review 2:** findings 1, 3 and 4 were confirmed resolved. It requested changes for:
+  - **finding 2:** the kept keys are now checked on both sides (`confkey` too);
+  - **finding 5:** the binding trigger must be attached and enabled for INSERT and UPDATE, or the migration stops. This is mutation-checked: a disabled trigger is refused.
+  - The runbook query shows the referenced columns and the trigger's live state.
+- **Codex fix review 3:** finding 2 was confirmed resolved. On the trigger check, it now requires a mode that fires normally (`O`/`A`, not `D` disabled or `R` replica-only) and BEFORE ROW timing (tgtype bits 1 and 2), and the runbook shows both.
+- **Codex fix review 4: APPROVE.** One optional point was not taken: the runbook labels both firing modes, `O` and `A`, as "enabled" instead of printing which. Both are correct for normal writes.
+
 ## Part B: the redesign (next PR, AMBER)
 
 Built to the mockup:
