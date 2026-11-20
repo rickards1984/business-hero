@@ -15,10 +15,22 @@ router = APIRouter()
 _logger = logging.getLogger("realtime_voice")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-# Model and voice are env-configurable; defaults preserve existing behaviour.
-ARIA_REALTIME_MODEL = os.getenv("ARIA_REALTIME_MODEL", "gpt-realtime-2")
+# AI-1: the model is the "voice_aria" task (gpt-realtime-2 by default;
+# ARIA_REALTIME_MODEL still chooses it). The voice is env-configurable.
+ARIA_REALTIME_MODEL = None   # an override for tests only; None means ask the switchboard
 ARIA_REALTIME_VOICE = os.getenv("ARIA_REALTIME_VOICE", "shimmer")
-OPENAI_REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={ARIA_REALTIME_MODEL}"
+def realtime_model() -> str:
+    from services import ai_models
+    return ARIA_REALTIME_MODEL or ai_models.openai_model("voice_aria")
+
+
+def transcribe_model() -> str:
+    from services import ai_models
+    return ai_models.openai_model("transcribe")
+
+
+def realtime_url(model: str) -> str:
+    return f"wss://api.openai.com/v1/realtime?model={model}"
 
 # NS-A2 — the kill switch. Production, 2 Oct 2026: every session got
 # `beta_api_shape_disabled` because this module spoke the Realtime BETA
@@ -94,7 +106,8 @@ def _turn_detection(quiet_mode: bool) -> dict:
             "prefix_padding_ms": 350, "silence_duration_ms": 600}
 
 
-def build_session_config(instructions: str, voice: str, quiet_mode: bool, tools: list) -> dict:
+def build_session_config(instructions: str, voice: str, quiet_mode: bool, tools: list, *,
+                         model: str = None, transcription: str = None) -> dict:
     """The GA `session.update` (the receptionist's PHASE 3 is the worked
     example). GA has no `modalities`, top-level `voice`, `*_audio_format` or
     `temperature`; audio settings live under `session.audio`."""
@@ -102,13 +115,13 @@ def build_session_config(instructions: str, voice: str, quiet_mode: bool, tools:
         "type": "session.update",
         "session": {
             "type": "realtime",
-            "model": ARIA_REALTIME_MODEL,
+            "model": model or realtime_model(),
             "output_modalities": ["audio"],
             "instructions": instructions,
             "audio": {
                 "input": {
                     "format": _AUDIO_FORMAT,
-                    "transcription": {"model": "whisper-1"},
+                    "transcription": {"model": transcription or transcribe_model()},
                     "turn_detection": _turn_detection(quiet_mode),
                 },
                 "output": {"format": _AUDIO_FORMAT, "voice": voice},
@@ -1138,8 +1151,10 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         _LIVE_SESSIONS.add(session_id)
         watchdog = asyncio.create_task(_end_at_cap())
         heartbeat = asyncio.create_task(_beat_forever(_period))
+        session_model, session_transcription = await asyncio.to_thread(
+            lambda: (realtime_model(), transcribe_model()))      # AI-1: off the loop
         openai_ws = await websockets.connect(
-            OPENAI_REALTIME_URL,
+            realtime_url(session_model),
             additional_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
             ping_interval=20,
             ping_timeout=20,
@@ -1153,7 +1168,7 @@ async def realtime_voice_endpoint(websocket: WebSocket):
         await openai_ws.send(json.dumps(build_session_config(
             meeting_instructions if meeting_id
             else build_system_instructions(business_name, user_name) + owner_notes,
-            ARIA_REALTIME_VOICE, quiet_mode, _ledger.REALTIME_TOOLS if meeting_id else REALTIME_TOOLS)))
+            ARIA_REALTIME_VOICE, quiet_mode, _ledger.REALTIME_TOOLS if meeting_id else REALTIME_TOOLS, model=session_model, transcription=session_transcription)))
         _logger.info(f"Session configured with quiet_mode={quiet_mode}")
 
         await websocket.send_json({"type": "ready"})

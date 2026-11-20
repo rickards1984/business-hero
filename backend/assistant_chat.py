@@ -1,5 +1,6 @@
 """AI Assistant chat endpoint handler."""
 
+from services import ai_models  # AI-1: every AI call names a task
 import os
 import json
 import logging
@@ -191,6 +192,7 @@ Each item needs: description, quantity, unit, unit_cost, category (labour/materi
         if not profit_guard.permits("quote"):
             return {"error": "Aria's quote drafting is paused for now. You can still build the quote by hand on the Quotes page."}
         worst_in = len(system_prompt) + len(description)
+        quote_model = ai_models.openai_model("quote_chat")   # AI-1
         try:
             try:
                 async with _httpx.AsyncClient(timeout=60.0) as client:
@@ -198,17 +200,17 @@ Each item needs: description, quantity, unit, unit_cost, category (labour/materi
                         "https://api.openai.com/v1/chat/completions",
                         headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
                         json={
-                            "model": "gpt-4o",
+                            "model": quote_model,
                             "messages": [
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": description},
                             ],
-                            "temperature": 0.3,
+                            **ai_models.chat_params(quote_model, temperature=0.3),
                             "response_format": {"type": "json_object"},
                         },
                     )
             except BaseException:   # including cancellation: the provider may already have it (review 4)
-                profit_guard.record_direct("gpt-4o", worst_in, 16384, estimated=True, purpose="quote",
+                profit_guard.record_direct(quote_model, worst_in, 16384, estimated=True, purpose="quote",
                                            business_id=business_id)   # may have been billed
                 raise
             try:
@@ -217,7 +219,7 @@ Each item needs: description, quantity, unit, unit_cost, category (labour/materi
                 billed = {}
             usage = billed.get("usage") or {}
             if usage or resp.status_code == 200 or resp.status_code >= 500:
-                profit_guard.record_direct(billed.get("model") or "gpt-4o",
+                profit_guard.record_direct(billed.get("model") or quote_model,
                                            usage.get("prompt_tokens") if usage else worst_in,
                                            usage.get("completion_tokens") if usage else 16384,
                                            estimated=not usage, purpose="quote", business_id=business_id)
@@ -841,6 +843,7 @@ async def process_chat_message(
     logger.info(f"[DEBUG] System prompt built for {business.name} (voice_mode={voice_mode}, user_name={user_name}). History has {len(history)} messages.")
     
     client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
+    chat_model = ai_models.openai_model("chat")   # AI-1 (AI-1b picks chat or chat_complex per message)
     
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
@@ -855,7 +858,7 @@ async def process_chat_message(
         try:
             response = await asyncio.to_thread(
                 _complete, client, business.id,
-                model="gpt-5",
+                model=chat_model,
                 messages=messages,
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
@@ -929,7 +932,7 @@ async def process_chat_message(
         try:
             final_response = await asyncio.to_thread(
                 _complete, client, business.id,
-                model="gpt-5",
+                model=chat_model,
                 messages=messages,
                 timeout=120
             )

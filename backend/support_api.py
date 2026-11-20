@@ -6,6 +6,7 @@ If the AI can't help, the conversation escalates to a human-managed ticket.
 Admin endpoints for ticket management and knowledge base CRUD.
 """
 
+from services import ai_models  # AI-1: every AI call names a task
 import logging
 import os
 import re
@@ -145,10 +146,8 @@ Confidence: 0.0 to 1.0 (how confident you are that you've fully resolved their q
         from services import profit_guard   # PROFIT-1: a customer's support chat is essential: recorded, never paused
         with profit_guard.attributed(None, "chat"):
             resp = await client.chat.completions.create(
-                model="gpt-4o",
+                **ai_models.chat_request("support", max_tokens=800, temperature=0.3),
                 messages=messages,
-                temperature=0.3,
-                max_tokens=800,
             )
 
         ai_text = resp.choices[0].message.content.strip()
@@ -665,7 +664,7 @@ async def admin_ai_draft_response(
         from services import profit_guard   # PROFIT-1
         with profit_guard.attributed(None, "support_draft"):
             resp = await client.chat.completions.create(
-                model="gpt-4o",
+                **ai_models.chat_request("support", max_tokens=500, temperature=0.4),
                 messages=[
                     {
                         "role": "system",
@@ -684,8 +683,6 @@ async def admin_ai_draft_response(
                     },
                     {"role": "user", "content": "Draft a response to this support conversation."},
                 ],
-                temperature=0.4,
-                max_tokens=500,
             )
 
         draft = resp.choices[0].message.content.strip()

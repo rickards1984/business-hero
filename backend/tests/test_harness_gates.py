@@ -383,3 +383,97 @@ def test_preflight_trap4_ignores_table_text_in_tests(tmp_path):
     """A test may contain `table=True` as data; only application code counts."""
     trap = _trap4(_trap4_repo(tmp_path), "backend/tests/test_x.py", 'SRC = "class T(SQLModel, table=True)"\n')
     assert "FAIL" not in trap, trap
+
+
+# ---------------------------------------------------- preflight TRAP 5 (AI-1a) ---
+# The samples are assembled at run time so that this file's own added lines
+# never match the scan it tests (as preflight.sh skips its own source).
+ROLE = "SUPABASE_" + "SERVICE_ROLE_KEY"
+
+def _trap5(d, path, content):
+    target = d / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    base = run(["git", "rev-parse", "HEAD"], cwd=d).stdout.strip()
+    run(["git", "add", "-A"], cwd=d)
+    run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "change"], cwd=d)
+    out = run([str(d / "scripts" / "preflight.sh")], cwd=d, env={"PREFLIGHT_BASE": base}).stdout
+    return out.split("TRAP 5")[1]
+
+
+def _trap5_repo(tmp_path):
+    """TRAP 4's throwaway repo, plus a module that has always named the
+    service-role setting (as backend/app/email/service.py does)."""
+    d = _trap4_repo(tmp_path)
+    (d / "backend" / "svc.py").write_text(f"from supabase_auth import {ROLE}\nX = 1\n")
+    run(["git", "add", "-A"], cwd=d)
+    run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "svc"], cwd=d)
+    return d
+
+
+def test_preflight_trap5_ignores_a_setting_name_already_in_a_changed_file(tmp_path):
+    """AI-1a: editing a file that has always NAMED the service-role setting is
+    not a secret; only what the change adds is scanned."""
+    trap = _trap5(_trap5_repo(tmp_path), "backend/svc.py",
+                  f"from supabase_auth import {ROLE}\nX = 2\n")
+    assert "possible secret" not in trap, trap
+
+
+@pytest.mark.parametrize("added", [
+    'KEY = "sk-' + 'ant-api03-abcdefghijklmnop"\n',
+    'KEY = "sk-' + 'proj-abcdefghijklmnop"\n',
+    'KEY = "xai' + '-abcdefghijklmnopqrstuvwx"\n',
+    'service_' + 'role = "ey' + 'JhbGciOiJIUzI1NiJ9.x.y"\n',
+    ROLE + " = 'pasted'\n",
+])
+def test_preflight_trap5_still_catches_an_added_secret(tmp_path, added):
+    trap = _trap5(_trap5_repo(tmp_path), "backend/svc.py",
+                  f"from supabase_auth import {ROLE}\nX = 1\n" + added)
+    assert "possible secret" in trap and "backend/svc.py" in trap, trap
+
+
+def test_preflight_trap5_catches_a_secret_in_a_new_file(tmp_path):
+    trap = _trap5(_trap5_repo(tmp_path), "backend/new.py", 'KEY = "sk-' + 'ant-api03-abcdefghijklmnop"\n')
+    assert "possible secret" in trap and "backend/new.py" in trap, trap
+
+
+def test_preflight_trap5_catches_a_secret_before_a_huge_change(tmp_path):
+    """Codex AI-1a review 1, finding 1: an early match must not be lost when
+    the rest of a large patch is still being read (SIGPIPE under pipefail)."""
+    body = 'KEY = "sk-' + 'ant-api03-abcdefghijklmnop"\n' + "".join(f"X{i} = {i}\n" for i in range(100_000))
+    trap = _trap5(_trap5_repo(tmp_path), "backend/big.py", body)
+    assert "possible secret" in trap and "backend/big.py" in trap, trap
+
+
+def test_preflight_trap5_catches_a_secret_in_a_binary_file(tmp_path):
+    """Codex AI-1a review 1, finding 2: a NUL byte made git print 'Binary
+    files differ' and the key went unscanned."""
+    d = _trap5_repo(tmp_path)
+    target = d / "backend" / "blob.bin"
+    target.write_bytes(b"\x00\x01head" + ('sk-' + 'ant-api03-abcdefghijklmnop').encode() + b"\x00tail")
+    base = run(["git", "rev-parse", "HEAD"], cwd=d).stdout.strip()
+    run(["git", "add", "-A"], cwd=d)
+    run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "blob"], cwd=d)
+    trap = run([str(d / "scripts" / "preflight.sh")], cwd=d, env={"PREFLIGHT_BASE": base}).stdout.split("TRAP 5")[1]
+    assert "possible secret" in trap and "backend/blob.bin" in trap, trap
+
+
+
+def test_preflight_trap5_fails_when_the_scanner_itself_errors(tmp_path):
+    """Codex AI-1a review 2, finding 1: a grep error (exit 2) was read as
+    'no secret'. A grep that fails on the secret pattern must fail the scan."""
+    d = _trap5_repo(tmp_path)
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    real = run(["sh", "-c", "command -v grep"]).stdout.strip()
+    (shim / "grep").write_text(f'#!/bin/sh\ncase "$*" in *-acEi*) exit 2;; esac\nexec {real} "$@"\n')
+    (shim / "grep").chmod(0o755)
+    (d / "backend" / "clean.py").write_text("X = 1\n")
+    base = run(["git", "rev-parse", "HEAD"], cwd=d).stdout.strip()
+    run(["git", "add", "-A"], cwd=d)
+    run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "clean"], cwd=d)
+    import os
+    out = run([str(d / "scripts" / "preflight.sh")], cwd=d,
+              env={"PREFLIGHT_BASE": base, "PATH": f"{shim}:{os.environ['PATH']}"}).stdout
+    trap = out.split("TRAP 5")[1]
+    assert "UNREADABLE backend/clean.py" in trap and "possible secret" in trap, trap

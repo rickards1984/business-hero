@@ -1,5 +1,6 @@
 """FastAPI application for AI Admin Assistant."""
 
+from services import ai_models  # AI-1: every AI call names a task
 import os
 import re
 import json
@@ -2552,7 +2553,7 @@ async def text_to_speech(
         client = OpenAI(api_key=openai_api_key, timeout=30.0, max_retries=1)
         
         response = client.audio.speech.create(
-            model="tts-1",  # Use tts-1-hd for higher quality but more cost
+            model=ai_models.openai_model("speak"),  # AI-1: the "speak" task (tts-1 by default)
             voice=voice,
             input=text,
             response_format="mp3"
