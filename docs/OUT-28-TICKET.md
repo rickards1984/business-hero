@@ -100,6 +100,7 @@ It needs outreach (with retained history) and is scoped to the business.
   - **finding 2:** the kept keys are now checked on both sides (`confkey` too);
   - **finding 5:** the binding trigger must be attached and enabled for INSERT and UPDATE, or the migration stops. This is mutation-checked: a disabled trigger is refused.
   - The runbook query shows the referenced columns and the trigger's live state.
+- **Codex fix review 3:** finding 2 was confirmed resolved. On the trigger check, it now requires a mode that fires normally (`O`/`A`, not `D` disabled or `R` replica-only) and BEFORE ROW timing (tgtype bits 1 and 2), and the runbook shows both.
 
 ## Part B: the redesign (next PR, AMBER)
 

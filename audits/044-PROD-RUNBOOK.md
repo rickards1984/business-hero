@@ -56,7 +56,9 @@ WHERE c.conrelid = 'public.outreach_messages'::regclass AND c.contype = 'f'
   AND c.confrelid IN ('public.outreach_enrolments'::regclass, 'public.outreach_sequence_steps'::regclass)
 UNION ALL
 SELECT 'trigger: ' || CASE WHEN position('044' in f.prosrc) > 0 THEN 'new' ELSE 'old' END
-         || CASE WHEN t.tgenabled = 'D' THEN ', DISABLED' ELSE ', enabled' END,
+         || CASE WHEN t.tgenabled IN ('O', 'A') THEN ', enabled' ELSE ', NOT FIRING (' || t.tgenabled::text || ')' END
+         || CASE WHEN (t.tgtype & 1) <> 0 AND (t.tgtype & 2) <> 0 AND (t.tgtype & 4) <> 0 AND (t.tgtype & 16) <> 0
+                 THEN ', before insert/update' ELSE ', WRONG TIMING' END,
        NULL, NULL, NULL
 FROM pg_trigger t JOIN pg_proc f ON f.oid = t.tgfoid JOIN pg_namespace n ON n.oid = f.pronamespace
 WHERE t.tgrelid = 'public.outreach_messages'::regclass AND t.tgname = 'outreach_message_version'
@@ -70,9 +72,9 @@ ORDER BY 1;
   - `{business_id,campaign_id,prospect_id,enrolment_id}`, refers to `{business_id,campaign_id,prospect_id,id}`;
   - **`{business_id,campaign_id,sequence_version,enrolment_id}`, refers to `{business_id,campaign_id,sequence_version,id}`**: the rule 044 removes.
 - **Pointing at `outreach_sequence_steps`:** three rows, including `{business_id,campaign_id,sequence_version,step_id}` referring to `{business_id,campaign_id,sequence_version,id}`.
-- **One last row:** `trigger: old, enabled`.
+- **One last row:** `trigger: old, enabled, before insert/update`.
 
-**STOP IF:** the `sequence_version, enrolment_id` row is missing, any `refers_to` differs from the above, or the trigger row is missing or says `DISABLED`. Send me the output.
+**STOP IF:** the `sequence_version, enrolment_id` row is missing, any `refers_to` differs from the above, or the trigger row is missing or says `NOT FIRING` or `WRONG TIMING`. Send me the output.
 
 ---
 
@@ -96,11 +98,11 @@ Run the STEP 0 query again.
 
 **EXPECT:** the same rows, except:
 - the **`{business_id,campaign_id,sequence_version,enrolment_id}`** row is **gone**;
-- the last row now reads **`trigger: new, enabled`**.
+- the last row now reads **`trigger: new, enabled, before insert/update`**.
 
 All the other rows, including the step key `{business_id,campaign_id,sequence_version,step_id}`, are still there.
 
-**STOP IF:** any other row changed, or the last row isn't `trigger: new, enabled`.
+**STOP IF:** any other row changed, or the last row isn't `trigger: new, enabled, before insert/update`.
 
 ---
 

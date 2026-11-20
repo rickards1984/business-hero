@@ -85,15 +85,17 @@ BEGIN
   IF identity <> 1 OR kept <> 1 THEN
     RAISE EXCEPTION '044: expected the contact key and the step key to exist (found %, %)', identity, kept;
   END IF;
-  -- The trigger that binds a new email's version must be attached and enabled
-  -- for INSERT and UPDATE (review 2, finding 5).
+  -- The trigger that binds a new email's version must be attached, fire in
+  -- normal operation ('O' origin or 'A' always; not 'D' disabled or 'R'
+  -- replica-only), and be BEFORE ROW for INSERT and UPDATE: tgtype bits
+  -- ROW 1, BEFORE 2, INSERT 4, UPDATE 16 (Codex fix reviews 2 and 3).
   IF NOT EXISTS (
     SELECT 1 FROM pg_trigger t JOIN pg_proc f ON f.oid = t.tgfoid
     JOIN pg_namespace n ON n.oid = f.pronamespace
     WHERE t.tgrelid = messages AND t.tgname = 'outreach_message_version' AND NOT t.tgisinternal
-      AND t.tgenabled <> 'D' AND n.nspname = 'public' AND f.proname = 'outreach_bind_message_version'
-      AND (t.tgtype & 4) <> 0 AND (t.tgtype & 16) <> 0) THEN
-    RAISE EXCEPTION '044: trigger outreach_message_version is missing or disabled';
+      AND t.tgenabled IN ('O', 'A') AND n.nspname = 'public' AND f.proname = 'outreach_bind_message_version'
+      AND (t.tgtype & 1) <> 0 AND (t.tgtype & 2) <> 0 AND (t.tgtype & 4) <> 0 AND (t.tgtype & 16) <> 0) THEN
+    RAISE EXCEPTION '044: trigger outreach_message_version is missing, not firing normally, or not BEFORE ROW INSERT/UPDATE';
   END IF;
 
   IF pinned IS NULL THEN
