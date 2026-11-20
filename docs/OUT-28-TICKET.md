@@ -74,6 +74,19 @@ It needs outreach (with retained history) and is scoped to the business.
 - The old sequence editor is removed from campaign settings, which now points to the Emails tab.
 - Tabs get plain names: Home, Prospects, Emails, Replies, Opt-outs, Settings. The paths are unchanged.
 
+## Part A fix: migration 044 (20 Nov, RED)
+
+**Production, 19 Nov.** Mike's first save on New Body returned 500. The error was:
+
+`ForeignKeyViolation outreach_messages_business_id_campaign_id_sequence_version_fkey`
+
+- **The cause:** 037 tied every email record to its contact's current wording version, so a contact with any email history (New Body's 2 failed sends, MSC's sent emails) could not move.
+- **Why the tests missed it:** the SQLite suite enforces no foreign keys, and the PostgreSQL test contact had no email history before the save.
+- **What changed:**
+  - **Migration 044** (`audits/044-PROD-RUNBOOK.md`) drops that one constraint. An email record still names its contact and still must match the exact wording it was sent with (`…_fkey1`).
+  - **New PostgreSQL tests** use real send-path history (accepted and failed). They failed with the production error before 044 and pass after it.
+  - The screen shows the server's plain-words reason for any refusal (`lib/outreachErrors.ts`). A server failure says "nothing was saved".
+
 ## Part B: the redesign (next PR, AMBER)
 
 Built to the mockup:

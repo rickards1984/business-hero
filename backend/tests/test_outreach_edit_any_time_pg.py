@@ -112,3 +112,43 @@ def test_a_save_racing_an_approval_never_deadlocks_or_sends_stale_wording(pg):
         assert "save" in results and "approve" in refused
     if "save" in results:
         assert _one(pg, "SELECT sequence_version FROM outreach_enrolments WHERE id = :e")[0] == 2
+
+
+def _history(pg, outcome):
+    """A real email record for the harness contact on wording v1, made by the
+    real send path: accepted (as MSC's), or refused by the provider (as New
+    Body's two failed cards of 11 Nov)."""
+    pg.p.outcome = outcome
+    _approve(pg, _propose(pg))
+    pg.p.outcome = "accepted"
+    with pg.engine.connect() as c:
+        return c.execute(text("SELECT state FROM outreach_messages WHERE business_id = :b"), {"b": A}).scalar()
+
+
+@pytest.mark.parametrize("outcome", ["definitely_not_accepted", "accepted"])
+def test_a_contact_with_email_history_moves_to_the_new_wording(pg, outcome):
+    """OUT-28a fix (production, 19 Nov 2026): New Body's save failed with
+    ForeignKeyViolation outreach_messages_business_id_campaign_id_sequence_version_fkey,
+    because a contact with any email record could not change wording version.
+    Migration 044 drops that constraint; each email keeps its own wording."""
+    _three(pg)
+    recorded = _history(pg, outcome)
+    assert recorded in ("accepted", "failed"), recorded
+    before = _one(pg, "SELECT next_step FROM outreach_enrolments WHERE id = :e")[0]
+    out = _save(pg)
+    assert out["moved"] == 1
+    assert _one(pg, "SELECT sequence_version, next_step FROM outreach_enrolments WHERE id = :e") == (2, before)
+    # the email already recorded keeps the wording it had
+    assert _one(pg, "SELECT sequence_version, subject FROM outreach_messages WHERE business_id = :b") == (1, "Synthetic offer")
+
+
+def test_an_email_record_still_cannot_change_the_wording_it_was_sent_with(pg):
+    """The constraint that stays (…_fkey1): an email record's wording version
+    must be its step's version."""
+    from sqlalchemy.exc import IntegrityError
+    _three(pg)
+    _history(pg, "accepted")
+    _save(pg)                                   # version 2 exists now, but not for this email's step
+    with pytest.raises(IntegrityError):
+        with pg.engine.begin() as c:
+            c.execute(text("UPDATE outreach_messages SET sequence_version = 2 WHERE business_id = :b"), {"b": A})

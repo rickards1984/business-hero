@@ -36,11 +36,4 @@ export function useRefreshOutreach(businessId: string) {
   const client = useQueryClient();
   return () => { client.invalidateQueries({ queryKey: ['outreach', businessId] }); client.invalidateQueries({ queryKey: ['aria-actions', businessId] }); };
 }
-export function outreachError(error: unknown) {
-  const text = error instanceof Error ? error.message : '';
-  if (text.startsWith('403:')) return 'Access denied. These controls require the active business owner and the relevant account access.';
-  if (text.startsWith('404:')) return 'This record is unavailable in the current business.';
-  if (text.startsWith('409:')) return 'The record changed or this action is blocked. Reload and review the current state before continuing.';
-  if (text.startsWith('422:')) return 'Check the entered values. This request was not accepted.';
-  return 'Unavailable. Refresh to check the saved state before trying again.';
-}
+export { outreachError, serverReason } from '@/lib/outreachErrors';

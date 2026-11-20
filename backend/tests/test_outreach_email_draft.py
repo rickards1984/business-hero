@@ -25,6 +25,7 @@ pytestmark = pytest.mark.skipif(not (ESBUILD.exists() and NODE),
 
 SCENARIOS = r"""
 import { startDraft, edit, changed, problems, stale, payload } from './src/lib/outreachEmailDraft';
+import { outreachError } from './src/lib/outreachErrors';
 const NB = (ordinal: number) => ({ ordinal, subject: `Subject ${ordinal + 1}`, body: `Hello,\n\nEmail ${ordinal + 1}.\n\nThanks,\n[Your Name]` });
 const out: Record<string, unknown> = {};
 
@@ -55,6 +56,16 @@ e = edit(e, 2, { subject: '   ' });
 out.one_line = e.emails[0].subject;
 out.flags = problems(e).map(p => [p.ordinal, p.kind]);
 out.unchanged = changed(startDraft({ version: 1, emails: [0, 1, 2].map(o => ({ ordinal: o, subject: 's', body: 'b' })) }));
+// OUT-28a fix: the server's plain-words reason is shown, never hidden
+const err = (m: string) => outreachError(new Error(m));
+out.errors = [
+  err('422: {"detail":"Email 2 still contains [Your Name]. Replace it with the real words"}'),
+  err('409: {"detail":"An email from this campaign is sending right now. Try again in a minute"}'),
+  err('422: {"detail":[{"loc":["body"],"msg":"bad"}]}'),
+  err('500: Internal Server Error'),
+  err('403: {"detail":"Only the business owner can approve outreach."}'),
+  err('500: {"detail":"psycopg2.errors.ForeignKeyViolation ..."}'),
+];
 console.log(JSON.stringify(out));
 """
 
@@ -105,3 +116,13 @@ def test_subjects_stay_one_line_and_problems_are_named(result):
     assert result["first_name"] == [[1, "placeholder"]]      # a fill-in field is a placeholder
     assert result["flags"] == [[1, "curly"], [2, "blank"]]
     assert result["unchanged"] is False
+
+
+def test_the_server_s_own_reason_is_shown(result):
+    e = result["errors"]
+    assert e[0] == "Email 2 still contains [Your Name]. Replace it with the real words"
+    assert e[1].startswith("An email from this campaign is sending right now")
+    assert e[2] == "Check the entered values. This request was not accepted."      # a validation list: general wording
+    assert e[3].startswith("Something went wrong on our side and nothing was saved")
+    assert e[4] == "Only the business owner can approve outreach."
+    assert "psycopg2" not in e[5]                                                    # never a raw server error
