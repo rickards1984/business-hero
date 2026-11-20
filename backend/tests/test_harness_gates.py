@@ -383,3 +383,52 @@ def test_preflight_trap4_ignores_table_text_in_tests(tmp_path):
     """A test may contain `table=True` as data; only application code counts."""
     trap = _trap4(_trap4_repo(tmp_path), "backend/tests/test_x.py", 'SRC = "class T(SQLModel, table=True)"\n')
     assert "FAIL" not in trap, trap
+
+
+# ---------------------------------------------------- preflight TRAP 5 (AI-1a) ---
+
+def _trap5(d, path, content):
+    target = d / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    base = run(["git", "rev-parse", "HEAD"], cwd=d).stdout.strip()
+    run(["git", "add", "-A"], cwd=d)
+    run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "change"], cwd=d)
+    out = run([str(d / "scripts" / "preflight.sh")], cwd=d, env={"PREFLIGHT_BASE": base}).stdout
+    return out.split("TRAP 5")[1]
+
+
+def _trap5_repo(tmp_path):
+    """TRAP 4's throwaway repo, plus a module that has always named the
+    service-role setting (as backend/app/email/service.py does)."""
+    d = _trap4_repo(tmp_path)
+    (d / "backend" / "svc.py").write_text("from supabase_auth import SUPABASE_SERVICE_ROLE_KEY\nX = 1\n")
+    run(["git", "add", "-A"], cwd=d)
+    run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "svc"], cwd=d)
+    return d
+
+
+def test_preflight_trap5_ignores_a_setting_name_already_in_a_changed_file(tmp_path):
+    """AI-1a: editing a file that has always NAMED the service-role setting is
+    not a secret; only what the change adds is scanned."""
+    trap = _trap5(_trap5_repo(tmp_path), "backend/svc.py",
+                  "from supabase_auth import SUPABASE_SERVICE_ROLE_KEY\nX = 2\n")
+    assert "possible secret" not in trap, trap
+
+
+@pytest.mark.parametrize("added", [
+    'KEY = "sk-ant-api03-abcdefghijklmnop"\n',
+    'KEY = "sk-proj-abcdefghijklmnop"\n',
+    'KEY = "xai-abcdefghijklmnopqrstuvwx"\n',
+    'service_role = "eyJhbGciOiJIUzI1NiJ9.x.y"\n',
+    "SUPABASE_SERVICE_ROLE_KEY = 'pasted'\n",
+])
+def test_preflight_trap5_still_catches_an_added_secret(tmp_path, added):
+    trap = _trap5(_trap5_repo(tmp_path), "backend/svc.py",
+                  "from supabase_auth import SUPABASE_SERVICE_ROLE_KEY\nX = 1\n" + added)
+    assert "possible secret" in trap and "backend/svc.py" in trap, trap
+
+
+def test_preflight_trap5_catches_a_secret_in_a_new_file(tmp_path):
+    trap = _trap5(_trap5_repo(tmp_path), "backend/new.py", 'KEY = "sk-ant-api03-abcdefghijklmnop"\n')
+    assert "possible secret" in trap and "backend/new.py" in trap, trap

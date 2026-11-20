@@ -182,7 +182,14 @@ if [ -n "$RANGE" ] && [ "$DIFF_OK" -eq 1 ] && [ -n "$CHANGED" ]; then
     # Skip it — scanning the scanner for its own signatures is a false
     # positive, not a secret.
     [ "$f" = "scripts/preflight.sh" ] && continue
-    grep -lEi 'sk-ant-[a-z0-9]|sk-proj-[a-z0-9]|xai-[a-z0-9]{20}|SUPABASE_SERVICE_ROLE|service_role.*ey[A-Za-z0-9]' "$f" 2>/dev/null
+    # Only the lines this change ADDS (committed in the range, or staged) are
+    # scanned (AI-1a): a file that has always NAMED a setting such as
+    # SUPABASE_SERVICE_ROLE_KEY is not a new secret, while a pasted key on any
+    # added line, or in a new file (all of whose lines are added), still is.
+    { git diff "$RANGE" -- "$f" 2>/dev/null; git diff --cached -- "$f" 2>/dev/null; } \
+      | grep -E '^\+' | grep -vE '^\+\+\+ ' \
+      | grep -qEi 'sk-ant-[a-z0-9]|sk-proj-[a-z0-9]|xai-[a-z0-9]{20}|SUPABASE_SERVICE_ROLE|service_role.*ey[A-Za-z0-9]' \
+      && printf '%s\n' "$f"
   done)
   if [ -n "$HITS" ]; then
     bad "possible secret in changed files:"
