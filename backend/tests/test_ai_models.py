@@ -231,7 +231,7 @@ ALLOWED = {"services/ai_models.py", "services/ai_router.py", "services/ai_costs.
 MODEL_SETTING = re.compile(r"MODEL$")
 # A constant that looks like an AI model id, wherever it is assigned
 # (Codex AI-1a review 2, finding 6: annotated and function-local constants).
-MODEL_ID = re.compile(r"^(gpt|chatgpt|o\d|claude|grok|whisper|tts|text-embedding|dall-e|gemini)", re.I)
+MODEL_ID = re.compile(r"^(ft:)?(gpt|chatgpt|o\d|claude|grok|whisper|tts|text-embedding|dall-e|gemini)", re.I)
 
 
 def named_models(source: str) -> list:
@@ -280,6 +280,7 @@ def named_models(source: str) -> list:
     ('M: str = "gpt-5"\nclient.create(model=M)', 1),                       # annotated (review 2)
     ('def f():\n    M = "gpt-5"\n    client.create(model=M)', 1),          # function-local (review 2)
     ('model = "single"\nbilling(model=model)', 0),                         # not a model id
+    ('M = "ft:gpt-4o-mini:org::id"\nclient.create(model=M)', 1),          # fine-tuned (review 3)
 ])
 def test_the_guard_reads_code_not_text(source, count):
     assert len(named_models(source)) == count

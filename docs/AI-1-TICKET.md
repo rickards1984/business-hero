@@ -117,6 +117,7 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
   - **finding 6:** the guard resolves model-id constants anywhere, annotated or not.
 
   All are mutation-checked.
+- **Codex AI-1a review 3:** findings 1, 4 and 5 were confirmed resolved. The one finding left (fine-tuned `ft:` model IDs held in a constant slipped past the guard) was escalated after three repair cycles. Mike chose to fix it and run one more review: the guard now matches `ft:` IDs, with an example.
 - **AI-1b: chat on the router.**
   - `chat` / `chat_complex` rules and "Think harder";
   - tool calls translated for Anthropic and xAI;
