@@ -104,13 +104,11 @@ Also return a JSON block at the end (after the briefing text) with this structur
         try:
             with profit_guard.attributed(business_id, "briefing"):
                 response = await client.chat.completions.create(
-                    model=ai_models.openai_model("briefing"),
+                    **ai_models.chat_request("briefing", max_tokens=2000, temperature=0.4),
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    temperature=0.4,
-                    max_tokens=2000,
                 )
             full_response = response.choices[0].message.content.strip()
 
@@ -164,7 +162,7 @@ RULES:
 """
             with profit_guard.attributed(business_id, "briefing"):
                 response = await client.chat.completions.create(
-                    model=ai_models.openai_model("briefing"),
+                    **ai_models.chat_request("briefing", max_tokens=400, temperature=0.3),
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {
@@ -172,8 +170,6 @@ RULES:
                             "content": f"Generate a daily pulse from this data:\n{json.dumps(data, indent=2, default=_serialize_for_json)}",
                         },
                     ],
-                    temperature=0.3,
-                    max_tokens=400,
                 )
             return response.choices[0].message.content.strip()
         except Exception as e:

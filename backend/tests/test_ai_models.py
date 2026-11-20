@@ -163,11 +163,21 @@ def test_an_openai_call_site_with_no_openai_choice_keeps_todays_model(m):
     assert m.mod.openai_model("briefing") == "gpt-4o"
 
 
-def test_voice_choices_are_not_price_checked(m):
-    """Realtime voice is metered by the minute, not by tokens (M1)."""
-    choose(m, "voice_aria", [("openai", "gpt-realtime-3")])
+@pytest.mark.parametrize("task,model", [("voice_aria", "gpt-5"), ("voice_aria", "gpt-realtime-3"),
+                                        ("transcribe", "gpt-5"), ("speak", "tts-1-hd")])
+def test_voice_and_speech_accept_only_models_their_code_is_known_to_serve(m, task, model):
+    """Codex AI-1a review 1, finding 4: a realtime endpoint can't serve gpt-5,
+    and speech is costed per character at tts-1's rate, so a dearer voice
+    model would be under-recorded. Pinned until each is checked."""
+    choose(m, task, [("openai", model)])
     m.mod.invalidate()
-    assert m.mod.openai_model("voice_aria") == "gpt-realtime-3"
+    assert m.mod.resolve(task) == TODAY[task]
+
+
+def test_a_voice_preview_choice_within_its_known_models_is_used(m):
+    choose(m, "voice_preview", [("openai", "tts-1-hd"), ("openai", "tts-1")])
+    m.mod.invalidate()
+    assert m.mod.openai_models("voice_preview") == ["tts-1-hd", "tts-1"]
 
 
 def test_voice_stays_with_openai(m):
@@ -211,11 +221,58 @@ def test_aria_s_chat_is_costed_at_gpt_5_s_real_price():
 
 
 # ---------------------------------------------- no model named elsewhere ---
+# Syntax-aware (Codex AI-1a review 1, finding 6): spacing, line breaks and a
+# constant passed in all count; comments and strings that are not arguments
+# do not.
+
+import ast
 
 ALLOWED = {"services/ai_models.py", "services/ai_router.py", "services/ai_costs.py", "services/profit_guard.py"}
-# A keyword argument (model="…"), a dict entry ("model": "…") or a
-# model-choosing setting read with a default (getenv("…_MODEL", …)).
-NAMED = re.compile(r"""(\bmodel=["'][a-z]|["']model["']\s*:\s*["'][a-z]|getenv\(\s*["'][A-Z_]*MODEL["']\s*,)""")
+MODEL_SETTING = re.compile(r"MODEL$")
+
+
+def named_models(source: str) -> list:
+    """Line numbers where code names an AI model instead of a task."""
+    tree = ast.parse(source)
+    consts = {t.id for n in tree.body if isinstance(n, ast.Assign)
+              and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)
+              for t in n.targets if isinstance(t, ast.Name)}
+    hits = []
+
+    def literal(node):
+        return (isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value[:1].isalpha()) or \
+               (isinstance(node, ast.Name) and node.id in consts)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg == "model" and literal(node.value):
+            hits.append(node.value.lineno)
+        elif isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if isinstance(k, ast.Constant) and k.value == "model" and literal(v):
+                    hits.append(v.lineno)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr in ("getenv", "get") and len(node.args) >= 2
+              and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+              and MODEL_SETTING.search(node.args[0].value) and literal(node.args[1])):
+            hits.append(node.lineno)
+    return sorted(hits)
+
+
+@pytest.mark.parametrize("source,count", [
+    ('client.create(model="gpt-5")', 1),
+    ('client.create(model = "gpt-5")', 1),
+    ('client.create(\n    messages=m,\n    model=\n        "gpt-5",\n)', 1),
+    ('M = "gpt-5"\nclient.create(model=M)', 1),
+    ('payload = {"model": "gpt-4o"}', 1),
+    ('X = os.getenv("QUOTE_AI_MODEL", "gpt-5.4")', 1),
+    ('X = os.environ.get("ARIA_DRAFT_MODEL", "gpt-4o")', 1),
+    ('# client.create(model="example")', 0),                      # a comment
+    ('note = \'call it with model="x"\'', 0),                     # text, not an argument
+    ('client.create(model=ai_models.openai_model("chat"))', 0),
+    ('client.create(**ai_models.chat_request("support", max_tokens=1))', 0),
+    ('plan = "single"\nbilling(model=plan_kind)', 0),
+])
+def test_the_guard_reads_code_not_text(source, count):
+    assert len(named_models(source)) == count
 
 
 def test_no_ai_call_names_a_model_outside_the_switchboard():
@@ -224,9 +281,9 @@ def test_no_ai_call_names_a_model_outside_the_switchboard():
         rel = path.relative_to(BACKEND).as_posix()
         if rel.startswith(("tests/", ".venv/")) or rel in ALLOWED or "/site-packages/" in rel:
             continue
-        for n, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
-            if NAMED.search(line) and "response_model" not in line:
-                offenders.append(f"{rel}:{n}: {line.strip()[:100]}")
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        for n in named_models(source):
+            offenders.append(f"{rel}:{n}: {source.splitlines()[n - 1].strip()[:100]}")
     assert not offenders, "name a task via services.ai_models instead:\n" + "\n".join(offenders)
 
 
@@ -267,3 +324,99 @@ def test_off_the_loop_a_stale_cache_is_refreshed_at_once(m):
     choose(m, "briefing", [("openai", "gpt-5")])
     m.mod.invalidate()
     assert m.mod.resolve("briefing") == [("openai", "gpt-5")]
+
+
+# --------------------------------------- settings follow the chosen model ---
+
+@pytest.mark.parametrize("model,expected", [
+    ("gpt-4o", {"max_tokens": 800, "temperature": 0.3}),
+    ("gpt-4o-mini", {"max_tokens": 800, "temperature": 0.3}),
+    ("gpt-5", {"max_completion_tokens": 4000}),                 # BM-1: no temperature, no max_tokens
+    ("gpt-5.4", {"max_completion_tokens": 4000}),
+    ("o4-mini", {"max_completion_tokens": 4000}),
+    ("gpt-5-chat-latest", {"max_tokens": 800, "temperature": 0.3}),
+])
+def test_chat_settings_follow_the_model(model, expected):
+    """Codex AI-1a review 1, finding 3: choosing gpt-5 for a task whose code
+    sent temperature and max_tokens would have broken it. The settings now
+    follow the model; this also mends the email briefing and the three-tone
+    reply drafts, which already ran on gpt-5 with settings it refuses."""
+    from services import ai_models
+    assert ai_models.chat_params(model, max_tokens=800, temperature=0.3) == expected
+
+
+def test_a_large_limit_keeps_room_for_reasoning():
+    from services import ai_models
+    assert ai_models.chat_params("gpt-5", max_tokens=1500) == {"max_completion_tokens": 6000}
+
+
+def test_a_chat_request_names_its_model_once(m):
+    choose(m, "support", [("openai", "gpt-5")])
+    m.mod.invalidate()
+    assert m.mod.chat_request("support", max_tokens=800, temperature=0.3) == {
+        "model": "gpt-5", "max_completion_tokens": 4000}
+
+
+def test_a_responses_only_model_is_never_chosen_for_a_chat_site(m, monkeypatch):
+    monkeypatch.setenv("AI_PRICES_JSON", '{"openai/gpt-5-pro": [1000, 8000, 1]}')
+    choose(m, "support", [("openai", "gpt-5-pro")])
+    m.mod.invalidate()
+    assert m.mod.resolve("support") == [("openai", "gpt-4o")]
+
+
+# ------------------------------------------- a stale load is never published ---
+
+def test_a_load_that_began_before_a_change_is_dropped(m, monkeypatch):
+    """Codex AI-1a review 1, finding 5: a refresh read the old choice, paused,
+    then published it after invalidate(), so the change was hidden a minute."""
+    import threading
+    choose(m, "briefing", [("openai", "gpt-4o-mini")])
+    real_read = m.mod._read
+    reading, resume = threading.Event(), threading.Event()
+
+    def slow_read():
+        out = real_read()
+        reading.set()
+        resume.wait(5)
+        return out
+    monkeypatch.setattr(m.mod, "_read", slow_read)
+    worker = threading.Thread(target=m.mod._load)
+    worker.start()
+    assert reading.wait(2)
+    choose(m, "briefing", [("openai", "gpt-4.1")])          # Mike changes it meanwhile
+    m.mod.invalidate()
+    resume.set()
+    worker.join(5)
+    monkeypatch.setattr(m.mod, "_read", real_read)
+    assert m.mod.resolve("briefing") == [("openai", "gpt-4.1")]
+
+
+def test_an_older_read_never_overwrites_a_newer_one(m, monkeypatch):
+    """Two loads in the same generation (a change made by another server, so
+    no invalidate here): the one that read later must be the one that stays."""
+    import threading
+    import time
+    choose(m, "briefing", [("openai", "gpt-4o-mini")])
+    real_read = m.mod._read
+    first = {"done": False}
+    reading, resume = threading.Event(), threading.Event()
+
+    def read():
+        out = real_read()
+        if not first["done"]:
+            first["done"] = True
+            reading.set()
+            resume.wait(5)               # the old read stalls
+        return out
+    monkeypatch.setattr(m.mod, "_read", read)
+    old = threading.Thread(target=m.mod._load)
+    old.start()
+    assert reading.wait(2)
+    choose(m, "briefing", [("openai", "gpt-4.1")])           # changed elsewhere
+    newer = threading.Thread(target=m.mod._load)
+    newer.start()
+    time.sleep(0.2)
+    resume.set()
+    old.join(5)
+    newer.join(5)
+    assert m.mod._cache["choices"]["briefing"] == [("openai", "gpt-4.1")]

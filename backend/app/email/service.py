@@ -405,13 +405,11 @@ def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
     try:
         client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
         response = client.chat.completions.create(
-            model=ai_models.openai_model("inbox_classify"),
+            **ai_models.chat_request("inbox_classify", max_tokens=1500, temperature=0.1),
             messages=[
                 {"role": "system", "content": CATEGORIZE_SYSTEM_PROMPT},
                 {"role": "user", "content": "Analyze these emails:\n\n" + "\n---\n".join(email_items)},
             ],
-            max_tokens=1500,
-            temperature=0.1,
         )
         content = (response.choices[0].message.content or "").strip()
         if content.startswith("```"):
@@ -499,7 +497,7 @@ def generate_email_briefing_markdown(
             )
         prompt = "\n---\n".join(items)
         response = client.chat.completions.create(
-            model=ai_models.openai_model("email_briefing"),
+            **ai_models.chat_request("email_briefing", max_tokens=1200, temperature=0.2),
             messages=[
                 {
                     "role": "system",
@@ -518,8 +516,6 @@ def generate_email_briefing_markdown(
                     ),
                 },
             ],
-            max_tokens=1200,
-            temperature=0.2,
         )
         briefing = response.choices[0].message.content or fallback_text
 
@@ -561,7 +557,7 @@ def generate_email_reply_draft(message: EmailMessageModel, business: Business) -
             f"Body:\n{message.body_text or ''}"
         )
         response = client.chat.completions.create(
-            model=ai_models.openai_model("reply_draft"),
+            **ai_models.chat_request("reply_draft", max_tokens=400, temperature=0.3),
             messages=[
                 {
                     "role": "system",
@@ -573,8 +569,6 @@ def generate_email_reply_draft(message: EmailMessageModel, business: Business) -
                 },
                 {"role": "user", "content": f"Draft a reply to this email:\n\n{prompt}"},
             ],
-            max_tokens=400,
-            temperature=0.3,
         )
         content = response.choices[0].message.content or ""
         body_text = fallback_body
@@ -632,7 +626,7 @@ def generate_email_reply_drafts(
         )
 
         response = client.chat.completions.create(
-            model=ai_models.openai_model("reply_drafts"),
+            **ai_models.chat_request("reply_drafts", max_tokens=1200, temperature=0.4),
             messages=[
                 {
                     "role": "system",
@@ -652,8 +646,6 @@ def generate_email_reply_drafts(
                 },
                 {"role": "user", "content": f"Generate 3 reply drafts for this email:\n\n{email_context}"},
             ],
-            max_tokens=1200,
-            temperature=0.4,
         )
 
         content = (response.choices[0].message.content or "").strip()

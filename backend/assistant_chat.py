@@ -205,7 +205,7 @@ Each item needs: description, quantity, unit, unit_cost, category (labour/materi
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": description},
                             ],
-                            "temperature": 0.3,
+                            **ai_models.chat_params(quote_model, temperature=0.3),
                             "response_format": {"type": "json_object"},
                         },
                     )

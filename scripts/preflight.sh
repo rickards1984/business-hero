@@ -186,10 +186,17 @@ if [ -n "$RANGE" ] && [ "$DIFF_OK" -eq 1 ] && [ -n "$CHANGED" ]; then
     # scanned (AI-1a): a file that has always NAMED a setting such as
     # SUPABASE_SERVICE_ROLE_KEY is not a new secret, while a pasted key on any
     # added line, or in a new file (all of whose lines are added), still is.
-    { git diff "$RANGE" -- "$f" 2>/dev/null; git diff --cached -- "$f" 2>/dev/null; } \
-      | grep -E '^\+' | grep -vE '^\+\+\+ ' \
-      | grep -qEi 'sk-ant-[a-z0-9]|sk-proj-[a-z0-9]|xai-[a-z0-9]{20}|SUPABASE_SERVICE_ROLE|service_role.*ey[A-Za-z0-9]' \
-      && printf '%s\n' "$f"
+    # --text: a binary file's added bytes are scanned too (Codex AI-1a review
+    # 1, finding 2). The whole patch is captured first and every line counted,
+    # so an early match is never lost to SIGPIPE (finding 1). A patch that
+    # can't be read is reported, never passed (fail closed).
+    if ! ADDED=$(git diff --text "$RANGE" -- "$f" 2>/dev/null && git diff --text --cached -- "$f" 2>/dev/null); then
+      printf 'UNREADABLE %s\n' "$f"
+      continue
+    fi
+    N=$(printf '%s\n' "$ADDED" | grep -aE '^\+' | grep -avE '^\+\+\+ ' \
+      | grep -acEi 'sk-ant-[a-z0-9]|sk-proj-[a-z0-9]|xai-[a-z0-9]{20}|SUPABASE_SERVICE_ROLE|service_role.*ey[A-Za-z0-9]' || true)
+    [ -n "$N" ] && [ "$N" -gt 0 ] 2>/dev/null && printf '%s\n' "$f"
   done)
   if [ -n "$HITS" ]; then
     bad "possible secret in changed files:"

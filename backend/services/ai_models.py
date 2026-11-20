@@ -44,6 +44,12 @@ class Task:
     legacy_env: Optional[str] = None    # the Railway variable that chose the OpenAI model before AI-1
     openai_only: bool = False           # no other provider offers it (realtime voice, speech)
     providers: tuple = field(default=PROVIDERS)
+    # Models this task's call site is known to work with, or None for any priced
+    # text model (OpenAI chat sites adapt their settings through chat_params).
+    # Voice and speech are pinned: a different model may not serve the endpoint,
+    # and speech is costed at a fixed per-character rate (Codex AI-1a review 1,
+    # findings 3 and 4).
+    compatible: Optional[tuple] = None
 
 
 def _t(label, *chain, **kw):
@@ -65,13 +71,16 @@ TASKS = {
     "support": _t("Help assistant", ("openai", "gpt-4o")),
     "call_summary": _t("Call summaries", ("openai", "gpt-4o-mini")),
     "voice_aria": _t("Aria's voice (realtime)", ("openai", "gpt-realtime-2"), kind="voice",
-                     legacy_env="ARIA_REALTIME_MODEL", openai_only=True),
+                     legacy_env="ARIA_REALTIME_MODEL", openai_only=True, compatible=("gpt-realtime-2",)),
     "voice_receptionist": _t("Receptionist (realtime)", ("openai", "gpt-realtime-2"), kind="voice",
-                             legacy_env="RECEPTIONIST_REALTIME_MODEL", openai_only=True),
-    "transcribe": _t("Speech to text", ("openai", "whisper-1"), kind="transcribe", openai_only=True),
-    "speak": _t("Text to speech", ("openai", "tts-1"), kind="speech", openai_only=True),
+                             legacy_env="RECEPTIONIST_REALTIME_MODEL", openai_only=True,
+                             compatible=("gpt-realtime-2",)),
+    "transcribe": _t("Speech to text", ("openai", "whisper-1"), kind="transcribe", openai_only=True,
+                     compatible=("whisper-1",)),
+    "speak": _t("Text to speech", ("openai", "tts-1"), kind="speech", openai_only=True, compatible=("tts-1",)),
     "voice_preview": _t("Receptionist voice previews", ("openai", "gpt-4o-mini-tts"), ("openai", "tts-1-hd"),
-                        ("openai", "tts-1"), kind="speech", openai_only=True),
+                        ("openai", "tts-1"), kind="speech", openai_only=True,
+                        compatible=("gpt-4o-mini-tts", "tts-1-hd", "tts-1")),
     # Outreach's purposes (services/ai_router.py keeps their defaults and env settings).
     "draft": _t("Outreach drafts", ("openai", "gpt-6.1-sol")),
     "research": _t("Outreach research", ("openai", "gpt-6.1-sol")),
@@ -80,8 +89,9 @@ TASKS = {
 }
 ROUTER_PURPOSES = {"draft", "research", "classify", "wording"}
 
-_cache = {"at": None, "choices": {}}
-_refreshing = threading.Lock()
+_cache = {"at": None, "choices": {}, "generation": 0}
+_refreshing = threading.Lock()        # one background refresh at a time
+_loading = threading.Lock()           # one load (background or not) publishes at a time
 
 
 def _now() -> float:
@@ -94,7 +104,10 @@ def _engine():
 
 
 def invalidate() -> None:
-    """Forget the cached choices (the admin page calls this after a change)."""
+    """Forget the cached choices (the admin page calls this after a change).
+    A load already under way was reading the old choices: its result is
+    dropped, never published (Codex AI-1a review 1, finding 5)."""
+    _cache["generation"] += 1
     _cache["at"] = None
     _cache["choices"] = {}
 
@@ -148,6 +161,15 @@ def _choices() -> dict:
 
 
 def _load() -> dict:
+    with _loading:
+        generation = _cache["generation"]
+        loaded = _read()
+        if generation == _cache["generation"]:
+            _cache["at"], _cache["choices"] = _now(), loaded
+        return loaded
+
+
+def _read() -> dict:
     loaded = {}
     try:
         from sqlalchemy import text
@@ -161,13 +183,52 @@ def _load() -> dict:
     except Exception as exc:          # a missing table (before 045) or a database problem
         logger.warning("[AI] model choices unavailable (%s); using the defaults", type(exc).__name__)
         loaded = {}
-    _cache["at"], _cache["choices"] = _now(), loaded
     return loaded
+
+
+def _base_model(model: str) -> str:
+    """A fine-tuned id ("ft:gpt-5-mini:org::id") behaves as its base model."""
+    m = (model or "").lower()
+    return m.split(":")[1] if m.startswith("ft:") and ":" in m[3:] else m
+
+
+def is_reasoning(model: str) -> bool:
+    """gpt-5 and the o-series refuse max_tokens and any non-default
+    temperature (BM-1); their -chat variants behave as ordinary chat models."""
+    m = _base_model(model)
+    return (m.startswith("gpt-5") or (len(m) > 1 and m[0] == "o" and m[1].isdigit())) and "-chat" not in m
+
+
+def chat_params(model: str, *, max_tokens: Optional[int] = None, temperature: Optional[float] = None) -> dict:
+    """The output-limit and temperature settings for one OpenAI Chat
+    Completions call, in the form `model` accepts. A reasoning model refuses
+    max_tokens and temperature (BM-1): it gets max_completion_tokens, with room
+    for its reasoning, and the default temperature."""
+    out = {}
+    if is_reasoning(model):
+        if max_tokens:
+            out["max_completion_tokens"] = max(4 * int(max_tokens), 4000)
+        return out
+    if max_tokens:
+        out["max_tokens"] = int(max_tokens)
+    if temperature is not None:
+        out["temperature"] = temperature
+    return out
+
+
+def chat_request(task_name: str, *, max_tokens: Optional[int] = None, temperature: Optional[float] = None) -> dict:
+    """`model` plus its settings for an OpenAI Chat Completions call site."""
+    model = openai_model(task_name)
+    return {"model": model, **chat_params(model, max_tokens=max_tokens, temperature=temperature)}
 
 
 def _usable(task: Task, provider: str, model: str) -> bool:
     if provider not in task.providers or (task.openai_only and provider != "openai"):
         return False
+    if task.compatible is not None and model not in task.compatible:
+        return False
+    if task.kind == "text" and provider == "openai" and is_reasoning(model) and "-pro" in _base_model(model):
+        return False                  # the -pro models serve only the Responses API (BM-1)
     if not os.environ.get(KEYS[provider]):
         return False
     if task.kind != "text":

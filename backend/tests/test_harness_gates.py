@@ -435,3 +435,24 @@ def test_preflight_trap5_still_catches_an_added_secret(tmp_path, added):
 def test_preflight_trap5_catches_a_secret_in_a_new_file(tmp_path):
     trap = _trap5(_trap5_repo(tmp_path), "backend/new.py", 'KEY = "sk-' + 'ant-api03-abcdefghijklmnop"\n')
     assert "possible secret" in trap and "backend/new.py" in trap, trap
+
+
+def test_preflight_trap5_catches_a_secret_before_a_huge_change(tmp_path):
+    """Codex AI-1a review 1, finding 1: an early match must not be lost when
+    the rest of a large patch is still being read (SIGPIPE under pipefail)."""
+    body = 'KEY = "sk-' + 'ant-api03-abcdefghijklmnop"\n' + "".join(f"X{i} = {i}\n" for i in range(100_000))
+    trap = _trap5(_trap5_repo(tmp_path), "backend/big.py", body)
+    assert "possible secret" in trap and "backend/big.py" in trap, trap
+
+
+def test_preflight_trap5_catches_a_secret_in_a_binary_file(tmp_path):
+    """Codex AI-1a review 1, finding 2: a NUL byte made git print 'Binary
+    files differ' and the key went unscanned."""
+    d = _trap5_repo(tmp_path)
+    target = d / "backend" / "blob.bin"
+    target.write_bytes(b"\x00\x01head" + ('sk-' + 'ant-api03-abcdefghijklmnop').encode() + b"\x00tail")
+    base = run(["git", "rev-parse", "HEAD"], cwd=d).stdout.strip()
+    run(["git", "add", "-A"], cwd=d)
+    run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "blob"], cwd=d)
+    trap = run([str(d / "scripts" / "preflight.sh")], cwd=d, env={"PREFLIGHT_BASE": base}).stdout.split("TRAP 5")[1]
+    assert "possible secret" in trap and "backend/blob.bin" in trap, trap

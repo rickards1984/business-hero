@@ -104,6 +104,12 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     - **The problem:** the scan flagged any changed file that *names* the Supabase service-role key setting, so `app/email/service.py`, which has always imported that setting, could never be edited.
     - **The fix:** it now scans only the lines a change adds, both committed and staged. A pasted key on any added line, or in a new file, is still caught.
     - **The test:** `test_harness_gates.py` TRAP 5 has 7 tests. The old behaviour fails the false-positive test.
+- **Codex AI-1a review 1 requested changes**, and all six findings were acted on:
+  - **Findings 1 and 2, TRAP 5.** It captures the whole patch before counting matches (no SIGPIPE loss), scans binary files with `--text`, and fails closed when a patch can't be read. It's tested with a 100,000-line patch and a binary file.
+  - **Finding 3, settings.** `ai_models.chat_params` sends each OpenAI chat call the settings its model accepts: reasoning models get `max_completion_tokens`, with room to reason, and no temperature (BM-1). Every OpenAI chat call site now uses `chat_request` or `chat_params`. **This also mends three features that already ran on `gpt-5` with settings it refuses: the email briefing, the inbox's three-tone reply drafts, and Aria's reply-drafts tool.** Responses-only `-pro` models are never chosen for a chat site.
+  - **Finding 4, voice and speech.** These are pinned to models their code is known to serve (`compatible`). Speech stays on `tts-1`, because it's costed at that rate.
+  - **Finding 5, the refresh race.** `invalidate()` bumps a generation, so a load that began before a change is dropped. Loads are serialised, so an older read never overwrites a newer one.
+  - **Finding 6, the guard.** It is now syntax-aware (it parses the code): spacing, line breaks and constants are caught, comments and plain text are not, with 12 regression examples.
 - **AI-1b: chat on the router.**
   - `chat` / `chat_complex` rules and "Think harder";
   - tool calls translated for Anthropic and xAI;
