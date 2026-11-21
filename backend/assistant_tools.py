@@ -1,5 +1,6 @@
 """OpenAI assistant tools for AI Admin Assistant."""
 
+from services import ai_models  # AI-1: every AI call names a task
 import os
 import re
 import concurrent.futures
@@ -2906,7 +2907,7 @@ def _draft_email_reply(engine, business_id: str, args: dict) -> dict:
         from services import profit_guard   # PROFIT-1
         with profit_guard.attributed(business_id, "draft"):
             response = client.chat.completions.create(
-                model="gpt-5",
+                **ai_models.chat_request("reply_drafts", max_tokens=1000, temperature=0.4),
                 messages=[
                     {
                         "role": "system",
@@ -2925,8 +2926,6 @@ def _draft_email_reply(engine, business_id: str, args: dict) -> dict:
                         "content": f"From: {from_name or from_email}\nSubject: {subject}\nContent: {email_content[:1000]}"
                     }
                 ],
-                max_tokens=1000,
-                temperature=0.4,
             )
 
         content = response.choices[0].message.content or ""

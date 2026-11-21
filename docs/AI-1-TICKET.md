@@ -92,6 +92,41 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
 - when the allowance runs short, Aria uses `chat` and says so;
 - no model choice can make Aria send anything without the owner's approval.
 
+## Build in three PRs
+
+- **AI-1a (this PR): foundations.**
+  - `services/ai_models.py`: the tasks, their day-one defaults (today's models and old Railway settings), saved choices (cached for a minute; never read on the event loop), and the key and price rules.
+  - Every call site now names a task. A guard test fails on any hard-coded model.
+  - Outreach's router reads saved choices.
+  - Migration 045, with a runbook.
+  - Prices added: gpt-5, Claude Opus 5.5, Sonnet 5.5. Before this, gpt-5 had no price, so chats were recorded at the "unknown model" rate.
+  - **The preflight secret scan (TRAP 5) was fixed so it could push at all.**
+    - **The problem:** the scan flagged any changed file that *names* the Supabase service-role key setting, so `app/email/service.py`, which has always imported that setting, could never be edited.
+    - **The fix:** it now scans only the lines a change adds, both committed and staged. A pasted key on any added line, or in a new file, is still caught.
+    - **The test:** `test_harness_gates.py` TRAP 5 has 7 tests. The old behaviour fails the false-positive test.
+- **Codex AI-1a review 1 requested changes**, and all six findings were acted on:
+  - **Findings 1 and 2, TRAP 5.** It captures the whole patch before counting matches (no SIGPIPE loss), scans binary files with `--text`, and fails closed when a patch can't be read. It's tested with a 100,000-line patch and a binary file.
+  - **Finding 3, settings.** `ai_models.chat_params` sends each OpenAI chat call the settings its model accepts: reasoning models get `max_completion_tokens`, with room to reason, and no temperature (BM-1). Every OpenAI chat call site now uses `chat_request` or `chat_params`. **This also mends three features that already ran on `gpt-5` with settings it refuses: the email briefing, the inbox's three-tone reply drafts, and Aria's reply-drafts tool.** Responses-only `-pro` models are never chosen for a chat site.
+  - **Finding 4, voice and speech.** These are pinned to models their code is known to serve (`compatible`). Speech stays on `tts-1`, because it's costed at that rate.
+  - **Finding 5, the refresh race.** `invalidate()` bumps a generation, so a load that began before a change is dropped. Loads are serialised, so an older read never overwrites a newer one.
+  - **Finding 6, the guard.** It is now syntax-aware (it parses the code): spacing, line breaks and constants are caught, comments and plain text are not, with 12 regression examples.
+- **Codex AI-1a review 2:** findings 2 and 3 confirmed. Changes made for:
+  - **finding 1:** a scanner error now fails TRAP 5, tested with a failing `grep` shim;
+  - **finding 4:** speech is costed per model (`tts-1-hd` and `gpt-4o-mini-tts` at 2.4p per 1,000 characters, an unknown model at the highest rate). That also mends voice previews' existing under-recording;
+  - **finding 5:** invalidation and a load's publication share one lock;
+  - **finding 6:** the guard resolves model-id constants anywhere, annotated or not.
+
+  All are mutation-checked.
+- **Codex AI-1a review 3:** findings 1, 4 and 5 were confirmed resolved. The one finding left (fine-tuned `ft:` model IDs held in a constant slipped past the guard) was escalated after three repair cycles. Mike chose to fix it and run one more review: the guard now matches `ft:` IDs, with an example.
+- **Codex AI-1a review 4: APPROVE.**
+- **AI-1b: chat on the router.**
+  - `chat` / `chat_complex` rules and "Think harder";
+  - tool calls translated for Anthropic and xAI;
+  - whole-turn failover.
+- **AI-1c: the admin page.**
+  - choices, Revert, "Test this model" and the evaluation set;
+  - briefings, support and the board meeting moved onto the router, so they can also use other providers.
+
 ## Out of scope
 
 - Choosing models per business, which is platform-wide for now.

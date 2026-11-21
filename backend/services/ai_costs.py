@@ -55,12 +55,19 @@ DEFAULT_PRICES = {
     "openai/gpt-4.1": (157, 630, 2),
     "openai/gpt-4o": (197, 787, 2),
     "openai/gpt-4o-mini": (12, 47, 2),
+    # AI-1a: gpt-5 ($1.25 / $10), Aria's chat model, had no price, so every chat
+    # was recorded at the "unknown model" rate, about 16x too high.
+    "openai/gpt-5": (98, 787, 1),
     # xAI (docs.x.ai/developers/pricing): doubles above 200k tokens; web search $5/1k.
     "xai/grok-4.20-0309-reasoning": (98, 197, 0.4, 200_000, 197, 394),
     "xai/grok-4.20-0309-non-reasoning": (98, 197, 0.4, 200_000, 197, 394),
     "xai/grok-4.7": (157, 472, 0.4, 200_000, 315, 945),
-    # Anthropic: an estimate, to be checked against its pricing page.
+    # Anthropic (platform.claude.com/docs/en/about-claude/pricing, checked 20 Nov
+    # 2026): Opus 5.5 $4 / $20, Sonnet 5.5 $2 / $10, Sonnet 4.5 $3 / $15. The
+    # full 1M context is at the standard rate.
     "anthropic/claude-sonnet-4-5": (240, 1190, 1),
+    "anthropic/claude-opus-5-5": (315, 1575, 1),
+    "anthropic/claude-sonnet-5-5": (157, 787, 1),
 }
 LEDGER_LOCK = 0x4F555431   # one advisory lock serialises ledger writes platform-wide (PostgreSQL)
 

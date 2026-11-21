@@ -39,6 +39,11 @@ PLATFORM = "platform"                          # ledger rows no business owns (p
 VOICE_METERS = (RECEPTIONIST_METER, OVERAGE_METER, ARIA_VOICE_METER, ARIA_VOICE_OVERAGE_METER,
                 BOARD_VOICE_METER, BOARD_VOICE_OVERAGE_METER)          # BM-2
 TTS_PENCE_PER_1K_CHARS = 1.2                   # tts-1, $15 per million characters
+# AI-1a (Codex review 2, finding 4): each speech model at its own rate. tts-1-hd
+# is $30 per million characters; gpt-4o-mini-tts is billed by tokens (about
+# 1.5c a minute) and is recorded at the tts-1-hd rate, on the high side. A
+# speech model not listed is recorded at the highest rate, never the lowest.
+TTS_PENCE_PER_1K_CHARS_BY_MODEL = {"tts-1": 1.2, "tts-1-hd": 2.4, "gpt-4o-mini-tts": 2.4}
 # A call that sets no output limit is estimated at its model's own maximum
 # output (Codex PROFIT-1 review 2); a model not listed, at the largest of these.
 MODEL_MAX_OUTPUT_TOKENS = {"gpt-4o": 16384, "gpt-4o-mini": 16384, "gpt-4.1": 32768, "gpt-4.1-mini": 32768,
@@ -538,7 +543,9 @@ def _record_speech(result, kwargs) -> None:
         return
     from sqlmodel import Session
     business_id, _ = _attribution.get() or (PLATFORM, "voice")
-    pence = len(str(kwargs.get("input") or "")) * TTS_PENCE_PER_1K_CHARS / 1000
+    rate = TTS_PENCE_PER_1K_CHARS_BY_MODEL.get(str(kwargs.get("model") or ""),
+                                               max(TTS_PENCE_PER_1K_CHARS_BY_MODEL.values()))
+    pence = len(str(kwargs.get("input") or "")) * rate / 1000
     with Session(_engine()) as s:
         ai_costs.record(s, None if business_id == PLATFORM else business_id, purpose="voice", provider="openai",
                         model=str(kwargs.get("model") or "tts"), pence=pence, estimated=True)

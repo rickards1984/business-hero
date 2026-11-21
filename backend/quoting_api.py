@@ -1,9 +1,9 @@
 """
 Quoting System API — CRUD for quotes, line items, and settings.
 """
+from services import ai_models  # AI-1: every AI call names a task
 import json
 import logging
-import os
 from datetime import date, timedelta
 from typing import Optional
 from uuid import uuid4
@@ -33,7 +33,8 @@ router = APIRouter(prefix="/v1/quotes", tags=["Quotes"])
 
 
 # AI quote generation model — env-configurable, default preserves behaviour.
-QUOTE_AI_MODEL = os.getenv("QUOTE_AI_MODEL", "gpt-5.4")
+# AI-1: the "quote" task (gpt-5.4 by default; QUOTE_AI_MODEL still chooses it).
+QUOTE_AI_MODEL = None   # an override for tests only; None means ask the switchboard
 
 # ── Helpers ──────────────────────────────────────────────
 
@@ -1149,6 +1150,7 @@ async def generate_ai_quote(
     session: Session = Depends(get_session),
 ):
     """Generate a quote using AI from a job description and optional photos."""
+    quote_model = QUOTE_AI_MODEL or ai_models.openai_model("quote")   # AI-1
     import httpx
     import os
 
@@ -1267,7 +1269,7 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
                     # `max_completion_tokens` is also accepted by GPT-4o-family, so
                     # this payload is safe for any QUOTE_AI_MODEL setting.
                     json={
-                        "model": QUOTE_AI_MODEL,
+                        "model": quote_model,
                         "messages": [
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_content},
@@ -1277,7 +1279,7 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
                     },
                 )
         except BaseException:   # including cancellation (Codex PROFIT-1 review 4)
-            profit_guard.record_direct(QUOTE_AI_MODEL, worst_in, 4096, estimated=True, purpose="quote",
+            profit_guard.record_direct(quote_model, worst_in, 4096, estimated=True, purpose="quote",
                                        business_id=business_id)   # may have been billed
             raise
         try:
@@ -1286,7 +1288,7 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
             billed = {}
         usage = billed.get("usage") or {}
         if usage or resp.status_code == 200 or resp.status_code >= 500:
-            profit_guard.record_direct(billed.get("model") or QUOTE_AI_MODEL,
+            profit_guard.record_direct(billed.get("model") or quote_model,
                                        usage.get("prompt_tokens") if usage else worst_in,
                                        usage.get("completion_tokens") if usage else 4096,
                                        estimated=not usage, purpose="quote", business_id=business_id)
@@ -1316,7 +1318,7 @@ Respond with ONLY a JSON object, no markdown, no explanation. Format:
             "subtotal": round(subtotal, 2),
             "estimated_duration": quote_data.get("estimated_duration", ""),
             "notes": quote_data.get("notes", ""),
-            "ai_model": QUOTE_AI_MODEL,
+            "ai_model": quote_model,
             "ai_prompt": job_description,
             "images_analysed": len(images[:5]),
         }

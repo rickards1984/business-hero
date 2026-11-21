@@ -103,6 +103,11 @@ col   accounting_transactions.reference character varying(100) null=YES def=-
 col   accounting_transactions.transaction_date date null=NO def=-
 col   accounting_transactions.type character varying(20) null=NO def=-
 col   accounting_transactions.updated_at timestamp with time zone null=YES def=now()
+col   ai_model_choices.chain jsonb null=NO def=-
+col   ai_model_choices.changed_at timestamp with time zone null=NO def=now()
+col   ai_model_choices.changed_by uuid null=YES def=-
+col   ai_model_choices.previous jsonb null=YES def=-
+col   ai_model_choices.task text null=NO def=-
 col   aria_actions.action_type text null=NO def=-
 col   aria_actions.approved_at timestamp with time zone null=YES def=-
 col   aria_actions.approved_by uuid null=YES def=-

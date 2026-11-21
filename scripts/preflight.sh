@@ -182,7 +182,35 @@ if [ -n "$RANGE" ] && [ "$DIFF_OK" -eq 1 ] && [ -n "$CHANGED" ]; then
     # Skip it — scanning the scanner for its own signatures is a false
     # positive, not a secret.
     [ "$f" = "scripts/preflight.sh" ] && continue
-    grep -lEi 'sk-ant-[a-z0-9]|sk-proj-[a-z0-9]|xai-[a-z0-9]{20}|SUPABASE_SERVICE_ROLE|service_role.*ey[A-Za-z0-9]' "$f" 2>/dev/null
+    # Only the lines this change ADDS (committed in the range, or staged) are
+    # scanned (AI-1a): a file that has always NAMED a setting such as
+    # SUPABASE_SERVICE_ROLE_KEY is not a new secret, while a pasted key on any
+    # added line, or in a new file (all of whose lines are added), still is.
+    # --text: a binary file's added bytes are scanned too (Codex AI-1a review
+    # 1, finding 2). The whole patch is captured first and every line counted,
+    # so an early match is never lost to SIGPIPE (finding 1). A patch that
+    # can't be read is reported, never passed (fail closed).
+    if ! ADDED=$(git diff --text "$RANGE" -- "$f" 2>/dev/null && git diff --text --cached -- "$f" 2>/dev/null); then
+      printf 'UNREADABLE %s\n' "$f"
+      continue
+    fi
+    # grep exits 1 for "no lines" and 2 or more for an error: only 0 and 1
+    # are results; anything else reports the file (review 2, finding 1).
+    LINES=$(printf '%s\n' "$ADDED" | grep -aE '^\+')
+    RC=$?
+    if [ "$RC" -le 1 ]; then
+      LINES=$(printf '%s\n' "$LINES" | grep -avE '^\+\+\+ ')
+      RC=$?
+    fi
+    if [ "$RC" -le 1 ]; then
+      N=$(printf '%s\n' "$LINES" | grep -acEi 'sk-ant-[a-z0-9]|sk-proj-[a-z0-9]|xai-[a-z0-9]{20}|SUPABASE_SERVICE_ROLE|service_role.*ey[A-Za-z0-9]')
+      RC=$?
+    fi
+    if [ "$RC" -gt 1 ]; then
+      printf 'UNREADABLE %s\n' "$f"
+    elif [ "$N" -gt 0 ]; then
+      printf '%s\n' "$f"
+    fi
   done)
   if [ -n "$HITS" ]; then
     bad "possible secret in changed files:"

@@ -9,10 +9,10 @@ data loader can fail without breaking prep — the failed section just gets
 The output dict is what Prompt 3 will pass to GPT as context.
 """
 from __future__ import annotations
+from services import ai_models  # AI-1: every AI call names a task
 
 import json
 import logging
-import os
 import time as _time_module
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -38,7 +38,8 @@ logger = logging.getLogger(__name__)
 
 # Read at import time; Prompt 3 will use this when calling GPT.
 # Default kept conservative; Railway env should override.
-EXECUTIVE_MEETING_AI_MODEL = os.getenv("EXECUTIVE_MEETING_AI_MODEL", "gpt-5")
+# AI-1: the "meeting" task (gpt-5 by default; EXECUTIVE_MEETING_AI_MODEL still chooses it).
+EXECUTIVE_MEETING_AI_MODEL = None   # an override for tests only; None means ask the switchboard
 
 PREP_SCHEMA_VERSION = "1.0"
 TOKEN_BUDGET_TARGET = 8000  # warn if estimated tokens exceed this
@@ -209,7 +210,7 @@ def generate_prep_data(
         "schema_version": PREP_SCHEMA_VERSION,
         "generated_at": generated_at,
         "generation_duration_ms": duration_ms,
-        "ai_model": EXECUTIVE_MEETING_AI_MODEL,
+        "ai_model": EXECUTIVE_MEETING_AI_MODEL or ai_models.openai_model("meeting"),
         "business": business_profile,
         "period": _serialise_period(period),
         "financials": financials,

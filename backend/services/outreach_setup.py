@@ -812,10 +812,6 @@ def recheck_health(session, *, resolve: Callable = dns_txt, moment: Optional[dat
 DRAFT_MAX_TOKENS = 4000
 
 
-def draft_model() -> str:
-    return os.getenv("ARIA_DRAFT_MODEL", "gpt-4o")
-
-
 def _model_json(instructions: str, context: dict) -> dict:
     """One JSON draft from the first AI provider that can serve it (OUT-19 H:
     failover across providers; every attempt is noted for the cost ledger)."""
