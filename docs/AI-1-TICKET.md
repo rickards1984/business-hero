@@ -159,6 +159,9 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
   - unrecorded costs are kept per UK month, so they never block the next month.
 
   Also, the optional point: a politely asked new job ("Can you change my account name?") isn't a follow-up. All three are mutation-checked.
+- **Codex AI-1b review 4: APPROVE.** Two optional points were noted for later:
+  - one reservation lock for all businesses: a slow database read delays every business's admission. A per-business lock with a bounded wait would fix it;
+  - an attempt that straddles midnight on the 1st could file an unrecorded cost under the new month.
 - **AI-1c: the admin page.**
   - choices, Revert, "Test this model" and the evaluation set;
   - briefings, support and the board meeting moved onto the router, so they can also use other providers.
