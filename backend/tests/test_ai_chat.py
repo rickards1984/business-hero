@@ -259,6 +259,7 @@ def loop(chat, monkeypatch):
         checks.append(business_id)
         return held.get("why")
     monkeypatch.setattr(chat.m, "complex_refusal", refusal)
+    monkeypatch.setattr(chat.m.RESERVATIONS, "admit", lambda business_id, worst: held.get("why"))
     tools_run = []
 
     async def tool(name, args, *a, **k):
@@ -575,3 +576,96 @@ def test_the_budgets_can_be_changed_without_a_release(monkeypatch):
     assert ai_chat.complex_budget_pence("pro") == 2000 and ai_chat.complex_budget_pence("starter") == 500
     monkeypatch.setenv("AI_COMPLEX_MONTHLY_PENCE_JSON", '{"pro": -1}')
     assert ai_chat.complex_budget_pence("pro") == 1200
+
+
+
+# ------------------------------------------------ Codex AI-1b review 2 ---
+
+@pytest.fixture
+def reservations(ledger, monkeypatch):
+    from services import ai_chat
+    fresh = ai_chat._Reservations()
+    monkeypatch.setattr(ai_chat, "RESERVATIONS", fresh)
+    return fresh
+
+
+def test_concurrent_attempts_cannot_all_pass_just_under_the_budget(reservations, ledger):
+    """Finding 2: several requests read 499p of 500p and all proceeded."""
+    from services import ai_chat
+    spend(ledger, "b2", 480)                                  # starter: 500p
+    assert reservations.admit("b2", 15) is None               # 480 + 15 fits
+    assert reservations.admit("b2", 15) == ai_chat.BUDGET_USED   # the first is still in flight: no room
+    reservations.settle("b2", 15, recorded=True)
+    assert reservations.admit("b2", 15) is None               # settled (its cost is now in the ledger)
+
+
+def test_an_attempt_larger_than_what_is_left_is_refused(reservations, ledger):
+    from services import ai_chat
+    spend(ledger, "b2", 490)
+    assert reservations.admit("b2", 26) == ai_chat.BUDGET_USED
+
+
+def test_a_cost_that_could_not_be_recorded_still_counts(reservations, ledger):
+    from services import ai_chat
+    spend(ledger, "b2", 400)
+    assert reservations.admit("b2", 50) is None
+    reservations.settle("b2", 50, recorded=False, pence=60)
+    assert reservations.admit("b2", 50) == ai_chat.BUDGET_USED   # 400 + 60 unrecorded + 50 > 500
+
+
+def test_every_attempt_reserves_including_a_failover(chat, monkeypatch, reservations, ledger):
+    from services import ai_chat
+    choose(chat, monkeypatch, "chat_complex", [("anthropic", "claude-opus-5-5"), ("openai", "gpt-5")])
+    monkeypatch.setattr(ai_chat, "_http", FakeAnthropic([(529, {})]))
+    seen = []
+    real = reservations.admit
+    monkeypatch.setattr(reservations, "admit", lambda bid, worst: seen.append(worst) or real(bid, worst))
+    ai_chat.turn("chat_complex", business_id="b1", messages=[{"role": "user", "content": "hi"}],
+                 openai_client=FakeOpenAI([oa_reply("ok")]), budget_business="b1")
+    assert len(seen) == 2 and all(w > 0 for w in seen)
+    assert reservations.inflight.get("b1", 0) == 0            # both settled
+
+
+def test_a_budget_refusal_mid_turn_answers_with_the_everyday_model(chat, loop, monkeypatch):
+    choose(chat, monkeypatch, "chat_complex", [("openai", "gpt-5.4")])
+    monkeypatch.setenv("AI_PRICES_JSON", '{"openai/gpt-5.4": [200, 1000, 1]}')
+    monkeypatch.setattr(chat.m.RESERVATIONS, "admit", lambda business_id, worst: "budget")
+    fake = FakeOpenAI([oa_reply("Cheaper answer.")])
+    monkeypatch.setattr(loop.ac, "OpenAI", fake)
+    out = run_chat(loop, "how much did we make this month?")
+    assert fake.calls[0]["model"] == "gpt-5" and "used up" in out["reply"]
+
+
+def test_a_cut_off_final_answer_says_so(chat, loop, monkeypatch):
+    """Finding 4: the final answer after the tool rounds ignored truncation."""
+    calls = [oa_reply(tool_calls=[{"id": f"c{n}", "name": "get_invoices", "args": {}}]) for n in range(5)]
+    last = oa_reply("First half only")
+    last.choices[0].finish_reason = "length"
+    monkeypatch.setattr(loop.ac, "OpenAI", FakeOpenAI(calls + [last]))
+    out = run_chat(loop, "anything new for me?")
+    assert out["reply"].startswith("First half only") and "ran out of room" in out["reply"]
+
+
+@pytest.mark.parametrize("tool_first,words", [(False, "couldn't put an answer together just then"),
+                                              (True, "looked into that but couldn't")])
+def test_an_empty_answer_never_claims_something_was_done(chat, loop, monkeypatch, tool_first, words):
+    """Finding 9: two empty replies ended 'I've completed the requested
+    actions' with nothing done."""
+    script = ([oa_reply(tool_calls=[{"id": "c1", "name": "get_invoices", "args": {}}])] if tool_first else []) \
+        + [oa_reply(""), oa_reply("")]
+    monkeypatch.setattr(loop.ac, "OpenAI", FakeOpenAI(script))
+    out = run_chat(loop, "send the invoice")
+    assert words in out["reply"] and "completed" not in out["reply"]
+
+
+def test_a_chain_of_follow_ups_keeps_its_topic(chat):
+    history = [{"role": "user", "content": "how much profit did we make in October?"},
+               {"role": "assistant", "content": "About £4,200."},
+               {"role": "user", "content": "What about last month?"},
+               {"role": "assistant", "content": "About £3,900."}]
+    assert chat.m.pick_task("And the month before?", history=history) == "chat_complex"
+
+
+def test_a_new_job_after_a_money_question_is_not_a_follow_up(chat):
+    history = [{"role": "user", "content": "how much profit did we make in October?"}]
+    assert chat.m.pick_task("Change my account name", history=history) == "chat"

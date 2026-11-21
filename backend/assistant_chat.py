@@ -871,7 +871,17 @@ async def process_chat_message(
     async def one_round(task, tools):
         """One round, off the event loop, on the first provider that answers
         (M4: a failed provider hands the round to the next; tools already run
-        stay in `messages` as results and are never run again)."""
+        stay in `messages` as results and are never run again). A round on the
+        stronger model reserves from the business's budget before each attempt;
+        when it doesn't fit, the round is answered by the everyday model."""
+        nonlocal held_back
+        if task == "chat_complex":
+            try:
+                return await asyncio.to_thread(ai_chat.turn, task, business_id=business.id, messages=messages,
+                                               tools=tools, openai_client=OpenAI, budget_business=business.id)
+            except ai_chat.BudgetRefused as refused:
+                held_back = refused.reason
+                task = "chat"
         return await asyncio.to_thread(ai_chat.turn, task, business_id=business.id, messages=messages,
                                        tools=tools, openai_client=OpenAI)
 
@@ -941,7 +951,17 @@ async def process_chat_message(
         try:
             reply = await one_round(await task_for(tool_round), None)
             answered_by = f"{reply.provider}/{reply.model}"
-            assistant_reply = reply.content if (reply.content or "").strip() else "I've completed the requested actions."
+            if (reply.content or "").strip():
+                assistant_reply = reply.content
+                if getattr(reply, "truncated", False):     # review 2, finding 4
+                    assistant_reply += "\n\n(I ran out of room there: ask me to carry on.)"
+            else:
+                # Never claim something was done when nothing says it was
+                # (review 2, finding 9).
+                assistant_reply = (
+                    "I've prepared that for you: please check the card below." if proposals else
+                    "I looked into that but couldn't put an answer together. Please ask me again." if tool_round else
+                    "Sorry, I couldn't put an answer together just then. Please try again.")
         except ai_router.AllProvidersFailed as e:
             logger.error(f"AI providers all failed on the final response: {e}")
             assistant_reply = "I encountered an error generating a response. Please try again."

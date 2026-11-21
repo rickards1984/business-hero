@@ -147,6 +147,13 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
   8. Routing: words such as made, afford, hire and money count; account, why and review on their own don't; a short follow-up keeps its money topic.
 
   Every fix has a test and is mutation-checked.
+- **Codex AI-1b review 2:** findings 1, 3, 5, 6 and 7 confirmed resolved. Changes made for:
+  - **2, the budget:** every attempt on the stronger model, failovers included, first **reserves its most possible cost** (`ai_chat.RESERVATIONS`). Recorded spend this month, plus what attempts in flight hold, plus this attempt's maximum, must fit the budget. A cost that couldn't be recorded stays counted. So concurrent turns can't all pass a check made just under the limit, and overspend is bounded by how far the estimates fall short of real usage. The reservations are in memory because production runs one process (pinned by a STAB-1 test). A refusal mid-turn answers that round with the everyday model and adds the note.
+  - **4:** a cut-off final answer now says so.
+  - **9 (new):** an empty answer never claims anything was done. It points to the card if one was made, or says plainly that Aria couldn't answer.
+  - **8, routing:** a chain of short follow-ups keeps the topic of the question that started it, and a short message that starts a new job (change, add, send…) isn't a follow-up.
+
+  All are mutation-checked.
 - **AI-1c: the admin page.**
   - choices, Revert, "Test this model" and the evaluation set;
   - briefings, support and the board meeting moved onto the router, so they can also use other providers.

@@ -69,12 +69,28 @@ def pick_task(message: str, *, history, think_harder: bool = False, tool_rounds:
         return "chat_complex"
     if _complex(message):
         return "chat_complex"
-    if len((message or "").strip()) <= FOLLOW_UP_CHARS:
-        previous = next((m.get("content") for m in reversed(history or [])
-                         if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str)), None)
-        if previous and _complex(previous):
-            return "chat_complex"
+    if _is_follow_up(message):
+        # The topic is set by the last user message that wasn't itself a short
+        # follow-up: "profit?" → "what about last month?" → "and before?"
+        for m in reversed(history or []):
+            if not (isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str)):
+                continue
+            if _complex(m["content"]):
+                return "chat_complex"
+            if not _is_follow_up(m["content"]):
+                break
     return "chat"
+
+
+# A short message that starts a new job is a change of topic, not a follow-up
+# (Codex AI-1b review 2: "Change my account name" after a profit question).
+_NEW_TOPIC = re.compile(r"^\s*(change|update|rename|delete|remove|add|set|create|book|cancel|send|show|open|"
+                        r"remind|turn|switch|log|sign|reset|edit|move|call|email|text)\b", re.I)
+
+
+def _is_follow_up(text) -> bool:
+    text = (text or "").strip()
+    return bool(text) and len(text) <= FOLLOW_UP_CHARS and not _NEW_TOPIC.search(text)
 
 
 def _complex(text) -> bool:
@@ -137,6 +153,72 @@ def complex_refusal(business_id) -> Optional[str]:
     return BUDGET_USED if spent >= complex_budget_pence(plan) else None
 
 
+class BudgetRefused(Exception):
+    """The stronger model may not take this attempt: `reason` is BUDGET_USED
+    or PAUSED. The chat loop answers with the everyday model instead."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _Reservations:
+    """Each attempt on the stronger model first RESERVES its most possible
+    cost from the business's month (Codex AI-1b review 2, finding 2), so
+    concurrent turns can't all pass a check made just under the budget: spend
+    recorded + held by attempts in flight + this attempt's maximum must fit.
+    In memory, because production runs one process (STAB-1: a test fails if
+    the Procfile or railway.json gains workers). A cost that could not be
+    recorded stays counted for the month."""
+
+    def __init__(self):
+        import threading
+        self.lock = threading.Lock()
+        self.inflight: dict = {}
+        self.unrecorded: dict = {}
+
+    def admit(self, business_id, worst_pence: float) -> Optional[str]:
+        from services import profit_guard
+        if not profit_guard.permits("chat_complex"):
+            return PAUSED
+        try:
+            from sqlalchemy import text
+            from sqlmodel import Session
+            with Session(profit_guard._engine()) as s:
+                plan = s.execute(text("SELECT plan_tier FROM businesses WHERE id = :b"),
+                                 {"b": str(business_id)}).scalar()
+                spent = complex_spent_pence(s, business_id)
+                s.rollback()
+        except Exception:
+            logger.exception("[AI] the deeper-thinking budget could not be checked; the everyday model answers")
+            return PAUSED
+        key = str(business_id)
+        with self.lock:
+            held = self.inflight.get(key, 0.0) + self.unrecorded.get(key, 0.0)
+            if spent + held + worst_pence > complex_budget_pence(plan):
+                return BUDGET_USED
+            self.inflight[key] = self.inflight.get(key, 0.0) + worst_pence
+        return None
+
+    def settle(self, business_id, worst_pence: float, *, recorded: bool, pence: float = 0.0) -> None:
+        key = str(business_id)
+        with self.lock:
+            self.inflight[key] = max(0.0, self.inflight.get(key, 0.0) - worst_pence)
+            if not recorded:
+                self.unrecorded[key] = self.unrecorded.get(key, 0.0) + pence
+
+
+RESERVATIONS = _Reservations()
+
+
+def _pence(provider, model, tokens) -> float:
+    from services import ai_costs, profit_guard
+    try:
+        return float(ai_costs.cost(provider, model, int(tokens[0]), int(tokens[1])))
+    except ai_costs.Unpriced:
+        return (tokens[0] * profit_guard.UNPRICED_PENCE[0] + tokens[1] * profit_guard.UNPRICED_PENCE[1]) / 1e6
+
+
 NOTES = {
     BUDGET_USED: ("(I answered with my everyday model: this month's allowance for deeper thinking is used up. "
                   "It starts again on the 1st.)"),
@@ -146,8 +228,9 @@ NOTES = {
 
 # ---------------------------------------------------------------- cost ---
 
-def _record(business_id, *, purpose, provider, model, input_tokens, output_tokens, estimated) -> None:
-    """One attempt in the ledger, in its own short session (never raises)."""
+def _record(business_id, *, purpose, provider, model, input_tokens, output_tokens, estimated) -> bool:
+    """One attempt in the ledger, in its own short session (never raises).
+    True when it was recorded."""
     try:
         from sqlmodel import Session
         from services import ai_costs, profit_guard
@@ -161,8 +244,10 @@ def _record(business_id, *, purpose, provider, model, input_tokens, output_token
                             purpose=purpose, provider=provider, model=model, input_tokens=int(input_tokens),
                             output_tokens=int(output_tokens), pence=pence, estimated=estimated)
             s.commit()
+        return True
     except Exception:
         logger.exception("[AI] could not record a chat attempt's cost (%s/%s)", provider, model)
+        return False
 
 
 # ------------------------------------------------------------- providers ---
@@ -346,37 +431,56 @@ def available(task: str) -> bool:
 
 
 def turn(task: str, *, business_id, messages: list, tools: Optional[list] = None, timeout: float = 120.0,
-         openai_client=None, purpose: Optional[str] = None):
+         openai_client=None, purpose: Optional[str] = None, budget_business=None):
     """One round of the conversation from the first provider that answers.
     Returns content, tool_calls [{id, name, arguments}], truncated, provider
     and model. Recorded under `purpose` (the task, by default), so each
-    business's deeper-thinking spend can be read back."""
+    business's deeper-thinking spend can be read back. With `budget_business`,
+    every attempt first reserves its most possible cost from that business's
+    deeper-thinking budget, and raises BudgetRefused when it doesn't fit."""
     purpose = purpose or task
     tried = []
     for provider, model in ai_models.resolve(task):
         if ai_router._is_down(provider) or not os.environ.get(ai_models.KEYS.get(provider, "")):
             continue
         worst = _worst(provider, model, messages, tools)
+        reserved = 0.0
+        if budget_business is not None:
+            reserved = _pence(provider, model, worst)
+            why = RESERVATIONS.admit(budget_business, reserved)
+            if why:
+                raise BudgetRefused(why)
+        outcome = {"recorded": True, "pence": 0.0}
+
+        def note(**kw):
+            outcome["pence"] = _pence(kw["provider"], kw["model"], (kw["input_tokens"], kw["output_tokens"]))
+            outcome["recorded"] = _record(business_id, **kw) is not False
         try:
             reply, usage = _ADAPTERS[provider](provider, model, messages, tools, timeout, openai_client)
         except Rejected as exc:
             # Refused before any work: not billed, and not an outage (finding 3).
+            if budget_business is not None:
+                RESERVATIONS.settle(budget_business, reserved, recorded=True)
             tried.append(f"{provider}/{model}")
             logger.warning("[AI] %s: %s/%s refused the request (%s); trying the next provider",
                            task, provider, model, exc)
             continue
         except ai_router.ProviderError as exc:
             got = _tokens(exc.usage)
-            _record(business_id, purpose=purpose, provider=provider, model=model,
-                    input_tokens=(got or worst)[0], output_tokens=(got or worst)[1], estimated=got is None)
+            note(purpose=purpose, provider=provider, model=model,
+                 input_tokens=(got or worst)[0], output_tokens=(got or worst)[1], estimated=got is None)
+            if budget_business is not None:
+                RESERVATIONS.settle(budget_business, reserved, **outcome)
             if not isinstance(exc, Truncated):
                 ai_router._trip(provider)     # an outage; a cut-off reply is our limit, not theirs
             tried.append(f"{provider}/{model}")
             logger.warning("[AI] %s: %s/%s failed (%s); trying the next provider", task, provider, model, exc)
             continue
         got = _tokens(usage)
-        _record(business_id, purpose=purpose, provider=provider, model=model,
-                input_tokens=(got or worst)[0], output_tokens=(got or worst)[1], estimated=got is None)
+        note(purpose=purpose, provider=provider, model=model,
+             input_tokens=(got or worst)[0], output_tokens=(got or worst)[1], estimated=got is None)
+        if budget_business is not None:
+            RESERVATIONS.settle(budget_business, reserved, **outcome)
         reply.provider, reply.model = provider, model
         return reply
     raise ai_router.AllProvidersFailed("No AI provider could answer" + (f" (tried {', '.join(tried)})" if tried else ""))
