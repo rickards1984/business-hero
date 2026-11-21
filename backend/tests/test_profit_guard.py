@@ -364,7 +364,7 @@ def test_chat_costs_are_attributed_to_the_business_within_the_call_only():
     assert "completions.create" not in source
     from services import ai_chat
     turn = inspect.getsource(ai_chat.turn)
-    assert "_record(business_id, purpose=purpose" in turn
+    assert "_record(business_id, **kw)" in turn and "note(purpose=purpose" in turn
 
 
 
