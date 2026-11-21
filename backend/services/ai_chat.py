@@ -84,7 +84,9 @@ def pick_task(message: str, *, history, think_harder: bool = False, tool_rounds:
 
 # A short message that starts a new job is a change of topic, not a follow-up
 # (Codex AI-1b review 2: "Change my account name" after a profit question).
-_NEW_TOPIC = re.compile(r"^\s*(change|update|rename|delete|remove|add|set|create|book|cancel|send|show|open|"
+_NEW_TOPIC = re.compile(r"^\s*(?:(?:please|can you|could you|would you|will you|can i|could i|"
+                        r"i want to|i'd like to|i need to|help me)\s+)*"
+                        r"(change|update|rename|delete|remove|add|set|create|book|cancel|send|show|open|"
                         r"remind|turn|switch|log|sign|reset|edit|move|call|email|text)\b", re.I)
 
 
@@ -169,32 +171,44 @@ class _Reservations:
     recorded + held by attempts in flight + this attempt's maximum must fit.
     In memory, because production runs one process (STAB-1: a test fails if
     the Procfile or railway.json gains workers). A cost that could not be
-    recorded stays counted for the month."""
+    recorded stays counted for ITS month only.
+
+    The recorded spend is read UNDER the lock (Codex AI-1b review 3, finding
+    1). An attempt records its cost before it settles, so an admission reads
+    either the cost not yet recorded and its reservation still held, or the
+    cost recorded and the reservation still held (counted twice: on the
+    cautious side), never neither."""
 
     def __init__(self):
         import threading
         self.lock = threading.Lock()
         self.inflight: dict = {}
-        self.unrecorded: dict = {}
+        self.unrecorded: dict = {}          # (business, UK month) → pence (review 3, finding 2)
+
+    @staticmethod
+    def _period() -> str:
+        from datetime import datetime, timezone
+        from services.metering import period_for
+        return period_for(datetime.now(timezone.utc))
 
     def admit(self, business_id, worst_pence: float) -> Optional[str]:
         from services import profit_guard
         if not profit_guard.permits("chat_complex"):
             return PAUSED
-        try:
-            from sqlalchemy import text
-            from sqlmodel import Session
-            with Session(profit_guard._engine()) as s:
-                plan = s.execute(text("SELECT plan_tier FROM businesses WHERE id = :b"),
-                                 {"b": str(business_id)}).scalar()
-                spent = complex_spent_pence(s, business_id)
-                s.rollback()
-        except Exception:
-            logger.exception("[AI] the deeper-thinking budget could not be checked; the everyday model answers")
-            return PAUSED
         key = str(business_id)
         with self.lock:
-            held = self.inflight.get(key, 0.0) + self.unrecorded.get(key, 0.0)
+            try:
+                from sqlalchemy import text
+                from sqlmodel import Session
+                with Session(profit_guard._engine()) as s:
+                    plan = s.execute(text("SELECT plan_tier FROM businesses WHERE id = :b"),
+                                     {"b": key}).scalar()
+                    spent = complex_spent_pence(s, business_id)
+                    s.rollback()
+            except Exception:
+                logger.exception("[AI] the deeper-thinking budget could not be checked; the everyday model answers")
+                return PAUSED
+            held = self.inflight.get(key, 0.0) + self.unrecorded.get((key, self._period()), 0.0)
             if spent + held + worst_pence > complex_budget_pence(plan):
                 return BUDGET_USED
             self.inflight[key] = self.inflight.get(key, 0.0) + worst_pence
@@ -205,7 +219,8 @@ class _Reservations:
         with self.lock:
             self.inflight[key] = max(0.0, self.inflight.get(key, 0.0) - worst_pence)
             if not recorded:
-                self.unrecorded[key] = self.unrecorded.get(key, 0.0) + pence
+                slot = (key, self._period())
+                self.unrecorded[slot] = self.unrecorded.get(slot, 0.0) + pence
 
 
 RESERVATIONS = _Reservations()

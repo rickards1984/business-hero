@@ -669,3 +669,47 @@ def test_a_chain_of_follow_ups_keeps_its_topic(chat):
 def test_a_new_job_after_a_money_question_is_not_a_follow_up(chat):
     history = [{"role": "user", "content": "how much profit did we make in October?"}]
     assert chat.m.pick_task("Change my account name", history=history) == "chat"
+
+
+
+# ------------------------------------------------ Codex AI-1b review 3 ---
+
+def test_admission_never_reads_a_stale_spend(reservations, ledger, monkeypatch):
+    """Finding 1: B read 480p, A recorded its 15p and released, then B admitted
+    against 480p: 510p of 500p. The read is now under the lock, so A can't
+    release in between: B sees A's reservation still held."""
+    import threading
+    import time
+    from services import ai_chat
+    assert reservations.admit("b2", 15) is None                     # A is in flight (ledger 0p)
+    fired = {}
+
+    def stale_read(session, business_id, moment=None):
+        # B's reading predates A's recording: 480p (A's 15p not in it yet)...
+        if not fired:
+            fired["t"] = threading.Thread(target=lambda: reservations.settle("b2", 15, recorded=True))
+            fired["t"].start()                                      # ...while A records and releases
+            time.sleep(0.2)
+        return 480.0
+    monkeypatch.setattr(ai_chat, "complex_spent_pence", stale_read)
+    assert reservations.admit("b2", 15) == ai_chat.BUDGET_USED       # 480 + A's 15 still held + 15 > 500
+    fired["t"].join(5)
+
+
+def test_an_unrecorded_cost_counts_only_in_its_own_month(reservations, ledger, monkeypatch):
+    """Finding 2: November's unrecorded 500p still blocked December."""
+    from services import ai_chat
+    monkeypatch.setattr(ai_chat._Reservations, "_period", staticmethod(lambda: "2026-11"))
+    assert reservations.admit("b2", 10) is None
+    reservations.settle("b2", 10, recorded=False, pence=500)
+    assert reservations.admit("b2", 10) == ai_chat.BUDGET_USED       # November: used up
+    monkeypatch.setattr(ai_chat._Reservations, "_period", staticmethod(lambda: "2026-12"))
+    assert reservations.admit("b2", 10) is None                      # December: starts again
+
+
+@pytest.mark.parametrize("message", ["Can you change my account name?", "Please add a task for Friday",
+                                     "could you send that to Sam"])
+def test_a_politely_asked_new_job_is_not_a_follow_up(chat, message):
+    """Review 3, optional: the new-topic verbs only matched at the start."""
+    history = [{"role": "user", "content": "how much profit did we make in October?"}]
+    assert chat.m.pick_task(message, history=history) == "chat"

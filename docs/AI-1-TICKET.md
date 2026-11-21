@@ -154,6 +154,11 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
   - **8, routing:** a chain of short follow-ups keeps the topic of the question that started it, and a short message that starts a new job (change, add, send…) isn't a follow-up.
 
   All are mutation-checked.
+- **Codex AI-1b review 3:** findings 4 and 9 were confirmed resolved. The two left on the budget were escalated after three cycles, and Mike chose to fix them and run one more review:
+  - the recorded spend is read **under** the reservation lock, so an attempt that records and releases can't slip between the read and the decision;
+  - unrecorded costs are kept per UK month, so they never block the next month.
+
+  Also, the optional point: a politely asked new job ("Can you change my account name?") isn't a follow-up. All three are mutation-checked.
 - **AI-1c: the admin page.**
   - choices, Revert, "Test this model" and the evaluation set;
   - briefings, support and the board meeting moved onto the router, so they can also use other providers.
