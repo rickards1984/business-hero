@@ -35,14 +35,21 @@ LONG_CONVERSATION_TOKENS = 30_000    # M3: about 120,000 characters
 COMPLEX_AFTER_TOOL_ROUNDS = 3
 
 # M3: words that mean money, numbers or thinking work. Matched as whole words.
+# Not "account" (an app account), "why" or "review" on their own: too many
+# everyday questions use them (Codex AI-1b review 1, finding 8).
 _COMPLEX = re.compile(r"\b(" + "|".join([
     r"invoices?", r"owed?", r"owing", r"overdue", r"debts?", r"paid", r"payments?", r"cash(?:\s*flow)?",
     r"profits?", r"loss(?:es)?", r"margins?", r"revenue", r"turnover", r"income", r"expenses?", r"costs?",
-    r"budgets?", r"forecasts?", r"accounts?", r"accounting", r"vat", r"tax(?:es)?", r"pric(?:e|es|ing)",
-    r"quotes?", r"quotation", r"estimates?", r"bank", r"balance", r"xero", r"payroll", r"£",
-    r"analy[sz]e", r"analysis", r"compare", r"comparison", r"plan", r"planning", r"strategy", r"review",
-    r"breakdown", r"why", r"recommend", r"should i",
+    r"budgets?", r"forecasts?", r"accounts", r"accounting", r"accountant", r"vat", r"tax(?:es)?",
+    r"pric(?:e|es|ing)", r"quotes?", r"quotation", r"estimates?", r"bank", r"balance", r"xero", r"payroll",
+    r"money", r"earn(?:ed|ings)?", r"made", r"make\s+(?:this|last|a)\s+(?:month|year|week|profit|loss)",
+    r"spen[dt]", r"afford", r"wages?", r"salar(?:y|ies)", r"hire", r"hiring", r"employees?", r"staff costs",
+    r"analy[sz]e", r"analysis", r"compare", r"comparison", r"plan", r"planning", r"strategy", r"strategic",
+    r"breakdown", r"recommend(?:ation)?s?", r"should\s+(?:i|we)", r"worth\s+it", r"growth", r"grow",
 ]) + r")\b", re.I)
+# A short follow-up ("what about last month?") keeps the topic of the
+# question before it.
+FOLLOW_UP_CHARS = 60
 
 
 def _chars(messages) -> int:
@@ -60,7 +67,81 @@ def pick_task(message: str, *, history, think_harder: bool = False, tool_rounds:
         return "chat_complex"
     if (_chars(history) + len(message or "")) / 4 > LONG_CONVERSATION_TOKENS:
         return "chat_complex"
-    return "chat_complex" if _COMPLEX.search(message or "") or "£" in (message or "") else "chat"
+    if _complex(message):
+        return "chat_complex"
+    if len((message or "").strip()) <= FOLLOW_UP_CHARS:
+        previous = next((m.get("content") for m in reversed(history or [])
+                         if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str)), None)
+        if previous and _complex(previous):
+            return "chat_complex"
+    return "chat"
+
+
+def _complex(text) -> bool:
+    return bool(text) and (bool(_COMPLEX.search(text)) or "£" in text)
+
+
+# ---------------------------------------------- the deeper-thinking budget ---
+
+# Mike, 21 Nov 2026: each business's monthly spend on the stronger model, in
+# pence, by plan; after it, the everyday model answers and Aria says so.
+# AI_COMPLEX_MONTHLY_PENCE_JSON ({"starter": 500, ...}) overrides it.
+COMPLEX_MONTHLY_PENCE = {"starter": 500, "pro": 1200, "business": 3000}
+BUDGET_USED = "budget"
+PAUSED = "paused"
+
+
+def complex_budget_pence(plan_tier) -> int:
+    table = dict(COMPLEX_MONTHLY_PENCE)
+    raw = os.environ.get("AI_COMPLEX_MONTHLY_PENCE_JSON")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and all(isinstance(v, (int, float)) and v >= 0 for v in parsed.values()):
+                table.update({str(k): int(v) for k, v in parsed.items()})
+            else:
+                raise ValueError
+        except (TypeError, ValueError):
+            logger.error("AI_COMPLEX_MONTHLY_PENCE_JSON is not valid; the built-in budgets are used")
+    return table.get(str(plan_tier or "starter").lower(), table["starter"])
+
+
+def complex_spent_pence(session, business_id, moment=None) -> float:
+    from sqlalchemy import text
+    from services.metering import period_for
+    from datetime import datetime, timezone
+    period = period_for(moment or datetime.now(timezone.utc))
+    value = session.execute(text(
+        "SELECT COALESCE(SUM(value), 0) FROM usage_meters WHERE business_id = :b AND period = :p "
+        "AND meter LIKE 'ai\\_pence:chat\\_complex:%' ESCAPE '\\'"), {"b": str(business_id), "p": period}).scalar()
+    return float(value or 0)
+
+
+def complex_refusal(business_id) -> Optional[str]:
+    """None when this business may use the stronger model now; else why not:
+    BUDGET_USED (its month's budget, Mike's figures) or PAUSED (the platform's
+    profit guard, or a problem checking — never treated as allowed)."""
+    from services import profit_guard
+    if not profit_guard.permits("chat_complex"):
+        return PAUSED
+    try:
+        from sqlalchemy import text
+        from sqlmodel import Session
+        with Session(profit_guard._engine()) as s:
+            plan = s.execute(text("SELECT plan_tier FROM businesses WHERE id = :b"), {"b": str(business_id)}).scalar()
+            spent = complex_spent_pence(s, business_id)
+            s.rollback()
+    except Exception:
+        logger.exception("[AI] the deeper-thinking budget could not be checked; the everyday model answers")
+        return PAUSED
+    return BUDGET_USED if spent >= complex_budget_pence(plan) else None
+
+
+NOTES = {
+    BUDGET_USED: ("(I answered with my everyday model: this month's allowance for deeper thinking is used up. "
+                  "It starts again on the 1st.)"),
+    PAUSED: "(I answered with my everyday model: deeper thinking is paused for a short while.)",
+}
 
 
 # ---------------------------------------------------------------- cost ---
@@ -85,6 +166,27 @@ def _record(business_id, *, purpose, provider, model, input_tokens, output_token
 
 
 # ------------------------------------------------------------- providers ---
+
+class Rejected(ai_router.ProviderError):
+    """The provider refused THIS request (400, 404, 413, 422): not an outage.
+    It is not billed, never trips the provider for everyone, and the next
+    provider may still take the request (Codex AI-1b review 1, finding 3)."""
+
+
+class Truncated(ai_router.ProviderError):
+    """The reply hit its output limit in the middle of a tool call: the call
+    is incomplete and must never run (review 1, finding 4)."""
+
+
+REJECTED_STATUSES = {400, 404, 413, 422}
+
+
+def _status_of(exc) -> Optional[int]:
+    code = getattr(exc, "status_code", None)
+    if code is None:
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+    return code if isinstance(code, int) else None
+
 
 class _Http:
     def post(self, url, *, json=None, headers=None, timeout=None):
@@ -114,7 +216,7 @@ def _openai_compatible(provider, model, messages, tools, timeout, client_factory
     if tools:
         request.update(tools=tools, tool_choice="auto")
     if provider == "openai":
-        request.update(ai_models.chat_params(model))
+        request.update(ai_models.chat_params(model, max_tokens=OUTPUT_TOKENS))   # an explicit limit (finding 5)
     else:
         request["max_tokens"] = OUTPUT_TOKENS
     from services import profit_guard
@@ -122,14 +224,20 @@ def _openai_compatible(provider, model, messages, tools, timeout, client_factory
         with profit_guard.accounted():          # recorded here, never also by the SDK hook
             response = client.chat.completions.create(**request)
     except Exception as exc:
-        raise ai_router.ProviderError(f"{provider}: {type(exc).__name__}") from exc
+        kind = Rejected if _status_of(exc) in REJECTED_STATUSES else ai_router.ProviderError
+        raise kind(f"{provider}: {type(exc).__name__}") from exc
     usage = getattr(response, "usage", None)
     try:
-        message = response.choices[0].message
+        choice = response.choices[0]
+        message = choice.message
     except (AttributeError, IndexError, TypeError) as exc:
         raise ai_router.ProviderError(f"{provider}: malformed reply", usage=usage) from exc
-    return SimpleNamespace(content=getattr(message, "content", None) or "",
-                           tool_calls=_tool_calls_out(getattr(message, "tool_calls", None))), usage
+    calls = _tool_calls_out(getattr(message, "tool_calls", None))
+    truncated = getattr(choice, "finish_reason", None) == "length"
+    if truncated and calls:
+        raise Truncated(f"{provider}: a tool call was cut off at the output limit", usage=usage)
+    return SimpleNamespace(content=getattr(message, "content", None) or "", tool_calls=calls,
+                           truncated=truncated), usage
 
 
 def _arguments(raw) -> dict:
@@ -160,6 +268,8 @@ def to_anthropic(messages: list, tools: Optional[list]) -> dict:
             else:
                 out.append({"role": "user", "content": [block]})
             continue
+        if role == "assistant" and not m.get("tool_calls") and not str(m.get("content") or "").strip():
+            continue                     # an empty assistant message is invalid there (review 1, finding 6)
         if role == "assistant" and m.get("tool_calls"):
             blocks = [{"type": "text", "text": str(m["content"])}] if m.get("content") else []
             for c in m["tool_calls"]:
@@ -188,7 +298,8 @@ def _anthropic(provider, model, messages, tools, timeout, _client_factory):
     except Exception as exc:
         raise ai_router.ProviderError(f"{provider}: {type(exc).__name__}") from exc
     if response.status_code != 200:
-        raise ai_router.ProviderError(f"{provider}: HTTP {response.status_code}")
+        kind = Rejected if response.status_code in REJECTED_STATUSES else ai_router.ProviderError
+        raise kind(f"{provider}: HTTP {response.status_code}")
     reply, usage, _ = ai_router._anthropic_body(provider, response)
     blocks = reply.get("content")
     if not isinstance(blocks, list):
@@ -196,41 +307,70 @@ def _anthropic(provider, model, messages, tools, timeout, _client_factory):
     text = "".join(str(b.get("text", "")) for b in blocks if isinstance(b, dict) and b.get("type") == "text")
     calls = [{"id": str(b.get("id")), "name": str(b.get("name")), "arguments": json.dumps(b.get("input") or {})}
              for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
-    return SimpleNamespace(content=text, tool_calls=calls), usage
+    truncated = reply.get("stop_reason") == "max_tokens"
+    if truncated and calls:
+        raise Truncated(f"{provider}: a tool call was cut off at the output limit", usage=usage)
+    return SimpleNamespace(content=text, tool_calls=calls, truncated=truncated), usage
 
 
 _ADAPTERS = {"openai": _openai_compatible, "xai": _openai_compatible, "anthropic": _anthropic}
 
 
 def _tokens(usage) -> Optional[tuple]:
+    """(input, output) as the provider reported them; None unless BOTH are
+    reported, so a missing figure is estimated, never taken as zero (finding 5)."""
     if usage is None:
         return None
-    pairs = (("prompt_tokens", "completion_tokens"), ("input_tokens", "output_tokens"))
-    for a, b in pairs:
+    for a, b in (("prompt_tokens", "completion_tokens"), ("input_tokens", "output_tokens")):
         x, y = getattr(usage, a, None), getattr(usage, b, None)
         if isinstance(x, int) and isinstance(y, int):
             return x, y
-        if isinstance(x, int) and y is None:
-            return x, 0
     return None
 
 
+def _worst(provider, model, messages, tools) -> tuple:
+    """The most a request can be billed: every character of everything sent
+    (tool calls included) a token, and the request's own output limit."""
+    sent = len(json.dumps(messages, default=str)) + len(json.dumps(tools or []))
+    if provider == "openai":
+        limit = ai_models.chat_params(model, max_tokens=OUTPUT_TOKENS)
+        out = limit.get("max_completion_tokens") or limit.get("max_tokens") or OUTPUT_TOKENS
+    else:
+        out = OUTPUT_TOKENS
+    return max(1, sent), int(out)
+
+
+def available(task: str) -> bool:
+    """Whether any provider in the task's chain has its key (finding 7)."""
+    return any(os.environ.get(ai_models.KEYS.get(p, "")) for p, _ in ai_models.resolve(task))
+
+
 def turn(task: str, *, business_id, messages: list, tools: Optional[list] = None, timeout: float = 120.0,
-         openai_client=None, purpose: str = PURPOSE):
+         openai_client=None, purpose: Optional[str] = None):
     """One round of the conversation from the first provider that answers.
-    Returns content, tool_calls [{id, name, arguments}], provider and model."""
-    worst = (max(1, _chars(messages) + len(json.dumps(tools or []))), OUTPUT_TOKENS)
+    Returns content, tool_calls [{id, name, arguments}], truncated, provider
+    and model. Recorded under `purpose` (the task, by default), so each
+    business's deeper-thinking spend can be read back."""
+    purpose = purpose or task
     tried = []
     for provider, model in ai_models.resolve(task):
         if ai_router._is_down(provider) or not os.environ.get(ai_models.KEYS.get(provider, "")):
             continue
+        worst = _worst(provider, model, messages, tools)
         try:
             reply, usage = _ADAPTERS[provider](provider, model, messages, tools, timeout, openai_client)
+        except Rejected as exc:
+            # Refused before any work: not billed, and not an outage (finding 3).
+            tried.append(f"{provider}/{model}")
+            logger.warning("[AI] %s: %s/%s refused the request (%s); trying the next provider",
+                           task, provider, model, exc)
+            continue
         except ai_router.ProviderError as exc:
             got = _tokens(exc.usage)
             _record(business_id, purpose=purpose, provider=provider, model=model,
                     input_tokens=(got or worst)[0], output_tokens=(got or worst)[1], estimated=got is None)
-            ai_router._trip(provider)
+            if not isinstance(exc, Truncated):
+                ai_router._trip(provider)     # an outage; a cut-off reply is our limit, not theirs
             tried.append(f"{provider}/{model}")
             logger.warning("[AI] %s: %s/%s failed (%s); trying the next provider", task, provider, model, exc)
             continue

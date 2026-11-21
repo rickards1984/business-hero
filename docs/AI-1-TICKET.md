@@ -88,8 +88,8 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
 
 **M7. Cost and safety, unchanged:**
 - every call goes through the profit guard;
-- `chat_complex` is still bound by the business's AI allowance;
-- when the allowance runs short, Aria uses `chat` and says so;
+- `chat_complex` has a **monthly budget per business**. This was corrected on 21 Nov: no per-business AI allowance existed, only platform-wide limits (Codex AI-1b review 1, finding 2). Mike's figures: Starter £5, Pro £12, Business £30;
+- after the budget is used, or while the platform's profit guard pauses non-essential AI, Aria uses `chat` and says which;
 - no model choice can make Aria send anything without the owner's approval.
 
 ## Build in three PRs
@@ -136,6 +136,17 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     - falls back to `chat` when the profit guard holds `chat_complex`, and says so in the reply.
   - "Think harder" is the `think_harder` request field and a button in the chat bar. It applies to the next message.
   - `model` in the reply is shown to platform admins only.
+- **Codex AI-1b review 1 requested changes**, and all eight findings were acted on:
+  1. The budget and the profit guard are checked before **every** round that would use `chat_complex`: the first, the move up after three tool rounds, and the final answer. Once refused, the rest of the turn stays on the everyday model.
+  2. A **per-business monthly budget** (`ai_chat.complex_refusal`): spend recorded under `chat_complex` this UK month, against Mike's figures by plan, and changeable with `AI_COMPLEX_MONTHLY_PENCE_JSON`. A check that fails counts as paused, never as allowed. Each round is recorded under its own task.
+  3. A request the provider refuses (400, 404, 413 or 422) is **`Rejected`**: not billed, never trips the provider for everyone, and the next provider may still take it. 429, 5xx and timeouts are outages, as before.
+  4. A tool call cut off at the output limit (Anthropic `stop_reason: max_tokens`, OpenAI `finish_reason: length`) is **`Truncated`**: never run, and the next provider is tried. A cut-off text answer says so.
+  5. OpenAI chat requests carry an explicit output limit. Failure estimates use that limit and everything sent, tool calls included. A usage report missing either figure is estimated.
+  6. An empty answer goes to the final round instead of being saved empty, and empty assistant messages are left out for Claude.
+  7. Chat needs any provider in its chain with a key, not specifically OpenAI.
+  8. Routing: words such as made, afford, hire and money count; account, why and review on their own don't; a short follow-up keeps its money topic.
+
+  Every fix has a test and is mutation-checked.
 - **AI-1c: the admin page.**
   - choices, Revert, "Test this model" and the evaluation set;
   - briefings, support and the board meeting moved onto the router, so they can also use other providers.

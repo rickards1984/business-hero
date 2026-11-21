@@ -817,8 +817,11 @@ async def process_chat_message(
     
     logger.info(f"[DEBUG] Context resolved: user_id={user.id}, conversation_id={resolved_conv_id}, business_id={business.id}, business_name={business.name}, timezone={business.timezone}")
     
-    if not OPENAI_API_KEY:
-        return {"error": "OpenAI API key not configured", "status": 500}
+    # AI-1b: any provider in the chat chain will do, not only OpenAI (Codex
+    # AI-1b review 1, finding 7).
+    from services import ai_chat as _switchboard_chat
+    if not _switchboard_chat.available("chat"):
+        return {"error": "No AI provider is configured", "status": 500}
     
     # Step 4: Load conversation history BEFORE saving new message
     history = await asyncio.to_thread(load_conversation_history, resolved_conv_id, user.id, is_admin, limit=20)
@@ -841,11 +844,23 @@ async def process_chat_message(
     # for money, analysis, planning, a long conversation, many tool rounds or
     # "Think harder". The stronger one is non-essential: when the allowance
     # holds it, the everyday model answers and Aria says so.
-    from services import ai_chat, ai_router, profit_guard
-    wanted = ai_chat.pick_task(message, history=history, think_harder=think_harder)
-    held_back = False
-    if wanted == "chat_complex" and not await asyncio.to_thread(profit_guard.permits, "chat_complex"):
-        wanted, held_back = "chat", True
+    from services import ai_chat, ai_router
+    held_back = None                       # why the stronger model was not used, if it was wanted
+
+    async def task_for(tool_rounds):
+        """chat or chat_complex for this round. The stronger model only within
+        the business's monthly budget and while the profit guard allows it,
+        checked before EVERY round that would use it (Codex AI-1b review 1,
+        findings 1 and 2); once refused, the rest of the turn stays everyday."""
+        nonlocal held_back
+        task = ai_chat.pick_task(message, history=history, think_harder=think_harder, tool_rounds=tool_rounds)
+        if task != "chat_complex" or held_back:
+            return "chat"
+        why = await asyncio.to_thread(ai_chat.complex_refusal, business.id)
+        if why:
+            held_back = why
+            return "chat"
+        return "chat_complex"
 
     MAX_TOOL_ROUNDS = 5
     assistant_reply = None
@@ -861,10 +876,7 @@ async def process_chat_message(
                                        tools=tools, openai_client=OpenAI)
 
     while tool_round < MAX_TOOL_ROUNDS:
-        task = wanted
-        if task == "chat" and not held_back and ai_chat.pick_task(
-                message, history=history, tool_rounds=tool_round) == "chat_complex":
-            task = "chat_complex"              # three tool rounds in: the rest of the turn moves up
+        task = await task_for(tool_round)      # three tool rounds in, the rest of the turn moves up
         try:
             reply = await one_round(task, TOOL_DEFINITIONS)
         except ai_router.AllProvidersFailed as e:
@@ -873,7 +885,11 @@ async def process_chat_message(
         answered_by = f"{reply.provider}/{reply.model}"
 
         if not reply.tool_calls:
-            assistant_reply = reply.content or ""
+            # An empty answer (possible after tool results) goes to the final
+            # round below rather than being saved empty (finding 6).
+            assistant_reply = reply.content if (reply.content or "").strip() else None
+            if assistant_reply and getattr(reply, "truncated", False):
+                assistant_reply += "\n\n(I ran out of room there: ask me to carry on.)"
             break
 
         messages.append({
@@ -923,16 +939,15 @@ async def process_chat_message(
 
     if assistant_reply is None:
         try:
-            reply = await one_round("chat" if held_back else "chat_complex" if tool_round >= ai_chat.COMPLEX_AFTER_TOOL_ROUNDS else wanted, None)
+            reply = await one_round(await task_for(tool_round), None)
             answered_by = f"{reply.provider}/{reply.model}"
-            assistant_reply = reply.content or "I've completed the requested actions."
+            assistant_reply = reply.content if (reply.content or "").strip() else "I've completed the requested actions."
         except ai_router.AllProvidersFailed as e:
             logger.error(f"AI providers all failed on the final response: {e}")
             assistant_reply = "I encountered an error generating a response. Please try again."
 
     if held_back and assistant_reply:
-        assistant_reply += ("\n\n(I answered with my everyday model this time: this month's allowance for "
-                            "deeper analysis is nearly used.)")
+        assistant_reply += "\n\n" + ai_chat.NOTES[held_back]
     
     # Step 7: Save assistant reply to DB
     await asyncio.to_thread(save_message, resolved_conv_id, business.id, user.id, "assistant", assistant_reply or "")
