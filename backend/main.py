@@ -2468,7 +2468,8 @@ async def assistant_chat(
         message=data.message,
         conversation_id=data.conversation_id,
         business_id=data.business_id,
-        voice_mode=data.voice_mode
+        voice_mode=data.voice_mode,
+        think_harder=data.think_harder,
     )
     
     if "error" in result:
@@ -2485,7 +2486,13 @@ async def assistant_chat(
         ),
         conversation_id=result.get("conversation_id"),
         proposals=result.get("proposals") or [],
+        model=await run_in_threadpool(_model_for_admins, session, user.id, result),
     )
+
+
+def _model_for_admins(session, user_id, result) -> Optional[str]:
+    """AI-1b (M3): which model answered, for platform admins only."""
+    return result.get("model") if is_platform_admin_user(user_id, session) else None
 
 
 def _assert_ai_access(session, user_id, requested_business_id, feature_name):

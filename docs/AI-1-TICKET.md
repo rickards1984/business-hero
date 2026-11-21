@@ -123,6 +123,19 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
   - `chat` / `chat_complex` rules and "Think harder";
   - tool calls translated for Anthropic and xAI;
   - whole-turn failover.
+- **AI-1b, as built:**
+  - `services/ai_chat.py`:
+    - `pick_task` applies the M3 rules: money, analysis, planning and pricing words; more than about 30,000 tokens of conversation; three or more tool rounds; or "Think harder".
+    - `turn` runs one round on the first provider in the task's chain that answers. OpenAI gets settings per model; xAI goes through its OpenAI-compatible API; Anthropic's Messages API gets the conversation and tools translated, with consecutive tool results merged into one user turn.
+    - A failure trips the router's cooldown and moves to the next provider.
+    - Every attempt is recorded for the business as `chat`. A failed attempt is recorded at its maximum, marked estimated.
+  - The chat loop (`assistant_chat.process_chat_message`):
+    - runs each round through `turn` in a thread;
+    - after three tool rounds, moves the rest of the turn to `chat_complex`;
+    - never re-runs a tool on failover;
+    - falls back to `chat` when the profit guard holds `chat_complex`, and says so in the reply.
+  - "Think harder" is the `think_harder` request field and a button in the chat bar. It applies to the next message.
+  - `model` in the reply is shown to platform admins only.
 - **AI-1c: the admin page.**
   - choices, Revert, "Test this model" and the evaluation set;
   - briefings, support and the board meeting moved onto the router, so they can also use other providers.

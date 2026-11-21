@@ -183,6 +183,7 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = Field(None, alias="conversationId", description="Optional conversation ID for context")
     business_id: Optional[str] = Field(None, alias="businessId", description="Optional business ID (required if user belongs to multiple businesses)")
     voice_mode: bool = Field(False, alias="voiceMode", description="Whether the user is in voice conversation mode (more concise responses)")
+    think_harder: bool = Field(False, alias="thinkHarder", description="AI-1b: answer with the stronger model")
     
     class Config:
         populate_by_name = True
@@ -204,6 +205,7 @@ class ChatResponse(BaseModel):
     proposals: List[Dict[str, Any]] = Field(
         default_factory=list,
         description="NS-B10: approval cards Aria raised this turn; nothing in them has been done")
+    model: Optional[str] = Field(None, description="AI-1b: which provider/model answered (platform admins only)")
 
 
 class BusinessSettingsResponse(BaseModel):

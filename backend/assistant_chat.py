@@ -600,16 +600,6 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
     return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2], logo_url=m[3])
 
 
-def _complete(client, business_id, **request):
-    """STAB-1: one OpenAI chat call, attributed to the business, for running in
-    a thread. On the event loop it froze every request in the app for as long
-    as Aria took to answer, often tens of seconds. The attribution is entered
-    here, in the thread, around the call its SDK hook records."""
-    from services import profit_guard
-    with profit_guard.attributed(business_id, "chat"):
-        return client.chat.completions.create(**request)
-
-
 @dataclass
 class ConversationContext:
     """Conversation context for continuity."""
@@ -759,7 +749,8 @@ async def process_chat_message(
     message: str,
     conversation_id: Optional[str] = None,
     business_id: Optional[str] = None,
-    voice_mode: bool = False
+    voice_mode: bool = False,
+    think_harder: bool = False,
 ) -> dict:
     """Process a chat message and return the assistant response.
     
@@ -842,59 +833,61 @@ async def process_chat_message(
     system_prompt = build_system_prompt(business, voice_mode=voice_mode, user_name=user_name, user_email=user_email)
     logger.info(f"[DEBUG] System prompt built for {business.name} (voice_mode={voice_mode}, user_name={user_name}). History has {len(history)} messages.")
     
-    client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
-    chat_model = ai_models.openai_model("chat")   # AI-1 (AI-1b picks chat or chat_complex per message)
-    
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": message})
-    
+
+    # AI-1b (docs/AI-1-TICKET.md M3): the everyday model, or the stronger one
+    # for money, analysis, planning, a long conversation, many tool rounds or
+    # "Think harder". The stronger one is non-essential: when the allowance
+    # holds it, the everyday model answers and Aria says so.
+    from services import ai_chat, ai_router, profit_guard
+    wanted = ai_chat.pick_task(message, history=history, think_harder=think_harder)
+    held_back = False
+    if wanted == "chat_complex" and not await asyncio.to_thread(profit_guard.permits, "chat_complex"):
+        wanted, held_back = "chat", True
+
     MAX_TOOL_ROUNDS = 5
     assistant_reply = None
+    answered_by = None
     proposals: list = []  # NS-B10 approval cards raised this turn
     tool_round = 0
 
+    async def one_round(task, tools):
+        """One round, off the event loop, on the first provider that answers
+        (M4: a failed provider hands the round to the next; tools already run
+        stay in `messages` as results and are never run again)."""
+        return await asyncio.to_thread(ai_chat.turn, task, business_id=business.id, messages=messages,
+                                       tools=tools, openai_client=OpenAI)
+
     while tool_round < MAX_TOOL_ROUNDS:
+        task = wanted
+        if task == "chat" and not held_back and ai_chat.pick_task(
+                message, history=history, tool_rounds=tool_round) == "chat_complex":
+            task = "chat_complex"              # three tool rounds in: the rest of the turn moves up
         try:
-            response = await asyncio.to_thread(
-                _complete, client, business.id,
-                model=chat_model,
-                messages=messages,
-                tools=TOOL_DEFINITIONS,
-                tool_choice="auto",
-                timeout=120
-            )
-        except Exception as e:
-            logger.error(f"OpenAI API error on round {tool_round}: {e}")
+            reply = await one_round(task, TOOL_DEFINITIONS)
+        except ai_router.AllProvidersFailed as e:
+            logger.error(f"AI providers all failed on round {tool_round}: {e}")
             return {"error": f"AI service error: {str(e)}", "status": 500}
+        answered_by = f"{reply.provider}/{reply.model}"
 
-        assistant_message = response.choices[0].message
-
-        if not assistant_message.tool_calls:
-            assistant_reply = assistant_message.content or ""
+        if not reply.tool_calls:
+            assistant_reply = reply.content or ""
             break
 
-        assistant_msg_dict = {
+        messages.append({
             "role": "assistant",
-            "content": assistant_message.content,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
-                }
-                for tc in assistant_message.tool_calls
-            ]
-        }
-        messages.append(assistant_msg_dict)
+            "content": reply.content or None,
+            "tool_calls": [{"id": c["id"], "type": "function",
+                            "function": {"name": c["name"], "arguments": c["arguments"]}}
+                           for c in reply.tool_calls],
+        })
 
-        for tool_call in assistant_message.tool_calls:
-            tool_name = tool_call.function.name
+        for tool_call in reply.tool_calls:
+            tool_name = tool_call["name"]
             try:
-                arguments = json.loads(tool_call.function.arguments)
+                arguments = json.loads(tool_call["arguments"])
             except json.JSONDecodeError:
                 arguments = {}
 
@@ -922,7 +915,7 @@ async def process_chat_message(
 
             messages.append({
                 "role": "tool",
-                "tool_call_id": tool_call.id,
+                "tool_call_id": tool_call["id"],
                 "content": tool_content
             })
 
@@ -930,16 +923,16 @@ async def process_chat_message(
 
     if assistant_reply is None:
         try:
-            final_response = await asyncio.to_thread(
-                _complete, client, business.id,
-                model=chat_model,
-                messages=messages,
-                timeout=120
-            )
-            assistant_reply = final_response.choices[0].message.content or "I've completed the requested actions."
-        except Exception as e:
-            logger.error(f"OpenAI API error on final response: {e}")
+            reply = await one_round("chat" if held_back else "chat_complex" if tool_round >= ai_chat.COMPLEX_AFTER_TOOL_ROUNDS else wanted, None)
+            answered_by = f"{reply.provider}/{reply.model}"
+            assistant_reply = reply.content or "I've completed the requested actions."
+        except ai_router.AllProvidersFailed as e:
+            logger.error(f"AI providers all failed on the final response: {e}")
             assistant_reply = "I encountered an error generating a response. Please try again."
+
+    if held_back and assistant_reply:
+        assistant_reply += ("\n\n(I answered with my everyday model this time: this month's allowance for "
+                            "deeper analysis is nearly used.)")
     
     # Step 7: Save assistant reply to DB
     await asyncio.to_thread(save_message, resolved_conv_id, business.id, user.id, "assistant", assistant_reply or "")
@@ -955,4 +948,5 @@ async def process_chat_message(
         },
         "conversation_id": resolved_conv_id,
         "proposals": proposals,
+        "model": answered_by,          # AI-1b: shown to platform admins only (M3)
     }

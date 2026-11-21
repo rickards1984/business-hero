@@ -364,13 +364,16 @@ def test_silly_pool_settings_fall_back_to_the_defaults(monkeypatch, bad):
 
 def test_a_slow_aria_reply_never_freezes_the_server(pg_like, monkeypatch):
     """The OpenAI client is synchronous: on the event loop, every request in
-    the app waited for as long as Aria took to answer."""
-    from services import profit_guard
+    the app waited for as long as Aria took to answer. AI-1b: the round runs
+    through services.ai_chat.turn in a thread, which records its own cost for
+    the business, as chat."""
+    from services import ai_chat
     seen = []
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setattr(ai_chat, "_record", lambda business_id, **kw: seen.append((business_id, kw["purpose"])))
 
     class Completions:
         def create(self, **request):
-            seen.append(profit_guard._attribution.get())
             time.sleep(0.4)
             message = SimpleNamespace(content="Hello", tool_calls=None)
             return SimpleNamespace(choices=[SimpleNamespace(message=message)])

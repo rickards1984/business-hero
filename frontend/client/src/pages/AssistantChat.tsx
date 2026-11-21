@@ -11,6 +11,7 @@ import {
   Container,
   Paper,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
@@ -22,6 +23,7 @@ import CalendarTodayIcon from '@mui/icons-material/CalendarToday';
 import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
 import ReceiptIcon from '@mui/icons-material/Receipt';
 import SendIcon from '@mui/icons-material/Send';
+import PsychologyIcon from '@mui/icons-material/Psychology';
 import { useAuth } from '@/contexts/AuthContext';
 import { apiRequest } from '@/lib/queryClient';
 import RealtimeVoice from '@/components/RealtimeVoice';
@@ -33,6 +35,7 @@ interface ChatMessage {
   role: ChatRole;
   content: string;
   proposals?: Proposal[];  // NS-B10: Aria's drafts awaiting a tap
+  model?: string | null;   // AI-1b: which model answered (platform admins only)
 }
 
 const QUICK_ACTIONS = [
@@ -57,6 +60,8 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [conversationId, setConversationId] = useState<string | null>(null);
+  // AI-1b: "Think harder" sends the next message to the stronger model, then resets.
+  const [thinkHarder, setThinkHarder] = useState(false);
   const [realtimeMode, setRealtimeMode] = useState(false);
   // NS-A2: voice is switched off server-side until the Realtime GA migration.
   // Start hidden (null = not yet known) so a broken button never flashes up.
@@ -115,6 +120,8 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
     try {
       const payload: Record<string, any> = { message };
       if (conversationId) payload.conversation_id = conversationId;
+      if (thinkHarder) payload.think_harder = true;
+      setThinkHarder(false);
       const response = await apiRequest('POST', '/v1/assistant/chat', payload);
       if (!response.ok) {
         const errorData = await response.json();
@@ -122,7 +129,7 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
       }
       const data = await response.json();
       setMessages((prev) => [...prev, {
-        role: 'assistant', content: data.reply || '', proposals: data.proposals || [],
+        role: 'assistant', content: data.reply || '', proposals: data.proposals || [], model: data.model || null,
       }]);
       if (data.conversation_id) {
         setConversationId(data.conversation_id);
@@ -389,7 +396,14 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                   }}
                 >
                   {message.role === 'assistant' ? (
-                    <ReactMarkdown>{message.content}</ReactMarkdown>
+                    <>
+                      <ReactMarkdown>{message.content}</ReactMarkdown>
+                      {message.model && (
+                        <Typography variant="caption" sx={{ display: 'block', mt: 0.5, opacity: 0.6 }}>
+                          Answered by {message.model}
+                        </Typography>
+                      )}
+                    </>
                   ) : (
                     <Typography variant="body2" sx={{ color: 'inherit' }}>{message.content}</Typography>
                   )}
@@ -447,6 +461,25 @@ export default function AssistantChat({ embedded = false }: AssistantChatProps) 
                 },
               }}
             >
+              <Tooltip title={thinkHarder ? 'Aria will think harder about your next message' : 'Think harder: use Aria\'s strongest model for the next message'}>
+                <Button
+                  onClick={() => setThinkHarder((v) => !v)}
+                  aria-pressed={thinkHarder}
+                  aria-label="Think harder"
+                  disabled={loading}
+                  sx={{
+                    minWidth: 'auto', height: 36, px: 1.25, borderRadius: '9999px', flexShrink: 0, gap: 0.5,
+                    textTransform: 'none', fontSize: '0.75rem', fontWeight: 600,
+                    color: thinkHarder ? 'white' : 'var(--color-aria-500)',
+                    background: thinkHarder ? 'var(--color-aria-500)' : 'transparent',
+                    border: '1px solid var(--color-aria-400)',
+                    '&:hover': { background: thinkHarder ? 'var(--color-aria-600)' : 'rgba(139,92,246,0.08)' },
+                  }}
+                >
+                  <PsychologyIcon sx={{ fontSize: 18 }} />
+                  <Box component="span" sx={{ display: { xs: 'none', sm: 'inline' } }}>Think harder</Box>
+                </Button>
+              </Tooltip>
               <TextField
                 inputRef={inputRef}
                 fullWidth

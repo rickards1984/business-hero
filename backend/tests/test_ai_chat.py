@@ -1,0 +1,345 @@
+"""AI-1b — Aria's chat on the switchboard (docs/AI-1-TICKET.md, M3 and M4).
+
+  M3  each message goes to `chat` or `chat_complex` by rules, never another AI
+      call: money, analysis, a long conversation, three or more tool rounds,
+      or the owner's "Think harder". A held chat_complex falls back to chat and
+      says so.
+  M4  a provider failure hands the round to the next provider; a tool that has
+      already acted is never run again. Costs are recorded for every attempt.
+"""
+import asyncio
+import json
+from types import SimpleNamespace
+
+import pytest
+
+TOOLS = [{"type": "function", "function": {"name": "get_invoices", "description": "List invoices",
+                                           "parameters": {"type": "object", "properties": {"status": {"type": "string"}}}}}]
+
+
+@pytest.fixture
+def chat(monkeypatch):
+    from services import ai_chat, ai_models, ai_router
+    ai_router.reset_breakers()
+    for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"):
+        monkeypatch.setenv(key, "test-key")
+    recorded = []
+    monkeypatch.setattr(ai_chat, "_record", lambda business_id, **kw: recorded.append(kw))
+    monkeypatch.setattr(ai_models, "_choices", lambda: {})
+    yield SimpleNamespace(m=ai_chat, recorded=recorded, models=ai_models, router=ai_router)
+    ai_router.reset_breakers()
+
+
+def choose(chat, monkeypatch, task, pairs):
+    monkeypatch.setattr(chat.models, "_choices", lambda: {task: list(pairs)})
+
+
+class FakeOpenAI:
+    """An OpenAI client whose create() follows a script."""
+    def __init__(self, script):
+        self.calls, self.script = [], list(script)
+
+    def __call__(self, *a, **k):          # used as the client factory
+        self.base_url = k.get("base_url")
+        return self
+
+    @property
+    def chat(self):
+        return SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kw):
+        self.calls.append(kw)
+        step = self.script.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+def oa_reply(content=None, tool_calls=None, tokens=(100, 20)):
+    calls = [SimpleNamespace(id=c["id"], function=SimpleNamespace(name=c["name"], arguments=json.dumps(c["args"])))
+             for c in (tool_calls or [])] or None
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=calls))],
+                           usage=SimpleNamespace(prompt_tokens=tokens[0], completion_tokens=tokens[1]))
+
+
+class FakeAnthropic:
+    def __init__(self, replies):
+        self.sent, self.replies = [], list(replies)
+
+    def post(self, url, *, json=None, headers=None, timeout=None):
+        self.sent.append(json)
+        step = self.replies.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        status, body = step
+        return SimpleNamespace(status_code=status, json=lambda: body)
+
+
+# --------------------------------------------------------------- M3 rules ---
+
+@pytest.mark.parametrize("message,task", [
+    ("what's on today?", "chat"),
+    ("thanks!", "chat"),
+    ("who is my next appointment with", "chat"),
+    ("which invoices are overdue and how much am I owed?", "chat_complex"),
+    ("can you analyse my cash flow for the quarter", "chat_complex"),
+    ("compare this month's profit with last month", "chat_complex"),
+    ("draft a quote for a full bathroom refit", "chat_complex"),
+    ("plan my outreach for next month", "chat_complex"),
+    ("What's my VAT bill likely to be?", "chat_complex"),
+])
+def test_each_message_goes_to_the_right_task(chat, message, task):
+    assert chat.m.pick_task(message, history=[]) == task
+
+
+def test_think_harder_always_uses_the_stronger_model(chat):
+    assert chat.m.pick_task("what's on today?", history=[], think_harder=True) == "chat_complex"
+
+
+def test_a_long_conversation_uses_the_stronger_model(chat):
+    history = [{"role": "user", "content": "x" * 130_000}]          # about 32,000 tokens
+    assert chat.m.pick_task("and?", history=history) == "chat_complex"
+
+
+def test_three_tool_rounds_move_the_turn_to_the_stronger_model(chat):
+    assert chat.m.pick_task("ok", history=[], tool_rounds=2) == "chat"
+    assert chat.m.pick_task("ok", history=[], tool_rounds=3) == "chat_complex"
+
+
+# ------------------------------------------------------- the OpenAI path ---
+
+def test_openai_answers_with_the_settings_its_model_takes(chat, monkeypatch):
+    fake = FakeOpenAI([oa_reply("Hello")])
+    reply = chat.m.turn("chat", business_id="b1", messages=[{"role": "user", "content": "hi"}], tools=TOOLS,
+                        openai_client=fake)
+    assert reply.content == "Hello" and reply.tool_calls == [] and (reply.provider, reply.model) == ("openai", "gpt-5")
+    sent = fake.calls[0]
+    assert sent["model"] == "gpt-5" and "temperature" not in sent and "max_tokens" not in sent
+    assert sent["tools"] == TOOLS and sent["tool_choice"] == "auto"
+    assert chat.recorded == [{"purpose": "chat", "provider": "openai", "model": "gpt-5", "input_tokens": 100,
+                              "output_tokens": 20, "estimated": False}]
+
+
+def test_a_tool_call_comes_back_in_one_shape(chat):
+    fake = FakeOpenAI([oa_reply(tool_calls=[{"id": "call_1", "name": "get_invoices", "args": {"status": "overdue"}}])])
+    reply = chat.m.turn("chat", business_id="b1", messages=[{"role": "user", "content": "overdue?"}], tools=TOOLS,
+                        openai_client=fake)
+    assert reply.tool_calls == [{"id": "call_1", "name": "get_invoices", "arguments": '{"status": "overdue"}'}]
+
+
+# ---------------------------------------------------- the Anthropic path ---
+
+def test_anthropic_receives_the_conversation_in_its_own_shape(chat, monkeypatch):
+    choose(chat, monkeypatch, "chat_complex", [("anthropic", "claude-opus-5-5")])
+    http = FakeAnthropic([(200, {"content": [{"type": "text", "text": "Done."}],
+                                 "usage": {"input_tokens": 300, "output_tokens": 40}})])
+    monkeypatch.setattr(chat.m, "_http", http)
+    messages = [
+        {"role": "system", "content": "You are Aria."},
+        {"role": "user", "content": "which are overdue?"},
+        {"role": "assistant", "content": "Let me look.", "tool_calls": [
+            {"id": "call_1", "type": "function", "function": {"name": "get_invoices", "arguments": '{"status": "overdue"}'}},
+            {"id": "call_2", "type": "function", "function": {"name": "get_invoices", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": '{"invoices": [1]}'},
+        {"role": "tool", "tool_call_id": "call_2", "content": '{"invoices": [1, 2]}'},
+    ]
+    reply = chat.m.turn("chat_complex", business_id="b1", messages=messages, tools=TOOLS)
+    body = http.sent[0]
+    assert body["model"] == "claude-opus-5-5" and body["system"] == "You are Aria." and body["max_tokens"] > 0
+    assert body["tools"] == [{"name": "get_invoices", "description": "List invoices",
+                              "input_schema": TOOLS[0]["function"]["parameters"]}]
+    assert body["messages"] == [
+        {"role": "user", "content": "which are overdue?"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "Let me look."},
+            {"type": "tool_use", "id": "call_1", "name": "get_invoices", "input": {"status": "overdue"}},
+            {"type": "tool_use", "id": "call_2", "name": "get_invoices", "input": {}}]},
+        {"role": "user", "content": [                                   # both results in one user turn
+            {"type": "tool_result", "tool_use_id": "call_1", "content": '{"invoices": [1]}'},
+            {"type": "tool_result", "tool_use_id": "call_2", "content": '{"invoices": [1, 2]}'}]},
+    ]
+    assert (reply.content, reply.provider, reply.model) == ("Done.", "anthropic", "claude-opus-5-5")
+    assert chat.recorded[0]["provider"] == "anthropic" and chat.recorded[0]["input_tokens"] == 300
+
+
+def test_an_anthropic_tool_call_comes_back_in_the_same_shape(chat, monkeypatch):
+    choose(chat, monkeypatch, "chat_complex", [("anthropic", "claude-opus-5-5")])
+    monkeypatch.setattr(chat.m, "_http", FakeAnthropic([(200, {
+        "content": [{"type": "text", "text": "Checking."},
+                    {"type": "tool_use", "id": "toolu_9", "name": "get_invoices", "input": {"status": "overdue"}}],
+        "usage": {"input_tokens": 10, "output_tokens": 5}})]))
+    reply = chat.m.turn("chat_complex", business_id="b1", messages=[{"role": "user", "content": "x"}], tools=TOOLS)
+    assert reply.content == "Checking."
+    assert reply.tool_calls == [{"id": "toolu_9", "name": "get_invoices", "arguments": '{"status": "overdue"}'}]
+
+
+def test_a_conversation_started_on_one_provider_continues_on_another(chat, monkeypatch):
+    """OpenAI's call ids are valid Anthropic tool_use ids and back again."""
+    choose(chat, monkeypatch, "chat_complex", [("anthropic", "claude-opus-5-5")])
+    http = FakeAnthropic([(200, {"content": [{"type": "text", "text": "ok"}], "usage": {}})])
+    monkeypatch.setattr(chat.m, "_http", http)
+    chat.m.turn("chat_complex", business_id="b1", messages=[
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call_AbC-1_x", "type": "function", "function": {"name": "get_invoices", "arguments": "not json"}}]},
+        {"role": "tool", "tool_call_id": "call_AbC-1_x", "content": "{}"}], tools=TOOLS)
+    sent = http.sent[0]["messages"]
+    assert sent[1]["content"] == [{"type": "tool_use", "id": "call_AbC-1_x", "name": "get_invoices", "input": {}}]
+
+
+# --------------------------------------------------------------- M4 failover ---
+
+def test_a_provider_failure_hands_the_round_to_the_next(chat, monkeypatch):
+    choose(chat, monkeypatch, "chat_complex", [("anthropic", "claude-opus-5-5"), ("openai", "gpt-5")])
+    monkeypatch.setattr(chat.m, "_http", FakeAnthropic([(529, {"error": "overloaded"})]))
+    fake = FakeOpenAI([oa_reply("From OpenAI")])
+    reply = chat.m.turn("chat_complex", business_id="b1", messages=[{"role": "user", "content": "hi"}], tools=TOOLS,
+                        openai_client=fake)
+    assert (reply.content, reply.provider) == ("From OpenAI", "openai")
+    assert [r["provider"] for r in chat.recorded] == ["anthropic", "openai"]
+    assert chat.recorded[0]["estimated"] is True                   # the failed attempt, at its maximum
+
+
+def test_a_failed_provider_is_skipped_while_it_cools_down(chat, monkeypatch):
+    choose(chat, monkeypatch, "chat_complex", [("anthropic", "claude-opus-5-5"), ("openai", "gpt-5")])
+    http = FakeAnthropic([(500, {}), (200, {"content": [{"type": "text", "text": "x"}], "usage": {}})])
+    monkeypatch.setattr(chat.m, "_http", http)
+    fake = FakeOpenAI([oa_reply("one"), oa_reply("two")])
+    chat.m.turn("chat_complex", business_id="b1", messages=[{"role": "user", "content": "a"}], tools=TOOLS, openai_client=fake)
+    chat.m.turn("chat_complex", business_id="b1", messages=[{"role": "user", "content": "b"}], tools=TOOLS, openai_client=fake)
+    assert len(http.sent) == 1 and len(fake.calls) == 2
+
+
+def test_when_every_provider_fails_the_owner_is_told(chat, monkeypatch):
+    fake = FakeOpenAI([RuntimeError("down")])
+    with pytest.raises(chat.router.AllProvidersFailed):
+        chat.m.turn("chat", business_id="b1", messages=[{"role": "user", "content": "hi"}], tools=TOOLS,
+                    openai_client=fake)
+
+
+def test_a_malformed_reply_is_a_provider_failure(chat, monkeypatch):
+    choose(chat, monkeypatch, "chat_complex", [("anthropic", "claude-opus-5-5"), ("openai", "gpt-5")])
+    monkeypatch.setattr(chat.m, "_http", FakeAnthropic([(200, {"content": "not a list", "usage": {"input_tokens": 9}})]))
+    fake = FakeOpenAI([oa_reply("fine")])
+    reply = chat.m.turn("chat_complex", business_id="b1", messages=[{"role": "user", "content": "hi"}], tools=TOOLS,
+                        openai_client=fake)
+    assert reply.provider == "openai" and chat.recorded[0]["input_tokens"] == 9   # billed at what it reported
+
+
+def test_xai_is_reached_through_its_openai_compatible_api(chat, monkeypatch):
+    choose(chat, monkeypatch, "chat_complex", [("xai", "grok-4.7")])
+    fake = FakeOpenAI([oa_reply("Grok here")])
+    reply = chat.m.turn("chat_complex", business_id="b1", messages=[{"role": "user", "content": "hi"}], tools=TOOLS,
+                        openai_client=fake)
+    assert reply.provider == "xai" and fake.base_url == "https://api.x.ai/v1"
+    assert fake.calls[0]["max_tokens"] > 0                         # xAI takes max_tokens
+
+
+# ------------------------------------------------- the chat loop (assistant_chat) ---
+
+@pytest.fixture
+def loop(chat, monkeypatch):
+    import assistant_chat
+    ctx = assistant_chat.BusinessContext(id="b1", name="Biz", timezone="Europe/London")
+    monkeypatch.setattr(assistant_chat, "OPENAI_API_KEY", "test")
+    monkeypatch.setattr(assistant_chat, "is_platform_admin", lambda *a, **k: False)
+    monkeypatch.setattr(assistant_chat, "resolve_conversation", lambda *a, **k: ("c1", "b1"))
+    monkeypatch.setattr(assistant_chat, "get_business_for_user", lambda *a, **k: ctx)
+    monkeypatch.setattr(assistant_chat, "load_conversation_history", lambda *a, **k: [])
+    monkeypatch.setattr(assistant_chat, "save_message", lambda *a, **k: "m1")
+    monkeypatch.setattr(assistant_chat, "get_user_display_name", lambda *a, **k: "Mike")
+    monkeypatch.setattr(assistant_chat, "build_system_prompt", lambda *a, **k: "system")
+    from services import profit_guard
+    held = set()
+    monkeypatch.setattr(profit_guard, "permits", lambda purpose: purpose not in held)
+    tools_run = []
+
+    async def tool(name, args, *a, **k):
+        tools_run.append(name)
+        return {"invoices": []}
+    monkeypatch.setattr(assistant_chat, "_execute_tool_async", tool)
+    return SimpleNamespace(ac=assistant_chat, held=held, tools_run=tools_run)
+
+
+def run_chat(loop, message, **kw):
+    return asyncio.run(loop.ac.process_chat_message(user=SimpleNamespace(id="u1", email=None), message=message, **kw))
+
+
+def test_a_money_question_goes_to_the_stronger_model(chat, loop, monkeypatch):
+    choose(chat, monkeypatch, "chat_complex", [("openai", "gpt-5.4")])
+    monkeypatch.setenv("AI_PRICES_JSON", '{"openai/gpt-5.4": [200, 1000, 1]}')
+    fake = FakeOpenAI([oa_reply("You're owed £1,200.")])
+    monkeypatch.setattr(loop.ac, "OpenAI", fake)
+    out = run_chat(loop, "how much am I owed on overdue invoices?")
+    assert fake.calls[0]["model"] == "gpt-5.4" and out["reply"] == "You're owed £1,200."
+    assert out["model"] == "openai/gpt-5.4"
+
+
+def test_an_everyday_question_uses_the_fast_model(chat, loop, monkeypatch):
+    fake = FakeOpenAI([oa_reply("Two meetings.")])
+    monkeypatch.setattr(loop.ac, "OpenAI", fake)
+    out = run_chat(loop, "what's on today?")
+    assert fake.calls[0]["model"] == "gpt-5" and out["model"] == "openai/gpt-5"
+
+
+def test_think_harder_reaches_the_chat_loop(chat, loop, monkeypatch):
+    choose(chat, monkeypatch, "chat_complex", [("openai", "gpt-5.4")])
+    monkeypatch.setenv("AI_PRICES_JSON", '{"openai/gpt-5.4": [200, 1000, 1]}')
+    fake = FakeOpenAI([oa_reply("Thought hard.")])
+    monkeypatch.setattr(loop.ac, "OpenAI", fake)
+    run_chat(loop, "what's on today?", think_harder=True)
+    assert fake.calls[0]["model"] == "gpt-5.4"
+
+
+def test_when_the_allowance_holds_the_stronger_model_aria_says_so(chat, loop, monkeypatch):
+    loop.held.add("chat_complex")
+    fake = FakeOpenAI([oa_reply("Here it is.")])
+    monkeypatch.setattr(loop.ac, "OpenAI", fake)
+    out = run_chat(loop, "analyse my cash flow")
+    assert fake.calls[0]["model"] == "gpt-5"
+    assert "everyday model" in out["reply"].lower()
+
+
+def test_a_failover_after_a_tool_has_run_never_runs_it_again(chat, loop, monkeypatch):
+    choose(chat, monkeypatch, "chat", [("openai", "gpt-5"), ("anthropic", "claude-sonnet-5-5")])
+    fake = FakeOpenAI([oa_reply(tool_calls=[{"id": "call_1", "name": "get_invoices", "args": {}}]),
+                       RuntimeError("openai down")])
+    monkeypatch.setattr(loop.ac, "OpenAI", fake)
+    http = FakeAnthropic([(200, {"content": [{"type": "text", "text": "None overdue."}], "usage": {}})])
+    monkeypatch.setattr(chat.m, "_http", http)
+    out = run_chat(loop, "anything new for me?")
+    assert out["reply"] == "None overdue." and loop.tools_run == ["get_invoices"]
+    sent = http.sent[0]["messages"]
+    assert sent[-1]["content"][0]["type"] == "tool_result"         # Claude saw the tool's result, not a re-run
+
+
+def test_three_tool_rounds_move_the_rest_of_the_turn_up(chat, loop, monkeypatch):
+    choose(chat, monkeypatch, "chat_complex", [("openai", "gpt-5.4")])
+    monkeypatch.setenv("AI_PRICES_JSON", '{"openai/gpt-5.4": [200, 1000, 1]}')
+    call = lambda n: oa_reply(tool_calls=[{"id": f"c{n}", "name": "get_invoices", "args": {}}])
+    fake = FakeOpenAI([call(1), call(2), call(3), oa_reply("Done.")])
+    monkeypatch.setattr(loop.ac, "OpenAI", fake)
+    run_chat(loop, "ok go")
+    assert [c["model"] for c in fake.calls] == ["gpt-5", "gpt-5", "gpt-5", "gpt-5.4"]
+
+
+def test_when_every_provider_fails_the_chat_says_so(chat, loop, monkeypatch):
+    fake = FakeOpenAI([RuntimeError("down")])
+    monkeypatch.setattr(loop.ac, "OpenAI", fake)
+    out = run_chat(loop, "hi")
+    assert out.get("status") == 500 and "AI service" in out["error"]
+
+
+# ------------------------------------------------------ who sees the model ---
+
+@pytest.mark.parametrize("admin,shown", [(True, "anthropic/claude-opus-5-5"), (False, None)])
+def test_only_platform_admins_see_which_model_answered(monkeypatch, admin, shown):
+    import main
+    monkeypatch.setattr(main, "is_platform_admin_user", lambda uid, session: admin)
+    assert main._model_for_admins(None, "u1", {"model": "anthropic/claude-opus-5-5"}) == shown
+
+
+def test_the_chat_request_carries_think_harder():
+    from schemas import ChatRequest
+    assert ChatRequest(message="hi", thinkHarder=True).think_harder is True
+    assert ChatRequest(message="hi").think_harder is False
