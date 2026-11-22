@@ -162,9 +162,17 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
 - **Codex AI-1b review 4: APPROVE.** Two optional points were noted for later:
   - one reservation lock for all businesses: a slow database read delays every business's admission. A per-business lock with a bounded wait would fix it;
   - an attempt that straddles midnight on the 1st could file an unrecorded cost under the new month.
-- **AI-1c: the admin page.**
-  - choices, Revert, "Test this model" and the evaluation set;
-  - briefings, support and the board meeting moved onto the router, so they can also use other providers.
+- **AI-1c: the admin page** (as built). Briefings, support and the board meeting moving onto the router is now **AI-1d**, to keep this PR reviewable.
+  - **`admin_ai_api.py`:** `GET /v1/admin/ai/models`, plus `PUT /models/{task}`, `POST /models/{task}/revert`, `/reset` and `/test`. Platform admins only, plain `def` routes (run in the threadpool).
+  - **`services/ai_model_admin.py`:**
+    - the overview lists every task with its default, the choice (who, when, the previous one), what's used now, this month's spend (business and platform meters), and the models it can use, with prices or the reason each can't (`ai_models.why_unusable`);
+    - provider keys are shown only as set or not;
+    - Choose validates every entry: at most 6, no duplicates, and the reason if a model can't serve the task;
+    - Revert restores the previous chain, or the default;
+    - Reset saves the default as a choice, so it can be reverted;
+    - writes take an advisory lock per task on Postgres and invalidate the cache, so they apply at once.
+  - **`services/ai_eval.py`:** five synthetic chat cases (looks up invoices, looks up the calendar, never invents a price, keeps it short, uses what it looked up). Each runs on one provider and model directly, never trips a provider, records its cost as platform `eval`, and saves nothing.
+  - **`AdminAIModels.tsx`:** at `/admin/ai`, under "Aria's AI models" in the admin menu. It shows a card per task, provider key status, and a Change dialog with fallbacks, prices and "Test this model" side by side.
 
 ## Out of scope
 

@@ -72,3 +72,23 @@ def test_no_browser_role_can_reach_it(pg):
             "AND table_name = 'ai_model_choices' AND grantee IN ('anon', 'authenticated', 'service_role')")).scalar()
         rls = c.execute(text("SELECT relrowsecurity FROM pg_class WHERE oid = 'public.ai_model_choices'::regclass")).scalar()
     assert grants == 0 and rls is True
+
+
+def test_the_admin_page_saves_reverts_and_resets_on_postgres(pg):
+    """AI-1c: jsonb writes, the advisory lock and Revert on the real table."""
+    from sqlmodel import Session
+    from services import ai_model_admin
+    engine, m = pg
+    mike = "11111111-1111-4111-8111-111111111111"
+    with Session(engine) as s:
+        ai_model_admin.choose(s, "chat_complex", [{"provider": "anthropic", "model": "claude-opus-5-5"},
+                                                  {"provider": "openai", "model": "gpt-5"}], mike)
+    assert m.resolve("chat_complex") == [("anthropic", "claude-opus-5-5"), ("openai", "gpt-5")]
+    with Session(engine) as s:
+        ai_model_admin.reset(s, "chat_complex", mike)
+    assert m.resolve("chat_complex") == [("openai", "gpt-5")]
+    with Session(engine) as s:
+        ai_model_admin.revert(s, "chat_complex", mike)
+        rows = {r["task"]: r for r in ai_model_admin.overview(s)["tasks"]}
+    assert rows["chat_complex"]["choice"][0] == {"provider": "anthropic", "model": "claude-opus-5-5"}
+    assert rows["chat_complex"]["changed_by"] == mike
