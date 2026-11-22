@@ -8,6 +8,8 @@ Mike has lost two jobs on price after quoting with the most capable models, prom
 
 The models weren't short of intelligence. Nothing checked their answer against what the job typically costs, against trade (rather than retail) material prices, or against the business's own rates. They over-specified, and nobody was there to stop it.
 
+**What it's for (Mike, 22 Nov):** saving time by producing the **first draft**. It's useful from the first quote, because there's always something to work with. The user then amends it line by line, including material costs. Each amendment teaches it, so drafts get closer each time, until most need little or no change. Design for that loop: making a line easy to amend, and learning from the amendment, matter as much as the first guess.
+
 **The rule this ticket enforces:** the AI drafts the quote, and Business Hero's engine checks it. The engine is plain code with the business's own data, never the model marking its own work. **The user decides, line by line.**
 
 ## What exists today (checked in code, 22 Nov, origin/main 31fcfd5)
