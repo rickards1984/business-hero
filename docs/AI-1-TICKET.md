@@ -256,6 +256,7 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     3. only then tries the new fenced-block search.
 
     A test copies both old functions from HEAD~4. Across 4 payloads × 10 prefixes × 6 suffixes, plus Codex's example, whatever either old function parsed, `strip_fences` parses to the same value. It fails on the review-3 code and passes now.
+  - **Codex review 5, narrow and final** (`audits/AI-1D-CODEX-CODE-REVIEW-5.md`): **APPROVE**, no findings. Mike chose this last review after review 4.
   - **Follow-ups, non-blocking** (grading of "Test this model", and one latency claim). Not in this PR:
     - **Refund case:** an honest hedge over a comma-separated list ("…a full refund, a partial refund or no refund…") is read as a promise.
     - **Weekly case:**
