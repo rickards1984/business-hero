@@ -377,3 +377,50 @@ def test_prose_with_a_code_block_that_isn_t_json_is_left_alone():
     from services import ai_text
     text = "Try this:\n```\nprint('hi')\n```"
     assert ai_text.strip_fences(text) == text
+
+
+# ------------------------------------------------ Codex AI-1d review 2 ---
+
+@pytest.mark.parametrize("raw,inner", [
+    ('```json\n{"a": 1}\n```\nLet me know if you\'d like any changes.', '{"a": 1}'),           # finding 1
+    ('Here is the draft: ```json {"a": 1}``` Hope that helps.', '{"a": 1}'),
+    ('Sure!\n```\n[{"tone": "brief"}]\n```\nAnything else?', '[{"tone": "brief"}]'),
+    ('```json\n{"a": 1', '{"a": 1'),                                                         # cut off: as before
+])
+def test_json_in_a_block_is_found_wherever_the_block_sits(raw, inner):
+    from services import ai_text
+    assert ai_text.strip_fences(raw) == inner
+
+
+def test_a_draft_with_a_closing_remark_reads_as_the_draft(env, monkeypatch):
+    """Finding 1, through the site: the body was the whole answer, fences and all."""
+    from app.email import service
+    adapters(monkeypatch, Fake(**{"claude-opus-5-5": '```json\n{"subject": "Re: roof", "body_text": "Hi Sam, Thursday works."}'
+                                                      '\n```\nLet me know if you want changes.'}))
+    use(monkeypatch, ANTHROPIC)
+    message = SimpleNamespace(subject="Roof", from_name="Sam", from_email="s@x", snippet="", body_text="When?")
+    out = service.generate_email_reply_draft(message, SimpleNamespace(id="b1", name="New Body"))
+    assert out["body_text"] == "Hi Sam, Thursday works." and "```" not in out["body_html"]
+
+
+def test_a_slow_guard_counts_against_the_deadline(env, monkeypatch):
+    """Finding 6: a 31 s guard query, a 29 s failure and another 31 s query
+    took 91 s against a 60 s limit."""
+    import time
+    from services import ai_router, ai_text, profit_guard
+    clock = {"t": 0.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+
+    def slow_guard(purpose):
+        clock["t"] += 31
+        return True
+
+    def failing(provider, model, messages, tools, timeout, factory, **opts):
+        clock["t"] += timeout
+        raise ai_router.ProviderError(f"{provider}: Timeout")
+    monkeypatch.setattr(profit_guard, "permits", slow_guard)
+    adapters(monkeypatch, failing)
+    use(monkeypatch, GPT5, ANTHROPIC)
+    with profit_guard.attributed("b1", "briefing"), pytest.raises(ai_router.AllProvidersFailed):
+        ai_text.complete("briefing", MSGS, max_tokens=400, timeout=30.0)
+    assert clock["t"] <= 60               # the guard's 31 s counted; no second query after the limit

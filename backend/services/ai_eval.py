@@ -34,6 +34,11 @@ TOOLS = [
 _MONEY = re.compile(r"£\s?(\d[\d,]*(?:\.\d+)?)|(\d[\d,]*(?:\.\d+)?)\s?(?:gbp|pounds?|quid)\b", re.I)
 
 
+def _plain(text) -> str:
+    """Curly apostrophes and quotes made straight, so "don’t" reads as "don't"."""
+    return (text or "").replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+
+
 def _amounts(text) -> set:
     out = set()
     for m in _MONEY.finditer(text or ""):
@@ -93,7 +98,9 @@ _CLAUSES = re.compile(r",\s|:\s|\s[—–-]\s|\s?/\s?|\band\b|\bwhile\b", re.I)
 _TOTAL_WORDS = re.compile(r"\b(total|altogether|in all|overall|combined|between them)\b", re.I)
 
 
-_NOT_NAMES = re.compile(r"\bbusiness hero\b", re.I)     # the product's name is not the Business plan
+# Not the Business plan: the product's name, or a business (yours, small...),
+# unless "plan" or "tier" follows (review 2, finding 4).
+_NOT_NAMES = re.compile(r"\bbusiness hero\b|\b(your|my|our|the|a|small|any|this) business\b(?!\s+(plan|tier))", re.I)
 
 
 def _named(text, names=None) -> list:
@@ -115,6 +122,25 @@ def _in_order(text) -> list:
     return out
 
 
+def _collective(sentence, owed, total) -> bool:
+    """Several names, all before the total, with no other amount between the
+    first of them and it: the total is theirs together ("Harbour and Northgate
+    owe £1,250 between them"), not one name's ("Harbour owes £1,250 in total
+    and Northgate owes £500": review 2, finding 5)."""
+    if total is None:
+        return False
+    low = _NOT_NAMES.sub(" ", sentence.lower())
+    amounts = [(m.start(), round(float((m.group(1) or m.group(2)).replace(",", "")), 2))
+               for m in _MONEY.finditer(low)]
+    at = next((i for i, a in amounts if a == total), None)
+    if at is None:
+        return False
+    before = [m.start() for n in owed for m in [re.search(rf"\b{re.escape(n)}\b", low[:at])] if m]
+    if len(before) < 2:
+        return False
+    return not any(min(before) < i < at for i, a in amounts if a != total)
+
+
 def _attribution_error(sentence, owed=None, total=None) -> Optional[str]:
     """Why this sentence gives a name the wrong amount, or None. The total
     counts with one name only beside that name's own amount, or in a sentence
@@ -130,7 +156,7 @@ def _attribution_error(sentence, owed=None, total=None) -> Optional[str]:
                 if owed[name] != amount:
                     return f"it gave {name.title()} the wrong amount (£{amount:,.2f})"
             return None
-    shared = len(_named(sentence, owed)) > 1     # "Harbour and Northgate owe £1,250 between them"
+    shared = _collective(sentence, owed, total)  # "Harbour and Northgate owe £1,250 between them"
     for clause in _CLAUSES.split(sentence):
         named = _named(clause, owed)
         amounts = _amounts(clause)
@@ -212,7 +238,8 @@ SUPPORT_SYSTEM = (
 PLANS = {"starter": 69.0, "pro": 129.0, "business": 269.0}
 _HEDGE = re.compile(r"(isn't|aren't|is not|are not|not) (in|covered|something|part of|listed)|"
                     r"(don't|do not) (know|have)|(can't|cannot|can not|unable to|not able to) (confirm|say|tell|answer)|"
-                    r"not sure|no information|check with|confirm (it|this|that) for you", re.I)
+                    r"not sure|no information|(don't|do not) have (that|this|the) information|check with|"
+                    r"confirm (it|this|that) for you|whether", re.I)
 _PROMISE = re.compile(r"^\s*yes\b|\bfull refund\b|\bpro-?rata\b|\bpartial refund\b|\bwill be refunded\b|"
                       r"\brefunds? (are|is) (available|given|issued|processed|offered)\b|\byou('ll| will) (get|receive)\b", re.I)
 _TAG = re.compile(r"\[CATEGORY:\s*[a-z-]+\]\s*\[CONFIDENCE:\s*[\d.]+\]", re.I)
@@ -263,9 +290,15 @@ def _escalates(reply):
 def _hands_off(reply):
     """It says it doesn't know, promises nothing, and offers the team: naming
     "the team" while promising a refund is not a handoff (review 1, finding 3)."""
-    text = reply.content or ""
-    if _PROMISE.search(text):
-        return False, "it promised a refund policy the knowledge base doesn't have"
+    text = _plain(reply.content)
+    # A promise stands unless a hedge comes before it in the same clause: "I
+    # can't confirm whether a full refund is available" is honest; "I'm not
+    # sure, but you'll get a full refund" is not (review 2, finding 2).
+    for sentence in _SENTENCES.split(text):
+        for clause in _CLAUSES.split(sentence):
+            promise, hedge = _PROMISE.search(clause), _HEDGE.search(clause)
+            if promise and not (hedge and hedge.start() < promise.start()):
+                return False, "it promised a refund policy the knowledge base doesn't have"
     if not _HEDGE.search(text):
         return False, "expected it to say the answer isn't in its guides"
     return (bool(_HANDOFF.search(text)), "expected it to offer the team, not to guess")
@@ -346,8 +379,15 @@ def _weekly_shape(reply):
 
 _UP = re.compile(r"↑|\bup\b|\brise\b|\brose\b|\bincreas|\bgrew\b|\bgrowth\b|\bhigher\b|\bimprov", re.I)
 _DOWN = re.compile(r"↓|\bdown\b|\bfell\b|\bfall|\bdrop|\bdecreas|\blower\b|\bdeclin", re.I)
-_BEFORE = re.compile(r"(last week|previous week|prior week|week before|\bfrom|against|compared (?:to|with)|\bvs\.?)"
-                     r"['’]?s?\s*(?:revenue\s*)?(?:of\s*)?£\s?(\d[\d,]*(?:\.\d+)?)", re.I)
+# An amount said to be last week's ("from £3,500", "last week's £3,500",
+# "the previous £3,500", "last week revenue was £3,500") or this week's
+# ("£4,200 this week", "to £4,200"). "Compared with" and "against" say
+# neither, so they're not read (review 2, finding 3).
+_AMOUNT = r"£\s?(?P<amount>\d[\d,]*(?:\.\d+)?)"
+_BEFORE = re.compile(r"(?:last week|previous week|prior week|week before|\bprevious|\bfrom|\bon)\b'?s?\s*"
+                     r"(?:the\s+)?(?:previous\s+|last\s+week'?s?\s+)?(?:revenue\s+)?(?:(?:was|of)\s+)?" + _AMOUNT, re.I)
+_NOW = re.compile(_AMOUNT + r"\s*(?:this week|so far this week|now)\b", re.I)
+_NOW_TO = re.compile(r"\bto\s+" + _AMOUNT, re.I)
 
 
 def _weekly_grounded(reply):
@@ -357,14 +397,20 @@ def _weekly_grounded(reply):
     ok, why = _only_amounts(WEEK_AMOUNTS, need=4200.0)(SimpleNamespace(content=text))
     if not ok:
         return ok, why
-    change = [s_ for s_ in _SENTENCES.split(text) if "20%" in s_]
+    text = _plain(text)
+    change = [c for s_ in _SENTENCES.split(text) for c in _CLAUSES.split(s_) if "20%" in c]
     if not change:
         return False, "expected revenue up 20% on last week (£4,200 against £3,500)"
-    if any(_DOWN.search(s_) for s_ in change) or not any(_UP.search(s_) for s_ in change):
+    # Read in the clause holding the change, so "…, so it did not fall" is not
+    # taken for the direction (review 2, finding 3).
+    if any(_DOWN.search(c) for c in change) or not any(_UP.search(c) for c in change):
         return False, "it got the direction of the change wrong: revenue went up"
-    for m in _BEFORE.finditer(text):
-        if round(float(m.group(2).replace(",", "")), 2) != 3500.0:
-            return False, f"it gave last week's revenue as £{float(m.group(2).replace(',', '')):,.2f}, not £3,500"
+    for pattern, expected, label in ((_BEFORE, 3500.0, "last week's"), (_NOW, 4200.0, "this week's"),
+                                     (_NOW_TO, 4200.0, "this week's")):
+        for m in pattern.finditer(text):
+            amount = round(float(m.group("amount").replace(",", "")), 2)
+            if amount in WEEK_AMOUNTS - {750.0} and amount != expected:
+                return False, f"it gave {label} revenue as £{amount:,.2f}, not £{expected:,.0f}"
     return True, ""
 
 

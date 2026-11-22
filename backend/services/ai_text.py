@@ -68,9 +68,10 @@ def complete(task: str, messages: list, *, max_tokens: int, temperature: Optiona
     the provider and model that answered. Raises profit_guard.Paused at the
     kill switch, or ai_router.AllProvidersFailed when nothing answers.
 
-    `timeout` is one attempt's limit; the whole call ends within
-    TOTAL_ATTEMPT_LIMITS of it (Codex AI-1d review 1, finding 7: a chain of
-    timeouts each got the full limit, plus the SDK's own retry). Each model
+    `timeout` is one attempt's limit; no attempt starts or runs past
+    TOTAL_ATTEMPT_LIMITS of it from the start (Codex AI-1d review 1, finding
+    7: a chain of timeouts each got the full limit, plus the SDK's own retry).
+    Only an attempt's costing and one guard query can run past it. Each model
     gets one retry of its own after an outage, made and costed here rather
     than inside the SDK (finding 6), before the provider is switched off."""
     import time
@@ -94,15 +95,18 @@ def complete(task: str, messages: list, *, max_tokens: int, temperature: Optiona
             ai_chat._record(business_id, purpose=purpose, provider=provider, model=model,
                             input_tokens=tokens[0], output_tokens=tokens[1], estimated=got is None)
         for attempt in range(1 + RETRIES):
+            out_of_time = ai_router.AllProvidersFailed(f"No AI model could answer {task} in time"
+                                                       + (f" (tried {', '.join(tried)})" if tried else ""))
+            if deadline - time.monotonic() < MIN_ATTEMPT_SECONDS:
+                raise out_of_time              # before the guard's own query (review 2, finding 6)
             # Before every attempt: a failure just costed may have closed the
             # kill switch (finding 1), and the SDK hook can't see these calls.
             if held():
                 raise profit_guard.Paused(f"{purpose} paused: this month's costs have reached the kill threshold "
                                           "of income")
-            seconds = min(timeout, deadline - time.monotonic())
+            seconds = min(timeout, deadline - time.monotonic())     # after the guard: its time counts
             if seconds < MIN_ATTEMPT_SECONDS:
-                raise ai_router.AllProvidersFailed(f"No AI model could answer {task} in time"
-                                                   + (f" (tried {', '.join(tried)})" if tried else ""))
+                raise out_of_time
             try:
                 reply, usage = ai_chat._ADAPTERS[provider](provider, model, messages, None, seconds, None,
                                                            max_tokens=max_tokens, temperature=temperature, retries=0)
@@ -140,8 +144,7 @@ async def acomplete(task: str, messages: list, **kwargs):
     return await asyncio.to_thread(complete, task, messages, **kwargs)
 
 
-_WHOLE_FENCE = re.compile(r"^```[a-zA-Z]*[ \t]*\n?(.*?)\n?[ \t]*```$", re.S)
-_TRAILING_FENCE = re.compile(r"```[a-zA-Z]*[ \t]*\n(.*?)\n[ \t]*```\s*$", re.S)
+_ANY_FENCE = re.compile(r"```[a-zA-Z]*[ \t]*\n?(.*?)\n?[ \t]*```", re.S)
 
 
 def _is_json(text: str) -> bool:
@@ -153,17 +156,25 @@ def _is_json(text: str) -> bool:
 
 
 def strip_fences(text: str) -> str:
-    """JSON a model wrapped in a ``` block (Claude often does), or the text.
-    Valid JSON is returned as it is, so a fence inside one of its strings is
-    never mistaken for a wrapper (Codex AI-1d review 1, finding 2); a block
-    after a line of prose is taken only when what's inside is JSON."""
+    """The JSON in a model's answer, when it wrapped it in a ``` block (Claude
+    often does), or the text.
+
+    - Valid JSON is returned as it is, so a fence inside one of its strings is
+      never taken for a wrapper (Codex AI-1d review 1, finding 2).
+    - Otherwise the first fenced block holding JSON, wherever it sits: after a
+      line of prose, before "let me know if you'd like changes", or inline
+      (review 2, finding 1).
+    - Otherwise, an answer that opens with a fence loses it (a block cut off
+      before its closing fence), as the sites' own stripping did.
+    """
     text = (text or "").strip()
     if _is_json(text):
         return text
-    whole = _WHOLE_FENCE.match(text)
-    if whole:
-        return whole.group(1).strip()
-    trailing = _TRAILING_FENCE.search(text)
-    if trailing and _is_json(trailing.group(1).strip()):
-        return trailing.group(1).strip()
+    for block in _ANY_FENCE.finditer(text):
+        inner = block.group(1).strip()
+        if _is_json(inner):
+            return inner
+    if text.startswith("```"):
+        inner = text.split("\n", 1)[1] if "\n" in text else text.lstrip("`")
+        return inner.rstrip("`").strip()
     return text

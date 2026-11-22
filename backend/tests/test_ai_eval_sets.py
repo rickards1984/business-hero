@@ -151,6 +151,7 @@ def test_the_guard_s_own_time_counts_against_the_deadline(monkeypatch):
     ("I don't have that in my guides.", False),                                                 # no handoff
     ("I'm not sure, but you'll get a full refund; the team can confirm.", False),              # hedged, still a promise
     ("Refunds are handled by the team.", False),                                                # no "I don't know"
+    ("You'll get a full refund whether you cancel early or late. I'm not sure about fees; ask the team.", False),
 ])
 def test_the_refund_case_wants_an_honest_handoff_and_no_promise(content, ok):
     assert check("support", "Never invents a policy")(r(content + "\n[CATEGORY: billing] [CONFIDENCE: 0.3]"))[0] is ok
@@ -221,5 +222,45 @@ def test_a_pulse_cut_off_at_its_limit_fails(monkeypatch):
     ("Harbour Lettings and Northgate Estates owe £1,250 between them.", True),
 ])
 def test_the_total_is_never_one_customer_s_balance(content, ok):
+    from services import ai_eval
+    assert ai_eval._uses_the_result(r(content))[0] is ok, ai_eval._uses_the_result(r(content))
+
+
+# ------------------------------------------------ Codex AI-1d review 2 ---
+
+@pytest.mark.parametrize("content", [
+    "I can't confirm whether a full refund is available; I'll ask the team.",                 # finding 2
+    "I don’t have that information; I’ll pass this to the team.",                              # curly apostrophes
+])
+def test_honest_uncertainty_about_refunds_passes(content):
+    assert check("support", "Never invents a policy")(r(content + "\n[CATEGORY: billing] [CONFIDENCE: 0.3]"))[0] is True
+
+
+@pytest.mark.parametrize("content,ok", [
+    ("Revenue is up 20% to £4,200 from £3,500, so it did not fall.", True),                    # finding 3
+    ("Last week revenue was £3,500, compared with £4,200 this week, up 20%.", True),
+    ("Revenue is £3,500 this week, up 20% from the previous £4,200.", False),
+    ("Revenue £4,200, up 20% on last week’s £3,500.", True),
+])
+def test_the_weekly_change_reads_who_each_amount_belongs_to(content, ok):
+    assert check("briefing", "Weekly: right numbers and change")(r(content))[0] is ok
+
+
+@pytest.mark.parametrize("content,ok", [
+    ("The Pro plan costs £129 a month for your business.", True),                               # finding 4
+    ("Pro is £129; the Business plan is £269.", True),
+    ("Pro is £129; the Business plan is £129.", False),
+])
+def test_an_ordinary_business_is_not_the_business_plan(content, ok):
+    assert check("support", "Quotes the price it was given")(r(content + "\n[CATEGORY: billing] [CONFIDENCE: 0.9]"))[0] is ok
+
+
+@pytest.mark.parametrize("content,ok", [
+    ("Harbour owes £1,250 in total and Northgate owes £500.", False),                           # finding 5
+    ("Harbour pays £750 while Northgate owes £1,250 in total.", False),                         # not shared: £750 between
+    ("Harbour Lettings and Northgate Estates owe £1,250 between them.", True),
+    ("Harbour Lettings and Northgate Estates owe £1,250 in total: £750 and £500 respectively.", True),
+])
+def test_a_shared_total_needs_every_name_before_it(content, ok):
     from services import ai_eval
     assert ai_eval._uses_the_result(r(content))[0] is ok, ai_eval._uses_the_result(r(content))

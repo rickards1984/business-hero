@@ -232,6 +232,18 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     8. "Harbour owes £1,250 in total" passed. The total now counts with one customer only beside that customer's own balance, or in a sentence naming several.
 
     Unchanged: a daily pulse cut off in production is still sent as it is, as before. It isn't a regression.
+  - **Codex review 2** (`audits/AI-1D-CODEX-CODE-REVIEW-2.md`, REQUEST CHANGES; 1 blocking, 5 hardening), all fixed:
+    1. **Blocking:** JSON in a block followed by a closing remark, or inline after prose, was no longer found, so the email draft showed the whole answer. `strip_fences` now:
+       - returns valid JSON as it is;
+       - otherwise takes the first fenced block that holds JSON, wherever it sits;
+       - otherwise drops an opening fence that was cut off, as the sites did.
+
+       The draft site is now tested end to end.
+    2. Honest refund answers failed. A promise now counts only where no hedge comes before it in the same clause, so "I can't confirm whether a full refund is available" passes and "I'm not sure, but you'll get a full refund" still fails. Curly apostrophes are made straight first.
+    3. The weekly check judged wording rather than meaning. The direction is now read in the clause that holds the 20%, so "…, so it did not fall" is fine. Each amount is checked against what it's said to be: last week's (`from`, `on`, `previous`, `last week's`) or this week's (`this week`, `to`). "Compared with" and "against" are not read.
+    4. "Your business" was read as the Business plan. An ordinary business (yours, small, the…) is not the plan unless "plan" or "tier" follows.
+    5. "Harbour owes £1,250 in total and Northgate owes £500" passed. A total is shared only when every name comes before it, with no other amount between the first name and the total.
+    6. The guard's own query ran past the deadline. Time left is now checked before the guard, and the guard's time counts against the attempt. Only an attempt's costing and one guard query can run past the limit.
 
 ## Out of scope
 
