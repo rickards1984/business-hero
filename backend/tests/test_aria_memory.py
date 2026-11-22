@@ -297,13 +297,13 @@ def test_a_typed_meeting_turn_includes_the_owner_s_notes(db, monkeypatch):
     _remember_gocardless(db)
     sent = []
 
-    async def create(**kwargs):
+    def create(**kwargs):
         sent.append(kwargs)
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Noted.", tool_calls=None),
                                                         finish_reason="stop")],
                                usage=SimpleNamespace(total_tokens=5))
-    monkeypatch.setattr(orch, "_get_async_client",
-                        lambda: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")   # AI-1d: the meeting's calls go through ai_text
+    monkeypatch.setattr(orch, "_openai_client", lambda **kw: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
     monkeypatch.setattr(profit_guard, "permits", lambda purpose: True)
     monkeypatch.setattr(orch, "_load_meeting", lambda mid, s: {"business_id": A, "status": "in_progress",
                                                                "prep_data": {"business": {"name": "NB"}},

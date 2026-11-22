@@ -210,7 +210,7 @@ def generate_prep_data(
         "schema_version": PREP_SCHEMA_VERSION,
         "generated_at": generated_at,
         "generation_duration_ms": duration_ms,
-        "ai_model": EXECUTIVE_MEETING_AI_MODEL or ai_models.openai_model("meeting"),
+        "ai_model": EXECUTIVE_MEETING_AI_MODEL or ai_models.resolve("meeting")[0][1],   # AI-1d: the first choice
         "business": business_profile,
         "period": _serialise_period(period),
         "financials": financials,

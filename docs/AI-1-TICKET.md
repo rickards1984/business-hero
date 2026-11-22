@@ -268,6 +268,29 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
 
     Grading would be more robust with structured output than with reading free text. That was suggested in AI-1c review 3 and is still open.
 
+- **AI-1d, part 2: the board meeting on any provider** (as built).
+  - **`executive_meeting_orchestrator._gpt_chat_completion`** keeps its signature and contract (`(content, tokens)`, or `None` on failure). It now calls `ai_text.acomplete("meeting", ...)` once per round of the BM-3 tool loop. That gives it the chosen models in order with failover, including mid-loop, where the next model gets the look-ups so far. Each attempt is costed to the business as `meeting`. The kill switch is checked before every attempt, so a round that crosses the threshold stops the next.
+  - **OpenAI is asked exactly as before:** `_openai_settings` gives reasoning models `max_completion_tokens` with headroom, reasoning effort `low` (`none` with tools on gpt-5.x and learned models: BM-5) and no temperature, and chat models their temperature. `_refused_reasoning` is BM-5's ask-again-with-`none`, now an `ai_text` hook: it is unbilled and asked once. `test_board_meeting_ai` still proves BM-1 and BM-5 through the fake client, now reached via `_openai_client`.
+  - **Claude:** gets the meeting's own limit and no temperature. For JSON (the summary and the extraction) it is told in its system prompt (`ai_chat.JSON_ONLY`), and a fence is removed with `strip_fences`. OpenAI and xAI use `response_format`.
+  - **`ai_text.complete`** gains:
+    - `tools`, where an answer that is only tool calls counts;
+    - `json_object`;
+    - `openai_settings(model, tools_offered)`;
+    - `refused_hook`;
+    - `client_factory`;
+    - `chain`, used for the `EXECUTIVE_MEETING_AI_MODEL` test override;
+    - `tokens` in its result, the provider's reported total, which feeds the meeting's soft and hard caps.
+  - **One intended change:** a failure other than BM-5's refusal, such as a 429, now gets `ai_text`'s single costed retry in place of the SDK's hidden one. It is never asked again without reasoning.
+  - **Elsewhere:** the meeting prep records the first model chosen. On the admin page, `meeting` drops `ONE_OPENAI`. The voice meeting (BM-2, realtime) is unchanged.
+  - **Codex review 1** (`audits/AI-1D2-CODEX-CODE-REVIEW-1.md`, REQUEST CHANGES; 2 blocking, 2 not), all fixed:
+    1. **Blocking:** a billed empty answer's tokens fell out of the meeting's 50k and 100k caps. `ai_text` now adds up what every attempt reported, answered or not. The total comes back as the result's `tokens` and on the error raised, and the meeting adds it in on failure too.
+    2. **Blocking:** a `-pro` model set through the real `EXECUTIVE_MEETING_AI_MODEL` variable reached Chat Completions, because only the test override was checked. `ai_text` now skips any OpenAI `-pro` model (`ai_models.responses_only`) before any call or cost, for every task, and its log names the setting to change.
+    3. The ask-again hook is consulted only for a refusal made before any work: no usage reported, not cut off. A usage-bearing failure is always billed and counted as an attempt. The meeting's hook also ignores anything but a bad request (400).
+    4. The meeting's first guard check now runs in a worker, as it reads the database.
+  - **Codex review 2** (`audits/AI-1D2-CODEX-CODE-REVIEW-2.md`): **APPROVE**. Codex confirmed BM-5 in memory with a real `openai.BadRequestError` (status 400), which the adapter wraps as `Rejected`. Follow-ups, non-blocking, not in this PR:
+    - **The ask-again hook:** exempt only a confirmed `Rejected` from billing, not every failure without usage. This needs the BM-5 test fakes to raise status-400 errors in place of `RuntimeError`.
+    - **"Test this model":** validate the task's *current* model too, so an env-set `-pro` model is reported as unusable rather than sent by the eval, as production now skips it.
+
 ## Out of scope
 
 - Choosing models per business, which is platform-wide for now.

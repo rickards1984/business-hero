@@ -23,7 +23,7 @@ class StrictReasoningModel:
         self.sent = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
 
-    async def create(self, **kwargs):
+    def create(self, **kwargs):
         self.sent.append(kwargs)
         if "max_tokens" in kwargs:
             raise RuntimeError("Unsupported parameter: 'max_tokens'")
@@ -36,7 +36,8 @@ class StrictReasoningModel:
 @pytest.fixture
 def model(monkeypatch):
     fake = StrictReasoningModel()
-    monkeypatch.setattr(orch, "_get_async_client", lambda: fake)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")   # AI-1d: the meeting's calls go through ai_text
+    monkeypatch.setattr(orch, "_openai_client", lambda **kw: fake)
     monkeypatch.setattr(profit_guard, "permits", lambda purpose: True)
     return fake
 
@@ -63,7 +64,7 @@ def test_an_older_chat_model_keeps_its_temperature(model, monkeypatch):
 
 
 def _lenient(model):
-    async def create(**kwargs):
+    def create(**kwargs):
         model.sent.append(kwargs)
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
                                usage=SimpleNamespace(total_tokens=1))
@@ -98,7 +99,7 @@ def test_the_closing_summary_is_charged_to_the_business(model, monkeypatch):
 # ---- Codex BM-1 review 1 ---------------------------------------------------
 
 def _replying(model, content, finish_reason="stop"):
-    async def create(**kwargs):
+    def create(**kwargs):
         model.sent.append(kwargs)
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content),
                                                         finish_reason=finish_reason)],
@@ -178,7 +179,7 @@ class ToolStrictModel(StrictReasoningModel):
         super().__init__()
         self.refuse = refuse
 
-    async def create(self, **kwargs):
+    def create(self, **kwargs):
         self.sent.append(dict(kwargs))
         if self.refuse and kwargs.get("tools") and kwargs.get("reasoning_effort") not in (None, "none"):
             raise RuntimeError("Error code: 400 - Function tools with reasoning_effort are not supported for "
@@ -194,7 +195,8 @@ async def _no_tool(name, arguments):
 
 
 def _ask(fake, monkeypatch, name):
-    monkeypatch.setattr(orch, "_get_async_client", lambda: fake)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")   # AI-1d: the meeting's calls go through ai_text
+    monkeypatch.setattr(orch, "_openai_client", lambda **kw: fake)
     monkeypatch.setattr(profit_guard, "permits", lambda purpose: True)
     monkeypatch.setattr(orch, "EXECUTIVE_MEETING_AI_MODEL", name)
     monkeypatch.setattr(orch, "_TOOLS_REFUSE_REASONING", set())
@@ -230,15 +232,18 @@ def test_another_model_that_refuses_is_asked_again_and_remembered(monkeypatch):
     assert [s["reasoning_effort"] for s in fake.sent] == ["none"]
 
 
-def test_other_failures_are_not_retried(monkeypatch):
+def test_other_failures_are_not_asked_again_without_reasoning(monkeypatch):
+    """Only BM-5's refusal changes the reasoning. A rate limit gets the one
+    ordinary retry every model gets (AI-1d: made, and costed, by ai_text in
+    place of the SDK's hidden retry), with the same settings."""
     fake = ToolStrictModel(refuse=False)
 
-    async def broken(**kwargs):
+    def broken(**kwargs):
         fake.sent.append(kwargs)
         raise RuntimeError("Error code: 429 - rate limit")
     fake.chat.completions.create = broken
     assert _ask(fake, monkeypatch, "gpt-5")[0] is None
-    assert len(fake.sent) == 1
+    assert [s["reasoning_effort"] for s in fake.sent] == ["low", "low"]
 
 
 def test_the_final_answer_round_without_tools_keeps_its_reasoning(monkeypatch):
@@ -246,7 +251,7 @@ def test_the_final_answer_round_without_tools_keeps_its_reasoning(monkeypatch):
     fake = ToolStrictModel()
     calls = iter([True] * orch.MAX_TOOL_ROUNDS + [False])
 
-    async def create(**kwargs):
+    def create(**kwargs):
         fake.sent.append(dict(kwargs))
         call = SimpleNamespace(id="c", function=SimpleNamespace(name="ledger_summary", arguments="{}"))
         message = SimpleNamespace(content="Done.", tool_calls=[call] if next(calls) else None)

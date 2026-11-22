@@ -80,7 +80,7 @@ TASKS = {
     "email_briefing": _t("Email briefing", ("openai", "gpt-5"), ledger=("briefing",)),
     "briefing": _t("CEO briefings", ("openai", "gpt-4o"), ledger=("briefing",)),
     "meeting": _t("Board meeting", ("openai", "gpt-5"), legacy_env="EXECUTIVE_MEETING_AI_MODEL",
-                  ledger=("meeting",), **ONE_OPENAI),
+                  ledger=("meeting",)),         # AI-1d part 2: services.ai_text, any provider
     "support": _t("Help assistant", ("openai", "gpt-4o"), ledger=("chat", "support_draft")),
     "call_summary": _t("Call summaries", ("openai", "gpt-4o-mini"), ledger=("call_summary",)),
     "voice_aria": _t("Aria's voice (realtime)", ("openai", "gpt-realtime-2"), kind="voice",
@@ -239,6 +239,12 @@ def chat_request(task_name: str, *, max_tokens: Optional[int] = None, temperatur
     return {"model": model, **chat_params(model, max_tokens=max_tokens, temperature=temperature)}
 
 
+def responses_only(model: str) -> bool:
+    """The -pro reasoning models serve only the Responses API (BM-1), so a
+    Chat Completions call to them always fails."""
+    return is_reasoning(model) and "-pro" in _base_model(model)
+
+
 def why_unusable(task_name: str, provider: str, model: str) -> Optional[str]:
     """None when the task can use this provider and model now; otherwise why
     not, in words for the admin page (AI-1c)."""
@@ -249,7 +255,7 @@ def why_unusable(task_name: str, provider: str, model: str) -> Optional[str]:
         return f"{provider} can't serve this task (OpenAI only)"
     if task.compatible is not None and model not in task.compatible:
         return f"{model} is not one this task can use (only {', '.join(task.compatible)})"
-    if task.kind == "text" and provider == "openai" and is_reasoning(model) and "-pro" in _base_model(model):
+    if task.kind == "text" and provider == "openai" and responses_only(model):
         return f"{model} answers only through the Responses API, which this task doesn't use"
     if not os.environ.get(KEYS[provider]):
         return f"{provider} has no key set (add {KEYS[provider]} in Railway)"
