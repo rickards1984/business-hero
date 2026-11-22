@@ -291,10 +291,13 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     - **The ask-again hook:** exempt only a confirmed `Rejected` from billing, not every failure without usage. This needs the BM-5 test fakes to raise status-400 errors in place of `RuntimeError`.
     - **"Test this model":** validate the task's *current* model too, so an env-set `-pro` model is reported as unusable rather than sent by the eval, as production now skips it.
 
-- **HK-2 (22 Nov), a hotfix found while starting ARIA-1:** `ai_models.is_reasoning` knew gpt-5 and the o-series only. So a **gpt-6** model (gpt-6-luna, gpt-6.1-sol) chosen on the admin page was sent `max_tokens` and a temperature, which reasoning models refuse, while outreach's router already sent them `max_completion_tokens`. A refused request is not an outage, so the job quietly fell back to its plain version every time.
+- **HK-2 (22 Nov), a hotfix found while starting ARIA-1:** `ai_models.is_reasoning` knew gpt-5 and the o-series only. So a **gpt-6** model (gpt-6-luna, gpt-6.1-sol) chosen on the admin page was sent `max_tokens` and a temperature, which reasoning models refuse, while outreach's router already sent them `max_completion_tokens`. A refused request is not an outage, so the job moved on to its next model, or, with none configured, quietly fell back to its plain version.
   - Any `gpt-N` with N ≥ 5 now counts as a reasoning model (except `-chat` variants), along with the o-series.
   - The board meeting's own copy of the check now delegates to the switchboard's.
   - Tests: `test_hk2_gpt6_settings.py`, through `chat_params`, the shared adapter and the meeting's settings.
+  - **Codex review 1** (`audits/HK-2-CODEX-CODE-REVIEW-1.md`): **APPROVE**. Follow-ups, non-blocking:
+    - **AI-1e, the Responses API for tool calls.** Per OpenAI's documentation, cited by Codex, gpt-6.1-sol's function calls need the Responses API, and it refuses reasoning effort `none`. So a task that uses tools fails over on it: Aria's chat (`chat`, `chat_complex`) and typed meeting turns. This was already true before HK-2. gpt-6-luna recovers in the meeting through BM-5's retry, but not in chat. Until AI-1e, don't choose gpt-6.1-sol for chat or the meeting; it's fine for text-only jobs. QUOTE-1, whose suggested chain includes GPT-6.1, needs this if it uses tools.
+    - **Tests:** add exact-limit assertions, and gpt-6 cases for the meeting's tool branch and the `-pro` skip.
 
 ## Out of scope
 
