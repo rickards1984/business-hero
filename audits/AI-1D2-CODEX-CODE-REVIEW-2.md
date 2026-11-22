@@ -1,0 +1,19 @@
+# AI-1d part 2 — Codex code review 2 (verbatim)
+
+Model gpt-6-astra, read-only sandbox, 22 Nov 2026.
+
+---
+
+APPROVE
+
+1. **Review-1 finding 1 — High, previously blocking: fixed.** [ai_text.py:160](/Users/michaelrickards/dev/bh2-AI1d2/backend/services/ai_text.py:160), [executive_meeting_orchestrator.py:550](/Users/michaelrickards/dev/bh2-AI1d2/backend/services/executive_meeting_orchestrator.py:550). The former failure scenario—9,000 billed tokens disappearing after an empty answer—now returns `(None, 9000)`. Tests also prove accumulation across empty responses, failures and successful retries (5,500 tokens). Truncated failures use the same accumulation path, although their token total lacks a dedicated assertion. Part-1 callers ignore `tokens`; their exception handling remains compatible. Their site tests pass.
+
+2. **Review-1 finding 2 — Medium, previously blocking: fixed for production text calls.** [ai_text.py:121](/Users/michaelrickards/dev/bh2-AI1d2/backend/services/ai_text.py:121). Tests prove real environment selection of `gpt-5-pro`/`o3-pro` produces no provider call or charge, and a following Claude model can answer. The skip applies to every task using `ai_text`; saved-choice validation retains its previous rule. A configuration that previously reached Chat Completions and was rejected now skips directly to fallback. The tests cover meeting selection, not every task separately.
+
+3. **Review-1 finding 3 — Medium, non-blocking hardening: partially fixed.** [ai_text.py:165](/Users/michaelrickards/dev/bh2-AI1d2/backend/services/ai_text.py:165), [executive_meeting_orchestrator.py:487](/Users/michaelrickards/dev/bh2-AI1d2/backend/services/executive_meeting_orchestrator.py:487). Tests prove usage-bearing and truncated failures cannot receive an unbilled hook retry, and the meeting hook rejects status 429. However, absence of usage still does not establish a request refusal. Reproduced: an always-true hook with a no-usage `ProviderError` produces **three attempts but only two estimated cost records**. Require confirmed `Rejected` classification for that exemption. BM-5 itself works: an additional in-memory check using real `openai.BadRequestError`, status 400, through the adapter’s `Rejected.__cause__` path confirmed `low → none`, one cost record and correct tokens. The committed BM-5 test still uses `RuntimeError`.
+
+4. **Review-1 finding 4 — Medium, non-blocking: fixed.** [executive_meeting_orchestrator.py:522](/Users/michaelrickards/dev/bh2-AI1d2/backend/services/executive_meeting_orchestrator.py:522). The initial synchronous database guard now runs in a worker. The new test verifies every observed `permits` call runs off the main thread. The synchronous monkeypatched guards work correctly; the awaited checks remain sequential. The previous event-loop blocking scenario is addressed.
+
+5. **Low, non-blocking hardening — evaluation can disagree with production’s skip.** [ai_model_admin.py:223](/Users/michaelrickards/dev/bh2-AI1d2/backend/services/ai_model_admin.py:223), [ai_eval.py:463](/Users/michaelrickards/dev/bh2-AI1d2/backend/services/ai_eval.py:463). “Test this model” validates the candidate but not the resolved current model, and eval calls adapters directly. If a briefing environment override selects `gpt-5-pro`, testing a valid candidate still sends that current model to Chat Completions, while production skips it. This inherited validation gap remains uncovered; validate the current model or explicitly report it as unusable.
+
+**Verification:** 150 focused tests passed; broader model/admin/eval tests added 122 passes and 94 setup errors because temporary files are unavailable in this read-only sandbox. `check.sh` was not run because it writes artifacts. No files modified, committed or pushed.

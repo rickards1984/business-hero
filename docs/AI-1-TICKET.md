@@ -287,6 +287,9 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     2. **Blocking:** a `-pro` model set through the real `EXECUTIVE_MEETING_AI_MODEL` variable reached Chat Completions, because only the test override was checked. `ai_text` now skips any OpenAI `-pro` model (`ai_models.responses_only`) before any call or cost, for every task, and its log names the setting to change.
     3. The ask-again hook is consulted only for a refusal made before any work: no usage reported, not cut off. A usage-bearing failure is always billed and counted as an attempt. The meeting's hook also ignores anything but a bad request (400).
     4. The meeting's first guard check now runs in a worker, as it reads the database.
+  - **Codex review 2** (`audits/AI-1D2-CODEX-CODE-REVIEW-2.md`): **APPROVE**. Codex confirmed BM-5 in memory with a real `openai.BadRequestError` (status 400), which the adapter wraps as `Rejected`. Follow-ups, non-blocking, not in this PR:
+    - **The ask-again hook:** exempt only a confirmed `Rejected` from billing, not every failure without usage. This needs the BM-5 test fakes to raise status-400 errors in place of `RuntimeError`.
+    - **"Test this model":** validate the task's *current* model too, so an env-set `-pro` model is reported as unusable rather than sent by the eval, as production now skips it.
 
 ## Out of scope
 
