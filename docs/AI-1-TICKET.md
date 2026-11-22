@@ -291,6 +291,11 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     - **The ask-again hook:** exempt only a confirmed `Rejected` from billing, not every failure without usage. This needs the BM-5 test fakes to raise status-400 errors in place of `RuntimeError`.
     - **"Test this model":** validate the task's *current* model too, so an env-set `-pro` model is reported as unusable rather than sent by the eval, as production now skips it.
 
+- **HK-2 (22 Nov), a hotfix found while starting ARIA-1:** `ai_models.is_reasoning` knew gpt-5 and the o-series only. So a **gpt-6** model (gpt-6-luna, gpt-6.1-sol) chosen on the admin page was sent `max_tokens` and a temperature, which reasoning models refuse, while outreach's router already sent them `max_completion_tokens`. A refused request is not an outage, so the job quietly fell back to its plain version every time.
+  - Any `gpt-N` with N ≥ 5 now counts as a reasoning model (except `-chat` variants), along with the o-series.
+  - The board meeting's own copy of the check now delegates to the switchboard's.
+  - Tests: `test_hk2_gpt6_settings.py`, through `chat_params`, the shared adapter and the meeting's settings.
+
 ## Out of scope
 
 - Choosing models per business, which is platform-wide for now.

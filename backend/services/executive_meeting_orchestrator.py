@@ -73,10 +73,12 @@ def _base_model(model: str) -> str:
 
 
 def _is_reasoning_model(model: str) -> bool:
-    """gpt-5 and the o-series refuse max_tokens and any non-default
-    temperature (BM-1); their chat variants take neither reasoning setting."""
-    m = _base_model(model)
-    return (m.startswith("gpt-5") or (len(m) > 1 and m[0] == "o" and m[1].isdigit())) and "-chat" not in m
+    """gpt-5 and later and the o-series refuse max_tokens and any non-default
+    temperature (BM-1); their chat variants take neither reasoning setting.
+    HK-2: one definition, the switchboard's, so the meeting and every other
+    job agree (this copy missed gpt-6)."""
+    from services import ai_models
+    return ai_models.is_reasoning(model)
 
 
 # BM-5 (Mike's logs, 8 Nov 17:42): gpt-5.5 refuses function tools alongside a
