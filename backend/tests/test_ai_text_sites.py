@@ -257,3 +257,65 @@ def test_an_attribution_survives_the_worker_thread():
         with profit_guard.attributed("b1", "draft"):
             return await asyncio.to_thread(profit_guard._attribution.get)
     assert asyncio.run(go()) == ("b1", "draft")
+
+
+# ------------------------------------------------ Codex AI-1d review 3 ---
+# Every wrapper the sites' own stripping accepted before AI-1d still reads,
+# at every site that parses JSON (review 3, finding 1).
+
+def wrappers(payload):
+    return {
+        "bare": payload,
+        "fenced": f"```json\n{payload}\n```",
+        "closing fence only": f"{payload}\n```",
+        "opening fence, cut off": f"```json\n{payload}",
+        "json label": f"json\n{payload}",
+        "stray backticks": f"`{payload}`",
+        "fenced, then a remark": f"```json\n{payload}\n```\nLet me know if you'd like changes.",
+        "prose, then fenced": f"Here you go:\n```json\n{payload}\n```",
+    }
+
+
+CLASSIFY = json.dumps([{"message_id": "m1", "category": "action_required", "priority": 4,
+                        "summary": "Wants a roof quote", "suggested_action": "Reply"}])
+THREE = json.dumps([{"tone": t, "subject": "Re: roof", "body_text": f"{t} reply", "body": f"{t} reply"}
+                    for t in ("professional", "friendly", "brief")])
+
+
+@pytest.mark.parametrize("form", wrappers("x"))
+def test_inbox_sorting_reads_every_wrapper_it_read_before(ai, form):
+    from app.email import service
+    ai.answer = wrappers(CLASSIFY)[form]
+    assert [r.category for r in service.analyze_email_batch([message()])] == ["action_required"], form
+
+
+@pytest.mark.parametrize("form", wrappers("x"))
+def test_three_drafts_read_every_wrapper_they_read_before(ai, form):
+    from app.email import service
+    ai.answer = wrappers(THREE)[form]
+    out = service.generate_email_reply_drafts(message(), BUSINESS, user_name="Mike")
+    assert [d["tone"] for d in out] == ["professional", "friendly", "brief"], form
+
+
+@pytest.mark.parametrize("form", wrappers("x"))
+def test_aria_s_draft_tool_reads_every_wrapper_it_read_before(ai, form):
+    import assistant_tools
+    from sqlalchemy import create_engine, text
+    engine = create_engine("sqlite://")
+    with engine.begin() as c:
+        c.execute(text("CREATE TABLE email_messages (id TEXT, business_id TEXT, provider_message_id TEXT, from_email TEXT, "
+                       "from_name TEXT, subject TEXT, snippet TEXT, body_text TEXT, received_at TEXT)"))
+        c.execute(text("CREATE TABLE businesses (id TEXT, name TEXT)"))
+        c.execute(text("INSERT INTO email_messages VALUES ('m1', 'b1', 'abc123', 'sam@example.com', 'Sam', "
+                       "'Quote for a roof', 'Can you quote?', 'Can you quote for a roof repair?', NULL)"))
+        c.execute(text("INSERT INTO businesses VALUES ('b1', 'New Body')"))
+    ai.answer = wrappers(THREE)[form]
+    out = assistant_tools._draft_email_reply(engine, "b1", {"email_id": "abc123"})
+    assert [d["tone"] for d in out["drafts"]] == ["professional", "friendly", "brief"], form
+
+
+@pytest.mark.parametrize("form", wrappers("x"))
+def test_one_draft_reads_every_wrapper(ai, form):
+    from app.email import service
+    ai.answer = wrappers(json.dumps({"subject": "Re: roof", "body_text": "Hi Sam, Thursday works."}))[form]
+    assert service.generate_email_reply_draft(message(), BUSINESS)["body_text"] == "Hi Sam, Thursday works.", form

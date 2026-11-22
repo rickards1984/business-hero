@@ -243,7 +243,19 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     3. The weekly check judged wording rather than meaning. The direction is now read in the clause that holds the 20%, so "…, so it did not fall" is fine. Each amount is checked against what it's said to be: last week's (`from`, `on`, `previous`, `last week's`) or this week's (`this week`, `to`). "Compared with" and "against" are not read.
     4. "Your business" was read as the Business plan. An ordinary business (yours, small, the…) is not the plan unless "plan" or "tier" follows.
     5. "Harbour owes £1,250 in total and Northgate owes £500" passed. A total is shared only when every name comes before it, with no other amount between the first name and the total.
-    6. The guard's own query ran past the deadline. Time left is now checked before the guard, and the guard's time counts against the attempt. Only an attempt's costing and one guard query can run past the limit.
+    6. The guard's own query ran past the deadline. Time left is now checked before the guard, and the guard's time counts against the attempt. This bounds the attempts, not total wall-clock time (see the follow-ups).
+  - **Codex review 3** (`audits/AI-1D-CODEX-CODE-REVIEW-3.md`, REQUEST CHANGES; 1 blocking, 5 hardening). This was the third cycle, so it was escalated to Mike, who chose to fix the blocker and get one more targeted review.
+    1. **Blocking, fixed:** JSON with only a closing fence, a bare `json` label, or stray backticks no longer parsed. Those are formats the sites' own stripping accepted before AI-1d, so inbox sorting and two kinds of draft would have fallen back. `strip_fences` now tries the old lenient stripping after the fenced-block search, and uses its result only if it is JSON. Every wrapper is tested at all four JSON sites: inbox sorting, the one and three-tone email drafts, and Aria's draft tool.
+  - **Follow-ups, non-blocking** (grading of "Test this model", and one latency claim). Not in this PR:
+    - **Refund case:** an honest hedge over a comma-separated list ("…a full refund, a partial refund or no refund…") is read as a promise.
+    - **Weekly case:**
+      - "up 20% compared to £3,500 last week" is mis-read through `to £`;
+      - "up — 20% to £4,200" loses its direction at the dash.
+    - **Plans:** "a growing business" is read as the Business plan. The exclusion list is phrase-based, not general.
+    - **Shared total:** "The total owed is £1,250 by Harbour and Northgate" fails because the names come after the total.
+    - **Latency:** the 60 s bound covers attempts, not wall-clock time. A slow model-choices refresh before the first attempt, or slow response reads within an adapter's timeout, can exceed it.
+
+    Grading would be more robust with structured output than with reading free text. That was suggested in AI-1c review 3 and is still open.
 
 ## Out of scope
 

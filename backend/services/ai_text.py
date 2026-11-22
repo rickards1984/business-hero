@@ -164,6 +164,9 @@ def strip_fences(text: str) -> str:
     - Otherwise the first fenced block holding JSON, wherever it sits: after a
       line of prose, before "let me know if you'd like changes", or inline
       (review 2, finding 1).
+    - Otherwise what the sites' own stripping accepted before AI-1d, when it
+      is JSON: a lone closing fence, stray backticks, a bare "json" label
+      (review 3, finding 1).
     - Otherwise, an answer that opens with a fence loses it (a block cut off
       before its closing fence), as the sites' own stripping did.
     """
@@ -174,7 +177,22 @@ def strip_fences(text: str) -> str:
         inner = block.group(1).strip()
         if _is_json(inner):
             return inner
+    lenient = _legacy_strip(text)
+    if _is_json(lenient):
+        return lenient
     if text.startswith("```"):
         inner = text.split("\n", 1)[1] if "\n" in text else text.lstrip("`")
         return inner.rstrip("`").strip()
+    return text
+
+
+def _legacy_strip(text: str) -> str:
+    """Everything the sites' own stripping accepted before AI-1d (Codex AI-1d
+    review 3): an opening fence line dropped, stray backticks at either end,
+    and a bare "json" label, so `[...]\n```` and `json\n[...]` still read."""
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+    text = text.strip().strip("`").strip()
+    if text[:4].lower() == "json":
+        text = text[4:].strip()
     return text
