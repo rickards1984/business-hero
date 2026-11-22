@@ -246,6 +246,16 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     6. The guard's own query ran past the deadline. Time left is now checked before the guard, and the guard's time counts against the attempt. This bounds the attempts, not total wall-clock time (see the follow-ups).
   - **Codex review 3** (`audits/AI-1D-CODEX-CODE-REVIEW-3.md`, REQUEST CHANGES; 1 blocking, 5 hardening). This was the third cycle, so it was escalated to Mike, who chose to fix the blocker and get one more targeted review.
     1. **Blocking, fixed:** JSON with only a closing fence, a bare `json` label, or stray backticks no longer parsed. Those are formats the sites' own stripping accepted before AI-1d, so inbox sorting and two kinds of draft would have fallen back. `strip_fences` now tries the old lenient stripping after the fenced-block search, and uses its result only if it is JSON. Every wrapper is tested at all four JSON sites: inbox sorting, the one and three-tone email drafts, and Aria's draft tool.
+  - **Codex review 4, targeted** (`audits/AI-1D-CODEX-CODE-REVIEW-4.md`, REQUEST CHANGES; 2 blocking, both fixed). Both came from running the new fenced-block search before the old stripping:
+    - an answer that opens with "```json[" lost the bracket on the fence line;
+    - a summary quoting "```[]```", followed by a lone closing fence, gave up the embedded `[]`.
+
+    `strip_fences` now:
+    1. returns valid JSON as it is;
+    2. otherwise runs each site's stripping from before AI-1d, exactly as it was, and uses the result if it is JSON;
+    3. only then tries the new fenced-block search.
+
+    A test copies both old functions from HEAD~4. Across 4 payloads × 10 prefixes × 6 suffixes, plus Codex's example, whatever either old function parsed, `strip_fences` parses to the same value. It fails on the review-3 code and passes now.
   - **Follow-ups, non-blocking** (grading of "Test this model", and one latency claim). Not in this PR:
     - **Refund case:** an honest hedge over a comma-separated list ("…a full refund, a partial refund or no refund…") is read as a promise.
     - **Weekly case:**

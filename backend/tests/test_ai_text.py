@@ -424,3 +424,63 @@ def test_a_slow_guard_counts_against_the_deadline(env, monkeypatch):
     with profit_guard.attributed("b1", "briefing"), pytest.raises(ai_router.AllProvidersFailed):
         ai_text.complete("briefing", MSGS, max_tokens=400, timeout=30.0)
     assert clock["t"] <= 60               # the guard's 31 s counted; no second query after the limit
+
+
+# ------------------------------------------------ Codex AI-1d review 4 ---
+# The sites' own stripping before AI-1d, copied from HEAD~4, and every
+# combination of wrapper and payload: whatever either parsed, strip_fences
+# parses to the same value.
+
+def old_email(content):
+    content = (content or "").strip()
+    if content.startswith("```"):
+        content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+    if content.endswith("```"):
+        content = content[:-3]
+    return json.loads(content.strip())
+
+
+def old_aria(content):
+    content = (content or "").strip().strip("`").strip()
+    if content.startswith("json"):
+        content = content[4:].strip()
+    return json.loads(content)
+
+
+PAYLOADS = [
+    '[{"message_id": "m1", "category": "fyi", "priority": 2, "summary": "Customer quoted ```[]```"}]',   # review 4, 2
+    '[\n{"tone": "brief", "subject": "Re", "body": "ok"}\n]',
+    '{"subject": "Re", "body_text": "Use ```json {\\"a\\": 1}``` here"}',
+    '[{"tone": "friendly", "body": "Thanks!"}]',
+]
+PREFIXES = ["", "```", "```json", "```json\n", "```\n", "json\n", "json", "`", "```JSON\n", "  ```json \n"]
+SUFFIXES = ["", "```", "\n```", "`", "\n```\n", " ``` "]
+
+
+def corpus():
+    for payload in PAYLOADS:
+        for pre in PREFIXES:
+            for suf in SUFFIXES:
+                yield pre + payload + suf
+    yield '```json[\n{"tone": "brief", "body": "ok"}\n]'                                             # review 4, 1
+
+
+def test_whatever_the_old_stripping_parsed_still_parses_the_same():
+    from services import ai_text
+    checked = 0
+    for raw in corpus():
+        for old in (old_email, old_aria):
+            try:
+                expected = old(raw)
+            except ValueError:
+                continue
+            assert json.loads(ai_text.strip_fences(raw)) == expected, (old.__name__, raw)
+            checked += 1
+    assert checked > 100
+
+
+def test_the_review_4_examples_read():
+    from services import ai_text
+    assert json.loads(ai_text.strip_fences('```json[\n{"tone": "brief", "body": "ok"}\n]')) == [{"tone": "brief", "body": "ok"}]
+    wrapped = PAYLOADS[0] + "\n```"
+    assert json.loads(ai_text.strip_fences(wrapped))[0]["category"] == "fyi"

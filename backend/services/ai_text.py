@@ -155,44 +155,46 @@ def _is_json(text: str) -> bool:
         return False
 
 
-def strip_fences(text: str) -> str:
-    """The JSON in a model's answer, when it wrapped it in a ``` block (Claude
-    often does), or the text.
+def _email_strip(text: str) -> str:
+    """app/email/service.py's stripping before AI-1d, verbatim in effect."""
+    content = (text or "").strip()
+    if content.startswith("```"):
+        content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+    if content.endswith("```"):
+        content = content[:-3]
+    return content.strip()
 
-    - Valid JSON is returned as it is, so a fence inside one of its strings is
-      never taken for a wrapper (Codex AI-1d review 1, finding 2).
-    - Otherwise the first fenced block holding JSON, wherever it sits: after a
-      line of prose, before "let me know if you'd like changes", or inline
-      (review 2, finding 1).
-    - Otherwise what the sites' own stripping accepted before AI-1d, when it
-      is JSON: a lone closing fence, stray backticks, a bare "json" label
-      (review 3, finding 1).
-    - Otherwise, an answer that opens with a fence loses it (a block cut off
-      before its closing fence), as the sites' own stripping did.
+
+def _aria_strip(text: str) -> str:
+    """assistant_tools.py's stripping before AI-1d, verbatim in effect."""
+    content = (text or "").strip().strip("`").strip()
+    if content.startswith("json"):
+        content = content[4:].strip()
+    return content
+
+
+def strip_fences(text: str) -> str:
+    """The JSON in a model's answer, when it wrapped it (Claude often does), or
+    the text. In this order:
+
+    1. Valid JSON as it is, so a fence inside one of its strings is never
+       taken for a wrapper (Codex AI-1d review 1, finding 2).
+    2. Each site's own stripping before AI-1d, exactly as it was, when the
+       result is JSON: so every answer a site parsed before still parses to
+       the same thing (reviews 3 and 4).
+    3. New: the first fenced block holding JSON, wherever it sits: after a
+       line of prose, before "let me know if you'd like changes", or inline
+       (review 2, finding 1).
+    4. Otherwise an answer that opens with a fence loses it, as before.
     """
     text = (text or "").strip()
     if _is_json(text):
         return text
+    for legacy in (_email_strip(text), _aria_strip(text)):
+        if _is_json(legacy):
+            return legacy
     for block in _ANY_FENCE.finditer(text):
         inner = block.group(1).strip()
         if _is_json(inner):
             return inner
-    lenient = _legacy_strip(text)
-    if _is_json(lenient):
-        return lenient
-    if text.startswith("```"):
-        inner = text.split("\n", 1)[1] if "\n" in text else text.lstrip("`")
-        return inner.rstrip("`").strip()
-    return text
-
-
-def _legacy_strip(text: str) -> str:
-    """Everything the sites' own stripping accepted before AI-1d (Codex AI-1d
-    review 3): an opening fence line dropped, stray backticks at either end,
-    and a bare "json" label, so `[...]\n```` and `json\n[...]` still read."""
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-    text = text.strip().strip("`").strip()
-    if text[:4].lower() == "json":
-        text = text[4:].strip()
-    return text
+    return _email_strip(text) if text.startswith("```") else text

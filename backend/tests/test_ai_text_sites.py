@@ -319,3 +319,13 @@ def test_one_draft_reads_every_wrapper(ai, form):
     from app.email import service
     ai.answer = wrappers(json.dumps({"subject": "Re: roof", "body_text": "Hi Sam, Thursday works."}))[form]
     assert service.generate_email_reply_draft(message(), BUSINESS)["body_text"] == "Hi Sam, Thursday works.", form
+
+
+def test_inbox_sorting_keeps_a_summary_that_quotes_a_fence(ai):
+    """Codex review 4, finding 2: a summary quoting ```[]```, then a lone
+    closing fence: the embedded [] replaced the classification."""
+    from app.email import service
+    ai.answer = json.dumps([{"message_id": "m1", "category": "action_required", "priority": 4,
+                             "summary": "Customer quoted ```[]```", "suggested_action": "Reply"}]) + "\n```"
+    out = service.analyze_email_batch([message()])
+    assert [(r.message_id, r.summary) for r in out] == [("m1", "Customer quoted ```[]```")]
