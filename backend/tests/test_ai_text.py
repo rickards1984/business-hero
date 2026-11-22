@@ -484,3 +484,35 @@ def test_the_review_4_examples_read():
     assert json.loads(ai_text.strip_fences('```json[\n{"tone": "brief", "body": "ok"}\n]')) == [{"tone": "brief", "body": "ok"}]
     wrapped = PAYLOADS[0] + "\n```"
     assert json.loads(ai_text.strip_fences(wrapped))[0]["category"] == "fyi"
+
+
+# ------------------------------------------------- AI-1d part 2 hooks ---
+
+def test_a_site_s_refused_hook_asks_again_once_unbilled(env, monkeypatch):
+    """A hook that keeps saying "ask again" gets one more ask, never a loop;
+    the refusals are not billed and are not outages."""
+    from services import ai_router, ai_text
+    fake = Fake(**{"gpt-5": ai_router.ProviderError("openai: RuntimeError"), "claude-opus-5-5": "ok"})
+    adapters(monkeypatch, fake)
+    use(monkeypatch, GPT5, ANTHROPIC)
+    hooked = []
+    out = ai_text.complete("briefing", MSGS, max_tokens=400,
+                           refused_hook=lambda p, m, e: hooked.append(m) or True)
+    assert out.provider == "anthropic"
+    # gpt-5: asked, refused (hook: ask again), refused (hook spent: ordinary retry), refused, then Claude
+    assert [c.model for c in fake.calls] == ["gpt-5", "gpt-5", "gpt-5", "claude-opus-5-5"]
+    assert [kw["provider"] for _, kw in env.recorded] == ["openai", "openai", "anthropic"]
+
+
+def test_tools_reach_the_adapter_and_a_tool_only_answer_counts(env, monkeypatch):
+    from services import ai_text
+    seen = []
+
+    def adapter(provider, model, messages, tools, timeout, factory, **opts):
+        seen.append(tools)
+        return SimpleNamespace(content="", tool_calls=[{"id": "t", "name": "x", "arguments": "{}"}], truncated=False), \
+            SimpleNamespace(total_tokens=9)
+    adapters(monkeypatch, adapter)
+    use(monkeypatch, GPT5)
+    out = ai_text.complete("meeting", MSGS, max_tokens=400, tools=[{"type": "function"}])
+    assert seen == [[{"type": "function"}]] and out.tool_calls[0]["name"] == "x" and out.tokens == 9

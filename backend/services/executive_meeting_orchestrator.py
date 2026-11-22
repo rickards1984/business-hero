@@ -14,17 +14,14 @@ Resilience: the orchestrator NEVER raises. Worst case is a graceful Aria
 fallback message and a logged error. A meeting must never get stuck.
 """
 from __future__ import annotations
-from services import ai_models  # AI-1: every AI call names a task
 
 import asyncio
 import json
 import logging
-import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from openai import AsyncOpenAI
 from sqlalchemy import text
 from sqlmodel import Session
 
@@ -38,7 +35,6 @@ from services.executive_meeting_scheduling import compute_next_meeting_time
 
 logger = logging.getLogger(__name__)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # AI-1: the "meeting" task (gpt-5 by default; EXECUTIVE_MEETING_AI_MODEL still chooses it).
 EXECUTIVE_MEETING_AI_MODEL = None   # an override for tests only; None means ask the switchboard
 
@@ -458,14 +454,41 @@ async def extract_actions_and_goals(meeting_id: str, session: Session) -> Dict[s
 
 
 # ============================================================================
-# Internal: GPT call wrapper
+# Internal: the AI call wrapper (AI-1d part 2: any provider)
 # ============================================================================
 
-def _get_async_client() -> Optional[AsyncOpenAI]:
-    """Lazy AsyncOpenAI client. Returns None if no API key configured."""
-    if not OPENAI_API_KEY:
-        return None
-    return AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
+def _openai_client(**kwargs):
+    """The OpenAI client the meeting's calls use (tests replace it)."""
+    from openai import OpenAI
+    return OpenAI(**kwargs)
+
+
+def _openai_settings(temperature: float, max_tokens: int):
+    """The meeting's own settings for an OpenAI model, as before AI-1d: a
+    reasoning model gets max_completion_tokens with headroom, a short
+    reasoning effort ("none" with tools where the model needs it: BM-5) and
+    no temperature (BM-1); a chat model keeps its temperature."""
+    def settings(model: str, tools_offered: bool) -> Dict[str, Any]:
+        if _is_reasoning_model(model):
+            # Reasoning counts against the budget: kept short, with headroom.
+            return {"max_completion_tokens": max_tokens + REASONING_HEADROOM,
+                    "reasoning_effort": "none" if tools_offered and _tools_need_no_reasoning(model) else "low"}
+        # max_completion_tokens is accepted by every current OpenAI chat model;
+        # max_tokens is refused by the reasoning ones (BM-1).
+        return {"max_completion_tokens": max_tokens, "temperature": temperature}
+    return settings
+
+
+def _refused_reasoning(provider: str, model: str, exc: BaseException) -> bool:
+    """BM-5: a model we did not know refuses tools with a reasoning effort.
+    Remembered for every later turn, so it is asked again with none."""
+    if provider != "openai" or not _is_reasoning_model(model) or _tools_need_no_reasoning(model):
+        return False
+    if not _refuses_reasoning_with_tools(exc):
+        return False
+    logger.warning("[ExecMeeting] %s refuses tools with reasoning; retrying with none", model)
+    _TOOLS_REFUSE_REASONING.add(_base_model(model))
+    return True
 
 
 async def _gpt_chat_completion(
@@ -478,119 +501,85 @@ async def _gpt_chat_completion(
     run_tool=None,
 ) -> tuple[Optional[str], int]:
     """
-    Single point of contact with OpenAI. Returns (content, tokens_used).
-    On any failure returns (None, tokens so far) — caller must handle.
+    Single point of contact with the meeting's AI. Returns (content,
+    tokens_used). On any failure returns (None, tokens so far): the caller
+    must handle it.
+
+    AI-1d part 2: the models chosen for "meeting" on the admin page, in
+    order, on any provider (services.ai_text), with OpenAI asked exactly as
+    before (`_openai_settings`, BM-5's `_refused_reasoning`). JSON replies
+    (`response_format`) use OpenAI's and xAI's JSON mode; Claude is asked
+    for JSON, and a fence around it is removed.
 
     BM-3: with `tools` and `run_tool` (async name, arguments -> JSON str),
     the model may look things up before answering: at most MAX_TOOL_ROUNDS
     rounds, then it must answer from what it has.
-
-    Uses EXECUTIVE_MEETING_AI_MODEL env var to pick the model. Set this in
-    Railway to override the default (e.g. "gpt-5.5").
     """
-    from services import profit_guard
+    from services import ai_chat, ai_text, profit_guard
     if not profit_guard.permits("meeting"):
         logger.warning("[ExecMeeting] paused by the profit guard (PROFIT-1)")
         return None, 0
-    model = EXECUTIVE_MEETING_AI_MODEL or ai_models.openai_model("meeting")   # AI-1
-    if _responses_only(model):
-        logger.error("[ExecMeeting] EXECUTIVE_MEETING_AI_MODEL=%s cannot answer chat requests; "
-                     "set it to a chat model such as gpt-5", model)
+    chain = None
+    if EXECUTIVE_MEETING_AI_MODEL:                     # a test override: that OpenAI model alone
+        if _responses_only(EXECUTIVE_MEETING_AI_MODEL):
+            logger.error("[ExecMeeting] EXECUTIVE_MEETING_AI_MODEL=%s cannot answer chat requests; "
+                         "set it to a chat model such as gpt-5", EXECUTIVE_MEETING_AI_MODEL)
+            return None, 0
+        chain = [("openai", EXECUTIVE_MEETING_AI_MODEL)]
+    elif not ai_chat.available("meeting"):
+        logger.error("[ExecMeeting] no key is set for any model chosen for the meeting")
         return None, 0
-    client = _get_async_client()
-    if client is None:
-        logger.error("[ExecMeeting] OPENAI_API_KEY not configured")
-        return None, 0
-
-    # max_completion_tokens is accepted by every current OpenAI chat model;
-    # max_tokens is refused by the reasoning ones (BM-1).
-    kwargs: Dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "max_completion_tokens": max_tokens,
-    }
-    if _is_reasoning_model(model):
-        # Reasoning counts against the budget: kept short, with headroom.
-        kwargs["reasoning_effort"] = "low"
-        kwargs["max_completion_tokens"] = max_tokens + REASONING_HEADROOM
-    else:
-        kwargs["temperature"] = temperature
-    if response_format is not None:
-        kwargs["response_format"] = response_format
 
     conversation = list(messages)
     tokens = 0
+    reply = None
     for round_ in range(MAX_TOOL_ROUNDS + 1):
         offer = bool(tools and run_tool) and round_ < MAX_TOOL_ROUNDS
-        kwargs["messages"] = conversation
-        if offer:
-            kwargs["tools"] = tools
-        else:
-            kwargs.pop("tools", None)
-        if "reasoning_effort" in kwargs:
-            kwargs["reasoning_effort"] = ("none" if offer and _tools_need_no_reasoning(model)
-                                          else "low")
         try:
-            try:
-                with profit_guard.attributed(business_id, "meeting"):
-                    response = await client.chat.completions.create(**kwargs)
-            except Exception as exc:
-                if not (offer and kwargs.get("reasoning_effort") not in (None, "none")
-                        and _refuses_reasoning_with_tools(exc)):
-                    raise
-                # A model we did not know refuses the pair: ask once more without
-                # reasoning, and remember it for every later turn.
-                logger.warning("[ExecMeeting] %s refuses tools with reasoning; retrying with none",
-                               model)
-                _TOOLS_REFUSE_REASONING.add(_base_model(model))
-                kwargs["reasoning_effort"] = "none"
-                with profit_guard.attributed(business_id, "meeting"):
-                    response = await client.chat.completions.create(**kwargs)
+            with profit_guard.attributed(business_id, "meeting"):
+                reply = await ai_text.acomplete(
+                    "meeting", conversation, max_tokens=max_tokens, temperature=temperature,
+                    tools=tools if offer else None, json_object=response_format is not None,
+                    openai_settings=_openai_settings(temperature, max_tokens),
+                    refused_hook=_refused_reasoning, client_factory=_openai_client, chain=chain)
         except Exception as exc:
-            logger.exception("[ExecMeeting] GPT call failed: %s", exc)
+            logger.exception("[ExecMeeting] AI call failed: %s", exc)
             return None, tokens
-        try:
-            tokens += int(response.usage.total_tokens) if response.usage else 0
-            message = response.choices[0].message
-            calls = getattr(message, "tool_calls", None) if offer else None
-        except Exception:
-            logger.exception("[ExecMeeting] Could not parse GPT response shape")
-            return None, tokens
+        tokens += reply.tokens
+        calls = reply.tool_calls if offer else []
         if not calls:
             break
-        conversation.append({"role": "assistant", "content": message.content or "", "tool_calls": [
-            {"id": c.id, "type": "function", "function": {"name": c.function.name,
-                                                          "arguments": c.function.arguments or "{}"}}
+        conversation.append({"role": "assistant", "content": reply.content or "", "tool_calls": [
+            {"id": c["id"], "type": "function", "function": {"name": c["name"],
+                                                             "arguments": c["arguments"] or "{}"}}
             for c in calls]})
         for c in calls:
             try:
-                result = await asyncio.wait_for(run_tool(c.function.name, c.function.arguments or "{}"),
+                result = await asyncio.wait_for(run_tool(c["name"], c["arguments"] or "{}"),
                                                 TOOL_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
-                logger.warning("[ExecMeeting] tool %s timed out", c.function.name)
+                logger.warning("[ExecMeeting] tool %s timed out", c["name"])
                 result = json.dumps({"error": "That took too long to look up. Answer from the meeting "
                                               "data, and say the detail could not be checked."})
             except Exception:
-                logger.exception("[ExecMeeting] tool %s failed", c.function.name)
+                logger.exception("[ExecMeeting] tool %s failed", c["name"])
                 result = json.dumps({"error": "That could not be looked up just now."})
             # meeting_ledger.run_tool already fits its result; this is only a
             # backstop, and says so rather than cutting JSON silently.
             result = str(result)
             if len(result) > TOOL_RESULT_CHARS:
                 result = json.dumps({"error": "That result was too large to read. Narrow the search."})
-            conversation.append({"role": "tool", "tool_call_id": c.id, "content": result})
-        logger.info("[ExecMeeting] round %s: %s", round_ + 1, ", ".join(c.function.name for c in calls))
+            conversation.append({"role": "tool", "tool_call_id": c["id"], "content": result})
+        logger.info("[ExecMeeting] round %s: %s", round_ + 1, ", ".join(c["name"] for c in calls))
 
-    try:
-        content = response.choices[0].message.content
-        if getattr(response.choices[0], "finish_reason", None) == "length":
-            logger.warning("[ExecMeeting] reply cut short (finish_reason=length, %d chars)", len(content or ""))
-            if not content or response_format is not None:
-                return None, tokens   # nothing to say, or JSON that cannot parse
-        return content, tokens
-    except Exception:
-        logger.exception("[ExecMeeting] Could not parse GPT response shape")
-        return None, 0
+    content = reply.content if reply is not None else None
+    if reply is not None and reply.truncated:
+        logger.warning("[ExecMeeting] reply cut short (finish_reason=length, %d chars)", len(content or ""))
+        if not content or response_format is not None:
+            return None, tokens   # nothing to say, or JSON that cannot parse
+    if content and response_format is not None:
+        content = ai_text.strip_fences(content)
+    return content, tokens
 
 
 # ============================================================================

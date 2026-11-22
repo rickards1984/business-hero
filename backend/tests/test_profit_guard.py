@@ -342,7 +342,8 @@ def test_at_the_kill_switch_an_executive_meeting_turn_makes_no_ai_call(engine, m
     import asyncio
     killed(engine, monkeypatch)
     from services import executive_meeting_orchestrator as em
-    monkeypatch.setattr(em, "_get_async_client", lambda: (_ for _ in ()).throw(AssertionError("no AI call")))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")   # AI-1d: the meeting's calls go through ai_text
+    monkeypatch.setattr(em, "_openai_client", lambda **kw: (_ for _ in ()).throw(AssertionError("no AI call")))
     assert asyncio.run(em._gpt_chat_completion([{"role": "user", "content": "hi"}])) == (None, 0)
 
 
@@ -740,7 +741,7 @@ def test_a_meeting_turn_retried_without_reasoning_is_charged_once(engine, monkey
     from services import executive_meeting_orchestrator as orch
     sent = []
 
-    async def create(**kwargs):
+    def create(**kwargs):
         sent.append(kwargs.get("reasoning_effort"))
         if kwargs.get("reasoning_effort") != "none":
             raise _Refusal("Function tools with reasoning_effort are not supported for o4-mini")
@@ -749,7 +750,8 @@ def test_a_meeting_turn_retried_without_reasoning_is_charged_once(engine, monkey
                                choices=[SimpleNamespace(message=SimpleNamespace(content="Here.", tool_calls=None),
                                                         finish_reason="stop")])
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=g.wrap_create(create))))
-    monkeypatch.setattr(orch, "_get_async_client", lambda: client)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")   # AI-1d: the meeting's calls go through ai_text
+    monkeypatch.setattr(orch, "_openai_client", lambda **kw: client)
     monkeypatch.setattr(orch, "EXECUTIVE_MEETING_AI_MODEL", "o4-mini")
     monkeypatch.setattr(orch, "_TOOLS_REFUSE_REASONING", set())
 

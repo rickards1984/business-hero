@@ -288,11 +288,11 @@ def chat(monkeypatch):
     from services import profit_guard
     state = {"sent": [], "script": []}
 
-    async def create(**kwargs):
+    def create(**kwargs):
         state["sent"].append({**kwargs, "messages": list(kwargs["messages"])})
         return state["script"].pop(0)
-    monkeypatch.setattr(orch, "_get_async_client",
-                        lambda: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")   # AI-1d: the meeting's calls go through ai_text
+    monkeypatch.setattr(orch, "_openai_client", lambda **kw: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
     monkeypatch.setattr(profit_guard, "permits", lambda purpose: True)
     return state
 

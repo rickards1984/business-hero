@@ -52,28 +52,52 @@ def _attribution(task: str, business_id, purpose):
     return business_id, purpose
 
 
-def _worst(provider: str, model: str, messages, max_tokens: int) -> tuple:
+def _worst(provider: str, model: str, messages, max_tokens: int, tools=None, settings=None) -> tuple:
     """The most this request can be billed: every character sent a token, and
     its own output limit in the form the model takes."""
-    sent = max(1, len(json.dumps(messages, default=str)))
+    sent = max(1, len(json.dumps(messages, default=str)) + len(json.dumps(tools or [])))
     if provider == "openai":
-        limit = ai_models.chat_params(model, max_tokens=max_tokens)
+        limit = settings if settings is not None else ai_models.chat_params(model, max_tokens=max_tokens)
         return sent, int(limit.get("max_completion_tokens") or limit.get("max_tokens") or max_tokens)
     return sent, int(max_tokens)
 
 
+def _reported_tokens(usage) -> int:
+    """What the provider says the call used, for a site's own token budget
+    (the board meeting's caps): its total, else input plus output, else 0."""
+    total = getattr(usage, "total_tokens", None)
+    if isinstance(total, int):
+        return total
+    got = ai_chat._tokens(usage)
+    return sum(got) if got else 0
+
+
 def complete(task: str, messages: list, *, max_tokens: int, temperature: Optional[float] = None,
-             timeout: float = 30.0, business_id=_UNSET, purpose: Optional[str] = None):
-    """The text of the first of the task's models to answer, stripped, with
-    the provider and model that answered. Raises profit_guard.Paused at the
+             timeout: float = 30.0, business_id=_UNSET, purpose: Optional[str] = None,
+             tools: Optional[list] = None, json_object: bool = False, openai_settings=None,
+             refused_hook=None, client_factory=None, chain: Optional[list] = None):
+    """The first of the task's models to answer: its text (stripped), any
+    tool calls ([{id, name, arguments}]), whether it was cut off, the provider
+    and model, and the tokens it reported. Raises profit_guard.Paused at the
     kill switch, or ai_router.AllProvidersFailed when nothing answers.
 
     `timeout` is one attempt's limit; no attempt starts or runs past
     TOTAL_ATTEMPT_LIMITS of it from the start (Codex AI-1d review 1, finding
     7: a chain of timeouts each got the full limit, plus the SDK's own retry).
-    Only an attempt's costing and one guard query can run past it. Each model
-    gets one retry of its own after an outage, made and costed here rather
-    than inside the SDK (finding 6), before the provider is switched off."""
+    Each model gets one retry of its own after an outage, made and costed here
+    rather than inside the SDK (finding 6), before the provider is switched off.
+
+    AI-1d part 2, for the board meeting:
+    - `tools`: offered to the model; an answer that is only tool calls counts.
+    - `json_object`: OpenAI's and xAI's JSON mode; Claude is asked in its system prompt.
+    - `openai_settings(model, tools_offered) -> dict`: the site's own limit,
+      temperature and reasoning settings for an OpenAI model, in place of
+      `chat_params`.
+    - `refused_hook(provider, model, error) -> bool`: True when the site has
+      changed what it will send for that model (BM-5's reasoning with
+      tools), so it is asked again at once, unbilled, once.
+    - `chain`: the models to use instead of the task's choice (a test override).
+    """
     import time
     from services import profit_guard
     business_id, purpose = _attribution(task, business_id, purpose)
@@ -84,17 +108,20 @@ def complete(task: str, messages: list, *, max_tokens: int, temperature: Optiona
     def held() -> bool:
         return not essential and not profit_guard.permits(purpose)
 
-    for provider, model in ai_models.resolve(task):
+    for provider, model in (chain if chain is not None else ai_models.resolve(task)):
         if ai_router._is_down(provider) or not os.environ.get(ai_models.KEYS.get(provider, "")):
             continue
-        worst = _worst(provider, model, messages, max_tokens)
+        asked_again = False
+        attempt = 0
+        while attempt <= RETRIES:
+            settings = openai_settings(model, bool(tools)) if (openai_settings and provider == "openai") else None
+            worst = _worst(provider, model, messages, max_tokens, tools, settings)
 
-        def cost(usage):
-            got = ai_chat._tokens(usage)
-            tokens = got or worst
-            ai_chat._record(business_id, purpose=purpose, provider=provider, model=model,
-                            input_tokens=tokens[0], output_tokens=tokens[1], estimated=got is None)
-        for attempt in range(1 + RETRIES):
+            def cost(usage, worst=worst):
+                got = ai_chat._tokens(usage)
+                tokens = got or worst
+                ai_chat._record(business_id, purpose=purpose, provider=provider, model=model,
+                                input_tokens=tokens[0], output_tokens=tokens[1], estimated=got is None)
             out_of_time = ai_router.AllProvidersFailed(f"No AI model could answer {task} in time"
                                                        + (f" (tried {', '.join(tried)})" if tried else ""))
             if deadline - time.monotonic() < MIN_ATTEMPT_SECONDS:
@@ -107,33 +134,48 @@ def complete(task: str, messages: list, *, max_tokens: int, temperature: Optiona
             seconds = min(timeout, deadline - time.monotonic())     # after the guard: its time counts
             if seconds < MIN_ATTEMPT_SECONDS:
                 raise out_of_time
+            options = {"max_tokens": max_tokens, "temperature": temperature, "retries": 0}
+            if json_object:
+                options["json_object"] = True
+            if settings is not None:
+                options["settings"] = settings
             try:
-                reply, usage = ai_chat._ADAPTERS[provider](provider, model, messages, None, seconds, None,
-                                                           max_tokens=max_tokens, temperature=temperature, retries=0)
-            except ai_chat.Rejected as exc:    # refused before any work: not billed, not an outage
-                tried.append(f"{provider}/{model}")
-                logger.warning("[AI] %s: %s/%s refused the request (%s); trying the next model",
-                               task, provider, model, exc)
-                break
+                reply, usage = ai_chat._ADAPTERS[provider](provider, model, messages, tools, seconds,
+                                                           client_factory, **options)
             except ai_router.ProviderError as exc:
+                cause = exc.__cause__ or exc
+                if refused_hook and not asked_again and refused_hook(provider, model, cause):
+                    asked_again = True         # refused before any work: not billed, not an attempt
+                    logger.warning("[AI] %s: %s/%s refused those settings; asking again", task, provider, model)
+                    continue
+                if isinstance(exc, ai_chat.Rejected):   # refused before any work: not billed, not an outage
+                    tried.append(f"{provider}/{model}")
+                    logger.warning("[AI] %s: %s/%s refused the request (%s); trying the next model",
+                                   task, provider, model, exc)
+                    break
                 cost(exc.usage)
                 tried.append(f"{provider}/{model}")
                 if isinstance(exc, ai_chat.Truncated):
                     break                      # our limit, not their outage: no retry, no trip
                 if attempt < RETRIES:
                     logger.warning("[AI] %s: %s/%s failed (%s); retrying once", task, provider, model, exc)
+                    attempt += 1
                     continue
                 ai_router._trip(provider)
                 logger.warning("[AI] %s: %s/%s failed (%s); trying the next model", task, provider, model, exc)
                 break
             cost(usage)
             content = (reply.content or "").strip()
-            if not content:                    # billed, but no answer: the next model, not an outage
+            calls = list(getattr(reply, "tool_calls", None) or [])
+            if not content and not calls:      # billed, but no answer: the next model, not an outage
                 tried.append(f"{provider}/{model}")
-                logger.warning("[AI] %s: %s/%s gave an empty answer; trying the next model", task, provider, model)
+                logger.warning("[AI] %s: %s/%s gave an empty answer%s; trying the next model", task, provider, model,
+                               " (cut off at its output limit: finish_reason=length)"
+                               if getattr(reply, "truncated", False) else "")
                 break
-            return SimpleNamespace(content=content, provider=provider, model=model,
-                                   truncated=bool(getattr(reply, "truncated", False)))
+            return SimpleNamespace(content=content, tool_calls=calls, provider=provider, model=model,
+                                   truncated=bool(getattr(reply, "truncated", False)),
+                                   tokens=_reported_tokens(usage))
     raise ai_router.AllProvidersFailed(f"No AI model could answer {task}" + (f" (tried {', '.join(tried)})" if tried else ""))
 
 
