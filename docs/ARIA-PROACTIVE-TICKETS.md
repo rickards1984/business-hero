@@ -7,6 +7,14 @@
   2. ARIA-3, the finance strip;
   3. OUT-28 Part B;
   4. ARIA-4, Save to.
+- **Updated order (22 Nov 2026):** AI-1 (the model switchboard) went first and is done (AI-1a–1d, #108–#114). Mike then added QUOTE-1, the estimator that wins work (`docs/QUOTE-1-TICKET.md`), as of equal value. The order from here:
+  1. ARIA-1;
+  2. **QUOTE-1**;
+  3. ARIA-2;
+  4. ARIA-3;
+  5. OUT-28 Part B;
+  6. ARIA-4;
+  7. STAB-2.
 - **Email checks:** every 15 minutes, weekdays 07:00–19:00 UK, new mail only.
 - **Save to:** a download to the computer, Google Drive, OneDrive and Dropbox (all four).
 
