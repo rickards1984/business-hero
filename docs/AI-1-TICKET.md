@@ -88,8 +88,8 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
 
 **M7. Cost and safety, unchanged:**
 - every call goes through the profit guard;
-- `chat_complex` is still bound by the business's AI allowance;
-- when the allowance runs short, Aria uses `chat` and says so;
+- `chat_complex` has a **monthly budget per business**. This was corrected on 21 Nov: no per-business AI allowance existed, only platform-wide limits (Codex AI-1b review 1, finding 2). Mike's figures: Starter £5, Pro £12, Business £30;
+- after the budget is used, or while the platform's profit guard pauses non-essential AI, Aria uses `chat` and says which;
 - no model choice can make Aria send anything without the owner's approval.
 
 ## Build in three PRs
@@ -123,6 +123,45 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
   - `chat` / `chat_complex` rules and "Think harder";
   - tool calls translated for Anthropic and xAI;
   - whole-turn failover.
+- **AI-1b, as built:**
+  - `services/ai_chat.py`:
+    - `pick_task` applies the M3 rules: money, analysis, planning and pricing words; more than about 30,000 tokens of conversation; three or more tool rounds; or "Think harder".
+    - `turn` runs one round on the first provider in the task's chain that answers. OpenAI gets settings per model; xAI goes through its OpenAI-compatible API; Anthropic's Messages API gets the conversation and tools translated, with consecutive tool results merged into one user turn.
+    - A failure trips the router's cooldown and moves to the next provider.
+    - Every attempt is recorded for the business as `chat`. A failed attempt is recorded at its maximum, marked estimated.
+  - The chat loop (`assistant_chat.process_chat_message`):
+    - runs each round through `turn` in a thread;
+    - after three tool rounds, moves the rest of the turn to `chat_complex`;
+    - never re-runs a tool on failover;
+    - falls back to `chat` when the profit guard holds `chat_complex`, and says so in the reply.
+  - "Think harder" is the `think_harder` request field and a button in the chat bar. It applies to the next message.
+  - `model` in the reply is shown to platform admins only.
+- **Codex AI-1b review 1 requested changes**, and all eight findings were acted on:
+  1. The budget and the profit guard are checked before **every** round that would use `chat_complex`: the first, the move up after three tool rounds, and the final answer. Once refused, the rest of the turn stays on the everyday model.
+  2. A **per-business monthly budget** (`ai_chat.complex_refusal`): spend recorded under `chat_complex` this UK month, against Mike's figures by plan, and changeable with `AI_COMPLEX_MONTHLY_PENCE_JSON`. A check that fails counts as paused, never as allowed. Each round is recorded under its own task.
+  3. A request the provider refuses (400, 404, 413 or 422) is **`Rejected`**: not billed, never trips the provider for everyone, and the next provider may still take it. 429, 5xx and timeouts are outages, as before.
+  4. A tool call cut off at the output limit (Anthropic `stop_reason: max_tokens`, OpenAI `finish_reason: length`) is **`Truncated`**: never run, and the next provider is tried. A cut-off text answer says so.
+  5. OpenAI chat requests carry an explicit output limit. Failure estimates use that limit and everything sent, tool calls included. A usage report missing either figure is estimated.
+  6. An empty answer goes to the final round instead of being saved empty, and empty assistant messages are left out for Claude.
+  7. Chat needs any provider in its chain with a key, not specifically OpenAI.
+  8. Routing: words such as made, afford, hire and money count; account, why and review on their own don't; a short follow-up keeps its money topic.
+
+  Every fix has a test and is mutation-checked.
+- **Codex AI-1b review 2:** findings 1, 3, 5, 6 and 7 confirmed resolved. Changes made for:
+  - **2, the budget:** every attempt on the stronger model, failovers included, first **reserves its most possible cost** (`ai_chat.RESERVATIONS`). Recorded spend this month, plus what attempts in flight hold, plus this attempt's maximum, must fit the budget. A cost that couldn't be recorded stays counted. So concurrent turns can't all pass a check made just under the limit, and overspend is bounded by how far the estimates fall short of real usage. The reservations are in memory because production runs one process (pinned by a STAB-1 test). A refusal mid-turn answers that round with the everyday model and adds the note.
+  - **4:** a cut-off final answer now says so.
+  - **9 (new):** an empty answer never claims anything was done. It points to the card if one was made, or says plainly that Aria couldn't answer.
+  - **8, routing:** a chain of short follow-ups keeps the topic of the question that started it, and a short message that starts a new job (change, add, send…) isn't a follow-up.
+
+  All are mutation-checked.
+- **Codex AI-1b review 3:** findings 4 and 9 were confirmed resolved. The two left on the budget were escalated after three cycles, and Mike chose to fix them and run one more review:
+  - the recorded spend is read **under** the reservation lock, so an attempt that records and releases can't slip between the read and the decision;
+  - unrecorded costs are kept per UK month, so they never block the next month.
+
+  Also, the optional point: a politely asked new job ("Can you change my account name?") isn't a follow-up. All three are mutation-checked.
+- **Codex AI-1b review 4: APPROVE.** Two optional points were noted for later:
+  - one reservation lock for all businesses: a slow database read delays every business's admission. A per-business lock with a bounded wait would fix it;
+  - an attempt that straddles midnight on the 1st could file an unrecorded cost under the new month.
 - **AI-1c: the admin page.**
   - choices, Revert, "Test this model" and the evaluation set;
   - briefings, support and the board meeting moved onto the router, so they can also use other providers.

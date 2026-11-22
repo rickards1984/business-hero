@@ -692,6 +692,9 @@ def test_a_chat_reply_carries_its_proposals_to_the_app(chat_db, clock, doers, mo
 
     monkeypatch.setattr(assistant_chat, "OpenAI", _Client)
     monkeypatch.setattr(assistant_chat, "OPENAI_API_KEY", "test")
+    monkeypatch.setenv("OPENAI_API_KEY", "test")      # AI-1b: the switchboard needs the provider's key
+    from services import ai_chat
+    monkeypatch.setattr(ai_chat, "_record", lambda *a, **k: None)
     monkeypatch.setattr(assistant_chat, "is_platform_admin", lambda uid: False)
     monkeypatch.setattr(assistant_chat, "resolve_conversation", lambda *a: ("conv-1", A))
     monkeypatch.setattr(assistant_chat, "get_business_for_user",

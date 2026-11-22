@@ -600,16 +600,6 @@ def get_business_for_user(user_id: str, requested_business_id: Optional[str] = N
     return BusinessContext(id=str(m[0]), name=m[1], timezone=m[2], logo_url=m[3])
 
 
-def _complete(client, business_id, **request):
-    """STAB-1: one OpenAI chat call, attributed to the business, for running in
-    a thread. On the event loop it froze every request in the app for as long
-    as Aria took to answer, often tens of seconds. The attribution is entered
-    here, in the thread, around the call its SDK hook records."""
-    from services import profit_guard
-    with profit_guard.attributed(business_id, "chat"):
-        return client.chat.completions.create(**request)
-
-
 @dataclass
 class ConversationContext:
     """Conversation context for continuity."""
@@ -759,7 +749,8 @@ async def process_chat_message(
     message: str,
     conversation_id: Optional[str] = None,
     business_id: Optional[str] = None,
-    voice_mode: bool = False
+    voice_mode: bool = False,
+    think_harder: bool = False,
 ) -> dict:
     """Process a chat message and return the assistant response.
     
@@ -826,8 +817,11 @@ async def process_chat_message(
     
     logger.info(f"[DEBUG] Context resolved: user_id={user.id}, conversation_id={resolved_conv_id}, business_id={business.id}, business_name={business.name}, timezone={business.timezone}")
     
-    if not OPENAI_API_KEY:
-        return {"error": "OpenAI API key not configured", "status": 500}
+    # AI-1b: any provider in the chat chain will do, not only OpenAI (Codex
+    # AI-1b review 1, finding 7).
+    from services import ai_chat as _switchboard_chat
+    if not _switchboard_chat.available("chat"):
+        return {"error": "No AI provider is configured", "status": 500}
     
     # Step 4: Load conversation history BEFORE saving new message
     history = await asyncio.to_thread(load_conversation_history, resolved_conv_id, user.id, is_admin, limit=20)
@@ -842,59 +836,84 @@ async def process_chat_message(
     system_prompt = build_system_prompt(business, voice_mode=voice_mode, user_name=user_name, user_email=user_email)
     logger.info(f"[DEBUG] System prompt built for {business.name} (voice_mode={voice_mode}, user_name={user_name}). History has {len(history)} messages.")
     
-    client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
-    chat_model = ai_models.openai_model("chat")   # AI-1 (AI-1b picks chat or chat_complex per message)
-    
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": message})
-    
+
+    # AI-1b (docs/AI-1-TICKET.md M3): the everyday model, or the stronger one
+    # for money, analysis, planning, a long conversation, many tool rounds or
+    # "Think harder". The stronger one is non-essential: when the allowance
+    # holds it, the everyday model answers and Aria says so.
+    from services import ai_chat, ai_router
+    held_back = None                       # why the stronger model was not used, if it was wanted
+
+    async def task_for(tool_rounds):
+        """chat or chat_complex for this round. The stronger model only within
+        the business's monthly budget and while the profit guard allows it,
+        checked before EVERY round that would use it (Codex AI-1b review 1,
+        findings 1 and 2); once refused, the rest of the turn stays everyday."""
+        nonlocal held_back
+        task = ai_chat.pick_task(message, history=history, think_harder=think_harder, tool_rounds=tool_rounds)
+        if task != "chat_complex" or held_back:
+            return "chat"
+        why = await asyncio.to_thread(ai_chat.complex_refusal, business.id)
+        if why:
+            held_back = why
+            return "chat"
+        return "chat_complex"
+
     MAX_TOOL_ROUNDS = 5
     assistant_reply = None
+    answered_by = None
     proposals: list = []  # NS-B10 approval cards raised this turn
     tool_round = 0
 
+    async def one_round(task, tools):
+        """One round, off the event loop, on the first provider that answers
+        (M4: a failed provider hands the round to the next; tools already run
+        stay in `messages` as results and are never run again). A round on the
+        stronger model reserves from the business's budget before each attempt;
+        when it doesn't fit, the round is answered by the everyday model."""
+        nonlocal held_back
+        if task == "chat_complex":
+            try:
+                return await asyncio.to_thread(ai_chat.turn, task, business_id=business.id, messages=messages,
+                                               tools=tools, openai_client=OpenAI, budget_business=business.id)
+            except ai_chat.BudgetRefused as refused:
+                held_back = refused.reason
+                task = "chat"
+        return await asyncio.to_thread(ai_chat.turn, task, business_id=business.id, messages=messages,
+                                       tools=tools, openai_client=OpenAI)
+
     while tool_round < MAX_TOOL_ROUNDS:
+        task = await task_for(tool_round)      # three tool rounds in, the rest of the turn moves up
         try:
-            response = await asyncio.to_thread(
-                _complete, client, business.id,
-                model=chat_model,
-                messages=messages,
-                tools=TOOL_DEFINITIONS,
-                tool_choice="auto",
-                timeout=120
-            )
-        except Exception as e:
-            logger.error(f"OpenAI API error on round {tool_round}: {e}")
+            reply = await one_round(task, TOOL_DEFINITIONS)
+        except ai_router.AllProvidersFailed as e:
+            logger.error(f"AI providers all failed on round {tool_round}: {e}")
             return {"error": f"AI service error: {str(e)}", "status": 500}
+        answered_by = f"{reply.provider}/{reply.model}"
 
-        assistant_message = response.choices[0].message
-
-        if not assistant_message.tool_calls:
-            assistant_reply = assistant_message.content or ""
+        if not reply.tool_calls:
+            # An empty answer (possible after tool results) goes to the final
+            # round below rather than being saved empty (finding 6).
+            assistant_reply = reply.content if (reply.content or "").strip() else None
+            if assistant_reply and getattr(reply, "truncated", False):
+                assistant_reply += "\n\n(I ran out of room there: ask me to carry on.)"
             break
 
-        assistant_msg_dict = {
+        messages.append({
             "role": "assistant",
-            "content": assistant_message.content,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
-                }
-                for tc in assistant_message.tool_calls
-            ]
-        }
-        messages.append(assistant_msg_dict)
+            "content": reply.content or None,
+            "tool_calls": [{"id": c["id"], "type": "function",
+                            "function": {"name": c["name"], "arguments": c["arguments"]}}
+                           for c in reply.tool_calls],
+        })
 
-        for tool_call in assistant_message.tool_calls:
-            tool_name = tool_call.function.name
+        for tool_call in reply.tool_calls:
+            tool_name = tool_call["name"]
             try:
-                arguments = json.loads(tool_call.function.arguments)
+                arguments = json.loads(tool_call["arguments"])
             except json.JSONDecodeError:
                 arguments = {}
 
@@ -922,7 +941,7 @@ async def process_chat_message(
 
             messages.append({
                 "role": "tool",
-                "tool_call_id": tool_call.id,
+                "tool_call_id": tool_call["id"],
                 "content": tool_content
             })
 
@@ -930,16 +949,25 @@ async def process_chat_message(
 
     if assistant_reply is None:
         try:
-            final_response = await asyncio.to_thread(
-                _complete, client, business.id,
-                model=chat_model,
-                messages=messages,
-                timeout=120
-            )
-            assistant_reply = final_response.choices[0].message.content or "I've completed the requested actions."
-        except Exception as e:
-            logger.error(f"OpenAI API error on final response: {e}")
+            reply = await one_round(await task_for(tool_round), None)
+            answered_by = f"{reply.provider}/{reply.model}"
+            if (reply.content or "").strip():
+                assistant_reply = reply.content
+                if getattr(reply, "truncated", False):     # review 2, finding 4
+                    assistant_reply += "\n\n(I ran out of room there: ask me to carry on.)"
+            else:
+                # Never claim something was done when nothing says it was
+                # (review 2, finding 9).
+                assistant_reply = (
+                    "I've prepared that for you: please check the card below." if proposals else
+                    "I looked into that but couldn't put an answer together. Please ask me again." if tool_round else
+                    "Sorry, I couldn't put an answer together just then. Please try again.")
+        except ai_router.AllProvidersFailed as e:
+            logger.error(f"AI providers all failed on the final response: {e}")
             assistant_reply = "I encountered an error generating a response. Please try again."
+
+    if held_back and assistant_reply:
+        assistant_reply += "\n\n" + ai_chat.NOTES[held_back]
     
     # Step 7: Save assistant reply to DB
     await asyncio.to_thread(save_message, resolved_conv_id, business.id, user.id, "assistant", assistant_reply or "")
@@ -955,4 +983,5 @@ async def process_chat_message(
         },
         "conversation_id": resolved_conv_id,
         "proposals": proposals,
+        "model": answered_by,          # AI-1b: shown to platform admins only (M3)
     }
