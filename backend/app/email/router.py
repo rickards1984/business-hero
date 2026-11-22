@@ -15,6 +15,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Query, status
 from rate_limiting import limiter, LIMIT_AI_HEAVY, LIMIT_SYNC
 from fastapi.responses import RedirectResponse
+import asyncio
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import func
@@ -1171,7 +1172,7 @@ async def generate_email_briefing(
 
     from services import profit_guard   # PROFIT-1: recorded; paused at the kill switch (plain version instead)
     with profit_guard.attributed(business.id, "briefing"):
-        briefing_markdown = generate_email_briefing_markdown(messages, business)
+        briefing_markdown = await asyncio.to_thread(generate_email_briefing_markdown, messages, business)   # AI-1d
     stats = {
         "total_messages": len(messages),
         "unread_messages": sum(1 for m in messages if m.is_unread),
@@ -1273,7 +1274,7 @@ async def analyze_emails(
         batch = messages[i : i + batch_size]
         from services import profit_guard   # PROFIT-1: inbox sorting is essential: recorded, never paused
         with profit_guard.attributed(business.id, "classify"):
-            batch_results = analyze_email_batch(batch)
+            batch_results = await asyncio.to_thread(analyze_email_batch, batch)   # AI-1d: off the event loop
         all_analyses.extend(batch_results)
 
     for analysis in all_analyses:
@@ -1338,7 +1339,7 @@ async def generate_email_draft_options(
 
     from services import profit_guard   # PROFIT-1: recorded; paused at the kill switch (plain version instead)
     with profit_guard.attributed(business.id, "draft"):
-        draft_options = generate_email_reply_drafts(message, business, user_name)
+        draft_options = await asyncio.to_thread(generate_email_reply_drafts, message, business, user_name)   # AI-1d
 
     saved_drafts: List[EmailDraftResponse] = []
     for option in draft_options:
@@ -1399,7 +1400,7 @@ async def generate_email_draft(
 
     from services import profit_guard   # PROFIT-1: recorded; paused at the kill switch (plain version instead)
     with profit_guard.attributed(business.id, "draft"):
-        draft_content = generate_email_reply_draft(message, business)
+        draft_content = await asyncio.to_thread(generate_email_reply_draft, message, business)   # AI-1d
     draft = EmailDraft(
         business_id=business.id,
         email_message_id=message.id,

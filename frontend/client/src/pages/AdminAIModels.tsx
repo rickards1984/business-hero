@@ -167,7 +167,7 @@ function ChangeDialog({ row, onClose, onSaved }: { row: TaskRow; onClose: () => 
           <Typography variant="body2">
             {row.max_chain > 1
               ? "The first model answers; if it's unavailable, the next one does."
-              : 'This job uses one OpenAI model, with no fallback, until it moves onto the new router (AI-1d).'}
+              : 'This job still calls OpenAI directly, so it uses one OpenAI model with no fallback for now.'}
             {' '}Default: {row.default.map(key).join(', then ')}.
           </Typography>
           {chain.map((p, i) => (
@@ -227,7 +227,7 @@ function ChangeDialog({ row, onClose, onSaved }: { row: TaskRow; onClose: () => 
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} disabled={saving || testing}>Cancel</Button>
-        <Tooltip title={row.testable ? '' : 'Testing comes for this task when it moves onto the router (AI-1d)'}>
+        <Tooltip title={row.testable ? '' : 'This job has no test questions yet'}>
           <span>
             <Button onClick={test} disabled={!row.testable || testing || saving || !chain.length}>Test this model</Button>
           </span>

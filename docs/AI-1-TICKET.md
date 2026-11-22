@@ -194,6 +194,79 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
 
       Consider grading the grounding case by asking for structured output rather than reading free text.
     - There's no reservation for eval spend: a test admitted just under the kill threshold can overshoot it by at most one test's cost (≤ £3).
+- **AI-1d, part 1: the text jobs onto any provider** (as built). The board meeting is part 2: it has its own tool loop and OpenAI-specific workarounds, so it gets its own PR.
+  - **`services/ai_text.py`:** `complete(task, messages, max_tokens, temperature)`, with `acomplete` running it in a worker thread. It uses the task's chosen models in order through `ai_chat`'s adapters.
+    - **Failover:** an outage switches that provider off for a while. A refused request (400/404/413/422) moves on without being billed or switching the provider off. An empty answer is billed and moves on.
+    - **Costs:** each attempt is costed under the business and purpose of the surrounding `profit_guard.attributed` block, so the ledger and the admin page's spend read as before. A failure with no usage reported is charged at most what that request could cost, at the site's own limit.
+    - **Kill switch:** a non-essential purpose is refused before any call with `profit_guard.Paused`, which every site already falls back on.
+    - **Settings:** OpenAI takes `chat_params`, so reasoning models get no temperature. xAI takes the limit and temperature. Claude takes the limit and no temperature, because newer Claude models may refuse sampling settings.
+    - Each site's single OpenAI retry is kept. `strip_fences` reads JSON that a model wrapped in a code block.
+  - **Moved:**
+    - the weekly briefing and daily pulse;
+    - the help assistant's chat (essential `chat`) and the admin's draft (`support_draft`);
+    - call summaries;
+    - Aria's three reply drafts;
+    - email: inbox sorting, the email briefing, and the single and three-tone reply drafts.
+
+    Their prompts, parsing and plain fallbacks are unchanged. Key checks now ask whether any model in the chain has a key (`ai_chat.available`). The five tasks drop `ONE_OPENAI`, so on the admin page they take any provider and fallbacks.
+  - **Off the event loop:** the four email endpoints called the sync model functions directly, so a 30-second answer froze every request. They now use `asyncio.to_thread`, which carries the attribution. The call summary was an async function making a sync OpenAI call; it now awaits `acomplete`.
+  - **Still OpenAI-only:**
+    - quotes and quote chat: the price rules are RED and belong with the quote estimator ticket;
+    - the board meeting: part 2;
+    - voice, transcription and speech: there are no equivalents elsewhere.
+  - **Test this model:** new sets for the help assistant (answers from the knowledge base, hands over to a person, never invents a policy, quotes the given price) and the briefings (the pulse's shape, flagging the overdue invoice, the weekly JSON the app reads, the right numbers and the 20% change). Text sets send no tools and use the site's own output limit.
+  - **The AI-1c review 3 follow-ups:**
+    - each call's remaining time is now worked out after the per-case guard query;
+    - the slow-call test was re-scaled so some cases run before it stops;
+    - grading handles "respectively", dashes, slashes, two customers in one clause, and a total named against one customer.
+
+    The eval spend reservation stays bounded at one test's cost (≤ £3) and is not added.
+  - **Codex review 1** (`audits/AI-1D-CODEX-CODE-REVIEW-1.md`, REQUEST CHANGES; 5 blocking, 3 not), all fixed:
+    1. A failure that closed the kill switch didn't stop the next attempt. The guard is now checked before every attempt, because the SDK hook can't see these calls.
+    2. Fence stripping mangled valid JSON with a fence inside a string. Valid JSON is now returned as it is. Otherwise a fence is taken only if it wraps the whole answer, or follows prose and contains JSON.
+    3. The help-assistant set passed a promised refund and swapped plan prices. The refund case now needs "I don't know", no promise and a handoff. The price case needs each plan's own price: names match as whole words, and "Business Hero" is not the Business plan.
+    4. The briefing set passed "fell 20%" and `[1,2,3]` actions. The change must go up, last week's figure must be £3,500, each action needs a number and a label, and a briefing must come before the JSON.
+    5. The daily pulse was tested at 2,000 tokens against production's 400. Each case now carries its site's limit, used in its cost too, and a cut-off answer fails.
+    6. The SDK's own retry was never costed. Retries are now made in `ai_text`, one per model after an outage, and each attempt is costed. The adapters get `retries=0`.
+    7. A chain of timeouts had no overall limit. The whole call now ends within twice one attempt's limit: 60 s by default, the same as the old attempt plus its SDK retry.
+    8. "Harbour owes £1,250 in total" passed. The total now counts with one customer only beside that customer's own balance, or in a sentence naming several.
+
+    Unchanged: a daily pulse cut off in production is still sent as it is, as before. It isn't a regression.
+  - **Codex review 2** (`audits/AI-1D-CODEX-CODE-REVIEW-2.md`, REQUEST CHANGES; 1 blocking, 5 hardening), all fixed:
+    1. **Blocking:** JSON in a block followed by a closing remark, or inline after prose, was no longer found, so the email draft showed the whole answer. `strip_fences` now:
+       - returns valid JSON as it is;
+       - otherwise takes the first fenced block that holds JSON, wherever it sits;
+       - otherwise drops an opening fence that was cut off, as the sites did.
+
+       The draft site is now tested end to end.
+    2. Honest refund answers failed. A promise now counts only where no hedge comes before it in the same clause, so "I can't confirm whether a full refund is available" passes and "I'm not sure, but you'll get a full refund" still fails. Curly apostrophes are made straight first.
+    3. The weekly check judged wording rather than meaning. The direction is now read in the clause that holds the 20%, so "…, so it did not fall" is fine. Each amount is checked against what it's said to be: last week's (`from`, `on`, `previous`, `last week's`) or this week's (`this week`, `to`). "Compared with" and "against" are not read.
+    4. "Your business" was read as the Business plan. An ordinary business (yours, small, the…) is not the plan unless "plan" or "tier" follows.
+    5. "Harbour owes £1,250 in total and Northgate owes £500" passed. A total is shared only when every name comes before it, with no other amount between the first name and the total.
+    6. The guard's own query ran past the deadline. Time left is now checked before the guard, and the guard's time counts against the attempt. This bounds the attempts, not total wall-clock time (see the follow-ups).
+  - **Codex review 3** (`audits/AI-1D-CODEX-CODE-REVIEW-3.md`, REQUEST CHANGES; 1 blocking, 5 hardening). This was the third cycle, so it was escalated to Mike, who chose to fix the blocker and get one more targeted review.
+    1. **Blocking, fixed:** JSON with only a closing fence, a bare `json` label, or stray backticks no longer parsed. Those are formats the sites' own stripping accepted before AI-1d, so inbox sorting and two kinds of draft would have fallen back. `strip_fences` now tries the old lenient stripping after the fenced-block search, and uses its result only if it is JSON. Every wrapper is tested at all four JSON sites: inbox sorting, the one and three-tone email drafts, and Aria's draft tool.
+  - **Codex review 4, targeted** (`audits/AI-1D-CODEX-CODE-REVIEW-4.md`, REQUEST CHANGES; 2 blocking, both fixed). Both came from running the new fenced-block search before the old stripping:
+    - an answer that opens with "```json[" lost the bracket on the fence line;
+    - a summary quoting "```[]```", followed by a lone closing fence, gave up the embedded `[]`.
+
+    `strip_fences` now:
+    1. returns valid JSON as it is;
+    2. otherwise runs each site's stripping from before AI-1d, exactly as it was, and uses the result if it is JSON;
+    3. only then tries the new fenced-block search.
+
+    A test copies both old functions from HEAD~4. Across 4 payloads × 10 prefixes × 6 suffixes, plus Codex's example, whatever either old function parsed, `strip_fences` parses to the same value. It fails on the review-3 code and passes now.
+  - **Codex review 5, narrow and final** (`audits/AI-1D-CODEX-CODE-REVIEW-5.md`): **APPROVE**, no findings. Mike chose this last review after review 4.
+  - **Follow-ups, non-blocking** (grading of "Test this model", and one latency claim). Not in this PR:
+    - **Refund case:** an honest hedge over a comma-separated list ("…a full refund, a partial refund or no refund…") is read as a promise.
+    - **Weekly case:**
+      - "up 20% compared to £3,500 last week" is mis-read through `to £`;
+      - "up — 20% to £4,200" loses its direction at the dash.
+    - **Plans:** "a growing business" is read as the Business plan. The exclusion list is phrase-based, not general.
+    - **Shared total:** "The total owed is £1,250 by Harbour and Northgate" fails because the names come after the total.
+    - **Latency:** the 60 s bound covers attempts, not wall-clock time. A slow model-choices refresh before the first attempt, or slow response reads within an adapter's timeout, can exceed it.
+
+    Grading would be more robust with structured output than with reading free text. That was suggested in AI-1c review 3 and is still open.
 
 ## Out of scope
 

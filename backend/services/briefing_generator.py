@@ -3,17 +3,13 @@ AI-powered briefing generator.
 Uses GPT to produce strategic business analysis from raw data.
 """
 
-from services import ai_models  # AI-1: every AI call names a task
-import os
 import json
 import logging
 from typing import Optional, Dict, Any, List, Tuple
 
-from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 
 def _serialize_for_json(obj: Any) -> Any:
@@ -39,9 +35,8 @@ async def generate_weekly_briefing(
     """
     # PROFIT-1: at the kill switch the briefing still goes, as the plain
     # fallback without AI; its AI cost is recorded as "briefing".
-    from services import profit_guard
-    client = (AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
-              if OPENAI_API_KEY and profit_guard.permits("briefing") else None)
+    from services import ai_chat, profit_guard
+    use_ai = ai_chat.available("briefing") and profit_guard.permits("briefing")   # AI-1d: any provider
 
     system_prompt = f"""You are the AI business intelligence analyst for "{business_name}". You produce a concise, actionable weekly CEO briefing for {owner_name or 'the owner'}.
 
@@ -100,17 +95,15 @@ Also return a JSON block at the end (after the briefing text) with this structur
 }}
 """
 
-    if client:
+    if use_ai:
         try:
+            from services import ai_text
             with profit_guard.attributed(business_id, "briefing"):
-                response = await client.chat.completions.create(
-                    **ai_models.chat_request("briefing", max_tokens=2000, temperature=0.4),
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                )
-            full_response = response.choices[0].message.content.strip()
+                reply = await ai_text.acomplete("briefing", [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ], max_tokens=2000, temperature=0.4)
+            full_response = reply.content
 
             if "===JSON===" in full_response:
                 parts = full_response.split("===JSON===")
@@ -142,11 +135,10 @@ async def generate_daily_pulse(
     """Generate a short daily morning pulse."""
     # PROFIT-1: at the kill switch the briefing still goes, as the plain
     # fallback without AI; its AI cost is recorded as "briefing".
-    from services import profit_guard
-    client = (AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
-              if OPENAI_API_KEY and profit_guard.permits("briefing") else None)
+    from services import ai_chat, profit_guard
+    use_ai = ai_chat.available("briefing") and profit_guard.permits("briefing")   # AI-1d: any provider
 
-    if client:
+    if use_ai:
         try:
             owner_part = f", {owner_name}" if owner_name else ""
             system_prompt = f"""You produce a very short daily business pulse for {owner_part} at "{business_name}".
@@ -160,18 +152,16 @@ RULES:
 - Use emoji for visual scanning
 - Only mention things that need attention or are noteworthy
 """
+            from services import ai_text
             with profit_guard.attributed(business_id, "briefing"):
-                response = await client.chat.completions.create(
-                    **ai_models.chat_request("briefing", max_tokens=400, temperature=0.3),
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {
-                            "role": "user",
-                            "content": f"Generate a daily pulse from this data:\n{json.dumps(data, indent=2, default=_serialize_for_json)}",
-                        },
-                    ],
-                )
-            return response.choices[0].message.content.strip()
+                reply = await ai_text.acomplete("briefing", [
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": f"Generate a daily pulse from this data:\n{json.dumps(data, indent=2, default=_serialize_for_json)}",
+                    },
+                ], max_tokens=400, temperature=0.3)
+            return reply.content
         except Exception as e:
             logger.error(f"[Briefing Generator] Failed to generate daily pulse: {e}")
 

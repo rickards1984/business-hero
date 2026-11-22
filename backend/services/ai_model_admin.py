@@ -134,7 +134,7 @@ def _validate(task: str, chain) -> list:
         raise ActionRefused(422, "Choose at least one model")
     limit = ai_models.TASKS[task].max_chain
     if len(chain) > limit:
-        raise ActionRefused(422, "This task uses one model and no fallbacks until it moves onto the router (AI-1d)"
+        raise ActionRefused(422, "This job still calls OpenAI directly, so it uses one model and no fallbacks for now"
                             if limit == 1 else f"Choose at most {limit} models (a first choice and its fallbacks)")
     pairs = []
     for entry in chain:
@@ -215,7 +215,7 @@ def test(session, task: str, provider: str, model: str) -> dict:
     if task not in ai_models.TASKS:
         raise ActionRefused(404, f"Unknown task {task}")
     if not ai_eval.has_cases(task):
-        raise ActionRefused(422, "This task has no test set yet: it can be tested once it runs on the router (AI-1d)")
+        raise ActionRefused(422, "This job has no test set yet, so it can be chosen but not tested")
     why = ai_models.why_unusable(task, provider, model)
     if why:
         raise ActionRefused(422, why)

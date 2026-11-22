@@ -330,10 +330,10 @@ def killed(engine, monkeypatch):
 def test_at_the_kill_switch_a_briefing_still_goes_without_ai(engine, monkeypatch):
     import asyncio
     killed(engine, monkeypatch)
-    from services import briefing_generator as bg
-    monkeypatch.setattr(bg, "OPENAI_API_KEY", "key")
-    made = []
-    monkeypatch.setattr(bg, "AsyncOpenAI", lambda **k: made.append(1))
+    from services import ai_chat, briefing_generator as bg
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    made = []          # AI-1d: every provider is reached through ai_chat's adapters
+    monkeypatch.setattr(ai_chat, "_ADAPTERS", {p: (lambda *a, **k: made.append(1)) for p in ("openai", "anthropic", "xai")})
     out = asyncio.run(bg.generate_daily_pulse("New Body", "Mike", {}))
     assert made == [] and isinstance(out, str) and out
 
@@ -534,16 +534,14 @@ def test_the_scheduler_runs_the_check():
 
 
 def test_an_email_draft_at_the_kill_switch_is_the_plain_one_without_ai(engine, monkeypatch):
-    """P1 3: gated at the SDK itself. The router labels the call "draft"; the
-    hook refuses it before the provider; the draft code's own fallback answers."""
-    import httpx
+    """P1 3: the router labels the call "draft"; AI-1d's ai_text refuses it
+    before any provider (as the SDK hook did); the draft code's own fallback answers."""
     g, sync, aio = hooked_sdk(monkeypatch, engine)
     from app.email import service
+    from services import ai_chat
     calls = []
-    sync_client = __import__("openai").OpenAI(api_key="k", http_client=httpx.Client(transport=httpx.MockTransport(
-        lambda request: calls.append(1) or httpx.Response(200, json=completion_json()))))
-    monkeypatch.setattr(service, "OPENAI_API_KEY", "k")
-    monkeypatch.setattr(service, "OpenAI", lambda **k: sync_client)
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setattr(ai_chat, "_ADAPTERS", {p: (lambda *a, **k: calls.append(1)) for p in ("openai", "anthropic", "xai")})
     monkeypatch.setattr(g, "permits", lambda purpose: purpose in g.ESSENTIAL)
     message = SimpleNamespace(subject="Hello", from_name="Sam", from_email="s@x", snippet="", body_text="hi")
     business_row = SimpleNamespace(id="biz-1", name="New Body")
