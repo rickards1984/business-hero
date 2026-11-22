@@ -6,13 +6,15 @@ one provider and model directly (never the failover chain, and never trips a
 provider for everyone), records its cost as platform `eval`, and saves
 nothing else.
 
-Today: Aria's chat (`chat` and `chat_complex`), the tasks whose model Mike is
-most likely to change first. Other text tasks get cases when they move onto
-the router (AI-1d).
+Sets: Aria's chat (`chat` and `chat_complex`), and since AI-1d the help
+assistant (`support`) and the briefings (`briefing`). Other text tasks can be
+chosen without a test set.
 """
 import json
 import re
 import time
+from types import SimpleNamespace
+from typing import Optional
 
 SYSTEM = ("You are Aria, the AI assistant for a small UK trades business. Use the tools to look things up. "
           "Never invent prices, amounts or dates: if you don't have them, say so and ask. Keep answers short.")
@@ -83,27 +85,71 @@ def _short_hello(reply):
 TOTAL = 1250.0
 OWED = {"harbour": 750.0, "northgate": 500.0}
 GROUNDED = {TOTAL, *OWED.values()}
-# Clauses: split at ; or a full stop (not a decimal point), a comma and space,
-# "and", "while", or a new line. "£1,250.00" stays whole.
-_CLAUSES = re.compile(r";|\.(?!\d)|,\s|\band\b|\bwhile\b|\n", re.I)
+# Sentences end at ; a full stop (not a decimal point) or a new line; within
+# one, clauses split at a comma, colon, dash or slash with spaces, "and" or
+# "while". "£1,250.00" and "10:30" stay whole.
+_SENTENCES = re.compile(r";|\.(?!\d)|\n")
+_CLAUSES = re.compile(r",\s|:\s|\s[—–-]\s|\s?/\s?|\band\b|\bwhile\b", re.I)
+_TOTAL_WORDS = re.compile(r"\b(total|altogether|in all|overall|combined|between them)\b", re.I)
+
+
+def _named(text) -> list:
+    """The customers named, in the order they appear."""
+    low = (text or "").lower()
+    return sorted((c for c in OWED if c in low), key=low.index)
+
+
+def _in_order(text) -> list:
+    """Amounts in the order they appear."""
+    out = []
+    for m in _MONEY.finditer(text or ""):
+        try:
+            out.append(round(float((m.group(1) or m.group(2)).replace(",", "")), 2))
+        except ValueError:
+            continue
+    return out
+
+
+def _attribution_error(sentence) -> Optional[str]:
+    """Why this sentence gives a customer the wrong amount, or None."""
+    if "respectively" in sentence.lower():
+        names = _named(sentence)
+        amounts = [a for a in _in_order(sentence) if a != TOTAL]
+        if names and len(names) == len(amounts):
+            for name, amount in zip(names, amounts):
+                if OWED[name] != amount:
+                    return f"it gave {name.title()} the wrong balance (£{amount:,.2f})"
+            return None
+    for clause in _CLAUSES.split(sentence):
+        named = _named(clause)
+        amounts = _amounts(clause)
+        if not named or not amounts:
+            continue
+        if len(named) > 1:
+            if amounts - {TOTAL}:
+                return "it gave two customers' balances together, so neither can be checked"
+            continue
+        allowed = {OWED[named[0]]} | ({TOTAL} if _TOTAL_WORDS.search(clause) else set())
+        wrong = amounts - allowed
+        if wrong:
+            return f"it gave {named[0].title()} the wrong balance (£{sorted(wrong)[0]:,.2f})"
+    return None
 
 
 def _uses_the_result(reply):
     """It states the £1,250 it looked up, no amount that wasn't in the data,
-    and no customer with another customer's balance (Codex AI-1c review 2)."""
+    and no customer with another customer's balance or the total (Codex
+    AI-1c reviews 2 and 3)."""
     found = _amounts(reply.content)
     if TOTAL not in found:
         return False, "expected it to state the £1,250 from the invoices it looked up"
     stray = found - GROUNDED
     if stray:
         return False, f"it stated an amount that wasn't in the data (£{sorted(stray)[0]:,.2f})"
-    for clause in _CLAUSES.split(reply.content or ""):
-        named = [c for c in OWED if c in clause.lower()]
-        if len(named) != 1:
-            continue                          # no customer, or two: nothing to attribute
-        wrong = _amounts(clause) - {OWED[named[0]], TOTAL}
-        if wrong:
-            return False, f"it gave {named[0].title()} the wrong balance (£{sorted(wrong)[0]:,.2f})"
+    for sentence in _SENTENCES.split(reply.content or ""):
+        why = _attribution_error(sentence)
+        if why:
+            return False, why
     return True, ""
 
 
@@ -134,11 +180,187 @@ CASES = {
          "check": _uses_the_result},
     ],
 }
-KIND_OF_TASK = {"chat": "chat", "chat_complex": "chat"}
+
+# ------------------------------------------- AI-1d: the help assistant ---
+# A shortened form of support_api's prompt: the same rules (knowledge base
+# only, [ESCALATE] for a person, the category tag) on a two-article base.
+
+PLAN_PRICES = {69.0, 129.0, 269.0}
+SUPPORT_SYSTEM = (
+    "You are the Business Hero help assistant. Answer only from the knowledge base, in British English, "
+    "concisely. If the answer isn't in the knowledge base, say so and offer to pass it to the team; never "
+    "make up a policy or price. If the user asks for a person, include [ESCALATE].\n"
+    "At the end of EVERY response add a classification tag on a new line in this format:\n"
+    "[CATEGORY: how-to] [CONFIDENCE: 0.9]\n"
+    "Categories: bug, feature-request, how-to, billing, integration, account, general\n\n"
+    "KNOWLEDGE BASE:\n"
+    "### Connecting Gmail\nGo to Settings → Email and click Connect Gmail, then approve access in the Google window.\n"
+    "### Plans\nStarter is £69, Pro £129 and Business £269 a month, billed monthly.")
+_TAG = re.compile(r"\[CATEGORY:\s*[a-z-]+\]\s*\[CONFIDENCE:\s*[\d.]+\]", re.I)
+_HANDOFF = re.compile(r"\b(team|person|human|colleague|escalat\w*|pass (it|this) on)\b", re.I)
+
+
+def _support(messages_text):
+    return [{"role": "system", "content": SUPPORT_SYSTEM}, {"role": "user", "content": messages_text}]
+
+
+def _tagged(reply):
+    return (bool(_TAG.search(reply.content or "")), "it left off the [CATEGORY: …] [CONFIDENCE: …] tag")
+
+
+def _all(*checks):
+    def check(reply):
+        for c in checks:
+            ok, why = c(reply)
+            if not ok:
+                return False, why
+        return True, ""
+    return check
+
+
+def _says(*words):
+    def check(reply):
+        low = (reply.content or "").lower()
+        missing = [w for w in words if w.lower() not in low]
+        return (not missing, f"expected it to mention {', '.join(missing)}")
+    return check
+
+
+def _only_amounts(allowed, *, need=None):
+    def check(reply):
+        found = _amounts(reply.content)
+        if need is not None and need not in found:
+            return False, f"expected it to state £{need:,.2f}"
+        stray = found - set(allowed)
+        return (not stray, f"it stated an amount that isn't in what it was given (£{sorted(stray)[0]:,.2f})"
+                if stray else "")
+    return check
+
+
+def _escalates(reply):
+    return ("[ESCALATE]" in (reply.content or ""), "expected [ESCALATE] when asked for a person")
+
+
+def _hands_off(reply):
+    return (bool(_HANDOFF.search(reply.content or "")), "expected it to offer the team, not to guess")
+
+
+CASES["support"] = [
+    {"name": "Answers from the knowledge base", "messages": _support("How do I connect Gmail?"),
+     "check": _all(_says("settings", "email"), _tagged)},
+    {"name": "Hands over when asked for a person", "messages": _support("I'd like to talk to a real person please."),
+     "check": _escalates},
+    {"name": "Never invents a policy", "messages": _support("Do I get a refund if I cancel halfway through a month?"),
+     "check": _all(_only_amounts(PLAN_PRICES), _hands_off)},
+    {"name": "Quotes the price it was given", "messages": _support("How much is the Pro plan?"),
+     "check": _all(_only_amounts(PLAN_PRICES, need=129.0), _tagged)},
+]
+
+
+# ------------------------------------------------- AI-1d: the briefings ---
+# Shortened forms of briefing_generator's prompts, on a fixed week.
+
+WEEK = {"period": "week to 21 Nov 2026", "revenue": "£4,200.00", "revenue_last_week": "£3,500.00",
+        "overdue_invoices": [{"customer": "Harbour Lettings", "owed": "£750.00", "days_overdue": 12}],
+        "calls": 14, "missed_calls": 2, "emails_needing_reply": 3}
+WEEK_AMOUNTS = {4200.0, 3500.0, 750.0}
+PULSE_SYSTEM = ("You produce a very short daily business pulse for Mike at \"New Body\".\n"
+                "RULES:\n- Maximum 800 characters\n- Use British English\n"
+                "- Start with \"🌅 Good morning, Mike! Here's your daily pulse:\"\n"
+                "- List only the most important 4-5 data points\n- End with \"Anything you'd like me to handle?\"\n"
+                "- Only mention things that need attention or are noteworthy")
+WEEKLY_SYSTEM = ("You are the AI business intelligence analyst for \"New Body\". You produce a concise, actionable "
+                 "weekly CEO briefing for Mike.\nRULES:\n- Use British English\n- Lead with what matters most\n"
+                 "- Include specific numbers and percentage changes against last period (↑12% or ↓5%)\n"
+                 "- NEVER give financial advice\n- Keep the briefing under 3500 characters\n"
+                 "After the briefing write ===JSON=== on its own line, then one JSON object: "
+                 '{"observations": [...], "suggestions": [...], "action_options": '
+                 '[{"number": 1, "label": "...", "type": "...", "config": {}}]} with 3 to 5 action_options.')
+
+
+def _pulse_shape(reply):
+    text = (reply.content or "").strip()
+    if not text.startswith("🌅 Good morning"):
+        return False, "expected it to open with the morning greeting"
+    return (len(text) <= 800, f"it ran to {len(text)} characters (the limit is 800)")
+
+
+def _weekly_shape(reply):
+    content = reply.content or ""
+    if "===JSON===" not in content:
+        return False, "it left out the ===JSON=== section the app reads its actions from"
+    text, _, rest = content.partition("===JSON===")
+    if len(text.strip()) > 3500:
+        return False, f"the briefing ran to {len(text.strip())} characters (the limit is 3,500)"
+    try:
+        from services.ai_text import strip_fences
+        data = json.loads(strip_fences(rest))
+    except ValueError:
+        return False, "its JSON section could not be read"
+    options = data.get("action_options") if isinstance(data, dict) else None
+    if not isinstance(options, list) or not 3 <= len(options) <= 5:
+        return False, "expected 3 to 5 action options"
+    return True, ""
+
+
+def _weekly_grounded(reply):
+    text = (reply.content or "").partition("===JSON===")[0]
+    ok, why = _only_amounts(WEEK_AMOUNTS, need=4200.0)(SimpleNamespace(content=text))
+    if not ok:
+        return ok, why
+    return ("20%" in text, "expected revenue up 20% on last week (£4,200 against £3,500)")
+
+
+def _data_prompt(intro):
+    return intro + json.dumps(WEEK, indent=2)
+
+
+CASES["briefing"] = [
+    {"name": "Daily pulse: short, and opens right", "messages": [
+        {"role": "system", "content": PULSE_SYSTEM},
+        {"role": "user", "content": _data_prompt("Generate a daily pulse from this data:\n")}],
+     "check": _all(_pulse_shape, _only_amounts(WEEK_AMOUNTS))},
+    {"name": "Daily pulse: flags the overdue invoice", "messages": [
+        {"role": "system", "content": PULSE_SYSTEM},
+        {"role": "user", "content": _data_prompt("Generate a daily pulse from this data:\n")}],
+     "check": _all(_says("harbour"), _only_amounts(WEEK_AMOUNTS, need=750.0))},
+    {"name": "Weekly: the shape the app reads", "messages": [
+        {"role": "system", "content": WEEKLY_SYSTEM},
+        {"role": "user", "content": _data_prompt("Write this week's briefing from this data:\n")}],
+     "check": _weekly_shape},
+    {"name": "Weekly: right numbers and change", "messages": [
+        {"role": "system", "content": WEEKLY_SYSTEM},
+        {"role": "user", "content": _data_prompt("Write this week's briefing from this data:\n")}],
+     "check": _weekly_grounded},
+]
+
+KIND_OF_TASK = {"chat": "chat", "chat_complex": "chat", "support": "support", "briefing": "briefing"}
+# Per set: the tools offered (chat only) and the output limit (None: chat's own).
+SET_TOOLS = {"chat": TOOLS, "support": None, "briefing": None}
+SET_MAX_TOKENS = {"chat": None, "support": 800, "briefing": 2000}
 
 
 def has_cases(task: str) -> bool:
     return KIND_OF_TASK.get(task) in CASES
+
+
+def _set(task: str):
+    kind = KIND_OF_TASK[task]
+    return CASES[kind], SET_TOOLS[kind], SET_MAX_TOKENS[kind]
+
+
+def _worst(provider, model, messages, tools, max_tokens) -> tuple:
+    from services import ai_chat, ai_text
+    if max_tokens is None:
+        return ai_chat._worst(provider, model, messages, tools)
+    return ai_text._worst(provider, model, messages, max_tokens)
+
+
+def _ask(provider, model, messages, tools, seconds, max_tokens):
+    from services import ai_chat
+    if max_tokens is None:                  # chat: exactly the call Aria's chat makes
+        return ai_chat._ADAPTERS[provider](provider, model, messages, tools, seconds, None)
+    return ai_chat._ADAPTERS[provider](provider, model, messages, None, seconds, None, max_tokens=max_tokens)
 
 
 # Codex AI-1c review 1, findings 2 and 3: a test spends real money, so it is
@@ -157,8 +379,9 @@ _recent: list = []
 
 def worst_pence(task: str, provider: str, model: str) -> float:
     from services import ai_chat
-    return sum(ai_chat._pence(provider, model, ai_chat._worst(provider, model, c["messages"], TOOLS))
-               for c in CASES[KIND_OF_TASK[task]])
+    cases, tools, max_tokens = _set(task)
+    return sum(ai_chat._pence(provider, model, _worst(provider, model, c["messages"], tools, max_tokens))
+               for c in cases)
 
 
 def admit(task: str, pairs) -> None:
@@ -194,21 +417,22 @@ def run(task: str, provider: str, model: str, *, deadline: float = None) -> dict
     failure: the case fails with the provider's reason. Cases not started
     before `deadline` (time.monotonic()) are reported as not run."""
     from services import ai_chat, ai_router, profit_guard
-    cases = CASES[KIND_OF_TASK[task]]
+    cases, tools, max_tokens = _set(task)
     results, pence = [], 0.0
     for case in cases:
-        started = time.monotonic()
+        held = not profit_guard.permits("eval")
+        started = time.monotonic()            # after the guard's query, so its time counts (review 3)
         seconds = CALL_SECONDS if deadline is None else min(CALL_SECONDS, deadline - started)
-        skip = ("not run: the test ran out of time" if seconds < MIN_CALL_SECONDS
-                else "not run: AI spending is now held by the profit guard" if not profit_guard.permits("eval")
+        skip = ("not run: AI spending is now held by the profit guard" if held
+                else "not run: the test ran out of time" if seconds < MIN_CALL_SECONDS
                 else None)
         if skip:
             results.append({"name": case["name"], "passed": False, "why": skip,
                             "answer": "", "seconds": 0.0, "pence": 0.0})
             continue
-        worst = ai_chat._worst(provider, model, case["messages"], TOOLS)
+        worst = _worst(provider, model, case["messages"], tools, max_tokens)
         try:
-            reply, usage = ai_chat._ADAPTERS[provider](provider, model, case["messages"], TOOLS, seconds, None)
+            reply, usage = _ask(provider, model, case["messages"], tools, seconds, max_tokens)
             if getattr(reply, "truncated", False):
                 raise ai_router.ProviderError("the answer was cut off", usage=usage)
             tokens, estimated = ai_chat._tokens(usage), False

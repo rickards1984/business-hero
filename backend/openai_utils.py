@@ -1,6 +1,5 @@
 """Optional OpenAI utilities for call summarization."""
 
-from services import ai_models  # AI-1: every AI call names a task
 import os
 from typing import Optional
 
@@ -15,7 +14,8 @@ async def generate_call_summary(transcript: str) -> Optional[str]:
     Generate a 5-bullet summary of a call transcript using OpenAI.
     Returns None if OpenAI is not configured or if there's an error.
     """
-    if not is_openai_available():
+    from services import ai_chat
+    if not ai_chat.available("call_summary"):     # AI-1d: a key for any model chosen for it
         return None
     
     if not transcript or not transcript.strip():
@@ -27,14 +27,12 @@ async def generate_call_summary(transcript: str) -> Optional[str]:
         return None
     
     try:
-        from openai import OpenAI
-        
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0, max_retries=1)
+        from services.ai_text import acomplete   # AI-1d: off the event loop, any provider
         
         from services import profit_guard   # PROFIT-1
         with profit_guard.attributed(None, "call_summary"):
-            response = client.chat.completions.create(
-                **ai_models.chat_request("call_summary", max_tokens=500, temperature=0.3),
+            reply = await acomplete(
+                "call_summary", max_tokens=500, temperature=0.3,
                 messages=[
                     {
                         "role": "system",
@@ -47,8 +45,8 @@ async def generate_call_summary(transcript: str) -> Optional[str]:
                 ],
             )
         
-        return response.choices[0].message.content
+        return reply.content
     
     except Exception as e:
-        print(f"OpenAI summarization failed (non-critical): {type(e).__name__}")
+        print(f"AI summarization failed (non-critical): {type(e).__name__}")
         return None

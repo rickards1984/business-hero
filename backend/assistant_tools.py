@@ -1,6 +1,5 @@
 """OpenAI assistant tools for AI Admin Assistant."""
 
-from services import ai_models  # AI-1: every AI call names a task
 import os
 import re
 import concurrent.futures
@@ -2901,13 +2900,11 @@ def _draft_email_reply(engine, business_id: str, args: dict) -> dict:
     email_content = body_text or snippet or "(no content)"
 
     try:
-        import openai
-        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0, max_retries=1)
-
+        from services import ai_text   # AI-1d: the reply-drafts models, any provider
         from services import profit_guard   # PROFIT-1
         with profit_guard.attributed(business_id, "draft"):
-            response = client.chat.completions.create(
-                **ai_models.chat_request("reply_drafts", max_tokens=1000, temperature=0.4),
+            reply = ai_text.complete(
+                "reply_drafts", max_tokens=1000, temperature=0.4,
                 messages=[
                     {
                         "role": "system",
@@ -2928,10 +2925,7 @@ def _draft_email_reply(engine, business_id: str, args: dict) -> dict:
                 ],
             )
 
-        content = response.choices[0].message.content or ""
-        content = content.strip().strip("`").strip()
-        if content.startswith("json"):
-            content = content[4:].strip()
+        content = ai_text.strip_fences(reply.content)
 
         drafts = _json.loads(content)
 

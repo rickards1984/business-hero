@@ -306,19 +306,24 @@ def _tool_calls_out(calls) -> list:
     return out
 
 
-def _openai_compatible(provider, model, messages, tools, timeout, client_factory):
-    """OpenAI (settings per model) or xAI (OpenAI-compatible, takes max_tokens)."""
+def _openai_compatible(provider, model, messages, tools, timeout, client_factory, *,
+                       max_tokens=None, temperature=None, retries=0):
+    """OpenAI (settings per model) or xAI (OpenAI-compatible, takes max_tokens).
+    `max_tokens`, `temperature` and `retries` are a text site's own settings
+    (AI-1d); chat passes none and keeps its limit."""
     if client_factory is None:
         from openai import OpenAI as client_factory
     client = client_factory(api_key=os.environ[ai_models.KEYS[provider]], base_url=ai_router.BASE_URLS.get(provider),
-                            timeout=timeout, max_retries=0)
+                            timeout=timeout, max_retries=retries)
     request = {"model": model, "messages": messages}
     if tools:
         request.update(tools=tools, tool_choice="auto")
-    if provider == "openai":
-        request.update(ai_models.chat_params(model, max_tokens=OUTPUT_TOKENS))   # an explicit limit (finding 5)
+    if provider == "openai":                    # an explicit limit (finding 5), in the form the model takes
+        request.update(ai_models.chat_params(model, max_tokens=max_tokens or OUTPUT_TOKENS, temperature=temperature))
     else:
-        request["max_tokens"] = OUTPUT_TOKENS
+        request["max_tokens"] = max_tokens or OUTPUT_TOKENS
+        if temperature is not None:
+            request["temperature"] = temperature
     from services import profit_guard
     try:
         with profit_guard.accounted():          # recorded here, never also by the SDK hook
@@ -389,8 +394,11 @@ def to_anthropic(messages: list, tools: Optional[list]) -> dict:
     return body
 
 
-def _anthropic(provider, model, messages, tools, timeout, _client_factory):
-    body = dict(to_anthropic(messages, tools), model=model, max_tokens=OUTPUT_TOKENS)
+def _anthropic(provider, model, messages, tools, timeout, _client_factory, *,
+               max_tokens=None, temperature=None, retries=0):
+    """Claude. A site's temperature is not sent: Claude's newest models may
+    refuse sampling settings, and it is a style hint, not worth a refusal."""
+    body = dict(to_anthropic(messages, tools), model=model, max_tokens=max_tokens or OUTPUT_TOKENS)
     try:
         response = _http.post(ai_router.ANTHROPIC_URL, json=body, timeout=timeout, headers={
             "x-api-key": os.environ[ai_models.KEYS[provider]], "anthropic-version": "2023-06-01",

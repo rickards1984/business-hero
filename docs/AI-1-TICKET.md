@@ -194,6 +194,33 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
 
       Consider grading the grounding case by asking for structured output rather than reading free text.
     - There's no reservation for eval spend: a test admitted just under the kill threshold can overshoot it by at most one test's cost (≤ £3).
+- **AI-1d, part 1: the text jobs onto any provider** (as built). The board meeting is part 2: it has its own tool loop and OpenAI-specific workarounds, so it gets its own PR.
+  - **`services/ai_text.py`:** `complete(task, messages, max_tokens, temperature)`, with `acomplete` running it in a worker thread. It uses the task's chosen models in order through `ai_chat`'s adapters.
+    - **Failover:** an outage switches that provider off for a while. A refused request (400/404/413/422) moves on without being billed or switching the provider off. An empty answer is billed and moves on.
+    - **Costs:** each attempt is costed under the business and purpose of the surrounding `profit_guard.attributed` block, so the ledger and the admin page's spend read as before. A failure with no usage reported is charged at most what that request could cost, at the site's own limit.
+    - **Kill switch:** a non-essential purpose is refused before any call with `profit_guard.Paused`, which every site already falls back on.
+    - **Settings:** OpenAI takes `chat_params`, so reasoning models get no temperature. xAI takes the limit and temperature. Claude takes the limit and no temperature, because newer Claude models may refuse sampling settings.
+    - Each site's single OpenAI retry is kept. `strip_fences` reads JSON that a model wrapped in a code block.
+  - **Moved:**
+    - the weekly briefing and daily pulse;
+    - the help assistant's chat (essential `chat`) and the admin's draft (`support_draft`);
+    - call summaries;
+    - Aria's three reply drafts;
+    - email: inbox sorting, the email briefing, and the single and three-tone reply drafts.
+
+    Their prompts, parsing and plain fallbacks are unchanged. Key checks now ask whether any model in the chain has a key (`ai_chat.available`). The five tasks drop `ONE_OPENAI`, so on the admin page they take any provider and fallbacks.
+  - **Off the event loop:** the four email endpoints called the sync model functions directly, so a 30-second answer froze every request. They now use `asyncio.to_thread`, which carries the attribution. The call summary was an async function making a sync OpenAI call; it now awaits `acomplete`.
+  - **Still OpenAI-only:**
+    - quotes and quote chat: the price rules are RED and belong with the quote estimator ticket;
+    - the board meeting: part 2;
+    - voice, transcription and speech: there are no equivalents elsewhere.
+  - **Test this model:** new sets for the help assistant (answers from the knowledge base, hands over to a person, never invents a policy, quotes the given price) and the briefings (the pulse's shape, flagging the overdue invoice, the weekly JSON the app reads, the right numbers and the 20% change). Text sets send no tools and use the site's own output limit.
+  - **The AI-1c review 3 follow-ups:**
+    - each call's remaining time is now worked out after the per-case guard query;
+    - the slow-call test was re-scaled so some cases run before it stops;
+    - grading handles "respectively", dashes, slashes, two customers in one clause, and a total named against one customer.
+
+    The eval spend reservation stays bounded at one test's cost (≤ £3) and is not added.
 
 ## Out of scope
 

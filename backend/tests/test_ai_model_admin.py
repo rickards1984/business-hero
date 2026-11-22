@@ -295,7 +295,7 @@ def test_the_api_turns_refusals_into_http_errors(db, monkeypatch):
 
 # ------------------------------------------------ Codex AI-1c review 1 ---
 
-@pytest.mark.parametrize("task", ["support", "briefing", "inbox_classify", "reply_drafts", "meeting", "quote"])
+@pytest.mark.parametrize("task", ["meeting", "quote", "quote_chat"])      # AI-1d moved the rest onto ai_text
 def test_a_one_openai_task_can_t_be_given_another_provider_or_fallbacks(db, task):
     """Finding 1: support accepted Claude and showed it as used, while its
     code still called gpt-4o; fallbacks were offered that it ignores."""
@@ -309,8 +309,8 @@ def test_a_one_openai_task_can_t_be_given_another_provider_or_fallbacks(db, task
 
 
 @pytest.mark.parametrize("task,model,site", [
-    ("support", "gpt-4o-mini", "support_api.py"),
-    ("briefing", "gpt-4.1", "services/briefing_generator.py"),
+    ("meeting", "gpt-4.1", "services/executive_meeting_orchestrator.py"),
+    ("quote", "gpt-4.1", "quoting_api.py"),
 ])
 def test_what_the_page_says_is_used_is_what_the_code_sends(db, monkeypatch, task, model, site):
     """Finding 1: compare an accepted choice with the call site's request."""
@@ -319,18 +319,19 @@ def test_what_the_page_says_is_used_is_what_the_code_sends(db, monkeypatch, task
         admin().choose(s, task, chain(("openai", model)), MIKE)
         effective = {r["task"]: r for r in admin().overview(s)["tasks"]}[task]["effective"]
     assert effective == chain(("openai", model))
-    assert ai_models.chat_request(task, max_tokens=100, temperature=0.3)["model"] == model
+    assert ai_models.openai_model(task) == model
     from pathlib import Path
     source = (Path(__file__).resolve().parents[1] / site).read_text()
-    assert f'ai_models.chat_request("{task}"' in source          # and that is how the site asks
+    assert f'ai_models.openai_model("{task}")' in source          # and that is how the site asks
 
 
 def test_the_overview_tells_the_page_how_many_models_each_task_takes(db):
     with Session(db) as s:
         rows = {r["task"]: r for r in admin().overview(s)["tasks"]}
-    assert rows["chat_complex"]["max_chain"] == 6 and rows["support"]["max_chain"] == 1
-    assert rows["voice_preview"]["max_chain"] == 3
-    assert {o["provider"] for o in rows["support"]["options"] if o["usable"]} == {"openai"}
+    assert rows["chat_complex"]["max_chain"] == 6 and rows["meeting"]["max_chain"] == 1
+    assert rows["voice_preview"]["max_chain"] == 3 and rows["support"]["max_chain"] == 6     # AI-1d
+    assert {o["provider"] for o in rows["meeting"]["options"] if o["usable"]} == {"openai"}
+    assert {o["provider"] for o in rows["support"]["options"] if o["usable"]} == {"openai", "anthropic"}
 
 
 def test_a_held_test_makes_no_provider_call(db, monkeypatch):
@@ -390,10 +391,11 @@ def test_a_test_stops_at_its_deadline(db, monkeypatch):
     monkeypatch.setattr(ai_chat, "_ADAPTERS", {"openai": slowly, "anthropic": slowly, "xai": slowly})
     monkeypatch.setattr(ai_chat, "_record", lambda *a, **k: True)
     monkeypatch.setattr(ai_eval, "DEADLINE_SECONDS", 0.4)
+    monkeypatch.setattr(ai_eval, "MIN_CALL_SECONDS", 0.01)      # scaled with the deadline (review 3)
     with Session(db) as s:
         out = admin().test(s, "chat_complex", "anthropic", "claude-opus-5-5")
     skipped = [c for c in out["candidate"]["results"] + out["current"]["results"] if "ran out of time" in c["why"]]
-    assert len(slow.calls) < 10 and skipped                       # it stopped, and said so
+    assert 0 < len(slow.calls) < 10 and skipped                   # some ran, then it stopped, and said so
     from services.aria_actions import ActionRefused
     try:
         ai_eval.admit("chat_complex", [("openai", "gpt-5")])      # and the slot was freed
@@ -459,16 +461,16 @@ def test_a_cut_off_answer_fails_its_case(db, monkeypatch):
 # ------------------------------------------------ Codex AI-1c review 2 ---
 
 def test_a_chain_saved_before_the_limit_shows_and_uses_only_what_the_site_takes(db):
-    """Finding 1: a [gpt-4o, gpt-4o-mini] support row from before max_chain
-    showed a fallback the call site never uses."""
+    """Finding 1: a [gpt-4o, gpt-4o-mini] row from before max_chain showed a
+    fallback the call site never uses (the meeting still calls OpenAI once)."""
     from services import ai_models
     with db.begin() as c:
-        c.execute(text("INSERT INTO ai_model_choices (task, chain) VALUES ('support', :c)"),
+        c.execute(text("INSERT INTO ai_model_choices (task, chain) VALUES ('meeting', :c)"),
                   {"c": json.dumps(chain(("openai", "gpt-4o"), ("openai", "gpt-4o-mini")))})
     ai_models.invalidate()
-    assert ai_models.resolve("support") == [("openai", "gpt-4o")]
+    assert ai_models.resolve("meeting") == [("openai", "gpt-4o")]
     with Session(db) as s:
-        row = {r["task"]: r for r in admin().overview(s)["tasks"]}["support"]
+        row = {r["task"]: r for r in admin().overview(s)["tasks"]}["meeting"]
     assert row["effective"] == chain(("openai", "gpt-4o"))
 
 

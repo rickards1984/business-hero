@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from services import ai_models  # AI-1: every AI call names a task
+from services import ai_chat, ai_text  # AI-1d: every AI call names a task, on any provider
 import json
-import os
 import smtplib
 from datetime import datetime
 from email.message import EmailMessage
@@ -12,7 +11,6 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
 from fastapi import Depends, HTTPException, status
-from openai import OpenAI
 from sqlmodel import Session, select
 from sqlalchemy import text
 
@@ -23,7 +21,6 @@ from providers.microsoft_graph import MicrosoftGraphProvider
 from providers.smtp import SMTPProvider
 from supabase_auth import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
 class SupabaseAdminClient:
@@ -378,7 +375,7 @@ def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
     if not messages:
         return []
 
-    if not OPENAI_API_KEY:
+    if not ai_chat.available("inbox_classify"):   # AI-1d: any provider
         from schemas import EmailAnalysis
         return [
             EmailAnalysis(
@@ -403,20 +400,11 @@ def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
         )
 
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
-        response = client.chat.completions.create(
-            **ai_models.chat_request("inbox_classify", max_tokens=1500, temperature=0.1),
-            messages=[
-                {"role": "system", "content": CATEGORIZE_SYSTEM_PROMPT},
-                {"role": "user", "content": "Analyze these emails:\n\n" + "\n---\n".join(email_items)},
-            ],
-        )
-        content = (response.choices[0].message.content or "").strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
+        reply = ai_text.complete("inbox_classify", [
+            {"role": "system", "content": CATEGORIZE_SYSTEM_PROMPT},
+            {"role": "user", "content": "Analyze these emails:\n\n" + "\n---\n".join(email_items)},
+        ], max_tokens=1500, temperature=0.1)
+        content = ai_text.strip_fences(reply.content)
 
         from schemas import EmailAnalysis
         parsed = json.loads(content)
@@ -462,7 +450,7 @@ def generate_email_briefing_markdown(
         fallback_lines.append(f"- {subject} — {sender}")
     fallback_text = "\n".join(fallback_lines)
 
-    if not OPENAI_API_KEY:
+    if not ai_chat.available("email_briefing"):   # AI-1d: any provider
         return fallback_text
 
     # Build structured section from AI analysis data
@@ -485,7 +473,6 @@ def generate_email_briefing_markdown(
             fyi_items.append(msg)
 
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
         items = []
         for msg in messages[:50]:
             items.append(
@@ -496,8 +483,8 @@ def generate_email_briefing_markdown(
                 f"AI Priority: {msg.ai_priority or 'N/A'}\n"
             )
         prompt = "\n---\n".join(items)
-        response = client.chat.completions.create(
-            **ai_models.chat_request("email_briefing", max_tokens=1200, temperature=0.2),
+        reply = ai_text.complete(
+            "email_briefing", max_tokens=1200, temperature=0.2,
             messages=[
                 {
                     "role": "system",
@@ -517,7 +504,7 @@ def generate_email_briefing_markdown(
                 },
             ],
         )
-        briefing = response.choices[0].message.content or fallback_text
+        briefing = reply.content or fallback_text
 
         # Append structured section
         structured_parts = []
@@ -545,19 +532,18 @@ def generate_email_reply_draft(message: EmailMessageModel, business: Business) -
         f"Best regards,\n{business.name}"
     )
 
-    if not OPENAI_API_KEY:
+    if not ai_chat.available("reply_draft"):   # AI-1d: any provider
         return {"subject": reply_subject, "body_text": fallback_body, "body_html": _text_to_html(fallback_body)}
 
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
         prompt = (
             f"From: {message.from_email or 'Unknown'}\n"
             f"Subject: {message.subject or '(no subject)'}\n"
             f"Snippet: {message.snippet or ''}\n"
             f"Body:\n{message.body_text or ''}"
         )
-        response = client.chat.completions.create(
-            **ai_models.chat_request("reply_draft", max_tokens=400, temperature=0.3),
+        reply = ai_text.complete(
+            "reply_draft", max_tokens=400, temperature=0.3,
             messages=[
                 {
                     "role": "system",
@@ -570,7 +556,7 @@ def generate_email_reply_draft(message: EmailMessageModel, business: Business) -
                 {"role": "user", "content": f"Draft a reply to this email:\n\n{prompt}"},
             ],
         )
-        content = response.choices[0].message.content or ""
+        content = ai_text.strip_fences(reply.content)     # Claude often fences its JSON
         body_text = fallback_body
         body_html = _text_to_html(fallback_body)
         if content:
@@ -612,11 +598,10 @@ def generate_email_reply_drafts(
     }
     fallback["body_html"] = _text_to_html(fallback["body_text"])
 
-    if not OPENAI_API_KEY:
+    if not ai_chat.available("reply_drafts"):   # AI-1d: any provider
         return [fallback]
 
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
         email_context = (
             f"From: {message.from_email or 'Unknown'}\n"
             f"From Name: {message.from_name or 'Unknown'}\n"
@@ -625,8 +610,8 @@ def generate_email_reply_drafts(
             f"Body:\n{message.body_text or message.snippet or ''}"
         )
 
-        response = client.chat.completions.create(
-            **ai_models.chat_request("reply_drafts", max_tokens=1200, temperature=0.4),
+        reply = ai_text.complete(
+            "reply_drafts", max_tokens=1200, temperature=0.4,
             messages=[
                 {
                     "role": "system",
@@ -648,12 +633,7 @@ def generate_email_reply_drafts(
             ],
         )
 
-        content = (response.choices[0].message.content or "").strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
+        content = ai_text.strip_fences(reply.content)
 
         drafts = json.loads(content)
         result = []

@@ -6,9 +6,7 @@ If the AI can't help, the conversation escalates to a human-managed ticket.
 Admin endpoints for ticket management and knowledge base CRUD.
 """
 
-from services import ai_models  # AI-1: every AI call names a task
 import logging
-import os
 import re
 from datetime import datetime
 from typing import Optional, List, Tuple
@@ -24,7 +22,6 @@ from auth import get_user_business_context, get_platform_admin_context
 
 _logger = logging.getLogger("support")
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Routers
@@ -140,17 +137,12 @@ Confidence: 0.0 to 1.0 (how confident you are that you've fully resolved their q
     messages.append({"role": "user", "content": user_message})
 
     try:
-        import openai
-        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
-
+        from services.ai_text import acomplete   # AI-1d: the help assistant's models, any provider
         from services import profit_guard   # PROFIT-1: a customer's support chat is essential: recorded, never paused
         with profit_guard.attributed(None, "chat"):
-            resp = await client.chat.completions.create(
-                **ai_models.chat_request("support", max_tokens=800, temperature=0.3),
-                messages=messages,
-            )
+            reply = await acomplete("support", messages, max_tokens=800, temperature=0.3)
 
-        ai_text = resp.choices[0].message.content.strip()
+        ai_text = reply.content
 
         should_escalate = "[ESCALATE]" in ai_text
         ai_text = ai_text.replace("[ESCALATE]", "").strip()
@@ -658,13 +650,11 @@ async def admin_ai_draft_response(
     )
 
     try:
-        import openai
-        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0, max_retries=1)
-
+        from services.ai_text import acomplete   # AI-1d
         from services import profit_guard   # PROFIT-1
         with profit_guard.attributed(None, "support_draft"):
-            resp = await client.chat.completions.create(
-                **ai_models.chat_request("support", max_tokens=500, temperature=0.4),
+            reply = await acomplete(
+                "support", max_tokens=500, temperature=0.4,
                 messages=[
                     {
                         "role": "system",
@@ -685,7 +675,7 @@ async def admin_ai_draft_response(
                 ],
             )
 
-        draft = resp.choices[0].message.content.strip()
+        draft = reply.content
         return {"draft": draft}
 
     except Exception as exc:
