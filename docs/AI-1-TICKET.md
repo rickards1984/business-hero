@@ -185,6 +185,15 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     3. Each call's timeout is what's left before the deadline, and no call starts with under 3 s left.
     4. A missing or non-object argument now fails without crashing, and so does an amount stated beside a lookup. Each customer's balance must sit with that customer. Honest answers with dates, invoice numbers and pence are covered as passing.
     5. The ledger purposes were checked against the code: `reply_draft` records `draft`, `email_briefing` records `briefing`, and `wording` records `accountancy_pack`. A test reads those attributions from the source.
+  - **Codex review 3** (`audits/AI-1C-CODEX-CODE-REVIEW-3.md`): **APPROVE**, no blocking defect. Follow-up hardening (non-blocking, not in this PR):
+    - Compute each call's remaining time *after* the per-case guard check, so a slow guard query can't push a call past the 150 s deadline. Re-scale the slow-call test so it runs some cases before stopping (MIN_CALL_SECONDS now skips them all).
+    - Grading edge cases:
+      - "£750 and £500 respectively" is a false failure;
+      - "Harbour £500 / Northgate £750" in one clause is a false pass;
+      - the total named against one customer is a false pass.
+
+      Consider grading the grounding case by asking for structured output rather than reading free text.
+    - There's no reservation for eval spend: a test admitted just under the kill threshold can overshoot it by at most one test's cost (≤ £3).
 
 ## Out of scope
 
