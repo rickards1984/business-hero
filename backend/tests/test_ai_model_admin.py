@@ -29,6 +29,9 @@ def db(tmp_path, monkeypatch):
     for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.setenv(key, "test-key")
     monkeypatch.delenv("XAI_API_KEY", raising=False)
+    from services import ai_eval, profit_guard
+    monkeypatch.setattr(profit_guard, "permits", lambda purpose: True)
+    monkeypatch.setattr(ai_eval, "_recent", [])
     ai_models.invalidate()
     yield engine
     ai_models.invalidate()
@@ -117,6 +120,7 @@ def test_the_overview_shows_this_month_s_spend_per_task(db):
         rows = {r["task"]: r for r in admin().overview(s)["tasks"]}
     assert rows["chat_complex"]["spent_pence"] == pytest.approx(155)
     assert rows["chat"]["spent_pence"] == pytest.approx(77)
+    assert rows["chat"]["recorded_as"] == ["chat"] and "Help assistant" in rows["chat"]["shared_with"]
 
 
 # ------------------------------------------------------------- choosing ---
@@ -286,3 +290,163 @@ def test_the_api_turns_refusals_into_http_errors(db, monkeypatch):
         admin_ai_api.admin_ai_choose("chat_complex", admin_ai_api.Choice(chain=chain(("xai", "grok-4.7"))),
                                      auth_ctx={"user_id": MIKE}, session=s)
     assert exc.value.status_code == 422 and "no key" in exc.value.detail
+
+
+
+# ------------------------------------------------ Codex AI-1c review 1 ---
+
+@pytest.mark.parametrize("task", ["support", "briefing", "inbox_classify", "reply_drafts", "meeting", "quote"])
+def test_a_one_openai_task_can_t_be_given_another_provider_or_fallbacks(db, task):
+    """Finding 1: support accepted Claude and showed it as used, while its
+    code still called gpt-4o; fallbacks were offered that it ignores."""
+    from services.aria_actions import ActionRefused
+    with Session(db) as s, pytest.raises(ActionRefused) as exc:
+        admin().choose(s, task, chain(("anthropic", "claude-opus-5-5")), MIKE)
+    assert "OpenAI only" in exc.value.detail
+    with Session(db) as s, pytest.raises(ActionRefused) as exc:
+        admin().choose(s, task, chain(("openai", "gpt-4o"), ("openai", "gpt-4o-mini")), MIKE)
+    assert "one model and no fallbacks" in exc.value.detail
+
+
+@pytest.mark.parametrize("task,model,site", [
+    ("support", "gpt-4o-mini", "support_api"),
+    ("briefing", "gpt-4.1", "briefing_generator"),
+])
+def test_what_the_page_says_is_used_is_what_the_code_sends(db, monkeypatch, task, model, site):
+    """Finding 1: compare an accepted choice with the call site's request."""
+    from services import ai_models
+    with Session(db) as s:
+        admin().choose(s, task, chain(("openai", model)), MIKE)
+        effective = {r["task"]: r for r in admin().overview(s)["tasks"]}[task]["effective"]
+    assert effective == chain(("openai", model))
+    assert ai_models.chat_request(task, max_tokens=100, temperature=0.3)["model"] == model
+
+
+def test_the_overview_tells_the_page_how_many_models_each_task_takes(db):
+    with Session(db) as s:
+        rows = {r["task"]: r for r in admin().overview(s)["tasks"]}
+    assert rows["chat_complex"]["max_chain"] == 6 and rows["support"]["max_chain"] == 1
+    assert rows["voice_preview"]["max_chain"] == 3
+    assert {o["provider"] for o in rows["support"]["options"] if o["usable"]} == {"openai"}
+
+
+def test_a_held_test_makes_no_provider_call(db, monkeypatch):
+    """Finding 2: tests ignored the profit guard."""
+    from services import ai_chat, profit_guard
+    from services.aria_actions import ActionRefused
+    monkeypatch.setattr(profit_guard, "permits", lambda purpose: purpose != "eval")
+    calls = []
+    monkeypatch.setattr(ai_chat, "_ADAPTERS", {p: lambda *a: calls.append(a) for p in ("openai", "anthropic", "xai")})
+    with Session(db) as s, pytest.raises(ActionRefused) as exc:
+        admin().test(s, "chat_complex", "anthropic", "claude-opus-5-5")
+    assert exc.value.status_code == 409 and "paused" in exc.value.detail and calls == []
+
+
+def test_a_test_that_could_cost_too_much_is_refused_before_any_call(db, monkeypatch):
+    from services import ai_chat, ai_eval
+    from services.aria_actions import ActionRefused
+    monkeypatch.setattr(ai_eval, "MAX_RUN_PENCE", 1)
+    calls = []
+    monkeypatch.setattr(ai_chat, "_ADAPTERS", {p: lambda *a: calls.append(a) for p in ("openai", "anthropic", "xai")})
+    with Session(db) as s, pytest.raises(ActionRefused) as exc:
+        admin().test(s, "chat_complex", "anthropic", "claude-opus-5-5")
+    assert "could cost up to" in exc.value.detail and calls == []
+
+
+def test_only_one_test_runs_at_a_time(db, monkeypatch):
+    from services import ai_eval
+    from services.aria_actions import ActionRefused
+    ai_eval.admit("chat_complex", [("openai", "gpt-5")])
+    try:
+        with Session(db) as s, pytest.raises(ActionRefused) as exc:
+            admin().test(s, "chat_complex", "anthropic", "claude-opus-5-5")
+        assert exc.value.status_code == 409 and "already running" in exc.value.detail
+    finally:
+        ai_eval.done()
+
+
+def test_at_most_ten_tests_an_hour(db, monkeypatch):
+    import time
+    from services import ai_eval
+    from services.aria_actions import ActionRefused
+    monkeypatch.setattr(ai_eval, "_recent", [time.monotonic()] * ai_eval.RUNS_PER_HOUR)
+    with Session(db) as s, pytest.raises(ActionRefused) as exc:
+        admin().test(s, "chat_complex", "anthropic", "claude-opus-5-5")
+    assert exc.value.status_code == 429
+
+
+def test_a_test_stops_at_its_deadline(db, monkeypatch):
+    """Finding 3: ten slow calls could hold a worker for ten minutes."""
+    import time
+    from services import ai_chat, ai_eval
+    slow = Fake({("anthropic", "claude-opus-5-5"): good, ("openai", "gpt-5"): good})
+
+    def slowly(*a):
+        time.sleep(0.15)
+        return slow(*a)
+    monkeypatch.setattr(ai_chat, "_ADAPTERS", {"openai": slowly, "anthropic": slowly, "xai": slowly})
+    monkeypatch.setattr(ai_chat, "_record", lambda *a, **k: True)
+    monkeypatch.setattr(ai_eval, "DEADLINE_SECONDS", 0.4)
+    with Session(db) as s:
+        out = admin().test(s, "chat_complex", "anthropic", "claude-opus-5-5")
+    skipped = [c for c in out["candidate"]["results"] + out["current"]["results"] if "ran out of time" in c["why"]]
+    assert len(slow.calls) < 10 and skipped                       # it stopped, and said so
+    from services.aria_actions import ActionRefused
+    try:
+        ai_eval.admit("chat_complex", [("openai", "gpt-5")])      # and the slot was freed
+    except ActionRefused:
+        pytest.fail("the test slot was not released")
+    finally:
+        ai_eval.done()
+
+
+def r(content="", calls=()):
+    return SimpleNamespace(content=content, tool_calls=list(calls), truncated=False)
+
+
+@pytest.mark.parametrize("reply", [
+    r("You should charge £4,500.", [{"id": "x", "name": "get_invoices", "arguments": "{}"}]),
+    r("Charge 4500 GBP."),
+    r("About 4,500 pounds."),
+    r(""),
+])
+def test_the_price_check_catches_every_invented_price(reply):
+    """Finding 4: a tool call excused '£4,500'; 'GBP' and empty answers passed."""
+    from services import ai_eval
+    assert ai_eval._no_invented_price(reply)[0] is False
+
+
+def test_the_price_check_passes_an_honest_answer():
+    from services import ai_eval
+    assert ai_eval._no_invented_price(r("I don't have your prices yet: what's your day rate?"))[0] is True
+
+
+@pytest.mark.parametrize("content,ok", [
+    ("You're owed £1,250 across two invoices.", True),
+    ("You're owed £1,250: £750 from Harbour and £500 from Northgate.", True),
+    ("You're owed £91,250, not £1,250.", False),                   # finding 4
+    ("You're owed 1250 GBP and also £3,000 from last year.", False),
+    ("", False),
+])
+def test_the_grounding_check_allows_only_amounts_in_the_data(content, ok):
+    from services import ai_eval
+    assert ai_eval._uses_the_result(r(content))[0] is ok
+
+
+def test_the_lookup_check_wants_the_right_arguments():
+    from services import ai_eval
+    check = ai_eval._calls("get_invoices", {"status": "overdue"})
+    assert check(r(calls=[{"id": "1", "name": "get_invoices", "arguments": '{"status": "overdue"}'}]))[0] is True
+    assert check(r(calls=[{"id": "1", "name": "get_invoices", "arguments": '{"status": "paid"}'}]))[0] is False
+    assert check(r(calls=[{"id": "1", "name": "get_invoices", "arguments": "not json"}]))[0] is False
+
+
+def test_a_cut_off_answer_fails_its_case(db, monkeypatch):
+    from services import ai_chat, ai_eval
+
+    def cut(*a):
+        return SimpleNamespace(content="Hello", tool_calls=[], truncated=True), SimpleNamespace(prompt_tokens=1, completion_tokens=1)
+    monkeypatch.setattr(ai_chat, "_ADAPTERS", {"openai": cut, "anthropic": cut, "xai": cut})
+    monkeypatch.setattr(ai_chat, "_record", lambda *a, **k: True)
+    out = ai_eval.run("chat", "openai", "gpt-5")
+    assert out["passed"] == 0 and all("cut off" in c["why"] for c in out["results"])

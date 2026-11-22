@@ -50,8 +50,8 @@ def _row(session, task: str):
             "changed_at": str(row[2]) if row[2] else None, "previous": load(row[3])}
 
 
-def _spent(session, task: str, period: str) -> float:
-    pattern = "ai\\_pence:" + task.replace("_", "\\_") + ":%"
+def _spent_purpose(session, purpose: str, period: str) -> float:
+    pattern = "ai\\_pence:" + purpose.replace("_", "\\_") + ":%"
     total = 0.0
     for table in ("usage_meters", "platform_meters"):
         try:
@@ -62,6 +62,19 @@ def _spent(session, task: str, period: str) -> float:
         except Exception:
             continue                      # a table this database doesn't have
     return total
+
+
+def _spend(session, task: str, period: str) -> dict:
+    """This month's spend for the ledger purposes the task's calls are
+    recorded under, and which other tasks share them (Codex AI-1c review 1,
+    finding 5: purposes are not task names, and some are shared)."""
+    t = ai_models.TASKS[task]
+    if not t.ledger:
+        return {"spent_pence": None, "recorded_as": [], "shared_with": []}
+    shared = sorted({other.label for name, other in ai_models.TASKS.items()
+                     if name != task and other.ledger and set(other.ledger) & set(t.ledger)})
+    total = sum(_spent_purpose(session, p, period) for p in t.ledger)
+    return {"spent_pence": round(total, 2), "recorded_as": list(t.ledger), "shared_with": shared}
 
 
 def _options(task: str) -> list:
@@ -104,7 +117,8 @@ def overview(session, moment: Optional[datetime] = None) -> dict:
             "changed_by": row["changed_by"] if row else None,
             "changed_at": row["changed_at"] if row else None,
             "effective": _pairs(ai_models.resolve(name)),
-            "spent_pence": round(_spent(session, name, period), 2),
+            "max_chain": t.max_chain,
+            **_spend(session, name, period),
             "testable": ai_eval.has_cases(name),
             "options": _options(name),
         })
@@ -118,8 +132,10 @@ def _validate(task: str, chain) -> list:
         raise ActionRefused(404, f"Unknown task {task}")
     if not isinstance(chain, list) or not chain:
         raise ActionRefused(422, "Choose at least one model")
-    if len(chain) > MAX_CHAIN:
-        raise ActionRefused(422, f"Choose at most {MAX_CHAIN} models (a first choice and its fallbacks)")
+    limit = ai_models.TASKS[task].max_chain
+    if len(chain) > limit:
+        raise ActionRefused(422, "This task uses one model and no fallbacks until it moves onto the router (AI-1d)"
+                            if limit == 1 else f"Choose at most {limit} models (a first choice and its fallbacks)")
     pairs = []
     for entry in chain:
         if not (isinstance(entry, dict) and isinstance(entry.get("provider"), str) and entry["provider"]
@@ -205,5 +221,11 @@ def test(session, task: str, provider: str, model: str) -> dict:
         raise ActionRefused(422, why)
     session.rollback()
     current = ai_models.resolve(task)[0]
-    return {"task": task, "candidate": ai_eval.run(task, provider, model),
-            "current": ai_eval.run(task, *current)}
+    ai_eval.admit(task, [(provider, model), current])
+    try:
+        import time
+        deadline = time.monotonic() + ai_eval.DEADLINE_SECONDS
+        return {"task": task, "candidate": ai_eval.run(task, provider, model, deadline=deadline),
+                "current": ai_eval.run(task, *current, deadline=deadline)}
+    finally:
+        ai_eval.done()

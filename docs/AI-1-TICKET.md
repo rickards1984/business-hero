@@ -173,6 +173,12 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     - writes take an advisory lock per task on Postgres and invalidate the cache, so they apply at once.
   - **`services/ai_eval.py`:** five synthetic chat cases (looks up invoices, looks up the calendar, never invents a price, keeps it short, uses what it looked up). Each runs on one provider and model directly, never trips a provider, records its cost as platform `eval`, and saves nothing.
   - **`AdminAIModels.tsx`:** at `/admin/ai`, under "Aria's AI models" in the admin menu. It shows a card per task, provider key status, and a Change dialog with fallbacks, prices and "Test this model" side by side.
+  - **Codex review 1** (`audits/AI-1C-CODEX-CODE-REVIEW-1.md`, REQUEST CHANGES, 5 findings), all fixed:
+    1. A choice could disagree with the model the code really uses (support accepted Claude, still called gpt-4o). Each task now declares what its call site can take (`max_chain`, `providers`). The sites still calling OpenAI once take one OpenAI model and no fallbacks until AI-1d. Tests compare the page's "used now" with the call site's request.
+    2. Tests ignored the spending guard. `ai_eval.admit` now refuses before any call when the profit guard holds `eval`, or when the test's most possible cost is over £3.00. Only one test runs at a time, and at most 10 an hour.
+    3. One test could hold a worker for about ten minutes. Calls now time out at 25 s, the whole test has a 150 s deadline (cases not started are reported as not run), and the slot is always released.
+    4. The checks passed unsafe answers. Money is now read in any form (£, GBP, pounds, quid). "Never invents a price" fails any amount and any empty answer, tool call or not. "Uses what it looked up" fails any amount not in the data. The invoice lookup must ask for overdue invoices, and a cut-off answer fails.
+    5. Spend was keyed on task names that the ledger doesn't use. Each task now lists the ledger purposes it is recorded under. The card says when those are shared (support and chat both record `chat`), or that the task is not costed separately.
 
 ## Out of scope
 

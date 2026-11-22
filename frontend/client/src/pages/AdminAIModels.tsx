@@ -18,7 +18,8 @@ interface Option extends Pair { usable: boolean; reason: string | null; price_in
 interface TaskRow {
   task: string; label: string; kind: string; openai_only: boolean;
   default: Pair[]; choice: Pair[] | null; previous: Pair[] | null; changed_by: string | null; changed_at: string | null;
-  effective: Pair[]; spent_pence: number; testable: boolean; options: Option[];
+  effective: Pair[]; max_chain: number; spent_pence: number | null; recorded_as: string[]; shared_with: string[];
+  testable: boolean; options: Option[];
 }
 interface Overview { period: string; tasks: TaskRow[]; providers: Record<string, boolean> }
 interface CaseResult { name: string; passed: boolean; why: string; answer: string; seconds: number; pence: number }
@@ -99,7 +100,8 @@ export default function AdminAIModels() {
                 </Stack>
                 <ModelChips chain={row.effective} />
                 <Typography variant="body2">
-                  This month: {pounds(row.spent_pence)}
+                  {row.spent_pence == null ? 'Not costed separately'
+                    : `This month: ${pounds(row.spent_pence)}${row.shared_with.length ? ` (shared with ${row.shared_with.join(', ')})` : ''}`}
                   {row.changed_at ? ` · changed ${new Date(row.changed_at).toLocaleString('en-GB')}` : ''}
                 </Typography>
               </Stack>
@@ -163,7 +165,10 @@ function ChangeDialog({ row, onClose, onSaved }: { row: TaskRow; onClose: () => 
       <DialogContent>
         <Stack spacing={2} sx={{ pt: 1 }}>
           <Typography variant="body2">
-            The first model answers; if it's unavailable, the next one does. Default: {row.default.map(key).join(', then ')}.
+            {row.max_chain > 1
+              ? "The first model answers; if it's unavailable, the next one does."
+              : 'This job uses one OpenAI model, with no fallback, until it moves onto the new router (AI-1d).'}
+            {' '}Default: {row.default.map(key).join(', then ')}.
           </Typography>
           {chain.map((p, i) => (
             <Stack key={i} direction="row" spacing={1} alignItems="center">
@@ -184,7 +189,11 @@ function ChangeDialog({ row, onClose, onSaved }: { row: TaskRow; onClose: () => 
             </Stack>
           ))}
           <Box>
-            <Button size="small" onClick={add} disabled={chain.length >= 6 || usable.length <= chain.length}>+ Add a fallback</Button>
+            {row.max_chain > 1 && (
+              <Button size="small" onClick={add} disabled={chain.length >= row.max_chain || usable.length <= chain.length}>
+                + Add a fallback
+              </Button>
+            )}
           </Box>
           {row.options.some((o) => !o.usable) && (
             <Typography variant="caption">
@@ -203,9 +212,11 @@ function ChangeDialog({ row, onClose, onSaved }: { row: TaskRow; onClose: () => 
                     <Typography sx={{ fontWeight: 700, color: 'text.primary' }}>{String(title)}: {r.model}</Typography>
                     <Typography variant="body2">Passed {r.passed} of {r.cases} · cost {pounds(r.pence)}</Typography>
                     {r.results.map((c) => (
-                      <Typography key={c.name} variant="body2" sx={{ mt: 0.5 }}>
-                        {c.passed ? '✓' : '✗'} {c.name} ({c.seconds}s){c.passed ? '' : `: ${c.why}`}
-                      </Typography>
+                      <Tooltip key={c.name} title={c.answer ? `Answer: ${c.answer}` : ''} placement="top-start">
+                        <Typography variant="body2" sx={{ mt: 0.5 }}>
+                          {c.passed ? '✓' : '✗'} {c.name} ({c.seconds}s){c.passed ? '' : `: ${c.why}`}
+                        </Typography>
+                      </Tooltip>
                     ))}
                   </Paper>
                 );
