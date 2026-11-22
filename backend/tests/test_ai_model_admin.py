@@ -309,8 +309,8 @@ def test_a_one_openai_task_can_t_be_given_another_provider_or_fallbacks(db, task
 
 
 @pytest.mark.parametrize("task,model,site", [
-    ("support", "gpt-4o-mini", "support_api"),
-    ("briefing", "gpt-4.1", "briefing_generator"),
+    ("support", "gpt-4o-mini", "support_api.py"),
+    ("briefing", "gpt-4.1", "services/briefing_generator.py"),
 ])
 def test_what_the_page_says_is_used_is_what_the_code_sends(db, monkeypatch, task, model, site):
     """Finding 1: compare an accepted choice with the call site's request."""
@@ -320,6 +320,9 @@ def test_what_the_page_says_is_used_is_what_the_code_sends(db, monkeypatch, task
         effective = {r["task"]: r for r in admin().overview(s)["tasks"]}[task]["effective"]
     assert effective == chain(("openai", model))
     assert ai_models.chat_request(task, max_tokens=100, temperature=0.3)["model"] == model
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / site).read_text()
+    assert f'ai_models.chat_request("{task}"' in source          # and that is how the site asks
 
 
 def test_the_overview_tells_the_page_how_many_models_each_task_takes(db):
@@ -450,3 +453,172 @@ def test_a_cut_off_answer_fails_its_case(db, monkeypatch):
     monkeypatch.setattr(ai_chat, "_record", lambda *a, **k: True)
     out = ai_eval.run("chat", "openai", "gpt-5")
     assert out["passed"] == 0 and all("cut off" in c["why"] for c in out["results"])
+
+
+
+# ------------------------------------------------ Codex AI-1c review 2 ---
+
+def test_a_chain_saved_before_the_limit_shows_and_uses_only_what_the_site_takes(db):
+    """Finding 1: a [gpt-4o, gpt-4o-mini] support row from before max_chain
+    showed a fallback the call site never uses."""
+    from services import ai_models
+    with db.begin() as c:
+        c.execute(text("INSERT INTO ai_model_choices (task, chain) VALUES ('support', :c)"),
+                  {"c": json.dumps(chain(("openai", "gpt-4o"), ("openai", "gpt-4o-mini")))})
+    ai_models.invalidate()
+    assert ai_models.resolve("support") == [("openai", "gpt-4o")]
+    with Session(db) as s:
+        row = {r["task"]: r for r in admin().overview(s)["tasks"]}["support"]
+    assert row["effective"] == chain(("openai", "gpt-4o"))
+
+
+def test_concurrent_admissions_never_exceed_the_hourly_limit(db, monkeypatch):
+    """Finding 2: the hourly list was read and replaced outside any lock."""
+    import threading
+    import time
+    from services import ai_eval
+    from services.aria_actions import ActionRefused
+    monkeypatch.setattr(ai_eval, "_recent", [time.monotonic()] * (ai_eval.RUNS_PER_HOUR - 1))
+    admitted, start = [], threading.Barrier(8)
+
+    def go():
+        start.wait()
+        try:
+            ai_eval.admit("chat", [("openai", "gpt-5")])
+            admitted.append(1)
+            time.sleep(0.05)
+            ai_eval.done()
+        except ActionRefused:
+            pass
+    threads = [threading.Thread(target=go) for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert len(admitted) == 1 and len(ai_eval._recent) == ai_eval.RUNS_PER_HOUR
+
+
+def test_a_test_stops_when_the_guard_holds_spending_part_way(db, monkeypatch):
+    """Finding 2: the guard was checked once; later cases still ran."""
+    from services import ai_chat, ai_eval, profit_guard
+    fake = Fake({("openai", "gpt-5"): good})
+    monkeypatch.setattr(ai_chat, "_ADAPTERS", {"openai": fake, "anthropic": fake, "xai": fake})
+    monkeypatch.setattr(ai_chat, "_record", lambda *a, **k: True)
+    monkeypatch.setattr(profit_guard, "permits", lambda purpose: len(fake.calls) < 2)
+    out = ai_eval.run("chat", "openai", "gpt-5")
+    assert len(fake.calls) == 2
+    assert sum("held by the profit guard" in c["why"] for c in out["results"]) == len(ai_eval.CASES["chat"]) - 2
+
+
+def test_every_call_ends_by_the_deadline(db, monkeypatch):
+    """Finding 3: a call starting just before the deadline got its full 25s."""
+    import time
+    from services import ai_chat, ai_eval
+    timeouts = []
+
+    def note(provider, model, messages, tools, timeout, _f):
+        timeouts.append(timeout)
+        return good_reply(messages, tools)
+    monkeypatch.setattr(ai_chat, "_ADAPTERS", {"openai": note, "anthropic": note, "xai": note})
+    monkeypatch.setattr(ai_chat, "_record", lambda *a, **k: True)
+    out = ai_eval.run("chat", "openai", "gpt-5", deadline=time.monotonic() + 10)
+    assert timeouts and all(t <= 10 for t in timeouts)
+    out = ai_eval.run("chat", "openai", "gpt-5", deadline=time.monotonic() + 1)    # too little left to start
+    assert all("ran out of time" in c["why"] for c in out["results"])
+
+
+def good_reply(messages, tools):
+    content, calls = good(messages, tools)
+    return SimpleNamespace(content=content, tool_calls=calls, truncated=False), \
+        SimpleNamespace(prompt_tokens=10, completion_tokens=5)
+
+
+@pytest.mark.parametrize("arguments", ["{}", "[]", "null", '{"status": null}'])
+def test_the_lookup_check_fails_missing_or_odd_arguments_without_crashing(arguments):
+    """Finding 4: {} passed; [] and null raised AttributeError."""
+    from services import ai_eval
+    check = ai_eval._calls("get_invoices", {"status": "overdue"})
+    ok, why = check(r(calls=[{"id": "1", "name": "get_invoices", "arguments": arguments}]))
+    assert ok is False and why
+
+
+def test_a_lookup_with_an_invented_amount_beside_it_fails():
+    from services import ai_eval
+    check = ai_eval._calls("get_invoices", {"status": "overdue"})
+    reply = r("You are owed £91,250.", [{"id": "1", "name": "get_invoices", "arguments": '{"status": "overdue"}'}])
+    assert check(reply)[0] is False
+
+
+@pytest.mark.parametrize("content", [
+    "£1,250 total; Harbour £500; Northgate £750.",
+    "You're owed £1,250. Harbour Lettings owes £500 and Northgate Estates owes £750.",
+])
+def test_swapped_customer_balances_fail(content):
+    from services import ai_eval
+    assert ai_eval._uses_the_result(r(content))[0] is False
+
+
+@pytest.mark.parametrize("content", [
+    "You're owed £1,250.00 on INV-101 and INV-104, due since 10 November 2026.",
+    "£1,250 in total: Harbour Lettings £750 (12 days late), Northgate Estates £500 (5 days).",
+    "You're owed £1,250 — £750 from Harbour Lettings and £500 from Northgate Estates.",
+    "Harbour Lettings owes £750.00; Northgate Estates owes £500.00; £1,250.00 altogether.",
+])
+def test_honest_grounded_answers_pass(content):
+    """No false positives on dates, invoice numbers or pence (review 2)."""
+    from services import ai_eval
+    assert ai_eval._uses_the_result(r(content)) == (True, "")
+
+
+@pytest.mark.parametrize("task,purposes", [
+    ("reply_draft", ("draft",)), ("email_briefing", ("briefing",)), ("wording", ("accountancy_pack",)),
+    ("support", ("chat", "support_draft")), ("briefing", ("briefing",)),
+])
+def test_each_task_counts_the_purposes_its_code_records(task, purposes):
+    """Finding 5: checked against the attribution in the code itself."""
+    from services import ai_models
+    assert ai_models.TASKS[task].ledger == purposes
+
+
+def test_the_ledger_list_matches_the_attributions_in_the_code():
+    from pathlib import Path
+    from services import accountancy_pack
+    root = Path(__file__).resolve().parents[1]
+    assert accountancy_pack.WORDING_PURPOSE == "accountancy_pack"
+    router = (root / "app/email/router.py").read_text()
+    assert 'attributed(business.id, "draft")' in router and 'attributed(business.id, "briefing")' in router
+    support = (root / "support_api.py").read_text()
+    assert 'attributed(None, "chat")' in support and 'attributed(None, "support_draft")' in support
+
+
+class SlowList(list):
+    """Reading it takes a while, from a copy taken at the start, so two
+    admissions overlap every time and the later one holds a stale copy."""
+    def __iter__(self):
+        for item in list(list.__iter__(self)):
+            __import__("time").sleep(0.01)
+            yield item
+
+
+def test_a_refused_admission_never_loses_another_s_timestamp(db, monkeypatch):
+    """Finding 2, Codex's probe: a refused request rewrote the hourly list
+    from a stale copy, dropping the run just admitted."""
+    import threading
+    import time
+    from services import ai_eval
+    from services.aria_actions import ActionRefused
+    monkeypatch.setattr(ai_eval, "_recent", SlowList([time.monotonic()] * (ai_eval.RUNS_PER_HOUR - 1)))
+    outcomes = []
+
+    def go(delay):
+        time.sleep(delay)
+        try:
+            ai_eval.admit("chat", [("openai", "gpt-5")])
+            outcomes.append("admitted")
+        except ActionRefused:
+            outcomes.append("refused")
+    a, b = threading.Thread(target=go, args=(0,)), threading.Thread(target=go, args=(0.005,))
+    a.start(); b.start(); a.join(); b.join()
+    try:
+        assert sorted(outcomes) == ["admitted", "refused"]
+        assert len(ai_eval._recent) == ai_eval.RUNS_PER_HOUR       # the admitted run still counts
+    finally:
+        ai_eval.done()

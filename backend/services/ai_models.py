@@ -73,10 +73,10 @@ TASKS = {
     "quote_chat": _t("Quote drafting in chat", ("openai", "gpt-4o"), ledger=("quote",), **ONE_OPENAI),
     "quote": _t("Quote estimator", ("openai", "gpt-5.4"), legacy_env="QUOTE_AI_MODEL", ledger=("quote",),
                 **ONE_OPENAI),
-    "reply_draft": _t("Email reply draft (one)", ("openai", "gpt-4o-mini"), **ONE_OPENAI),
+    "reply_draft": _t("Email reply draft (one)", ("openai", "gpt-4o-mini"), ledger=("draft",), **ONE_OPENAI),
     "reply_drafts": _t("Email reply drafts (three tones)", ("openai", "gpt-5"), ledger=("draft",), **ONE_OPENAI),
     "inbox_classify": _t("Sorting the inbox", ("openai", "gpt-4o-mini"), ledger=("classify",), **ONE_OPENAI),
-    "email_briefing": _t("Email briefing", ("openai", "gpt-5"), **ONE_OPENAI),
+    "email_briefing": _t("Email briefing", ("openai", "gpt-5"), ledger=("briefing",), **ONE_OPENAI),
     "briefing": _t("CEO briefings", ("openai", "gpt-4o"), ledger=("briefing",), **ONE_OPENAI),
     "meeting": _t("Board meeting", ("openai", "gpt-5"), legacy_env="EXECUTIVE_MEETING_AI_MODEL",
                   ledger=("meeting",), **ONE_OPENAI),
@@ -98,7 +98,7 @@ TASKS = {
     "draft": _t("Outreach drafts", ("openai", "gpt-6.1-sol"), ledger=("draft",)),
     "research": _t("Outreach research", ("openai", "gpt-6.1-sol"), ledger=("research",)),
     "classify": _t("Sorting outreach replies", ("openai", "gpt-6-luna"), ledger=("classify",)),
-    "wording": _t("Plain-English wording", ("openai", "gpt-6-luna"), ledger=("wording",)),
+    "wording": _t("Plain-English wording", ("openai", "gpt-6-luna"), ledger=("accountancy_pack",)),
 }
 ROUTER_PURPOSES = {"draft", "research", "classify", "wording"}
 
@@ -286,6 +286,9 @@ def choice(task_name: str) -> Optional[list]:
     if dropped:
         logger.error("[AI] %s: ignoring %s (no key, no price, or not allowed for this task)",
                      task_name, ", ".join(dropped))
+    if len(usable) > task.max_chain:      # saved before the limit: the call site uses only these
+        logger.error("[AI] %s: using only the first %d of its saved models", task_name, task.max_chain)
+        usable = usable[:task.max_chain]
     return usable or None
 
 

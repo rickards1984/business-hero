@@ -55,9 +55,13 @@ def _calls(name, arguments=None):
             args = json.loads(call["arguments"] or "{}")
         except (TypeError, ValueError):
             return False, f"its {name} arguments were not valid JSON"
+        if not isinstance(args, dict):
+            return False, f"its {name} arguments were not an object"
         for k, v in (arguments or {}).items():
-            if args.get(k, v) != v:
+            if args.get(k) != v:                # missing counts as wrong (Codex AI-1c review 2)
                 return False, f"it looked up {name} with {k}={args.get(k)!r}, expected {v!r}"
+        if _amounts(reply.content):
+            return False, "it stated an amount before looking anything up"
         return True, ""
     return check
 
@@ -76,16 +80,31 @@ def _short_hello(reply):
     return (0 < len(text) <= 300 and not reply.tool_calls, "expected a short greeting")
 
 
-GROUNDED = {1250.0, 750.0, 500.0}
+TOTAL = 1250.0
+OWED = {"harbour": 750.0, "northgate": 500.0}
+GROUNDED = {TOTAL, *OWED.values()}
+# Clauses: split at ; or a full stop (not a decimal point), a comma and space,
+# "and", "while", or a new line. "£1,250.00" stays whole.
+_CLAUSES = re.compile(r";|\.(?!\d)|,\s|\band\b|\bwhile\b|\n", re.I)
 
 
 def _uses_the_result(reply):
-    """It states the £1,250 it looked up and no amount that wasn't in the data."""
+    """It states the £1,250 it looked up, no amount that wasn't in the data,
+    and no customer with another customer's balance (Codex AI-1c review 2)."""
     found = _amounts(reply.content)
-    if 1250.0 not in found:
+    if TOTAL not in found:
         return False, "expected it to state the £1,250 from the invoices it looked up"
     stray = found - GROUNDED
-    return (not stray, f"it stated an amount that wasn't in the data (£{sorted(stray)[0]:,.2f})" if stray else "")
+    if stray:
+        return False, f"it stated an amount that wasn't in the data (£{sorted(stray)[0]:,.2f})"
+    for clause in _CLAUSES.split(reply.content or ""):
+        named = [c for c in OWED if c in clause.lower()]
+        if len(named) != 1:
+            continue                          # no customer, or two: nothing to attribute
+        wrong = _amounts(clause) - {OWED[named[0]], TOTAL}
+        if wrong:
+            return False, f"it gave {named[0].title()} the wrong balance (£{sorted(wrong)[0]:,.2f})"
+    return True, ""
 
 
 def _msgs(*turns):
@@ -129,8 +148,10 @@ def has_cases(task: str) -> bool:
 MAX_RUN_PENCE = 300            # both models, every case, at their most possible cost (Opus v GPT-5: £1.95)
 RUNS_PER_HOUR = 10
 CALL_SECONDS = 25.0
-DEADLINE_SECONDS = 150.0
+MIN_CALL_SECONDS = 3.0         # a call that would be cut short before it can answer isn't started
+DEADLINE_SECONDS = 150.0       # every call ends by then: each call's timeout is what's left
 _running = __import__("threading").Lock()
+_window = __import__("threading").Lock()  # the hourly list, read and written as one step
 _recent: list = []
 
 
@@ -151,13 +172,14 @@ def admit(task: str, pairs) -> None:
     if worst > MAX_RUN_PENCE:
         raise ActionRefused(422, f"This test could cost up to £{worst / 100:.2f}, over the £{MAX_RUN_PENCE / 100:.2f} "
                                  "limit for one test")
-    now = time.monotonic()
-    _recent[:] = [t for t in _recent if now - t < 3600]
-    if len(_recent) >= RUNS_PER_HOUR:
-        raise ActionRefused(429, f"At most {RUNS_PER_HOUR} tests an hour: try again shortly")
-    if not _running.acquire(blocking=False):
-        raise ActionRefused(409, "A test is already running: wait for it to finish")
-    _recent.append(now)
+    with _window:
+        now = time.monotonic()
+        _recent[:] = [t for t in _recent if now - t < 3600]
+        if len(_recent) >= RUNS_PER_HOUR:
+            raise ActionRefused(429, f"At most {RUNS_PER_HOUR} tests an hour: try again shortly")
+        if not _running.acquire(blocking=False):
+            raise ActionRefused(409, "A test is already running: wait for it to finish")
+        _recent.append(now)
 
 
 def done() -> None:
@@ -171,18 +193,22 @@ def run(task: str, provider: str, model: str, *, deadline: float = None) -> dict
     """Every case on one provider and model. Never raises for a provider
     failure: the case fails with the provider's reason. Cases not started
     before `deadline` (time.monotonic()) are reported as not run."""
-    from services import ai_chat, ai_router
+    from services import ai_chat, ai_router, profit_guard
     cases = CASES[KIND_OF_TASK[task]]
     results, pence = [], 0.0
     for case in cases:
         started = time.monotonic()
-        if deadline is not None and started >= deadline:
-            results.append({"name": case["name"], "passed": False, "why": "not run: the test ran out of time",
+        seconds = CALL_SECONDS if deadline is None else min(CALL_SECONDS, deadline - started)
+        skip = ("not run: the test ran out of time" if seconds < MIN_CALL_SECONDS
+                else "not run: AI spending is now held by the profit guard" if not profit_guard.permits("eval")
+                else None)
+        if skip:
+            results.append({"name": case["name"], "passed": False, "why": skip,
                             "answer": "", "seconds": 0.0, "pence": 0.0})
             continue
         worst = ai_chat._worst(provider, model, case["messages"], TOOLS)
         try:
-            reply, usage = ai_chat._ADAPTERS[provider](provider, model, case["messages"], TOOLS, CALL_SECONDS, None)
+            reply, usage = ai_chat._ADAPTERS[provider](provider, model, case["messages"], TOOLS, seconds, None)
             if getattr(reply, "truncated", False):
                 raise ai_router.ProviderError("the answer was cut off", usage=usage)
             tokens, estimated = ai_chat._tokens(usage), False

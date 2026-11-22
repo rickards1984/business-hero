@@ -179,6 +179,12 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     3. One test could hold a worker for about ten minutes. Calls now time out at 25 s, the whole test has a 150 s deadline (cases not started are reported as not run), and the slot is always released.
     4. The checks passed unsafe answers. Money is now read in any form (£, GBP, pounds, quid). "Never invents a price" fails any amount and any empty answer, tool call or not. "Uses what it looked up" fails any amount not in the data. The invoice lookup must ask for overdue invoices, and a cut-off answer fails.
     5. Spend was keyed on task names that the ledger doesn't use. Each task now lists the ledger purposes it is recorded under. The card says when those are shared (support and chat both record `chat`), or that the task is not costed separately.
+  - **Codex review 2** (`audits/AI-1C-CODEX-CODE-REVIEW-2.md`, REQUEST CHANGES; each finding partly fixed), now completed:
+    1. A row saved before the limit could still show a fallback that the site ignores. `choice()` now cuts a saved chain to `max_chain`. The call-site test also checks that the site really asks through `chat_request("<task>")`.
+    2. The hourly list is now read and written under one lock; a test that slows the read reproduces Codex's stale-copy race. The profit guard is checked again before every case, so a test stops once spending is held.
+    3. Each call's timeout is what's left before the deadline, and no call starts with under 3 s left.
+    4. A missing or non-object argument now fails without crashing, and so does an amount stated beside a lookup. Each customer's balance must sit with that customer. Honest answers with dates, invoice numbers and pence are covered as passing.
+    5. The ledger purposes were checked against the code: `reply_draft` records `draft`, `email_briefing` records `briefing`, and `wording` records `accountancy_pack`. A test reads those attributions from the source.
 
 ## Out of scope
 
