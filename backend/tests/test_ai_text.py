@@ -104,7 +104,9 @@ def test_an_outage_fails_over_and_switches_that_provider_off_for_a_while(env, mo
     out = ai_text.complete("briefing", MSGS, max_tokens=400)
     assert out.content == "from GPT" and out.provider == "openai"
     assert ai_router._is_down("anthropic")
-    assert [kw["provider"] for _, kw in env.recorded] == ["anthropic", "openai"]      # the failure is costed too
+    # retried once (as the SDK did), then the next model; every attempt costed (review 1, finding 6)
+    assert [kw["provider"] for _, kw in env.recorded] == ["anthropic", "anthropic", "openai"]
+    assert [(c.provider, c.model) for c in fake.calls] == [ANTHROPIC, ANTHROPIC, GPT5]
     assert env.recorded[0][1]["estimated"] is True
 
 
@@ -176,7 +178,7 @@ def test_the_site_s_limit_and_temperature_reach_every_adapter(env, monkeypatch):
     adapters(monkeypatch, fake)
     use(monkeypatch, GPT4O)
     ai_text.complete("briefing", MSGS, max_tokens=400, temperature=0.3, timeout=12.0)
-    assert fake.calls[0].opts == {"max_tokens": 400, "temperature": 0.3, "retries": 1}
+    assert fake.calls[0].opts == {"max_tokens": 400, "temperature": 0.3, "retries": 0}   # retried here instead
     assert fake.calls[0].timeout == 12.0
 
 
@@ -286,3 +288,92 @@ def test_the_async_form_runs_off_the_event_loop_and_keeps_the_attribution(env, m
 def test_json_is_read_with_or_without_fences(raw, expected):
     from services import ai_text
     assert json.loads(ai_text.strip_fences(raw)) == json.loads(expected)
+
+
+
+# ------------------------------------------------ Codex AI-1d review 1 ---
+
+def test_a_failure_that_closes_the_kill_switch_stops_the_next_attempt(env, monkeypatch):
+    """Finding 1: the guard was checked once, before the chain."""
+    from services import ai_router, ai_text, profit_guard
+    fake = Fake(**{"claude-opus-5-5": ai_router.ProviderError("anthropic: HTTP 529"), "gpt-5": "never"})
+    adapters(monkeypatch, fake)
+    use(monkeypatch, ANTHROPIC, GPT5)
+    monkeypatch.setattr(profit_guard, "permits", lambda purpose: len(env.recorded) == 0)   # closes once costed
+    with profit_guard.attributed("b1", "briefing"), pytest.raises(profit_guard.Paused):
+        ai_text.complete("briefing", MSGS, max_tokens=400)
+    assert [(c.provider, c.model) for c in fake.calls] == [ANTHROPIC]
+
+
+def test_an_essential_job_keeps_failing_over_at_the_kill_switch(env, monkeypatch):
+    from services import ai_router, ai_text, profit_guard
+    monkeypatch.setattr(profit_guard, "permits", lambda purpose: False)
+    adapters(monkeypatch, Fake(**{"claude-opus-5-5": ai_router.ProviderError("anthropic: HTTP 529"), "gpt-5": "ok"}))
+    use(monkeypatch, ANTHROPIC, GPT5)
+    with profit_guard.attributed(None, "chat"):
+        assert ai_text.complete("support", MSGS, max_tokens=400).content == "ok"
+
+
+def test_a_retry_that_answers_is_costed_alongside_the_failure_before_it(env, monkeypatch):
+    """Finding 6: the SDK's own retry was never costed on its own."""
+    from services import ai_router, ai_text
+    answers = iter([ai_router.ProviderError("openai: Timeout"), "second time lucky"])
+
+    def flaky(provider, model, messages, tools, timeout, factory, **opts):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return SimpleNamespace(content=answer, tool_calls=[], truncated=False), \
+            SimpleNamespace(prompt_tokens=100, completion_tokens=30)
+    adapters(monkeypatch, flaky)
+    use(monkeypatch, GPT5)
+    assert ai_text.complete("briefing", MSGS, max_tokens=400).content == "second time lucky"
+    assert [(kw["output_tokens"], kw["estimated"]) for _, kw in env.recorded][1] == (30, False)
+    assert len(env.recorded) == 2 and env.recorded[0][1]["estimated"] is True
+    assert not ai_router._is_down("openai")               # it answered: not switched off
+
+
+def test_a_cut_off_answer_is_not_retried_or_an_outage(env, monkeypatch):
+    from services import ai_chat, ai_router, ai_text
+    fake = Fake(**{"gpt-5": ai_chat.Truncated("openai: cut off"), "claude-opus-5-5": "ok"})
+    adapters(monkeypatch, fake)
+    use(monkeypatch, GPT5, ANTHROPIC)
+    assert ai_text.complete("briefing", MSGS, max_tokens=400).provider == "anthropic"
+    assert [c.model for c in fake.calls] == ["gpt-5", "claude-opus-5-5"] and not ai_router._is_down("openai")
+
+
+def test_the_whole_call_ends_within_twice_one_attempt_s_limit(env, monkeypatch):
+    """Finding 7: three providers timing out each got the full limit."""
+    import time
+    from services import ai_router, ai_text
+    timeouts = []
+
+    def slow(provider, model, messages, tools, timeout, factory, **opts):
+        timeouts.append(timeout)
+        time.sleep(min(timeout, 0.2))
+        raise ai_router.ProviderError(f"{provider}: Timeout")
+    monkeypatch.setenv("XAI_API_KEY", "test-key")
+    adapters(monkeypatch, slow)
+    use(monkeypatch, GPT5, ANTHROPIC, ("xai", "grok-4.7"))
+    monkeypatch.setattr(ai_text, "MIN_ATTEMPT_SECONDS", 0.05)
+    started = time.monotonic()
+    with pytest.raises(ai_router.AllProvidersFailed):
+        ai_text.complete("briefing", MSGS, max_tokens=400, timeout=0.3)
+    assert time.monotonic() - started < 0.6 + 0.15
+    assert all(t <= 0.3 for t in timeouts) and len(timeouts) < 6
+
+
+@pytest.mark.parametrize("raw", [
+    json.dumps({"subject": "Re: setup", "body_text": "Paste this: ```json {\"enabled\": true}``` into settings."}),
+    json.dumps([{"tone": "brief", "body_text": "Use ``` for code."}]),
+])
+def test_valid_json_with_fences_inside_its_strings_is_left_alone(raw):
+    """Finding 2: a fence inside a string value was taken for the wrapper."""
+    from services import ai_text
+    assert ai_text.strip_fences(raw) == raw
+
+
+def test_prose_with_a_code_block_that_isn_t_json_is_left_alone():
+    from services import ai_text
+    text = "Try this:\n```\nprint('hi')\n```"
+    assert ai_text.strip_fences(text) == text

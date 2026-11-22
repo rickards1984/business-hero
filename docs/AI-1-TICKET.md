@@ -221,6 +221,17 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     - grading handles "respectively", dashes, slashes, two customers in one clause, and a total named against one customer.
 
     The eval spend reservation stays bounded at one test's cost (≤ £3) and is not added.
+  - **Codex review 1** (`audits/AI-1D-CODEX-CODE-REVIEW-1.md`, REQUEST CHANGES; 5 blocking, 3 not), all fixed:
+    1. A failure that closed the kill switch didn't stop the next attempt. The guard is now checked before every attempt, because the SDK hook can't see these calls.
+    2. Fence stripping mangled valid JSON with a fence inside a string. Valid JSON is now returned as it is. Otherwise a fence is taken only if it wraps the whole answer, or follows prose and contains JSON.
+    3. The help-assistant set passed a promised refund and swapped plan prices. The refund case now needs "I don't know", no promise and a handoff. The price case needs each plan's own price: names match as whole words, and "Business Hero" is not the Business plan.
+    4. The briefing set passed "fell 20%" and `[1,2,3]` actions. The change must go up, last week's figure must be £3,500, each action needs a number and a label, and a briefing must come before the JSON.
+    5. The daily pulse was tested at 2,000 tokens against production's 400. Each case now carries its site's limit, used in its cost too, and a cut-off answer fails.
+    6. The SDK's own retry was never costed. Retries are now made in `ai_text`, one per model after an outage, and each attempt is costed. The adapters get `retries=0`.
+    7. A chain of timeouts had no overall limit. The whole call now ends within twice one attempt's limit: 60 s by default, the same as the old attempt plus its SDK retry.
+    8. "Harbour owes £1,250 in total" passed. The total now counts with one customer only beside that customer's own balance, or in a sentence naming several.
+
+    Unchanged: a daily pulse cut off in production is still sent as it is, as before. It isn't a regression.
 
 ## Out of scope
 

@@ -31,7 +31,9 @@ from services import ai_chat, ai_models, ai_router
 logger = logging.getLogger(__name__)
 
 _UNSET = object()
-RETRIES = 1                    # each site's OpenAI client retried once; kept, before failing over
+RETRIES = 1                    # each site's OpenAI client retried once: kept, here, and costed
+TOTAL_ATTEMPT_LIMITS = 2       # the whole call: as long as the old one attempt and its SDK retry
+MIN_ATTEMPT_SECONDS = 3.0      # an attempt that would be cut short before it can answer isn't started
 
 
 def _attribution(task: str, business_id, purpose):
@@ -64,46 +66,70 @@ def complete(task: str, messages: list, *, max_tokens: int, temperature: Optiona
              timeout: float = 30.0, business_id=_UNSET, purpose: Optional[str] = None):
     """The text of the first of the task's models to answer, stripped, with
     the provider and model that answered. Raises profit_guard.Paused at the
-    kill switch, or ai_router.AllProvidersFailed when nothing answers."""
+    kill switch, or ai_router.AllProvidersFailed when nothing answers.
+
+    `timeout` is one attempt's limit; the whole call ends within
+    TOTAL_ATTEMPT_LIMITS of it (Codex AI-1d review 1, finding 7: a chain of
+    timeouts each got the full limit, plus the SDK's own retry). Each model
+    gets one retry of its own after an outage, made and costed here rather
+    than inside the SDK (finding 6), before the provider is switched off."""
+    import time
     from services import profit_guard
     business_id, purpose = _attribution(task, business_id, purpose)
-    if purpose not in profit_guard.ESSENTIAL and not profit_guard.permits(purpose):
-        raise profit_guard.Paused(f"{purpose} paused: this month's costs have reached the kill threshold of income")
+    essential = purpose in profit_guard.ESSENTIAL
+    deadline = time.monotonic() + timeout * TOTAL_ATTEMPT_LIMITS
     tried = []
+
+    def held() -> bool:
+        return not essential and not profit_guard.permits(purpose)
+
     for provider, model in ai_models.resolve(task):
         if ai_router._is_down(provider) or not os.environ.get(ai_models.KEYS.get(provider, "")):
             continue
         worst = _worst(provider, model, messages, max_tokens)
 
-        def cost(usage, estimated_anyway=False):
+        def cost(usage):
             got = ai_chat._tokens(usage)
             tokens = got or worst
             ai_chat._record(business_id, purpose=purpose, provider=provider, model=model,
-                            input_tokens=tokens[0], output_tokens=tokens[1],
-                            estimated=got is None or estimated_anyway)
-        try:
-            reply, usage = ai_chat._ADAPTERS[provider](provider, model, messages, None, timeout, None,
-                                                       max_tokens=max_tokens, temperature=temperature,
-                                                       retries=RETRIES)
-        except ai_chat.Rejected as exc:        # refused before any work: not billed, not an outage
-            tried.append(f"{provider}/{model}")
-            logger.warning("[AI] %s: %s/%s refused the request (%s); trying the next model", task, provider, model, exc)
-            continue
-        except ai_router.ProviderError as exc:
-            cost(exc.usage)
-            if not isinstance(exc, ai_chat.Truncated):
+                            input_tokens=tokens[0], output_tokens=tokens[1], estimated=got is None)
+        for attempt in range(1 + RETRIES):
+            # Before every attempt: a failure just costed may have closed the
+            # kill switch (finding 1), and the SDK hook can't see these calls.
+            if held():
+                raise profit_guard.Paused(f"{purpose} paused: this month's costs have reached the kill threshold "
+                                          "of income")
+            seconds = min(timeout, deadline - time.monotonic())
+            if seconds < MIN_ATTEMPT_SECONDS:
+                raise ai_router.AllProvidersFailed(f"No AI model could answer {task} in time"
+                                                   + (f" (tried {', '.join(tried)})" if tried else ""))
+            try:
+                reply, usage = ai_chat._ADAPTERS[provider](provider, model, messages, None, seconds, None,
+                                                           max_tokens=max_tokens, temperature=temperature, retries=0)
+            except ai_chat.Rejected as exc:    # refused before any work: not billed, not an outage
+                tried.append(f"{provider}/{model}")
+                logger.warning("[AI] %s: %s/%s refused the request (%s); trying the next model",
+                               task, provider, model, exc)
+                break
+            except ai_router.ProviderError as exc:
+                cost(exc.usage)
+                tried.append(f"{provider}/{model}")
+                if isinstance(exc, ai_chat.Truncated):
+                    break                      # our limit, not their outage: no retry, no trip
+                if attempt < RETRIES:
+                    logger.warning("[AI] %s: %s/%s failed (%s); retrying once", task, provider, model, exc)
+                    continue
                 ai_router._trip(provider)
-            tried.append(f"{provider}/{model}")
-            logger.warning("[AI] %s: %s/%s failed (%s); trying the next model", task, provider, model, exc)
-            continue
-        cost(usage)
-        content = (reply.content or "").strip()
-        if not content:                        # billed, but no answer: the next model, not an outage
-            tried.append(f"{provider}/{model}")
-            logger.warning("[AI] %s: %s/%s gave an empty answer; trying the next model", task, provider, model)
-            continue
-        return SimpleNamespace(content=content, provider=provider, model=model,
-                               truncated=bool(getattr(reply, "truncated", False)))
+                logger.warning("[AI] %s: %s/%s failed (%s); trying the next model", task, provider, model, exc)
+                break
+            cost(usage)
+            content = (reply.content or "").strip()
+            if not content:                    # billed, but no answer: the next model, not an outage
+                tried.append(f"{provider}/{model}")
+                logger.warning("[AI] %s: %s/%s gave an empty answer; trying the next model", task, provider, model)
+                break
+            return SimpleNamespace(content=content, provider=provider, model=model,
+                                   truncated=bool(getattr(reply, "truncated", False)))
     raise ai_router.AllProvidersFailed(f"No AI model could answer {task}" + (f" (tried {', '.join(tried)})" if tried else ""))
 
 
@@ -114,11 +140,30 @@ async def acomplete(task: str, messages: list, **kwargs):
     return await asyncio.to_thread(complete, task, messages, **kwargs)
 
 
-_FENCE = re.compile(r"```[a-zA-Z]*\s*\n?(.*?)\n?\s*```", re.S)
+_WHOLE_FENCE = re.compile(r"^```[a-zA-Z]*[ \t]*\n?(.*?)\n?[ \t]*```$", re.S)
+_TRAILING_FENCE = re.compile(r"```[a-zA-Z]*[ \t]*\n(.*?)\n[ \t]*```\s*$", re.S)
+
+
+def _is_json(text: str) -> bool:
+    try:
+        json.loads(text)
+        return True
+    except ValueError:
+        return False
 
 
 def strip_fences(text: str) -> str:
-    """JSON a model wrapped in a ``` block (Claude often does), or the text."""
+    """JSON a model wrapped in a ``` block (Claude often does), or the text.
+    Valid JSON is returned as it is, so a fence inside one of its strings is
+    never mistaken for a wrapper (Codex AI-1d review 1, finding 2); a block
+    after a line of prose is taken only when what's inside is JSON."""
     text = (text or "").strip()
-    match = _FENCE.search(text)
-    return match.group(1).strip() if match else text
+    if _is_json(text):
+        return text
+    whole = _WHOLE_FENCE.match(text)
+    if whole:
+        return whole.group(1).strip()
+    trailing = _TRAILING_FENCE.search(text)
+    if trailing and _is_json(trailing.group(1).strip()):
+        return trailing.group(1).strip()
+    return text

@@ -65,7 +65,7 @@ def test_each_briefing_case_passes_a_good_answer_and_fails_a_bad_one(name, good,
 
 def test_the_weekly_shape_wants_three_to_five_actions():
     data = {"observations": [], "suggestions": [], "action_options": [{"number": 1}]}
-    ok, why = check("briefing", "Weekly: the shape the app reads")(r("Brief\n===JSON===\n" + json.dumps(data)))
+    ok, why = check("briefing", "Weekly: the shape the app reads")(r("📊 Week in brief: revenue up 20% to £4,200.\n===JSON===\n" + json.dumps(data)))
     assert ok is False and "3 to 5" in why
 
 
@@ -139,3 +139,87 @@ def test_the_guard_s_own_time_counts_against_the_deadline(monkeypatch):
     deadline = time.monotonic() + 0.5
     ai_eval.run("support", "openai", "gpt-4o", deadline=deadline)
     assert timeouts and timeouts[0] <= 0.2 + 0.05
+
+
+# ------------------------------------------------ Codex AI-1d review 1 ---
+
+@pytest.mark.parametrize("content,ok", [
+    ("Yes, cancellations receive a full refund. The team will process it.", False),            # finding 3
+    ("You'll get a pro-rata refund: I'll ask the team.", False),
+    ("Refunds aren't covered in my guides, so I'll pass this to the team to confirm.", True),
+    ("I'm not sure about that one: I'll pass it on to a colleague.", True),
+    ("I don't have that in my guides.", False),                                                 # no handoff
+    ("I'm not sure, but you'll get a full refund; the team can confirm.", False),              # hedged, still a promise
+    ("Refunds are handled by the team.", False),                                                # no "I don't know"
+])
+def test_the_refund_case_wants_an_honest_handoff_and_no_promise(content, ok):
+    assert check("support", "Never invents a policy")(r(content + "\n[CATEGORY: billing] [CONFIDENCE: 0.3]"))[0] is ok
+
+
+@pytest.mark.parametrize("content,ok", [
+    ("Pro costs £269 a month; Business costs £129.", False),                                    # finding 3
+    ("Pro is £129 a month, and Business is £269.", True),
+    ("Business Hero's Pro plan is £129 a month.", True),                       # the product's name, not the plan
+    ("The Pro plan is £129 a month: we process payments monthly.", True),      # "process" is not "pro"
+    ("Pro is £129 a month. Business is £269 with professional support.", True),  # "professional" is not "pro"
+])
+def test_the_price_case_wants_each_plan_s_own_price(content, ok):
+    assert check("support", "Quotes the price it was given")(r(content + "\n[CATEGORY: billing] [CONFIDENCE: 0.9]"))[0] is ok
+
+
+def test_weekly_actions_must_be_usable():
+    """Finding 4: {"action_options": [1, 2, 3]} passed."""
+    body = "📊 Week to 21 Nov: revenue up 20% to £4,200 on last week's £3,500.\n===JSON===\n"
+    shape = check("briefing", "Weekly: the shape the app reads")
+    assert shape(r(body + json.dumps({"action_options": [1, 2, 3]})))[0] is False
+    assert shape(r(body + json.dumps({"action_options": [{"number": n, "label": ""} for n in (1, 2, 3)]})))[0] is False
+    assert shape(r(body + json.dumps({"action_options": [{"number": n, "label": f"Do {n}"} for n in (1, 2, 3)]})))[0] is True
+    assert shape(r("===JSON===\n" + json.dumps({"action_options": [{"number": n, "label": "x"} for n in (1, 2, 3)]})))[0] is False
+
+
+@pytest.mark.parametrize("content,ok", [
+    ("Revenue fell 20% to £4,200 from £3,500.", False),                                          # finding 4
+    ("Revenue £3,500, up 20% on last week's £4,200.", False),                                    # swapped
+    ("Revenue rose 20% to £4,200 from £3,500.", True),
+    ("Revenue £4,200 (↑20% on last week's £3,500). Harbour Lettings owes £750.", True),
+    ("Revenue was £4,200, 20% higher than the £3,500 the week before.", True),
+])
+def test_the_weekly_change_must_go_the_right_way(content, ok):
+    assert check("briefing", "Weekly: right numbers and change")(r(content))[0] is ok
+
+
+def test_each_briefing_case_uses_the_site_s_own_limit():
+    """Finding 5: the pulse is asked for 400 tokens in production, not 2,000."""
+    from services import ai_eval
+    limits = {c["name"]: c.get("max_tokens") for c in ai_eval.CASES["briefing"]}
+    assert limits["Daily pulse: short, and opens right"] == 400 == limits["Daily pulse: flags the overdue invoice"]
+    assert limits["Weekly: the shape the app reads"] == 2000
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / "services/briefing_generator.py").read_text()
+    assert "max_tokens=400, temperature=0.3)" in source and "max_tokens=2000, temperature=0.4)" in source
+
+
+def test_a_pulse_cut_off_at_its_limit_fails(monkeypatch):
+    from services import ai_chat, ai_eval, profit_guard
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    asked = []
+
+    def fake(provider, model, messages, tools, timeout, factory, **opts):
+        asked.append(opts["max_tokens"])
+        return SimpleNamespace(content="🌅 Good morning, Mike! Here", tool_calls=[], truncated=True), None
+    monkeypatch.setattr(ai_chat, "_ADAPTERS", {"openai": fake, "anthropic": fake, "xai": fake})
+    monkeypatch.setattr(ai_chat, "_record", lambda *a, **k: True)
+    monkeypatch.setattr(profit_guard, "permits", lambda purpose: True)
+    out = ai_eval.run("briefing", "openai", "gpt-4o")
+    assert asked == [400, 400, 2000, 2000] and out["passed"] == 0
+    assert all("cut off" in c["why"] for c in out["results"])
+
+
+@pytest.mark.parametrize("content,ok", [
+    ("Harbour owes £1,250 in total. Northgate owes £500.", False),                               # finding 8
+    ("Harbour Lettings owes £750 of the £1,250 total; Northgate £500.", True),
+    ("Harbour Lettings and Northgate Estates owe £1,250 between them.", True),
+])
+def test_the_total_is_never_one_customer_s_balance(content, ok):
+    from services import ai_eval
+    assert ai_eval._uses_the_result(r(content))[0] is ok, ai_eval._uses_the_result(r(content))
