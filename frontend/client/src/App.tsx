@@ -7,6 +7,7 @@ import { queryClient } from './lib/queryClient';
 import { AuthProvider } from '@/contexts/AuthContext';
 import Login from '@/pages/Login';
 import AdminDashboard from '@/pages/AdminDashboard';
+import AdminAIModels from '@/pages/AdminAIModels';
 import AdminBusinessDetail from '@/pages/AdminBusinessDetail';
 import ConfirmEmail from '@/pages/ConfirmEmail';
 import BrandingSettings from '@/pages/BrandingSettings';
@@ -541,6 +542,7 @@ function App() {
                 <Route path="/admin" element={<AdminDashboard />} />
                 <Route path="/admin/businesses/:id" element={<AdminBusinessDetail />} />
                 <Route path="/admin/support" element={<AdminSupportDashboard />} />
+                <Route path="/admin/ai" element={<AdminAIModels />} />
                 <Route path="/admin/support-legacy" element={<AdminSupport />} />
                 <Route path="/admin/onboarding" element={<AdminOnboarding />} />
                 <Route path="/admin/onboarding/new" element={<AdminOnboardingWizard />} />

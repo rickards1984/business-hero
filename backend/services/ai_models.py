@@ -50,6 +50,14 @@ class Task:
     # and speech is costed at a fixed per-character rate (Codex AI-1a review 1,
     # findings 3 and 4).
     compatible: Optional[tuple] = None
+    # AI-1c (Codex review 1, finding 1): what the task's call site can really
+    # use today. A site that still calls OpenAI's API once, with no failover,
+    # takes one OpenAI model; the router-based sites (chat, outreach) take any
+    # provider and fallbacks. AI-1d moves more sites onto the router.
+    max_chain: int = 6
+    # The cost-ledger purposes this task's calls are recorded under, which may
+    # be shared with other tasks (finding 5); None: not tracked separately.
+    ledger: Optional[tuple] = None
 
 
 def _t(label, *chain, **kw):
@@ -57,35 +65,40 @@ def _t(label, *chain, **kw):
 
 
 # Defaults are what each call site used on 20 Nov 2026 (tests/test_ai_models.py TODAY).
+ONE_OPENAI = {"providers": ("openai",), "max_chain": 1}
+
 TASKS = {
-    "chat": _t("Aria chat: everyday questions", ("openai", "gpt-5")),
-    "chat_complex": _t("Aria chat: complex jobs, money and analysis", ("openai", "gpt-5")),
-    "quote_chat": _t("Quote drafting in chat", ("openai", "gpt-4o")),
-    "quote": _t("Quote estimator", ("openai", "gpt-5.4"), legacy_env="QUOTE_AI_MODEL"),
-    "reply_draft": _t("Email reply draft (one)", ("openai", "gpt-4o-mini")),
-    "reply_drafts": _t("Email reply drafts (three tones)", ("openai", "gpt-5")),
-    "inbox_classify": _t("Sorting the inbox", ("openai", "gpt-4o-mini")),
-    "email_briefing": _t("Email briefing", ("openai", "gpt-5")),
-    "briefing": _t("CEO briefings", ("openai", "gpt-4o")),
-    "meeting": _t("Board meeting", ("openai", "gpt-5"), legacy_env="EXECUTIVE_MEETING_AI_MODEL"),
-    "support": _t("Help assistant", ("openai", "gpt-4o")),
-    "call_summary": _t("Call summaries", ("openai", "gpt-4o-mini")),
+    "chat": _t("Aria chat: everyday questions", ("openai", "gpt-5"), ledger=("chat",)),
+    "chat_complex": _t("Aria chat: complex jobs, money and analysis", ("openai", "gpt-5"), ledger=("chat_complex",)),
+    "quote_chat": _t("Quote drafting in chat", ("openai", "gpt-4o"), ledger=("quote",), **ONE_OPENAI),
+    "quote": _t("Quote estimator", ("openai", "gpt-5.4"), legacy_env="QUOTE_AI_MODEL", ledger=("quote",),
+                **ONE_OPENAI),
+    "reply_draft": _t("Email reply draft (one)", ("openai", "gpt-4o-mini"), ledger=("draft",), **ONE_OPENAI),
+    "reply_drafts": _t("Email reply drafts (three tones)", ("openai", "gpt-5"), ledger=("draft",), **ONE_OPENAI),
+    "inbox_classify": _t("Sorting the inbox", ("openai", "gpt-4o-mini"), ledger=("classify",), **ONE_OPENAI),
+    "email_briefing": _t("Email briefing", ("openai", "gpt-5"), ledger=("briefing",), **ONE_OPENAI),
+    "briefing": _t("CEO briefings", ("openai", "gpt-4o"), ledger=("briefing",), **ONE_OPENAI),
+    "meeting": _t("Board meeting", ("openai", "gpt-5"), legacy_env="EXECUTIVE_MEETING_AI_MODEL",
+                  ledger=("meeting",), **ONE_OPENAI),
+    "support": _t("Help assistant", ("openai", "gpt-4o"), ledger=("chat", "support_draft"), **ONE_OPENAI),
+    "call_summary": _t("Call summaries", ("openai", "gpt-4o-mini"), ledger=("call_summary",), **ONE_OPENAI),
     "voice_aria": _t("Aria's voice (realtime)", ("openai", "gpt-realtime-2"), kind="voice",
-                     legacy_env="ARIA_REALTIME_MODEL", openai_only=True, compatible=("gpt-realtime-2",)),
+                     legacy_env="ARIA_REALTIME_MODEL", openai_only=True, compatible=("gpt-realtime-2",), max_chain=1),
     "voice_receptionist": _t("Receptionist (realtime)", ("openai", "gpt-realtime-2"), kind="voice",
                              legacy_env="RECEPTIONIST_REALTIME_MODEL", openai_only=True,
-                             compatible=("gpt-realtime-2",)),
+                             compatible=("gpt-realtime-2",), max_chain=1),
     "transcribe": _t("Speech to text", ("openai", "whisper-1"), kind="transcribe", openai_only=True,
-                     compatible=("whisper-1",)),
-    "speak": _t("Text to speech", ("openai", "tts-1"), kind="speech", openai_only=True, compatible=("tts-1",)),
+                     compatible=("whisper-1",), max_chain=1),
+    "speak": _t("Text to speech", ("openai", "tts-1"), kind="speech", openai_only=True, compatible=("tts-1",),
+                max_chain=1, ledger=("voice",)),
     "voice_preview": _t("Receptionist voice previews", ("openai", "gpt-4o-mini-tts"), ("openai", "tts-1-hd"),
                         ("openai", "tts-1"), kind="speech", openai_only=True,
-                        compatible=("gpt-4o-mini-tts", "tts-1-hd", "tts-1")),
+                        compatible=("gpt-4o-mini-tts", "tts-1-hd", "tts-1"), max_chain=3, ledger=("voice",)),
     # Outreach's purposes (services/ai_router.py keeps their defaults and env settings).
-    "draft": _t("Outreach drafts", ("openai", "gpt-6.1-sol")),
-    "research": _t("Outreach research", ("openai", "gpt-6.1-sol")),
-    "classify": _t("Sorting outreach replies", ("openai", "gpt-6-luna")),
-    "wording": _t("Plain-English wording", ("openai", "gpt-6-luna")),
+    "draft": _t("Outreach drafts", ("openai", "gpt-6.1-sol"), ledger=("draft",)),
+    "research": _t("Outreach research", ("openai", "gpt-6.1-sol"), ledger=("research",)),
+    "classify": _t("Sorting outreach replies", ("openai", "gpt-6-luna"), ledger=("classify",)),
+    "wording": _t("Plain-English wording", ("openai", "gpt-6-luna"), ledger=("accountancy_pack",)),
 }
 ROUTER_PURPOSES = {"draft", "research", "classify", "wording"}
 
@@ -225,23 +238,33 @@ def chat_request(task_name: str, *, max_tokens: Optional[int] = None, temperatur
     return {"model": model, **chat_params(model, max_tokens=max_tokens, temperature=temperature)}
 
 
-def _usable(task: Task, provider: str, model: str) -> bool:
+def why_unusable(task_name: str, provider: str, model: str) -> Optional[str]:
+    """None when the task can use this provider and model now; otherwise why
+    not, in words for the admin page (AI-1c)."""
+    task = TASKS[task_name]
+    if provider not in KEYS:
+        return f"{provider} is not a provider Business Hero knows"
     if provider not in task.providers or (task.openai_only and provider != "openai"):
-        return False
+        return f"{provider} can't serve this task (OpenAI only)"
     if task.compatible is not None and model not in task.compatible:
-        return False
+        return f"{model} is not one this task can use (only {', '.join(task.compatible)})"
     if task.kind == "text" and provider == "openai" and is_reasoning(model) and "-pro" in _base_model(model):
-        return False                  # the -pro models serve only the Responses API (BM-1)
+        return f"{model} answers only through the Responses API, which this task doesn't use"
     if not os.environ.get(KEYS[provider]):
-        return False
+        return f"{provider} has no key set (add {KEYS[provider]} in Railway)"
     if task.kind != "text":
-        return True                   # metered by the minute or character, not ai_costs
+        return None                   # metered by the minute or character, not ai_costs
     from services import ai_costs
     try:
         ai_costs.require_priced(provider, model)
-        return True
     except ai_costs.Unpriced:
-        return False
+        return f"{provider}/{model} has no price, so its cost can't be recorded"
+    return None
+
+
+def _usable(task: Task, provider: str, model: str) -> bool:
+    name = next(n for n, t in TASKS.items() if t is task)
+    return why_unusable(name, provider, model) is None
 
 
 def default(task_name: str) -> list:
@@ -263,6 +286,9 @@ def choice(task_name: str) -> Optional[list]:
     if dropped:
         logger.error("[AI] %s: ignoring %s (no key, no price, or not allowed for this task)",
                      task_name, ", ".join(dropped))
+    if len(usable) > task.max_chain:      # saved before the limit: the call site uses only these
+        logger.error("[AI] %s: using only the first %d of its saved models", task_name, task.max_chain)
+        usable = usable[:task.max_chain]
     return usable or None
 
 

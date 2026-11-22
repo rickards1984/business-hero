@@ -47,6 +47,7 @@ import {
   Add as AddIcon,
   Logout as LogoutIcon,
   RocketLaunch as RocketLaunchIcon,
+  Psychology as PsychologyIcon,
 } from '@mui/icons-material';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, type BusinessMember } from '@/lib/supabase';
@@ -695,6 +696,20 @@ export default function AdminDashboard() {
               <RocketLaunchIcon />
             </ListItemIcon>
             <ListItemText primary="Onboarding" />
+          </ListItemButton>
+        </ListItem>
+        <ListItem disablePadding>
+          <ListItemButton
+            onClick={() => {
+              navigate('/admin/ai');
+              setDrawerOpen(false);
+            }}
+            data-testid="nav-ai-models"
+          >
+            <ListItemIcon>
+              <PsychologyIcon />
+            </ListItemIcon>
+            <ListItemText primary="Aria's AI models" />
           </ListItemButton>
         </ListItem>
         <ListItem disablePadding>

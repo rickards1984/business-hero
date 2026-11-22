@@ -162,9 +162,38 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
 - **Codex AI-1b review 4: APPROVE.** Two optional points were noted for later:
   - one reservation lock for all businesses: a slow database read delays every business's admission. A per-business lock with a bounded wait would fix it;
   - an attempt that straddles midnight on the 1st could file an unrecorded cost under the new month.
-- **AI-1c: the admin page.**
-  - choices, Revert, "Test this model" and the evaluation set;
-  - briefings, support and the board meeting moved onto the router, so they can also use other providers.
+- **AI-1c: the admin page** (as built). Briefings, support and the board meeting moving onto the router is now **AI-1d**, to keep this PR reviewable.
+  - **`admin_ai_api.py`:** `GET /v1/admin/ai/models`, plus `PUT /models/{task}`, `POST /models/{task}/revert`, `/reset` and `/test`. Platform admins only, plain `def` routes (run in the threadpool).
+  - **`services/ai_model_admin.py`:**
+    - the overview lists every task with its default, the choice (who, when, the previous one), what's used now, this month's spend (business and platform meters), and the models it can use, with prices or the reason each can't (`ai_models.why_unusable`);
+    - provider keys are shown only as set or not;
+    - Choose validates every entry: at most 6, no duplicates, and the reason if a model can't serve the task;
+    - Revert restores the previous chain, or the default;
+    - Reset saves the default as a choice, so it can be reverted;
+    - writes take an advisory lock per task on Postgres and invalidate the cache, so they apply at once.
+  - **`services/ai_eval.py`:** five synthetic chat cases (looks up invoices, looks up the calendar, never invents a price, keeps it short, uses what it looked up). Each runs on one provider and model directly, never trips a provider, records its cost as platform `eval`, and saves nothing.
+  - **`AdminAIModels.tsx`:** at `/admin/ai`, under "Aria's AI models" in the admin menu. It shows a card per task, provider key status, and a Change dialog with fallbacks, prices and "Test this model" side by side.
+  - **Codex review 1** (`audits/AI-1C-CODEX-CODE-REVIEW-1.md`, REQUEST CHANGES, 5 findings), all fixed:
+    1. A choice could disagree with the model the code really uses (support accepted Claude, still called gpt-4o). Each task now declares what its call site can take (`max_chain`, `providers`). The sites still calling OpenAI once take one OpenAI model and no fallbacks until AI-1d. Tests compare the page's "used now" with the call site's request.
+    2. Tests ignored the spending guard. `ai_eval.admit` now refuses before any call when the profit guard holds `eval`, or when the test's most possible cost is over £3.00. Only one test runs at a time, and at most 10 an hour.
+    3. One test could hold a worker for about ten minutes. Calls now time out at 25 s, the whole test has a 150 s deadline (cases not started are reported as not run), and the slot is always released.
+    4. The checks passed unsafe answers. Money is now read in any form (£, GBP, pounds, quid). "Never invents a price" fails any amount and any empty answer, tool call or not. "Uses what it looked up" fails any amount not in the data. The invoice lookup must ask for overdue invoices, and a cut-off answer fails.
+    5. Spend was keyed on task names that the ledger doesn't use. Each task now lists the ledger purposes it is recorded under. The card says when those are shared (support and chat both record `chat`), or that the task is not costed separately.
+  - **Codex review 2** (`audits/AI-1C-CODEX-CODE-REVIEW-2.md`, REQUEST CHANGES; each finding partly fixed), now completed:
+    1. A row saved before the limit could still show a fallback that the site ignores. `choice()` now cuts a saved chain to `max_chain`. The call-site test also checks that the site really asks through `chat_request("<task>")`.
+    2. The hourly list is now read and written under one lock; a test that slows the read reproduces Codex's stale-copy race. The profit guard is checked again before every case, so a test stops once spending is held.
+    3. Each call's timeout is what's left before the deadline, and no call starts with under 3 s left.
+    4. A missing or non-object argument now fails without crashing, and so does an amount stated beside a lookup. Each customer's balance must sit with that customer. Honest answers with dates, invoice numbers and pence are covered as passing.
+    5. The ledger purposes were checked against the code: `reply_draft` records `draft`, `email_briefing` records `briefing`, and `wording` records `accountancy_pack`. A test reads those attributions from the source.
+  - **Codex review 3** (`audits/AI-1C-CODEX-CODE-REVIEW-3.md`): **APPROVE**, no blocking defect. Follow-up hardening (non-blocking, not in this PR):
+    - Compute each call's remaining time *after* the per-case guard check, so a slow guard query can't push a call past the 150 s deadline. Re-scale the slow-call test so it runs some cases before stopping (MIN_CALL_SECONDS now skips them all).
+    - Grading edge cases:
+      - "£750 and £500 respectively" is a false failure;
+      - "Harbour £500 / Northgate £750" in one clause is a false pass;
+      - the total named against one customer is a false pass.
+
+      Consider grading the grounding case by asking for structured output rather than reading free text.
+    - There's no reservation for eval spend: a test admitted just under the kill threshold can overshoot it by at most one test's cost (≤ £3).
 
 ## Out of scope
 
