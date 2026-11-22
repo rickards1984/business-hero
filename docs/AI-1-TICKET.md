@@ -282,6 +282,11 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     - `tokens` in its result, the provider's reported total, which feeds the meeting's soft and hard caps.
   - **One intended change:** a failure other than BM-5's refusal, such as a 429, now gets `ai_text`'s single costed retry in place of the SDK's hidden one. It is never asked again without reasoning.
   - **Elsewhere:** the meeting prep records the first model chosen. On the admin page, `meeting` drops `ONE_OPENAI`. The voice meeting (BM-2, realtime) is unchanged.
+  - **Codex review 1** (`audits/AI-1D2-CODEX-CODE-REVIEW-1.md`, REQUEST CHANGES; 2 blocking, 2 not), all fixed:
+    1. **Blocking:** a billed empty answer's tokens fell out of the meeting's 50k and 100k caps. `ai_text` now adds up what every attempt reported, answered or not. The total comes back as the result's `tokens` and on the error raised, and the meeting adds it in on failure too.
+    2. **Blocking:** a `-pro` model set through the real `EXECUTIVE_MEETING_AI_MODEL` variable reached Chat Completions, because only the test override was checked. `ai_text` now skips any OpenAI `-pro` model (`ai_models.responses_only`) before any call or cost, for every task, and its log names the setting to change.
+    3. The ask-again hook is consulted only for a refusal made before any work: no usage reported, not cut off. A usage-bearing failure is always billed and counted as an attempt. The meeting's hook also ignores anything but a bad request (400).
+    4. The meeting's first guard check now runs in a worker, as it reads the database.
 
 ## Out of scope
 

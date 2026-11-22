@@ -210,3 +210,68 @@ def test_the_meeting_can_be_given_any_provider_on_the_admin_page():
     from services import ai_models
     task = ai_models.TASKS["meeting"]
     assert task.max_chain == 6 and "anthropic" in task.providers and not task.openai_only
+
+
+# ------------------------------------------- Codex part 2 review 1 ---
+
+def test_an_empty_answer_s_tokens_still_count_against_the_meeting_s_caps(env, monkeypatch):
+    """Finding 1: an empty, cut-off answer reporting 9,000 tokens returned
+    (None, 9000) before and (None, 0) after."""
+    from services import ai_chat
+
+    def adapter(provider, model, messages, tools, timeout, factory, **opts):
+        env.calls.append(model)
+        return SimpleNamespace(content="", tool_calls=[], truncated=True), SimpleNamespace(total_tokens=9000)
+    monkeypatch.setattr(ai_chat, "_ADAPTERS", {"openai": adapter, "anthropic": adapter, "xai": adapter})
+    env.chain = [GPT5]
+    assert ask() == (None, 9000)
+
+
+def test_every_attempt_s_tokens_count_when_another_model_answers(env, monkeypatch):
+    """Claude answers empty (4,000 tokens); GPT-5 times out (1,000) and its
+    own retry answers (500): the meeting counts all 5,500."""
+    from services import ai_chat, ai_router
+    answers = iter([(SimpleNamespace(content="", tool_calls=[], truncated=True), SimpleNamespace(total_tokens=4000)),
+                    ai_router.ProviderError("openai: Timeout", usage=SimpleNamespace(total_tokens=1000)),
+                    (SimpleNamespace(content="Fine.", tool_calls=[], truncated=False), SimpleNamespace(total_tokens=500))])
+
+    def adapter(provider, model, messages, tools, timeout, factory, **opts):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    monkeypatch.setattr(ai_chat, "_ADAPTERS", {"openai": adapter, "anthropic": adapter, "xai": adapter})
+    env.chain = [ANTHROPIC, GPT5]
+    assert ask() == ("Fine.", 5500)
+
+
+@pytest.mark.parametrize("name", ["gpt-5-pro", "o3-pro"])
+def test_a_pro_model_set_in_the_environment_is_never_sent(env, monkeypatch, caplog, name):
+    """Finding 2: the real EXECUTIVE_MEETING_AI_MODEL setting skipped the
+    -pro refusal; only the test override was checked."""
+    from services import ai_models
+    monkeypatch.setattr(ai_models, "resolve", lambda task: ai_models.default(task))     # no saved choice
+    monkeypatch.setenv("EXECUTIVE_MEETING_AI_MODEL", name)
+    env.script = {name: "never"}
+    assert ask() == (None, 0)
+    assert env.calls == [] and env.recorded == [] and "EXECUTIVE_MEETING_AI_MODEL" in caplog.text
+
+
+def test_a_pro_model_is_skipped_for_the_next_in_the_chain(env, caplog):
+    env.chain = [("openai", "gpt-5-pro"), ANTHROPIC]
+    env.script = {"claude-opus-5-5": "Fine."}
+    assert ask()[0] == "Fine." and [c.model for c in env.calls] == ["claude-opus-5-5"]
+
+
+def test_the_first_guard_check_runs_off_the_event_loop(env):
+    """Finding 4: permits() reads the database; it ran on the loop."""
+    import threading
+    where = []
+
+    def permits(purpose):
+        where.append(threading.current_thread() is threading.main_thread())
+        return True
+    env.permits = permits
+    env.script = {"claude-opus-5-5": "Fine."}
+    ask()
+    assert where and not any(where)

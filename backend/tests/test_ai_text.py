@@ -516,3 +516,35 @@ def test_tools_reach_the_adapter_and_a_tool_only_answer_counts(env, monkeypatch)
     use(monkeypatch, GPT5)
     out = ai_text.complete("meeting", MSGS, max_tokens=400, tools=[{"type": "function"}])
     assert seen == [[{"type": "function"}]] and out.tool_calls[0]["name"] == "x" and out.tokens == 9
+
+
+def test_a_failure_with_usage_is_billed_even_when_the_hook_says_ask_again(env, monkeypatch):
+    """Part 2 review 1, finding 3: an always-true hook made a usage-bearing
+    failure unbilled; only a refusal before any work may be."""
+    from services import ai_router, ai_text
+    hooked = []
+
+    def failing(provider, model, messages, tools, timeout, factory, **opts):
+        raise ai_router.ProviderError("openai: Timeout", usage=SimpleNamespace(prompt_tokens=100, completion_tokens=20))
+    adapters(monkeypatch, failing)
+    use(monkeypatch, GPT5)
+    with pytest.raises(ai_router.AllProvidersFailed) as exc:
+        ai_text.complete("briefing", MSGS, max_tokens=400, refused_hook=lambda p, m, e: hooked.append(m) or True)
+    assert hooked == [] and len(env.recorded) == 2 and ai_router._is_down("openai")
+    assert exc.value.tokens == 240
+
+
+def test_a_cut_off_failure_is_never_asked_again_unbilled(env, monkeypatch):
+    from services import ai_chat, ai_text
+    hooked = []
+    adapters(monkeypatch, Fake(**{"gpt-5": ai_chat.Truncated("openai: cut off"), "claude-opus-5-5": "ok"}))
+    use(monkeypatch, GPT5, ANTHROPIC)
+    ai_text.complete("briefing", MSGS, max_tokens=400, refused_hook=lambda p, m, e: hooked.append(m) or True)
+    assert hooked == [] and env.recorded[0][1]["provider"] == "openai"
+
+
+def test_the_meeting_hook_ignores_a_refusal_that_isn_t_a_bad_request():
+    from services import executive_meeting_orchestrator as orch
+    err = RuntimeError("Function tools with reasoning_effort are not supported")
+    err.status_code = 429
+    assert orch._refused_reasoning("openai", "o4-mini", err) is False

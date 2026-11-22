@@ -97,6 +97,8 @@ def complete(task: str, messages: list, *, max_tokens: int, temperature: Optiona
       changed what it will send for that model (BM-5's reasoning with
       tools), so it is asked again at once, unbilled, once.
     - `chain`: the models to use instead of the task's choice (a test override).
+    - `tokens` in the result, and on the error raised: what every attempt
+      reported, answered or not, for a site's own token budget.
     """
     import time
     from services import profit_guard
@@ -104,12 +106,25 @@ def complete(task: str, messages: list, *, max_tokens: int, temperature: Optiona
     essential = purpose in profit_guard.ESSENTIAL
     deadline = time.monotonic() + timeout * TOTAL_ATTEMPT_LIMITS
     tried = []
+    spent = [0]            # tokens every attempt reported, answered or not (part 2 review 1, finding 1)
 
     def held() -> bool:
         return not essential and not profit_guard.permits(purpose)
 
+    def failed(exc):
+        exc.tokens = spent[0]                  # a site's token budget counts what failed attempts used
+        return exc
+
     for provider, model in (chain if chain is not None else ai_models.resolve(task)):
         if ai_router._is_down(provider) or not os.environ.get(ai_models.KEYS.get(provider, "")):
+            continue
+        if provider == "openai" and ai_models.responses_only(model):
+            # Set through an environment variable, which no saved choice's
+            # check sees (part 2 review 1, finding 2): never sent, never billed.
+            setting = ai_models.TASKS[task].legacy_env if task in ai_models.TASKS else None
+            logger.error("[AI] %s: openai/%s can't answer chat requests (it serves only the Responses API); "
+                         "change %s", task, model, setting or "its choice on the admin page")
+            tried.append(f"{provider}/{model}")
             continue
         asked_again = False
         attempt = 0
@@ -125,15 +140,15 @@ def complete(task: str, messages: list, *, max_tokens: int, temperature: Optiona
             out_of_time = ai_router.AllProvidersFailed(f"No AI model could answer {task} in time"
                                                        + (f" (tried {', '.join(tried)})" if tried else ""))
             if deadline - time.monotonic() < MIN_ATTEMPT_SECONDS:
-                raise out_of_time              # before the guard's own query (review 2, finding 6)
+                raise failed(out_of_time)      # before the guard's own query (review 2, finding 6)
             # Before every attempt: a failure just costed may have closed the
             # kill switch (finding 1), and the SDK hook can't see these calls.
             if held():
-                raise profit_guard.Paused(f"{purpose} paused: this month's costs have reached the kill threshold "
-                                          "of income")
+                raise failed(profit_guard.Paused(f"{purpose} paused: this month's costs have reached the kill "
+                                                 "threshold of income"))
             seconds = min(timeout, deadline - time.monotonic())     # after the guard: its time counts
             if seconds < MIN_ATTEMPT_SECONDS:
-                raise out_of_time
+                raise failed(out_of_time)
             options = {"max_tokens": max_tokens, "temperature": temperature, "retries": 0}
             if json_object:
                 options["json_object"] = True
@@ -143,8 +158,12 @@ def complete(task: str, messages: list, *, max_tokens: int, temperature: Optiona
                 reply, usage = ai_chat._ADAPTERS[provider](provider, model, messages, tools, seconds,
                                                            client_factory, **options)
             except ai_router.ProviderError as exc:
+                spent[0] += _reported_tokens(exc.usage)
                 cause = exc.__cause__ or exc
-                if refused_hook and not asked_again and refused_hook(provider, model, cause):
+                # Only a request refused before any work (no usage, not cut
+                # off) may be asked again unbilled (part 2 review 1, finding 3).
+                refusal = exc.usage is None and not isinstance(exc, ai_chat.Truncated)
+                if refused_hook and refusal and not asked_again and refused_hook(provider, model, cause):
                     asked_again = True         # refused before any work: not billed, not an attempt
                     logger.warning("[AI] %s: %s/%s refused those settings; asking again", task, provider, model)
                     continue
@@ -165,6 +184,7 @@ def complete(task: str, messages: list, *, max_tokens: int, temperature: Optiona
                 logger.warning("[AI] %s: %s/%s failed (%s); trying the next model", task, provider, model, exc)
                 break
             cost(usage)
+            spent[0] += _reported_tokens(usage)
             content = (reply.content or "").strip()
             calls = list(getattr(reply, "tool_calls", None) or [])
             if not content and not calls:      # billed, but no answer: the next model, not an outage
@@ -174,9 +194,9 @@ def complete(task: str, messages: list, *, max_tokens: int, temperature: Optiona
                                if getattr(reply, "truncated", False) else "")
                 break
             return SimpleNamespace(content=content, tool_calls=calls, provider=provider, model=model,
-                                   truncated=bool(getattr(reply, "truncated", False)),
-                                   tokens=_reported_tokens(usage))
-    raise ai_router.AllProvidersFailed(f"No AI model could answer {task}" + (f" (tried {', '.join(tried)})" if tried else ""))
+                                   truncated=bool(getattr(reply, "truncated", False)), tokens=spent[0])
+    raise failed(ai_router.AllProvidersFailed(f"No AI model could answer {task}"
+                                              + (f" (tried {', '.join(tried)})" if tried else "")))
 
 
 async def acomplete(task: str, messages: list, **kwargs):

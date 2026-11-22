@@ -484,6 +484,8 @@ def _refused_reasoning(provider: str, model: str, exc: BaseException) -> bool:
     Remembered for every later turn, so it is asked again with none."""
     if provider != "openai" or not _is_reasoning_model(model) or _tools_need_no_reasoning(model):
         return False
+    if getattr(exc, "status_code", None) not in (None, 400):   # only a bad-request refusal
+        return False
     if not _refuses_reasoning_with_tools(exc):
         return False
     logger.warning("[ExecMeeting] %s refuses tools with reasoning; retrying with none", model)
@@ -516,7 +518,8 @@ async def _gpt_chat_completion(
     rounds, then it must answer from what it has.
     """
     from services import ai_chat, ai_text, profit_guard
-    if not profit_guard.permits("meeting"):
+    # In a worker: the guard reads the database (part 2 review 1, finding 4).
+    if not await asyncio.to_thread(profit_guard.permits, "meeting"):
         logger.warning("[ExecMeeting] paused by the profit guard (PROFIT-1)")
         return None, 0
     chain = None
@@ -544,7 +547,7 @@ async def _gpt_chat_completion(
                     refused_hook=_refused_reasoning, client_factory=_openai_client, chain=chain)
         except Exception as exc:
             logger.exception("[ExecMeeting] AI call failed: %s", exc)
-            return None, tokens
+            return None, tokens + getattr(exc, "tokens", 0)    # what the failed attempts used still counts
         tokens += reply.tokens
         calls = reply.tool_calls if offer else []
         if not calls:
