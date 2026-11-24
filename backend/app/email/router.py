@@ -787,8 +787,7 @@ def list_email_messages(   # ARIA-1a: plain def, so FastAPI runs its database wo
         if category == "important":
             statement = statement.where(sa_text(inbox_sorting.IMPORTANT_SQL))
         else:
-            wanted = inbox_sorting.normalise(category)
-            statement = statement.where(EmailMessage.ai_category.in_(inbox_sorting.stored_values({wanted})))
+            statement = statement.where(sa_text(inbox_sorting.category_sql(category)))
     if priority_min is not None:
         statement = statement.where(EmailMessage.ai_priority >= priority_min)
 
@@ -1270,7 +1269,8 @@ async def analyze_emails(
         out = await run_in_threadpool(_sort_now, str(business.id))
         return EmailAnalyzeResponse(analyses=[], analyzed_count=out["sorted"] + out["skipped"],
                                     sorted_count=out["sorted"], skipped_count=out["skipped"],
-                                    waiting_count=out["waiting"] or 0, failed=out["failed"])
+                                    waiting_count=out["waiting"] or 0, failed=out["failed"],
+                                    busy=bool(out.get("busy")))
     statement = select(EmailMessage).where(
         EmailMessage.business_id == business.id,
         EmailMessage.id.in_(data.message_ids),
@@ -1327,33 +1327,57 @@ def _sort_now(business_id: str) -> dict:
         return inbox_sorting.sort_pending(s, business_id, limit=50)
 
 
+SORTING_RANGES = {"today", "week", "month", "all"}
+
+
+def _range_start(now: datetime, range_: str):
+    """The start of the Comms page's time range, as its list filters it."""
+    from zoneinfo import ZoneInfo
+    if range_ == "all":
+        return None
+    if range_ == "today":
+        local = now.astimezone(ZoneInfo("Europe/London"))
+        return local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    return now - timedelta(days=7 if range_ == "week" else 30)
+
+
 @router.get("/sorting")
 def email_sorting_status(
+    range: str = Query(default="month", description="today, week, month or all: the page's time range"),
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
     """ARIA-1a: what the Comms page says about Aria's sorting: how many are
-    waiting, when mail was last sorted and when she checks next, and the
-    count per category (last 30 days) for the filters."""
+    waiting, when mail was last sorted and when she checks next, and, for the
+    page's time range, the count per category, the unread count and the
+    important unread count. Counted here, not from the list on screen, so
+    choosing one category never shows the others as 0 (review 1, finding 5)."""
     from sqlalchemy import text as sa_text
     from services import inbox_schedule, inbox_sorting
     bid = str(auth_ctx["business_id"])
     now = datetime.now(timezone.utc)
-    since = now - timedelta(days=30)
+    if range not in SORTING_RANGES:
+        raise HTTPException(status_code=422, detail="range must be today, week, month or all")
+    since = _range_start(now, range)
     waiting = session.execute(sa_text(
         "SELECT COUNT(*) FROM email_messages WHERE business_id = :b AND ai_analyzed_at IS NULL"), {"b": bid}).scalar()
     last = session.execute(sa_text(
         "SELECT MAX(ai_analyzed_at) FROM email_messages WHERE business_id = :b"), {"b": bid}).scalar()
     counts = {key: 0 for key in inbox_sorting.CATEGORIES}
-    important = 0
+    important = important_total = unread_total = total = 0
+    window = "" if since is None else " AND received_at >= :since"
     rows = session.execute(sa_text(
         "SELECT ai_category, ai_priority, is_unread FROM email_messages "
-        "WHERE business_id = :b AND ai_analyzed_at IS NOT NULL AND received_at >= :since"),
+        "WHERE business_id = :b AND folder = 'INBOX'" + window),
         {"b": bid, "since": since}).fetchall()
     for category, priority, unread in rows:
-        counts[inbox_sorting.normalise(category)] += 1
-        if unread and inbox_sorting.is_important(category, priority):
-            important += 1
+        total += 1
+        unread_total += bool(unread)
+        if inbox_sorting.is_sorted_value(category):
+            counts[inbox_sorting.normalise(category)] += 1
+        if inbox_sorting.is_important(category, priority):
+            important_total += 1
+            important += bool(unread)
     session.rollback()
     if isinstance(last, datetime) and last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
@@ -1362,7 +1386,11 @@ def email_sorting_status(
         "last_sorted_at": last.isoformat() if isinstance(last, datetime) else (str(last) if last else None),
         "next_check_at": inbox_schedule.next_check(now, _last_quick_check()).isoformat(),
         "schedule": inbox_schedule.DESCRIPTION,
+        "range": range,
+        "total": total,
+        "unread": unread_total,
         "categories": [{"key": k, "label": v, "count": counts[k]} for k, v in inbox_sorting.CATEGORIES.items()],
+        "important": important_total,
         "important_unread": important,
     }
 

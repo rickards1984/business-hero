@@ -20,7 +20,7 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(not (ESBUILD.exists() and NODE),
                                 reason="needs frontend node_modules and node. A skip is not a pass.")
 
-CATS = ["money", "new_enquiry", "customer", "complaint", "supplier", "scheduling", "fyi", "junk", None]
+CATS = ["money", "new_enquiry", "customer", "complaint", "supplier", "scheduling", "fyi", "junk", None, ""]
 PRIOS = [None, 1, 2, 3, 4, 5]
 CASES = list(itertools.product(CATS, PRIOS))
 

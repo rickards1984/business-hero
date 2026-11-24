@@ -136,9 +136,7 @@ def test_the_important_sql_agrees_with_is_important(db):
     (dict(labels=["INBOX", "CATEGORY_PROMOTIONS"], subject="50% off"), "junk", "promotion"),
     (dict(labels=["SPAM"]), "junk", "spam"),
     (dict(labels=["INBOX", "CATEGORY_SOCIAL"]), "fyi", "social"),
-    (dict(from_email="no-reply@service.example", subject="Your weekly digest"), "fyi", "automated"),
-    (dict(raw_headers={"Auto-Submitted": "auto-replied"}, subject="Out of office"), "fyi", "automated"),
-    (dict(from_email="Mike@NewBody.example"), "fyi", "your own"),
+    (dict(raw_headers={"Auto-Submitted": "auto-replied"}, subject="Out of office"), "fyi", "automatic reply"),
 ])
 def test_free_filters_sort_without_any_ai(db, ai, kw, category, why):
     mid = mail(db, **kw)
@@ -164,10 +162,13 @@ def test_money_emails_are_never_filtered_away(db, ai, kw):
     assert ai.batches == [[mid]] and stored(db, mid).category == "money"
 
 
-def test_promotions_stay_junk_even_with_a_money_word(db, ai):
-    mid = mail(db, labels=["INBOX", "CATEGORY_PROMOTIONS"], subject="Save on payment terminals")
+def test_a_promotion_with_a_money_word_goes_to_the_ai(db, ai):
+    """Review 1, finding 2: a genuine invoice Gmail labelled a promotion
+    became Junk unseen. Now the AI decides (it may still say Junk)."""
+    mid = mail(db, labels=["INBOX", "CATEGORY_PROMOTIONS"], subject="Invoice INV-0042 from Harbour Lettings")
+    ai.answers[mid] = ("money", 4)
     sort(db)
-    assert ai.batches == [] and stored(db, mid).category == "junk"
+    assert ai.batches == [[mid]] and stored(db, mid).category == "money"
 
 
 def test_a_reply_to_outreach_is_left_to_the_outreach_scanner(db, ai):
@@ -195,7 +196,7 @@ def test_ordinary_mail_is_sorted_by_the_ai_in_batches(db, ai):
         ai.answers[i] = ("customer", 3)
     out = sort(db, batch_size=5)
     assert [len(b) for b in ai.batches] == [5, 5, 2] and out == {"sorted": 12, "skipped": 0, "waiting": 0,
-                                                                  "failed": False}
+                                                                  "failed": False, "busy": False}
     assert all(stored(db, i).category == "customer" for i in ids)
 
 
@@ -217,7 +218,7 @@ def test_a_failed_batch_stamps_nothing_and_says_so(db, ai):
 
 def test_already_sorted_mail_is_left_alone(db, ai):
     mail(db, ai_category="money", ai_priority=4, ai_analyzed_at=datetime.now(timezone.utc))
-    assert sort(db) == {"sorted": 0, "skipped": 0, "waiting": 0, "failed": False} and ai.batches == []
+    assert sort(db) == {"sorted": 0, "skipped": 0, "waiting": 0, "failed": False, "busy": False} and ai.batches == []
 
 
 def test_only_this_business_s_mail_is_sorted(db, ai):
@@ -319,3 +320,147 @@ def test_with_no_key_mail_is_left_unsorted_not_marked_fyi(monkeypatch, caplog):
     monkeypatch.setattr(service.ai_chat, "available", lambda task: False)
     batch = [SimpleNamespace(id="m1", from_email="a", from_name="A", subject="Invoice", snippet="", received_at=None)]
     assert service.analyze_email_batch(batch) == [] and "no key" in caplog.text
+
+
+# ------------------------------------------------ Codex ARIA-1a review 1 ---
+
+@pytest.mark.parametrize("kw", [
+    dict(from_email="no-reply@bookings.example", subject="New enquiry from your website"),          # finding 1
+    dict(from_email="mike@newbody.example", subject="Website contact form: roof repair"),           # plugin, own address
+    dict(from_email="mike@newbody.example", subject="Fwd: Complaint about Tuesday's visit"),        # forwarded in
+    dict(from_email="noreply@forms.example", raw_headers={"Auto-Submitted": "auto-generated"}, subject="Form submission"),
+])
+def test_sender_alone_never_hides_real_mail(db, ai, kw):
+    mid = mail(db, **kw)
+    sort(db)
+    assert ai.batches == [[mid]]
+
+
+@pytest.mark.parametrize("kw", [
+    dict(from_email="no-reply@bank.example", subject="£750 received",
+         raw_headers={"List-Unsubscribe": "<x>"}),                                                  # finding 2: leading £
+    dict(from_email="no-reply@gocardless.com", subject="Your mandate has been cancelled",
+         raw_headers={"List-Unsubscribe": "<x>"}),
+    dict(from_email="noreply@tax.service.gov.uk", subject="Action required", raw_headers={"Precedence": "bulk"}),
+    dict(from_email="alerts@notify.example", subject="An update", snippet="Your invoice INV-12 is now overdue",
+         raw_headers={"List-Id": "<x>"}),                                                           # the preview
+    dict(labels=["INBOX", "CATEGORY_PROMOTIONS"], subject="Your quote request"),
+    dict(from_email="hello@stripe.com", subject="Weekly summary", raw_headers={"List-Unsubscribe": "<x>"}),
+])
+def test_anything_that_might_be_money_or_need_the_owner_goes_to_the_ai(db, ai, kw):
+    mid = mail(db, **kw)
+    sort(db)
+    assert ai.batches == [[mid]]
+
+
+def test_bank_holiday_offers_are_still_a_free_newsletter(db, ai):
+    """Finding 9: "bank" in "bank holiday" isn't money."""
+    mid = mail(db, subject="Bank holiday offers", raw_headers={"List-Unsubscribe": "<x>"})
+    sort(db)
+    assert ai.batches == [] and stored(db, mid).category == "fyi"
+
+
+def test_a_pass_already_running_makes_the_next_one_do_nothing(db, ai):
+    """Finding 3: the background and Sort now both sorted (and paid for) the
+    same mail; the later stamp overwrote the earlier."""
+    from services import inbox_sorting
+    mail(db)
+    with Session(db) as holder, inbox_sorting._one_pass(holder, BIZ) as mine:
+        assert mine
+        out = sort(db)
+    assert out["busy"] is True and out["sorted"] == 0 and ai.batches == [] and out["waiting"] == 1
+    assert sort(db)["sorted"] == 1                                    # free again afterwards
+
+
+def test_a_stamp_never_overwrites_mail_already_sorted(db):
+    from services import inbox_sorting
+    mid = mail(db, ai_category="complaint", ai_priority=5, ai_analyzed_at=datetime.now(timezone.utc))
+    with Session(db) as s:
+        assert inbox_sorting._stamp(s, BIZ, mid, "fyi", 1, "late answer") is False
+        s.commit()
+    assert stored(db, mid).category == "complaint"
+
+
+def test_two_passes_at_once_sort_each_email_once(tmp_path, monkeypatch):
+    """Two threads, two sessions, one file database: one pass sorts, the other
+    is busy; the model is asked once."""
+    import threading
+    import time
+    from app.email import service
+    from schemas import EmailAnalysis
+    from services import inbox_sorting
+    engine = create_engine("sqlite:///" + str(tmp_path / "two.sqlite"), connect_args={"check_same_thread": False})
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE email_messages (id TEXT PRIMARY KEY, business_id TEXT, email_account_id TEXT,
+            provider_message_id TEXT, provider_thread_id TEXT, from_email TEXT, from_name TEXT, subject TEXT,
+            snippet TEXT, received_at TIMESTAMP, labels TEXT DEFAULT '[]', raw_headers TEXT DEFAULT '{}',
+            is_unread BOOLEAN DEFAULT 1, ai_category TEXT, ai_priority INT, ai_summary TEXT,
+            ai_suggested_action TEXT, ai_analyzed_at TIMESTAMP)"""))
+        c.execute(text("CREATE TABLE outreach_messages (business_id TEXT, provider_thread_id TEXT)"))
+    mid = mail(engine)
+    asked = []
+
+    def slow(batch):
+        asked.append([m.id for m in batch])
+        time.sleep(0.2)
+        return [EmailAnalysis(message_id=m.id, category="customer", priority=3, summary="x", suggested_action=None)
+                for m in batch]
+    monkeypatch.setattr(service, "analyze_email_batch", slow)
+    results = []
+
+    def go():
+        with Session(engine) as s:
+            results.append(inbox_sorting.sort_pending(s, BIZ))
+    threads = [threading.Thread(target=go) for _ in range(2)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert asked == [[mid]] and sorted(r["busy"] for r in results) == [False, True]
+
+
+def test_an_answer_given_twice_is_counted_once(db, monkeypatch):
+    """Finding 8."""
+    from app.email import service
+    from schemas import EmailAnalysis
+    mid = mail(db)
+    monkeypatch.setattr(service, "analyze_email_batch", lambda batch: [
+        EmailAnalysis(message_id=mid, category="money", priority=4, summary="x", suggested_action=None)] * 2)
+    assert sort(db)["sorted"] == 1
+
+
+def test_a_batch_the_model_answers_only_in_part_is_reported(db, monkeypatch):
+    from app.email import service
+    from schemas import EmailAnalysis
+    a, b = mail(db), mail(db)
+    monkeypatch.setattr(service, "analyze_email_batch", lambda batch: [
+        EmailAnalysis(message_id=a, category="money", priority=4, summary="x", suggested_action=None)])
+    out = sort(db)
+    assert out["sorted"] == 1 and out["failed"] is True and out["waiting"] == 1 and stored(db, b).analysed is False
+
+
+RAW = ["money", "Money", " MONEY ", "finance", "Finance", "FINANCE", "action_required", "Action Required",
+       "action-required", "new_enquiry", "New Enquiry", "new-enquiry", "complaint", "supplier", "Supplier",
+       "junk", "Junk", "spam", "Marketing", "fyi", "FYI", "newsletter", "weird value", "", "   ", None]
+
+
+def test_the_sql_rules_read_every_stored_value_as_python_does(db):
+    """Finding 4: "Finance" was important in Python, not in SQL; "Junk" p5
+    the other way round."""
+    from services import inbox_sorting
+    rows = {}
+    for raw in RAW:
+        for prio in (None, 1, 3, 4, 5):
+            rows[mail(db, ai_category=raw, ai_priority=prio)] = (raw, prio)
+    with db.connect() as c:
+        important = {r[0] for r in c.execute(text(f"SELECT id FROM email_messages WHERE {inbox_sorting.IMPORTANT_SQL}"))}
+        assert important == {i for i, (raw, p) in rows.items() if inbox_sorting.is_important(raw, p)}
+        for key in inbox_sorting.CATEGORIES:
+            got = {r[0] for r in c.execute(text(f"SELECT id FROM email_messages WHERE {inbox_sorting.category_sql(key)}"))}
+            want = {i for i, (raw, _) in rows.items() if inbox_sorting.is_sorted_value(raw)
+                    and inbox_sorting.normalise(raw) == key}
+            assert got == want, key
+
+
+@pytest.mark.parametrize("raw", ["", "   ", None])
+def test_mail_not_sorted_is_never_important(raw):
+    from services import inbox_sorting
+    assert inbox_sorting.is_important(raw, 5) is False

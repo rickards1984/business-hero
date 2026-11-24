@@ -43,13 +43,20 @@ def due(now: datetime, last_full: Optional[datetime], last_quick: Optional[datet
     return None
 
 
-def next_check(now: datetime, last: Optional[datetime] = None) -> datetime:
-    """When the next quick check will run (UTC)."""
-    if in_window(now):
-        at = (last + QUICK_EVERY) if last else now
-        return max(at, now).astimezone(timezone.utc)
-    local = now.astimezone(LONDON)
+def _next_opening(after: datetime) -> datetime:
+    """The first 07:00 UK on a weekday after `after` (UTC)."""
+    local = after.astimezone(LONDON)
     day = local.date() if local.hour < FIRST_HOUR else local.date() + timedelta(days=1)
     while day.weekday() >= 5:
         day += timedelta(days=1)
     return datetime(day.year, day.month, day.day, FIRST_HOUR, 0, tzinfo=LONDON).astimezone(timezone.utc)
+
+
+def next_check(now: datetime, last: Optional[datetime] = None) -> datetime:
+    """When the next quick check will run (UTC): never a time outside the
+    window, where none runs (Codex ARIA-1a review 1, finding 7: Friday 18:55
+    said 19:05)."""
+    at = max((last + QUICK_EVERY) if last else now, now)
+    if in_window(at):
+        return at.astimezone(timezone.utc)
+    return _next_opening(at)

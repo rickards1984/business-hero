@@ -295,8 +295,10 @@ def _run_background_sync_jobs_nonblocking():
     # ARIA-1a (services/inbox_schedule): weekdays 07:00-19:00 UK, a check for
     # new mail every 15 minutes (fetched and sorted), and the full sync every
     # 2 hours, which also refreshes read and unread state.
-    from services import inbox_schedule
-    run = inbox_schedule.due(now, _last_email_sync, _last_email_quick)
+    from services import background_sync, inbox_schedule
+    # Still running: record nothing, so a full sync that would only be
+    # skipped is tried again next minute (ARIA-1a review 1, finding 6).
+    run = None if background_sync.email_sync_busy() else inbox_schedule.due(now, _last_email_sync, _last_email_quick)
     if run == "full":
         _last_email_sync = _last_email_quick = now
         asyncio.create_task(_safe_background_email_sync(new_only=False))

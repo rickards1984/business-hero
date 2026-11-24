@@ -483,6 +483,7 @@ class EmailAnalyzeResponse(BaseModel):
     skipped_count: int = 0         # sorted by the free filters (newsletters, promotions, ...)
     waiting_count: int = 0         # still unsorted
     failed: bool = False           # an AI batch failed: those emails are tried again next check
+    busy: bool = False             # another pass was already sorting: nothing done by this one
 
 
 class EmailDraftOptionsResponse(BaseModel):

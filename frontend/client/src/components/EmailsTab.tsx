@@ -116,6 +116,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
   const hasDataRef = useRef(emails.length > 0);
   const [analyzing, setAnalyzing] = useState(false);
   const [sorting, setSorting] = useState<SortingStatus | null>(null);
+  const [unreadOnly, setUnreadOnly] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [timeRange, setTimeRange] = useState('today');
   const [searchQuery, setSearchQuery] = useState('');
@@ -146,9 +147,10 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
   const loadEmails = useCallback(async (): Promise<number> => {
     try {
       if (!hasDataRef.current) setLoading(true);
-      const params: { limit?: number; category?: string; sortBy?: string } = {
+      const params: { limit?: number; category?: string; sortBy?: string; unreadOnly?: boolean } = {
         limit: 50,
         sortBy: 'date',
+        unreadOnly,
       };
       if (categoryFilter !== 'all') {
         params.category = categoryFilter;
@@ -170,7 +172,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
     } finally {
       setLoading(false);
     }
-  }, [categoryFilter, businessId]);
+  }, [categoryFilter, unreadOnly, businessId]);
 
   // Keep a ref of the current email count so timers can read it without
   // re-subscribing on every change.
@@ -262,10 +264,18 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
     };
   }, [stopPolling]);
 
+  // The counts come from the server for the page's time range, never from the
+  // (filtered, 50 at most) list on screen (Codex ARIA-1a review 1, finding 5),
+  // and refresh each minute so "next check" never sits in the past.
   const loadSorting = useCallback(async () => {
-    try { setSorting(await fetchSortingStatus()); } catch { /* the line just stays as it was */ }
-  }, []);
-  useEffect(() => { loadSorting(); }, [loadSorting]);
+    try { setSorting(await fetchSortingStatus(timeRange)); } catch { /* the line just stays as it was */ }
+  }, [timeRange]);
+  useEffect(() => {
+    loadSorting();
+    const timer = setInterval(loadSorting, 60000);
+    return () => clearInterval(timer);
+  }, [loadSorting]);
+  const showCategory = (key: string, unread = false) => { setCategoryFilter(key); setUnreadOnly(unread); };
 
   // ARIA-1a: "Sort now" runs the same pass as the 15-minute check and says
   // what it did. "Analyze All" found nothing (the background had sorted it)
@@ -276,7 +286,9 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
       const result = await analyzeEmails();
       const sorted = result.sorted_count ?? 0;
       const free = result.skipped_count ?? 0;
-      if (result.failed) {
+      if (result.busy) {
+        setSnackbar({ open: true, severity: 'info', message: 'Aria is sorting your mail right now. It will be ready in a moment.' });
+      } else if (result.failed) {
         setSnackbar({ open: true, severity: 'error',
           message: `Aria couldn't sort ${result.waiting_count || 'some'} email${result.waiting_count === 1 ? '' : 's'} just now. She'll try again at the next check.` });
       } else if (sorted + free === 0) {
@@ -356,13 +368,21 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
       );
     });
 
-  const counts: Record<string, number> = {
-    all: filteredEmails.length,
-    unread: filteredEmails.filter(e => e.is_unread).length,
-    important: filteredEmails.filter(e => isImportant(e.ai_category, e.ai_priority)).length,
-    needsYou: filteredEmails.filter(e => e.is_unread && isImportant(e.ai_category, e.ai_priority)).length,
-    ...Object.fromEntries(INBOX_CATEGORIES.map(c => [c.key, filteredEmails.filter(e => e.ai_category === c.key).length])),
-  };
+  const counts: Record<string, number> = sorting
+    ? {
+      all: sorting.total,
+      unread: sorting.unread,
+      important: sorting.important,
+      needsYou: sorting.important_unread,
+      ...Object.fromEntries(sorting.categories.map(c => [c.key, c.count])),
+    }
+    : {
+      all: filteredEmails.length,
+      unread: filteredEmails.filter(e => e.is_unread).length,
+      important: filteredEmails.filter(e => isImportant(e.ai_category, e.ai_priority)).length,
+      needsYou: filteredEmails.filter(e => e.is_unread && isImportant(e.ai_category, e.ai_priority)).length,
+      ...Object.fromEntries(INBOX_CATEGORIES.map(c => [c.key, filteredEmails.filter(e => e.ai_category === c.key).length])),
+    };
   const when = (iso?: string | null) => (iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : null);
   const nextCheck = sorting?.next_check_at ? new Date(sorting.next_check_at) : null;
   const nextCheckText = nextCheck
@@ -467,7 +487,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
       {/* Summary stat cards: tap one to filter */}
       <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap' }}>
         <Card
-          onClick={() => setCategoryFilter('important')}
+          onClick={() => showCategory('important', true)}
           sx={{ flex: '1 1 150px', p: 2, textAlign: 'center', cursor: 'pointer', border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-xs)' }}
         >
           <Typography sx={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--color-danger-500)' }}>
@@ -478,7 +498,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
           </Typography>
         </Card>
         <Card
-          onClick={() => setCategoryFilter('new_enquiry')}
+          onClick={() => showCategory('new_enquiry')}
           sx={{ flex: '1 1 150px', p: 2, textAlign: 'center', cursor: 'pointer', border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-xs)' }}
         >
           <Typography sx={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--color-primary-500)' }}>
@@ -489,7 +509,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
           </Typography>
         </Card>
         <Card
-          onClick={() => setCategoryFilter('all')}
+          onClick={() => showCategory('all', true)}
           sx={{ flex: '1 1 150px', p: 2, textAlign: 'center', cursor: 'pointer', border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-xs)' }}
         >
           <Typography sx={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--color-neutral-700)' }}>
@@ -507,11 +527,14 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
           <Chip
             key={cat.key}
             label={`${cat.label} (${counts[cat.key] || 0})`}
-            onClick={() => setCategoryFilter(cat.key)}
+            onClick={() => showCategory(cat.key)}
             color={categoryFilter === cat.key ? 'primary' : 'default'}
             variant={categoryFilter === cat.key ? 'filled' : 'outlined'}
           />
         ))}
+        {unreadOnly && (
+          <Chip label="Unread only" color="primary" onDelete={() => setUnreadOnly(false)} />
+        )}
       </Box>
 
       {/* Search bar */}

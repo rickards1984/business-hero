@@ -22,6 +22,12 @@ logger = logging.getLogger("background_sync")
 _email_sync_running = False
 
 
+def email_sync_busy() -> bool:
+    """Whether a sync is running now: the scheduler doesn't record one as
+    run when it would only be skipped (Codex ARIA-1a review 1, finding 6)."""
+    return _email_sync_running
+
+
 async def background_email_sync_all(new_only: bool = False):
     """
     Sync emails for ALL businesses with a connected email account.

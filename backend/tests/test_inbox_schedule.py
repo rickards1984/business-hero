@@ -170,14 +170,14 @@ def test_the_status_reads_categories_old_and_new(monkeypatch):
     now = datetime.now(timezone.utc)
     with engine.begin() as c:
         c.execute(text("CREATE TABLE email_messages (business_id TEXT, ai_category TEXT, ai_priority INT, "
-                       "is_unread BOOLEAN, received_at TIMESTAMP, ai_analyzed_at TIMESTAMP)"))
+                       "is_unread BOOLEAN, received_at TIMESTAMP, ai_analyzed_at TIMESTAMP, folder TEXT DEFAULT 'INBOX')"))
         for cat, prio, unread, analysed in [("finance", 3, True, now), ("money", 2, False, now),
                                             ("marketing", 1, True, now), ("new_enquiry", 4, True, now),
                                             (None, None, True, None)]:
-            c.execute(text("INSERT INTO email_messages VALUES ('b1', :c, :p, :u, :r, :a)"),
+            c.execute(text("INSERT INTO email_messages VALUES ('b1', :c, :p, :u, :r, :a, 'INBOX')"),
                       {"c": cat, "p": prio, "u": unread, "r": now - timedelta(hours=2), "a": analysed})
     with Session(engine) as s:
-        out = router.email_sorting_status(auth_ctx={"business_id": "b1"}, session=s)
+        out = router.email_sorting_status(range="month", auth_ctx={"business_id": "b1"}, session=s)
     counts = {c["key"]: c["count"] for c in out["categories"]}
     assert counts["money"] == 2 and counts["junk"] == 1 and counts["new_enquiry"] == 1
     assert out["waiting"] == 1 and out["important_unread"] == 2 and out["last_sorted_at"]
@@ -188,6 +188,86 @@ def test_the_message_list_filters_by_mike_s_categories_and_importance():
     from pathlib import Path
     from app.email import router
     source = Path(router.__file__).read_text()
-    assert "inbox_sorting.stored_values({wanted})" in source and 'category == "important"' in source
+    assert "inbox_sorting.category_sql(category)" in source and 'category == "important"' in source
     import inspect
     assert not inspect.iscoroutinefunction(router.list_email_messages)       # its DB work in a worker
+
+
+# ------------------------------------------------ Codex ARIA-1a review 1 ---
+
+def test_the_next_check_is_never_outside_the_window():
+    """Finding 7: Friday 18:55, last check 18:50, said 19:05."""
+    from services import inbox_schedule
+    assert inbox_schedule.next_check(uk(2026, 11, 27, 18, 55), uk(2026, 11, 27, 18, 50)) == uk(2026, 11, 30, 7, 0)
+    assert inbox_schedule.next_check(uk(2026, 11, 27, 18, 50), uk(2026, 11, 27, 18, 45)) == uk(2026, 11, 27, 19, 0)
+
+
+def test_a_sync_still_running_means_nothing_is_recorded_as_run(monkeypatch):
+    """Finding 6: a full sync skipped by the overlap guard was recorded as
+    run, so read state went stale for two more hours."""
+    from services import background_sync, briefing_scheduler
+    started = []
+    monkeypatch.setattr(briefing_scheduler.asyncio, "create_task", lambda coro: started.append(coro) or coro.close())
+    monkeypatch.setattr(briefing_scheduler, "_last_email_sync", None)
+    monkeypatch.setattr(briefing_scheduler, "_last_email_quick", None)
+    monkeypatch.setattr(briefing_scheduler, "_last_financial_sync", datetime.now(timezone.utc))
+    from services import inbox_schedule
+    monkeypatch.setattr(inbox_schedule, "in_window", lambda now: True)
+    monkeypatch.setattr(background_sync, "_email_sync_running", True)
+    briefing_scheduler._run_background_sync_jobs_nonblocking()
+    assert started == [] and briefing_scheduler._last_email_sync is None
+    monkeypatch.setattr(background_sync, "_email_sync_running", False)
+    briefing_scheduler._run_background_sync_jobs_nonblocking()
+    assert len(started) == 1 and briefing_scheduler._last_email_sync is not None
+
+
+def test_the_counts_are_for_the_page_s_time_range(monkeypatch):
+    """Finding 5: the counts came from the filtered list on screen."""
+    from sqlalchemy import create_engine, text
+    from sqlmodel import Session
+    from app.email import router
+    engine = create_engine("sqlite://")
+    now = datetime.now(timezone.utc)
+    with engine.begin() as c:
+        c.execute(text("CREATE TABLE email_messages (business_id TEXT, ai_category TEXT, ai_priority INT, "
+                       "is_unread BOOLEAN, received_at TIMESTAMP, ai_analyzed_at TIMESTAMP, folder TEXT)"))
+        for cat, unread, age in [("money", True, timedelta(minutes=10)), ("junk", True, timedelta(minutes=5)),
+                                 ("new_enquiry", False, timedelta(days=3)), ("customer", True, timedelta(days=20))]:
+            c.execute(text("INSERT INTO email_messages VALUES ('b1', :c, 3, :u, :r, :r, 'INBOX')"),
+                      {"c": cat, "u": unread, "r": now - age})
+    with Session(engine) as s:
+        week = router.email_sorting_status(range="week", auth_ctx={"business_id": "b1"}, session=s)
+        every = router.email_sorting_status(range="all", auth_ctx={"business_id": "b1"}, session=s)
+    counts = {c["key"]: c["count"] for c in week["categories"]}
+    assert (week["total"], counts["money"], counts["junk"], counts["new_enquiry"], counts["customer"]) == (3, 1, 1, 1, 0)
+    assert week["important"] == 2 and week["important_unread"] == 1 and week["unread"] == 2
+    assert every["total"] == 4 and every["important_unread"] == 2
+
+
+def test_the_page_takes_its_counts_from_the_server_and_the_cards_filter_what_they_say():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "frontend/client/src/components/EmailsTab.tsx").read_text()
+    assert "fetchSortingStatus(timeRange)" in src and "needsYou: sorting.important_unread" in src
+    assert "showCategory('important', true)" in src and "showCategory('all', true)" in src
+    assert "unreadOnly," in src and "setInterval(loadSorting, 60000)" in src
+
+
+def test_the_postgres_lock_lets_one_pass_run(monkeypatch):
+    """Finding 3 across app instances: a session advisory lock on its own
+    connection. Run against the local PostgreSQL harness when it's up."""
+    import os
+    url = os.environ.get("RLS_LOCAL_DATABASE_URL")
+    if not url:
+        pytest.skip("RLS_LOCAL_DATABASE_URL not set (scripts/rls-local.sh up). A skip is not a pass.")
+    from sqlalchemy import create_engine
+    from sqlmodel import Session
+    from services import inbox_sorting
+    engine = create_engine(url)
+    with Session(engine) as a, Session(engine) as b:
+        with inbox_sorting._one_pass(a, "biz-lock-test") as first:
+            with inbox_sorting._one_pass(b, "biz-lock-test") as second:
+                assert first is True and second is False
+            with inbox_sorting._one_pass(b, "another-business") as other:
+                assert other is True
+        with inbox_sorting._one_pass(b, "biz-lock-test") as after:
+            assert after is True

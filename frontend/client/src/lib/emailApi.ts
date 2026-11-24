@@ -92,6 +92,7 @@ export interface EmailAnalyzeResponse {
   skipped_count?: number;
   waiting_count?: number;
   failed?: boolean;
+  busy?: boolean;
 }
 
 export interface SortingStatus {
@@ -99,13 +100,17 @@ export interface SortingStatus {
   last_sorted_at: string | null;
   next_check_at: string;
   schedule: string;
+  range: string;
+  total: number;
+  unread: number;
   categories: { key: string; label: string; count: number }[];
+  important: number;
   important_unread: number;
 }
 
-/** ARIA-1a: how Aria's sorting stands, for the Comms page. */
-export async function fetchSortingStatus(): Promise<SortingStatus> {
-  const response = await apiRequest('GET', '/v1/email/sorting');
+/** ARIA-1a: how Aria's sorting stands, and the counts for the page's time range. */
+export async function fetchSortingStatus(range: string = 'month'): Promise<SortingStatus> {
+  const response = await apiRequest('GET', `/v1/email/sorting?range=${encodeURIComponent(range)}`);
   return response.json();
 }
 
@@ -120,6 +125,7 @@ export async function fetchEmailMessages(params?: {
   category?: string;
   priorityMin?: number;
   sortBy?: string;
+  unreadOnly?: boolean;
 }): Promise<EmailMessageListResponse> {
   const search = new URLSearchParams();
   if (params?.emailAccountId) search.set('email_account_id', params.emailAccountId);
@@ -127,6 +133,7 @@ export async function fetchEmailMessages(params?: {
   if (params?.category) search.set('category', params.category);
   if (params?.priorityMin) search.set('priority_min', String(params.priorityMin));
   if (params?.sortBy) search.set('sort_by', params.sortBy);
+  if (params?.unreadOnly) search.set('unread_only', 'true');
   const query = search.toString();
   const response = await apiRequest('GET', `/v1/email/messages${query ? `?${query}` : ''}`);
   return response.json();

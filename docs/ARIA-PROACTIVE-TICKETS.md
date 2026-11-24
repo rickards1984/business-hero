@@ -132,6 +132,17 @@
   - the board meeting: Claude Opus 5.5, then gpt-5;
   - quote chat: gpt-6.1-sol.
 
+**Codex review 1** (`audits/ARIA-1A-CODEX-CODE-REVIEW-1.md`, REQUEST CHANGES; 5 blocking, 4 hardening), all fixed:
+1. **The sender alone hid real mail.** A booking form's no-reply address, a contact-form plugin sending from the business's own address, and "Fwd: Complaint" were all filtered as FYI. The free filters now skip **bulk mail only**: spam, promotions, social and forums, mailing lists, and out-of-office (`Auto-Submitted: auto-replied`). A no-reply sender, the owner's own address and auto-generated form mail all go to the AI.
+2. **"Money is never filtered away" wasn't true.** A promotion-labelled invoice, "£750 received" (the leading £ wasn't matched) and "Your mandate has been cancelled" were all filtered. Now a money, tax, account, enquiry, quote, complaint, booking or order signal in the **subject or the preview**, or a known money sender (HMRC, GoCardless, Stripe, PayPal, Xero, the main banks…), always goes to the AI. Promotions are checked after it.
+3. **Two passes sorted and paid for the same mail,** and the later overwrote the earlier. Now there's **one pass per business at a time**: a PostgreSQL session advisory lock on its own connection, or a process lock on SQLite. A pass that finds another running does nothing and says it's `busy` ("Aria is sorting your mail right now"). A stamp never overwrites mail already sorted.
+4. **Python and SQL read stored values differently.** "Finance" was important in Python but not in SQL, and "Junk" at priority 5 the other way round. `NORM_SQL` now reads a value as `normalise` does (trimmed, lower case, spaces and hyphens as underscores). `category_sql` and `IMPORTANT_SQL` are built from it; unknown values read as FYI in both; empty or NULL is "not sorted" and never important. A test checks 26 raw values × 5 priorities against Python.
+5. **Choosing a category showed every other count as 0.** The counts came from the filtered list on screen. They now come from `GET /v1/email/sorting?range=…` for the page's time range: total, unread, important and important unread, and per category. "Needs you" shows important unread mail and "Unread" shows unread mail, with an "Unread only" chip. The status refreshes every minute.
+6. A full sync skipped by the overlap guard was recorded as run. Now the scheduler records nothing while a sync is still running.
+7. "Next check" could show a time outside the window (Friday 18:55 said 19:05). Now it shows the next real check (Monday 07:00).
+8. A duplicate answer counted twice, and a partial answer said nothing. Each email is counted once, and a batch the model answered only in part is reported as `failed`; its missing mail stays unsorted.
+9. "Bank holiday offers" newsletters went to the AI. "Bank holiday" no longer reads as money.
+
 **Found while building:** `test_followups_due_on_existing_enrolments_get_their_morning_card` started failing on its own on 24 Nov 2026, 28 days after its fixed date. The card's check reads the real clock, for the 28-day first-send deadline. The test now holds that clock. **Follow-up:** sweep the other tests with fixed autumn-2026 dates for the same kind of date bomb.
 
 **Next (ARIA-1b):** drafted replies for important email, learning from the owner's edits, and one-tap send.
