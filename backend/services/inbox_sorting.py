@@ -2,29 +2,28 @@
 
 One sorting pass, used by the background sync and by "Sort now":
 
-1. **Free filters** first, with no AI, for **bulk mail only**: spam, Gmail
-   promotions, social and forum notifications, mailing lists and out-of-office
-   replies. A reply to the business's outreach is left to the outreach scanner.
-   - **Never on the sender alone** (Codex ARIA-1a review 1, finding 1). A
-     booking form's no-reply address, a contact-form plugin sending from the
-     business's own address, or the owner forwarding "Fwd: Complaint" into
-     the inbox are real mail.
-   - **Never anything that might matter** (finding 2). A subject or preview
-     with a money, enquiry, complaint, booking or account signal always goes
-     to the AI, even when Gmail calls it a promotion.
-2. **The AI** sorts the rest, in batches, into Mike's categories, costed to
-   the business as `classify` (essential: never paused).
+- **The AI reads every email** into Mike's categories, costed to the business
+  as `classify` (essential: never paused). The only exception is a reply to
+  the business's outreach, which is left to the outreach scanner. Each email
+  goes with its bulk signals (a mailing-list header, Gmail's promotions,
+  social or forums label, an out-of-office header), so newsletters still
+  come out as FYI or Junk.
+- **Why no free filters** (Codex ARIA-1a reviews 1 and 2). Every keyword list
+  left a way to hide real mail unseen: "Please pay today" from a supplier's
+  mailing list, a contact form saying "Can you fix our roof?" with a list
+  header, a no-reply booking form. Reading them all costs about 3p per 1,000
+  emails on gpt-6-luna. Missing a payment or an enquiry costs far more.
 
-**One pass at a time per business** (finding 3). On PostgreSQL that's a
-session advisory lock held on its own connection for the pass, so two app
-instances, or the background and "Sort now", never both pay for the same mail.
-And a stamp never overwrites mail already sorted.
+**One pass at a time per business.** On PostgreSQL that's a session advisory
+lock (a 64-bit key from the business id) on its own connection for the pass,
+so two app instances, or the background and "Sort now", never both pay for
+the same mail. And a stamp never overwrites mail already sorted.
 
-**One rule for categories** (finding 4). `normalise` (Python), `NORM_SQL`
-(any database) and the page's copy read the same stored value the same way:
-trimmed, lower case, spaces and hyphens as underscores, older values through
-`LEGACY`, anything else as FYI. Empty or NULL means not sorted, and is never
-important.
+**One rule for categories.** `normalise` (Python), `NORM_SQL` (any database)
+and the page's copy read a stored value the same way: spaces trimmed (only
+spaces, as SQL's trim does), lower case, spaces and hyphens as underscores,
+older values through `LEGACY`, anything else as FYI. Empty or NULL means not
+sorted, and is never important.
 """
 import json
 import logging
@@ -32,7 +31,6 @@ import re
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Optional
 
 from sqlalchemy import bindparam, text
 
@@ -59,7 +57,9 @@ LEGACY = {
 
 
 def _key(value) -> str:
-    return re.sub(r"[ \-]", "_", str(value if value is not None else "").strip().lower())
+    # strip(" "), not strip(): SQL's trim removes spaces only, so a tab reads
+    # the same in both (Codex ARIA-1a review 2, finding 4).
+    return re.sub(r"[ \-]", "_", str(value if value is not None else "").strip(" ").lower())
 
 
 def normalise(value) -> str:
@@ -119,21 +119,7 @@ IMPORTANT_SQL = (f"(ai_category IS NOT NULL AND {NORM_SQL} <> '' AND ("
                  f"{NORM_SQL} NOT IN ({_quoted(_values_reading_as({'junk'}))}))))")
 
 
-# ---------------------------------------------------------- free filters ---
-
-# Anything that might need the owner: never filtered free, whatever the sender
-# or Gmail's label (review 1, finding 2). Read in the subject and the preview.
-_MATTERS = re.compile(
-    r"(£\s?\d|\b(invoice|invoices|payment|payments|paid|payout|remittance|receipt|statement|overdue|refund|"
-    r"direct debit|mandate|bank(?!\s+holiday)|transfer|bacs|credit note|purchase order|account|tax|vat|hmrc|"
-    r"action required|urgent|enquiry|enquiries|inquiry|quote|quotation|estimate|complaint|unhappy|"
-    r"booking|appointment|order|contract|deposit|balance)\b)", re.I)
-# Senders whose mail is always money or tax, whatever its wording.
-_MONEY_SENDERS = re.compile(r"@([a-z0-9-]+\.)*(hmrc\.gov\.uk|gov\.uk|gocardless\.com|stripe\.com|paypal\.(com|co\.uk)|"
-                            r"xero\.com|quickbooks\.com|intuit\.com|sumup\.com|squareup\.com|wise\.com|"
-                            r"starlingbank\.com|monzo\.com|tide\.co|barclays\.(com|co\.uk)|hsbc\.(com|co\.uk)|"
-                            r"natwest\.com|lloydsbank\.(com|co\.uk)|santander\.co\.uk)$", re.I)
-
+# ----------------------------------------------------------- bulk hints ---
 
 def _load(value, default):
     if isinstance(value, str):
@@ -144,28 +130,24 @@ def _load(value, default):
     return value or default
 
 
-def skip(row, outreach_threads: set) -> Optional[tuple]:
-    """(category, priority, why) when this mail is bulk and needs no AI,
-    else None. Conservative: an unsure case goes to the AI."""
+def bulk_hints(row) -> list:
+    """What the email itself says about being bulk, for the AI to weigh. Never
+    a verdict on its own (review 2, finding 2)."""
     labels = {str(x).upper() for x in _load(row.labels, [])}
     headers = {str(k).lower(): str(v) for k, v in _load(row.raw_headers, {}).items()}
-    sender = (row.from_email or "").strip().lower()
-    if row.provider_thread_id and row.provider_thread_id in outreach_threads:
-        return "fyi", 1, "A reply to your outreach: see Outreach → Replies"
+    hints = []
     if "SPAM" in labels:
-        return "junk", 1, "Marked as spam by your email provider"
-    if _MONEY_SENDERS.search(sender) or _MATTERS.search(f"{row.subject or ''}\n{row.snippet or ''}"):
-        return None                       # might matter: the AI sorts it
+        hints.append("your email provider marked it as spam")
     if "CATEGORY_PROMOTIONS" in labels:
-        return "junk", 1, "A promotion"
+        hints.append("Gmail filed it under Promotions")
     if "CATEGORY_SOCIAL" in labels or "CATEGORY_FORUMS" in labels:
-        return "fyi", 1, "A social or forum notification"
+        hints.append("Gmail filed it under Social or Forums")
     if "list-unsubscribe" in headers or "list-id" in headers or \
             headers.get("precedence", "").lower() in ("bulk", "list", "junk"):
-        return "fyi", 1, "A newsletter or mailing list"
+        hints.append("it has a mailing-list header")
     if headers.get("auto-submitted", "").lower() == "auto-replied":
-        return "fyi", 1, "An automatic reply (out of office)"
-    return None
+        hints.append("it is an automatic reply (out of office)")
+    return hints
 
 
 # ------------------------------------------------- one pass per business ---
@@ -179,17 +161,24 @@ def _one_pass(session, business_id: str):
     """Yields True when this pass may run, False when another is already
     sorting this business's mail (here, or in another app instance)."""
     bind = session.get_bind()
-    if bind.dialect.name == "postgresql":
-        conn = bind.connect()           # its own connection: the lock outlives the pass's commits
+    engine = getattr(bind, "engine", bind)    # a Session bound to a Connection gives the Connection
+    if engine.dialect.name == "postgresql":
+        # Its own connection, in autocommit so no transaction sits open through
+        # the AI calls, and the lock outlives the pass's commits. A 64-bit key
+        # from the id, so two businesses never share one (review 2, finding 12).
+        key = "('x' || substr(md5('inbox_sort:' || :b), 1, 16))::bit(64)::bigint"
+        conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
         try:
-            got = conn.execute(text("SELECT pg_try_advisory_lock(hashtext('inbox_sort:' || :b))"),
-                               {"b": business_id}).scalar()
+            got = bool(conn.execute(text(f"SELECT pg_try_advisory_lock({key})"), {"b": business_id}).scalar())
             try:
-                yield bool(got)
+                yield got
             finally:
                 if got:
-                    conn.execute(text("SELECT pg_advisory_unlock(hashtext('inbox_sort:' || :b))"),
-                                 {"b": business_id})
+                    try:
+                        conn.execute(text(f"SELECT pg_advisory_unlock({key})"), {"b": business_id})
+                    except Exception:
+                        conn.invalidate()        # never back to the pool still holding the lock
+                        raise
         finally:
             conn.close()
         return
@@ -207,6 +196,13 @@ def _one_pass(session, business_id: str):
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+class _Mail:
+    """One email for the AI, with its bulk hints."""
+    def __init__(self, *, hints, **fields):
+        self.__dict__.update(fields)
+        self.hints = hints
 
 
 def _stamp(session, business_id, mid, category, priority, summary, action=None) -> bool:
@@ -227,7 +223,7 @@ def _waiting(session, business_id) -> int:
         {"b": str(business_id)}).scalar() or 0)
 
 
-def sort_pending(session, business_id, *, limit: int = 30, batch_size: int = 10) -> dict:
+def sort_pending(session, business_id, *, limit: int = 30, batch_size: int = 10, only_ids=None) -> dict:
     """Sort up to `limit` of the business's unsorted mail, newest first.
 
     Returns {"sorted", "skipped", "waiting", "failed", "busy"}:
@@ -238,26 +234,37 @@ def sort_pending(session, business_id, *, limit: int = 30, batch_size: int = 10)
       stays unsorted and is tried again next pass;
     - `busy`: another pass was already sorting this business's mail, so this
       one did nothing.
+
+    `only_ids`: sort only these of the business's unsorted emails (the
+    analyse endpoint's message_ids), through the same lock (review 2, finding 3).
     """
     bid = str(business_id)
     with _one_pass(session, bid) as mine:
         if not mine:
             return {"sorted": 0, "skipped": 0, "waiting": _waiting(session, bid), "failed": False, "busy": True}
-        out = _sort(session, bid, limit=limit, batch_size=batch_size)
+        out = _sort(session, bid, limit=limit, batch_size=batch_size, only_ids=only_ids)
         out["busy"] = False
         return out
 
 
-def _sort(session, bid: str, *, limit: int, batch_size: int) -> dict:
+def _sort(session, bid: str, *, limit: int, batch_size: int, only_ids=None) -> dict:
     from app.email import service
     from services import profit_guard
-    rows = session.execute(text("""
+    only = ""
+    params = {"b": bid, "limit": int(limit)}
+    if only_ids is not None:
+        only = " AND id IN :only"
+        params["only"] = [str(i) for i in only_ids] or [""]
+    query = text(f"""
         SELECT id, from_email, from_name, subject, snippet, received_at, labels, raw_headers, provider_thread_id
         FROM email_messages
-        WHERE business_id = :b AND ai_analyzed_at IS NULL
+        WHERE business_id = :b AND ai_analyzed_at IS NULL{only}
         ORDER BY received_at DESC
         LIMIT :limit
-    """), {"b": bid, "limit": int(limit)}).fetchall()
+    """)
+    if only_ids is not None:
+        query = query.bindparams(bindparam("only", expanding=True))
+    rows = session.execute(query, params).fetchall()
     if not rows:
         return {"sorted": 0, "skipped": 0, "waiting": 0, "failed": False}
     threads = sorted({r.provider_thread_id for r in rows if r.provider_thread_id})
@@ -269,11 +276,11 @@ def _sort(session, bid: str, *, limit: int, batch_size: int) -> dict:
 
     skipped, for_ai = 0, []
     for row in rows:
-        free = skip(row, outreach)
-        if free:
-            skipped += _stamp(session, bid, row.id, *free)
+        if row.provider_thread_id and row.provider_thread_id in outreach:
+            skipped += _stamp(session, bid, row.id, "fyi", 1, "A reply to your outreach: see Outreach → Replies")
         else:
-            for_ai.append(row)
+            row = row._asdict() if hasattr(row, "_asdict") else dict(row)
+            for_ai.append(_Mail(**row, hints=bulk_hints(_Mail(**row, hints=[]))))
     session.commit()
 
     sorted_, failed = 0, False

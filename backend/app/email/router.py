@@ -39,7 +39,6 @@ from schemas import (
     EmailDraftRequest,
     EmailDraftResponse,
     EmailDraftSendResponse,
-    EmailAnalysis,
     EmailAnalyzeResponse,
     EmailDraftOptionsResponse,
 )
@@ -54,7 +53,6 @@ from .service import (
     generate_email_briefing_markdown,
     generate_email_reply_draft,
     generate_email_reply_drafts,
-    analyze_email_batch,
 )
 from services.outreach_replies import storage_completed as outreach_storage_completed
 from providers.google_gmail import GoogleGmailProvider
@@ -756,7 +754,8 @@ async def list_email_outbox(
 def inbox_sorting_label(value):
     """A stored category as one of Mike's (an older value reads as its new one)."""
     from services import inbox_sorting
-    return inbox_sorting.normalise(value) if value else None
+    # Whitespace-only is "not sorted", as everywhere else (review 2, finding 4).
+    return inbox_sorting.normalise(value) if inbox_sorting.is_sorted_value(value) else None
 
 
 @router.get("/messages", response_model=EmailMessageListResponse)
@@ -1256,60 +1255,23 @@ async def analyze_emails(
     auth_ctx=Depends(get_user_business_context),
     session: Session = Depends(get_session),
 ):
-    """Analyze emails with AI: categorise, score priority, summarise."""
-    from sqlalchemy import text as sa_text
+    """Sort the business's unsorted mail with AI (ARIA-1a): Mike's categories, priority, a summary."""
 
     business = get_business_by_id(session, auth_ctx["business_id"])
 
-    if not data.message_ids:
-        # ARIA-1a "Sort now": the same pass as the background (free filters,
-        # then the AI), in its own session off the event loop, and it says
-        # what it did. It used to find nothing (the background had sorted it
-        # all) and look as if it did nothing.
-        out = await run_in_threadpool(_sort_now, str(business.id))
-        return EmailAnalyzeResponse(analyses=[], analyzed_count=out["sorted"] + out["skipped"],
-                                    sorted_count=out["sorted"], skipped_count=out["skipped"],
-                                    waiting_count=out["waiting"] or 0, failed=out["failed"],
-                                    busy=bool(out.get("busy")))
-    statement = select(EmailMessage).where(
-        EmailMessage.business_id == business.id,
-        EmailMessage.id.in_(data.message_ids),
-    )
+    # ARIA-1a "Sort now", and any request naming emails: the same pass as the
+    # background, under its lock and never overwriting (Codex review 2,
+    # finding 3), in its own session off the event loop, and it says what it
+    # did. The request's own session is released first, so the pass doesn't
+    # hold a third connection (finding 11).
+    business_id = str(business.id)
+    session.rollback()
+    out = await run_in_threadpool(_sort_now, business_id, list(data.message_ids) or None)
+    return EmailAnalyzeResponse(analyses=[], analyzed_count=out["sorted"] + out["skipped"],
+                                sorted_count=out["sorted"], skipped_count=out["skipped"],
+                                waiting_count=out["waiting"] or 0, failed=out["failed"],
+                                busy=bool(out.get("busy")))
 
-    messages = session.exec(statement).all()
-    if not messages:
-        return EmailAnalyzeResponse(analyses=[], analyzed_count=0)
-
-    all_analyses: List[EmailAnalysis] = []
-    batch_size = 10
-    for i in range(0, len(messages), batch_size):
-        batch = messages[i : i + batch_size]
-        from services import profit_guard   # PROFIT-1: inbox sorting is essential: recorded, never paused
-        with profit_guard.attributed(business.id, "classify"):
-            batch_results = await asyncio.to_thread(analyze_email_batch, batch)   # AI-1d: off the event loop
-        all_analyses.extend(batch_results)
-
-    for analysis in all_analyses:
-        session.execute(
-            sa_text("""
-                UPDATE email_messages
-                SET ai_category = :category, ai_priority = :priority,
-                    ai_summary = :summary, ai_suggested_action = :action,
-                    ai_analyzed_at = NOW()
-                WHERE id = :id AND business_id = :business_id
-            """),
-            {
-                "category": analysis.category,
-                "priority": analysis.priority,
-                "summary": analysis.summary,
-                "action": analysis.suggested_action,
-                "id": analysis.message_id,
-                "business_id": str(business.id),
-            },
-        )
-    session.commit()
-
-    return EmailAnalyzeResponse(analyses=all_analyses, analyzed_count=len(all_analyses))
 
 
 def _last_quick_check():
@@ -1320,11 +1282,11 @@ def _last_quick_check():
         return None
 
 
-def _sort_now(business_id: str) -> dict:
+def _sort_now(business_id: str, only_ids=None) -> dict:
     from db import get_session_context
     from services import inbox_sorting
     with get_session_context() as s:
-        return inbox_sorting.sort_pending(s, business_id, limit=50)
+        return inbox_sorting.sort_pending(s, business_id, limit=50, only_ids=only_ids)
 
 
 SORTING_RANGES = {"today", "week", "month", "all"}
@@ -1366,18 +1328,22 @@ def email_sorting_status(
     counts = {key: 0 for key in inbox_sorting.CATEGORIES}
     important = important_total = unread_total = total = 0
     window = "" if since is None else " AND received_at >= :since"
+    # Grouped in the database: a handful of rows, however big the mailbox
+    # (review 2, finding 13). Each group is read by the one rule.
     rows = session.execute(sa_text(
-        "SELECT ai_category, ai_priority, is_unread FROM email_messages "
-        "WHERE business_id = :b AND folder = 'INBOX'" + window),
-        {"b": bid, "since": since}).fetchall()
-    for category, priority, unread in rows:
-        total += 1
-        unread_total += bool(unread)
+        "SELECT ai_category, CASE WHEN coalesce(ai_priority, 0) >= :high THEN 5 ELSE 1 END, is_unread, COUNT(*) "
+        "FROM email_messages WHERE business_id = :b AND folder = 'INBOX'" + window +
+        " GROUP BY 1, 2, 3"),
+        {"b": bid, "since": since, "high": inbox_sorting.IMPORTANT_PRIORITY}).fetchall()
+    for category, priority, unread, n in rows:
+        n = int(n)
+        total += n
+        unread_total += n if unread else 0
         if inbox_sorting.is_sorted_value(category):
-            counts[inbox_sorting.normalise(category)] += 1
+            counts[inbox_sorting.normalise(category)] += n
         if inbox_sorting.is_important(category, priority):
-            important_total += 1
-            important += bool(unread)
+            important_total += n
+            important += n if unread else 0
     session.rollback()
     if isinstance(last, datetime) and last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)

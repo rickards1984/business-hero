@@ -236,7 +236,7 @@ def test_no_moved_site_builds_its_own_openai_client_any_more(path, count):
     assert len(re.findall(r"ai_text\.complete\(|ai_text\.acomplete\(|\bacomplete\(", source)) == count
 
 
-@pytest.mark.parametrize("fn", ["generate_email_briefing_markdown", "analyze_email_batch",
+@pytest.mark.parametrize("fn", ["generate_email_briefing_markdown",
                                 "generate_email_reply_drafts", "generate_email_reply_draft"])
 def test_the_email_endpoints_never_wait_on_a_model_on_the_event_loop(fn):
     """AI-1d: each is a sync model call made from an async endpoint. Called
@@ -329,3 +329,11 @@ def test_inbox_sorting_keeps_a_summary_that_quotes_a_fence(ai):
                              "summary": "Customer quoted ```[]```", "suggested_action": "Reply"}]) + "\n```"
     out = service.analyze_email_batch([message()])
     assert [(r.message_id, r.summary) for r in out] == [("m1", "Customer quoted ```[]```")]
+
+
+
+def test_inbox_sorting_runs_off_the_event_loop_too():
+    """ARIA-1a: the router hands sorting to the shared pass, in the threadpool."""
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / "app/email/router.py").read_text()
+    assert "analyze_email_batch(" not in source and "await run_in_threadpool(_sort_now" in source

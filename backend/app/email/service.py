@@ -348,6 +348,12 @@ Categories (pick ONE):
 - fyi: informational, nothing to do
 - junk: promotions, cold sales pitches, spam, phishing
 
+Some emails come with "bulk signs" (a mailing-list header, a Promotions label, an
+automatic reply). Weigh them, but what the email says comes first: an invoice,
+a request to pay, an enquiry, a customer's question or a complaint is that
+category even when it came from a mailing list or a no-reply address. Newsletters
+and updates with nothing for the owner to do are fyi; promotions and spam are junk.
+
 Priority (1-5):
 - 5: urgent: today (an angry customer, a payment problem, a deadline today)
 - 4: high: today if possible (a new enquiry, a customer waiting on an answer)
@@ -392,7 +398,8 @@ def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
             f"from_name: {m.from_name or 'Unknown'}\n"
             f"subject: {m.subject or '(no subject)'}\n"
             f"snippet: {(m.snippet or '')[:300]}\n"
-            f"received_at: {m.received_at.isoformat() if m.received_at else 'unknown'}"
+            f"received_at: {m.received_at.isoformat() if hasattr(m.received_at, 'isoformat') else (m.received_at or 'unknown')}"
+            + (f"\nbulk signs: {'; '.join(m.hints)}" if getattr(m, "hints", None) else "")
         )
 
     try:

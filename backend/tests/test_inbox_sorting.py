@@ -127,49 +127,7 @@ def test_the_important_sql_agrees_with_is_important(db):
     assert found == {i for i, (c_, p) in ids.items() if inbox_sorting.is_important(c_, p)}
 
 
-# -------------------------------------------------------- free filters ---
-
-@pytest.mark.parametrize("kw,category,why", [
-    (dict(raw_headers={"List-Unsubscribe": "<mailto:u@x>"}, subject="Our autumn news"), "fyi", "mailing list"),
-    (dict(raw_headers={"list-id": "<news.x>"}), "fyi", "mailing list"),
-    (dict(raw_headers={"Precedence": "bulk"}), "fyi", "mailing list"),
-    (dict(labels=["INBOX", "CATEGORY_PROMOTIONS"], subject="50% off"), "junk", "promotion"),
-    (dict(labels=["SPAM"]), "junk", "spam"),
-    (dict(labels=["INBOX", "CATEGORY_SOCIAL"]), "fyi", "social"),
-    (dict(raw_headers={"Auto-Submitted": "auto-replied"}, subject="Out of office"), "fyi", "automatic reply"),
-])
-def test_free_filters_sort_without_any_ai(db, ai, kw, category, why):
-    mid = mail(db, **kw)
-    out = sort(db)
-    got = stored(db, mid)
-    assert ai.batches == [] and out["skipped"] == 1 and out["sorted"] == 0
-    assert got.category == category and got.priority == 1 and got.analysed and why in got.summary.lower()
-
-
-@pytest.mark.parametrize("kw", [
-    dict(from_email="no-reply@xero.example", subject="Invoice INV-0042 from Harbour Lettings"),
-    dict(from_email="notifications@bank.example", subject="Payment received: £750.00"),
-    dict(raw_headers={"List-Unsubscribe": "<mailto:u@x>"}, subject="Your remittance advice"),
-    dict(labels=["INBOX", "CATEGORY_UPDATES"], subject="Your statement is ready"),
-    dict(from_email="noreply@stripe.example", subject="Payout of £1,250 is on its way"),
-])
-def test_money_emails_are_never_filtered_away(db, ai, kw):
-    """A bank notice or an invoice often comes from a no-reply sender with a
-    list header: it goes to the AI, which sorts it as Money."""
-    mid = mail(db, **kw)
-    ai.answers[mid] = ("money", 4)
-    sort(db)
-    assert ai.batches == [[mid]] and stored(db, mid).category == "money"
-
-
-def test_a_promotion_with_a_money_word_goes_to_the_ai(db, ai):
-    """Review 1, finding 2: a genuine invoice Gmail labelled a promotion
-    became Junk unseen. Now the AI decides (it may still say Junk)."""
-    mid = mail(db, labels=["INBOX", "CATEGORY_PROMOTIONS"], subject="Invoice INV-0042 from Harbour Lettings")
-    ai.answers[mid] = ("money", 4)
-    sort(db)
-    assert ai.batches == [[mid]] and stored(db, mid).category == "money"
-
+# ------------------------------------------- every email to the AI ---
 
 def test_a_reply_to_outreach_is_left_to_the_outreach_scanner(db, ai):
     mid = mail(db, provider_thread_id="th-out")
@@ -324,42 +282,6 @@ def test_with_no_key_mail_is_left_unsorted_not_marked_fyi(monkeypatch, caplog):
 
 # ------------------------------------------------ Codex ARIA-1a review 1 ---
 
-@pytest.mark.parametrize("kw", [
-    dict(from_email="no-reply@bookings.example", subject="New enquiry from your website"),          # finding 1
-    dict(from_email="mike@newbody.example", subject="Website contact form: roof repair"),           # plugin, own address
-    dict(from_email="mike@newbody.example", subject="Fwd: Complaint about Tuesday's visit"),        # forwarded in
-    dict(from_email="noreply@forms.example", raw_headers={"Auto-Submitted": "auto-generated"}, subject="Form submission"),
-])
-def test_sender_alone_never_hides_real_mail(db, ai, kw):
-    mid = mail(db, **kw)
-    sort(db)
-    assert ai.batches == [[mid]]
-
-
-@pytest.mark.parametrize("kw", [
-    dict(from_email="no-reply@bank.example", subject="£750 received",
-         raw_headers={"List-Unsubscribe": "<x>"}),                                                  # finding 2: leading £
-    dict(from_email="no-reply@gocardless.com", subject="Your mandate has been cancelled",
-         raw_headers={"List-Unsubscribe": "<x>"}),
-    dict(from_email="noreply@tax.service.gov.uk", subject="Action required", raw_headers={"Precedence": "bulk"}),
-    dict(from_email="alerts@notify.example", subject="An update", snippet="Your invoice INV-12 is now overdue",
-         raw_headers={"List-Id": "<x>"}),                                                           # the preview
-    dict(labels=["INBOX", "CATEGORY_PROMOTIONS"], subject="Your quote request"),
-    dict(from_email="hello@stripe.com", subject="Weekly summary", raw_headers={"List-Unsubscribe": "<x>"}),
-])
-def test_anything_that_might_be_money_or_need_the_owner_goes_to_the_ai(db, ai, kw):
-    mid = mail(db, **kw)
-    sort(db)
-    assert ai.batches == [[mid]]
-
-
-def test_bank_holiday_offers_are_still_a_free_newsletter(db, ai):
-    """Finding 9: "bank" in "bank holiday" isn't money."""
-    mid = mail(db, subject="Bank holiday offers", raw_headers={"List-Unsubscribe": "<x>"})
-    sort(db)
-    assert ai.batches == [] and stored(db, mid).category == "fyi"
-
-
 def test_a_pass_already_running_makes_the_next_one_do_nothing(db, ai):
     """Finding 3: the background and Sort now both sorted (and paid for) the
     same mail; the later stamp overwrote the earlier."""
@@ -464,3 +386,96 @@ def test_the_sql_rules_read_every_stored_value_as_python_does(db):
 def test_mail_not_sorted_is_never_important(raw):
     from services import inbox_sorting
     assert inbox_sorting.is_important(raw, 5) is False
+
+
+# ------------------------------------------------ Codex ARIA-1a review 2 ---
+
+EVERY_KIND = [
+    dict(raw_headers={"List-Unsubscribe": "<x>"}, subject="Please pay today", from_email="accounts@supplier.example"),
+    dict(raw_headers={"List-Unsubscribe": "<x>"}, subject="Website form", snippet="Can you fix our roof?"),
+    dict(labels=["SPAM"], subject="Invoice due", from_email="billing@xero.com"),
+    dict(labels=["INBOX", "CATEGORY_PROMOTIONS"], subject="Invoice INV-0042"),
+    dict(from_email="no-reply@bookings.example", subject="New enquiry from your website"),
+    dict(from_email="mike@newbody.example", subject="Fwd: Complaint about Tuesday's visit"),
+    dict(raw_headers={"Auto-Submitted": "auto-replied"}, subject="Out of office"),
+    dict(raw_headers={"List-Unsubscribe": "<x>"}, subject="Our autumn newsletter"),
+    dict(labels=["INBOX", "CATEGORY_SOCIAL"], subject="Someone liked your post"),
+]
+
+
+@pytest.mark.parametrize("kw", EVERY_KIND)
+def test_every_email_is_read_by_the_ai_whatever_its_sender_or_headers(db, ai, kw):
+    """Review 2, finding 2: each keyword list left a way to hide real mail
+    unseen. Now nothing is sorted on its headers alone."""
+    mid = mail(db, **kw)
+    out = sort(db)
+    assert ai.batches == [[mid]] and out["skipped"] == 0
+
+
+def test_the_ai_is_told_each_email_s_bulk_signs(monkeypatch):
+    from app.email import service
+    from services import ai_text, inbox_sorting
+    sent = []
+    monkeypatch.setattr(service.ai_chat, "available", lambda task: True)
+    monkeypatch.setattr(ai_text, "complete", lambda task, messages, **k: sent.append(messages) or
+                        SimpleNamespace(content="[]"))
+    row = SimpleNamespace(id="m1", from_email="a@x", from_name="A", subject="Autumn news", snippet="", received_at=None,
+                          labels=json.dumps(["INBOX", "CATEGORY_PROMOTIONS"]),
+                          raw_headers=json.dumps({"List-Unsubscribe": "<x>"}), provider_thread_id=None)
+    batch = [inbox_sorting._Mail(**vars(row), hints=inbox_sorting.bulk_hints(row))]
+    service.analyze_email_batch(batch)
+    prompt = sent[0][1]["content"]
+    assert "bulk signs: Gmail filed it under Promotions; it has a mailing-list header" in prompt
+    assert "what the email says comes first" in sent[0][0]["content"]
+
+
+def test_naming_emails_to_sort_uses_the_same_locked_pass(db, ai):
+    """Finding 3: /analyze with message_ids took neither the lock nor the
+    no-overwrite stamp."""
+    from services import inbox_sorting
+    a, b = mail(db), mail(db)
+    with Session(db) as s:
+        out = inbox_sorting.sort_pending(s, BIZ, only_ids=[a])
+    assert ai.batches == [[a]] and out["sorted"] == 1 and stored(db, b).analysed is False
+    with Session(db) as holder, inbox_sorting._one_pass(holder, BIZ) as mine:
+        assert mine
+        with Session(db) as s:
+            assert inbox_sorting.sort_pending(s, BIZ, only_ids=[b])["busy"] is True
+
+
+def test_the_analyse_endpoint_sends_named_emails_through_the_pass(monkeypatch):
+    import asyncio
+    from app.email import router
+    seen = []
+    monkeypatch.setattr(router, "_sort_now", lambda bid, only=None: seen.append(only) or
+                        {"sorted": 1, "skipped": 0, "waiting": 0, "failed": False, "busy": False})
+    monkeypatch.setattr(router, "get_business_by_id", lambda s, bid: SimpleNamespace(id=bid))
+    session = SimpleNamespace(rollback=lambda: None)
+    asyncio.run(router.analyze_emails.__wrapped__(
+        SimpleNamespace(), router.EmailAnalyzeRequest(message_ids=["m1"]), auth_ctx={"business_id": "b1"},
+        session=session))
+    asyncio.run(router.analyze_emails.__wrapped__(
+        SimpleNamespace(), router.EmailAnalyzeRequest(message_ids=[]), auth_ctx={"business_id": "b1"},
+        session=session))
+    assert seen == [["m1"], None]
+    from pathlib import Path
+    assert "UPDATE email_messages" not in Path(router.__file__).read_text().split("async def analyze_emails")[1].split("\n@router")[0]
+
+
+@pytest.mark.parametrize("raw", ["\t", "\n", " \t "])
+def test_whitespace_reads_the_same_in_python_and_sql(db, raw):
+    """Finding 4: a tab was "not sorted" in Python but important in SQL."""
+    from services import inbox_sorting
+    mid = mail(db, ai_category=raw, ai_priority=5)
+    with db.connect() as c:
+        in_sql = bool(c.execute(text(f"SELECT 1 FROM email_messages WHERE id = :i AND {inbox_sorting.IMPORTANT_SQL}"),
+                                {"i": mid}).first())
+    assert in_sql is inbox_sorting.is_important(raw, 5)
+
+
+@pytest.mark.parametrize("raw,shown", [("   ", None), ("", None), (None, None), ("Finance", "money"), ("\t", "fyi")])
+def test_the_list_shows_unsorted_mail_as_unsorted(raw, shown):
+    """Finding 4: "   " was sent to the page as "fyi", which the page then
+    counted as important at priority 5."""
+    from app.email import router
+    assert router.inbox_sorting_label(raw) == shown

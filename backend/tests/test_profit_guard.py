@@ -565,7 +565,11 @@ def test_the_email_router_labels_each_ai_feature():
     source = inspect.getsource(router)
     assert source.count('profit_guard.attributed(business.id, "draft")') == 2
     assert 'profit_guard.attributed(business.id, "briefing")' in source
-    assert 'profit_guard.attributed(business.id, "classify")' in source
+    # ARIA-1a: inbox sorting is labelled in the one sorting pass the router
+    # hands it to (services/inbox_sorting.sort_pending), for the business.
+    assert "run_in_threadpool(_sort_now" in source
+    from services import inbox_sorting
+    assert 'profit_guard.attributed(bid, "classify")' in inspect.getsource(inbox_sorting)
 
 
 def test_quote_drafting_is_gated_and_recorded():

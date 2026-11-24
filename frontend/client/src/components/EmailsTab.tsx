@@ -77,25 +77,17 @@ function formatTimestamp(dateStr: string | null | undefined): string {
   return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 
+// The same periods as the server's counts (GET /v1/email/sorting): today is
+// the UK day, a week is 7 days, a month 30 (Codex ARIA-1a review 2, finding 5).
+const UK_DAY = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' });
 function filterByTimeRange(email: EmailMessageItem, range: string): boolean {
   if (range === 'all') return true;
-  if (!email.received_at) return true;
+  if (!email.received_at) return false;            // the counts leave these out too
   const received = new Date(email.received_at);
   const now = new Date();
-  if (range === 'today') {
-    return received.toDateString() === now.toDateString();
-  }
-  if (range === 'week') {
-    const weekAgo = new Date(now);
-    weekAgo.setDate(weekAgo.getDate() - 7);
-    return received >= weekAgo;
-  }
-  if (range === 'month') {
-    const monthAgo = new Date(now);
-    monthAgo.setMonth(monthAgo.getMonth() - 1);
-    return received >= monthAgo;
-  }
-  return true;
+  if (range === 'today') return UK_DAY.format(received) === UK_DAY.format(now);
+  const days = range === 'week' ? 7 : 30;
+  return now.getTime() - received.getTime() <= days * 24 * 60 * 60 * 1000;
 }
 
 interface EmailsTabProps {
@@ -144,7 +136,9 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
     source_id: '',
   });
 
+  const requestRef = useRef(0);
   const loadEmails = useCallback(async (): Promise<number> => {
+    const request = ++requestRef.current;     // only the latest request may set the list
     try {
       if (!hasDataRef.current) setLoading(true);
       const params: { limit?: number; category?: string; sortBy?: string; unreadOnly?: boolean } = {
@@ -157,6 +151,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
       }
       const data = await fetchEmailMessages(params);
       const result = data.messages || [];
+      if (request !== requestRef.current) return result.length;   // a newer view was asked for
       setEmails(result);
       hasDataRef.current = true;
       setHasEmailAccount(true);
@@ -183,6 +178,9 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
   useEffect(() => {
     loadEmails();
   }, [loadEmails]);
+  // Timers call the latest loadEmails, never one from an earlier view (review 2, finding 5).
+  const loadEmailsRef = useRef(loadEmails);
+  useEffect(() => { loadEmailsRef.current = loadEmails; }, [loadEmails]);
 
   const stopPolling = useCallback(() => {
     if (pollTimerRef.current) {
@@ -200,7 +198,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
     let lastCount = emailsCountRef.current;
     pollTimerRef.current = setInterval(async () => {
       pollAttemptsRef.current += 1;
-      const count = await loadEmails();
+      const count = await loadEmailsRef.current();
       if (count > lastCount || pollAttemptsRef.current >= MAX_POLL_ATTEMPTS) {
         stopPolling();
         if (isMountedRef.current) setIsSyncing(false);
@@ -208,7 +206,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
         lastCount = Math.max(lastCount, count);
       }
     }, POLL_INTERVAL_MS);
-  }, [loadEmails, stopPolling]);
+  }, [stopPolling]);
 
   // Non-blocking sync trigger: ask the server to sync only if stale/empty.
   // Never blocks render; on failure we just keep showing the cached emails.
@@ -267,8 +265,16 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
   // The counts come from the server for the page's time range, never from the
   // (filtered, 50 at most) list on screen (Codex ARIA-1a review 1, finding 5),
   // and refresh each minute so "next check" never sits in the past.
+  const lastSortedRef = useRef<string | null>(null);
   const loadSorting = useCallback(async () => {
-    try { setSorting(await fetchSortingStatus(timeRange)); } catch { /* the line just stays as it was */ }
+    try {
+      const next = await fetchSortingStatus(timeRange);
+      setSorting(next);
+      // Sorting has moved on since the list was loaded: reload it, so a count
+      // never sits beside a list that doesn't show those emails yet.
+      if (lastSortedRef.current !== null && next.last_sorted_at !== lastSortedRef.current) loadEmailsRef.current();
+      lastSortedRef.current = next.last_sorted_at;
+    } catch { /* the line just stays as it was */ }
   }, [timeRange]);
   useEffect(() => {
     loadSorting();
@@ -356,6 +362,10 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
 
   const filteredEmails = emails
     .filter(e => filterByTimeRange(e, timeRange))
+    // The chosen view, applied here too, so a late response can't show another one.
+    .filter(e => !unreadOnly || e.is_unread)
+    .filter(e => categoryFilter === 'all'
+      || (categoryFilter === 'important' ? isImportant(e.ai_category, e.ai_priority) : e.ai_category === categoryFilter))
     .filter(e => {
       if (!searchQuery.trim()) return true;
       const q = searchQuery.toLowerCase();

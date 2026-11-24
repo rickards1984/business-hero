@@ -155,10 +155,12 @@ def test_every_provider_accepts_skip_ids(module):
 
 def test_sort_now_says_what_it_did(monkeypatch):
     from app.email import router
-    monkeypatch.setattr(router, "_sort_now", lambda bid: {"sorted": 3, "skipped": 5, "waiting": 0, "failed": False})
+    monkeypatch.setattr(router, "_sort_now", lambda bid, only=None: {"sorted": 3, "skipped": 5, "waiting": 0,
+                                                                     "failed": False})
     monkeypatch.setattr(router, "get_business_by_id", lambda s, bid: SimpleNamespace(id=bid))
     out = asyncio.run(router.analyze_emails.__wrapped__(
-        SimpleNamespace(), router.EmailAnalyzeRequest(message_ids=[]), auth_ctx={"business_id": "b1"}, session=None))
+        SimpleNamespace(), router.EmailAnalyzeRequest(message_ids=[]), auth_ctx={"business_id": "b1"},
+        session=SimpleNamespace(rollback=lambda: None)))
     assert (out.sorted_count, out.skipped_count, out.waiting_count, out.failed, out.analyzed_count) == (3, 5, 0, False, 8)
 
 
@@ -271,3 +273,31 @@ def test_the_postgres_lock_lets_one_pass_run(monkeypatch):
                 assert other is True
         with inbox_sorting._one_pass(b, "biz-lock-test") as after:
             assert after is True
+
+
+
+def test_the_lock_works_for_a_session_bound_to_a_connection_on_postgres():
+    """Review 2, finding 10: Session(bind=connection).get_bind() is a
+    Connection, which has no connect()."""
+    import os
+    url = os.environ.get("RLS_LOCAL_DATABASE_URL")
+    if not url:
+        pytest.skip("RLS_LOCAL_DATABASE_URL not set (scripts/rls-local.sh up). A skip is not a pass.")
+    from sqlalchemy import create_engine
+    from sqlmodel import Session
+    from services import inbox_sorting
+    engine = create_engine(url)
+    with engine.connect() as conn, Session(bind=conn) as a, Session(engine) as b:
+        with inbox_sorting._one_pass(a, "biz-conn-bound") as first, inbox_sorting._one_pass(b, "biz-conn-bound") as second:
+            assert first is True and second is False
+
+
+def test_the_page_never_shows_a_stale_view():
+    """Review 2, finding 5: a poll kept an old loadEmails; the periods and
+    timezone differed from the server's; the list didn't follow the counts."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "frontend/client/src/components/EmailsTab.tsx").read_text()
+    assert "await loadEmailsRef.current();" in src and "if (request !== requestRef.current)" in src
+    assert "timeZone: 'Europe/London'" in src and "range === 'week' ? 7 : 30" in src
+    assert ".filter(e => !unreadOnly || e.is_unread)" in src
+    assert "next.last_sorted_at !== lastSortedRef.current" in src

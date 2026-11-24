@@ -143,6 +143,27 @@
 8. A duplicate answer counted twice, and a partial answer said nothing. Each email is counted once, and a batch the model answered only in part is reported as `failed`; its missing mail stays unsorted.
 9. "Bank holiday offers" newsletters went to the AI. "Bank holiday" no longer reads as money.
 
+**Codex review 2** (`audits/ARIA-1A-CODEX-CODE-REVIEW-2.md`, REQUEST CHANGES; findings 2–5 still partly open, plus hardening). Fixed:
+- **2. A change of approach: no free filters.** Each keyword list still left a way to hide real mail unseen: "Please pay today" from a supplier's mailing list, a contact form saying "Can you fix our roof?" with a list header, "Invoice due" in spam.
+  - **The AI now reads every email,** except replies to the business's outreach (left to Outreach → Replies). Each email goes with its *bulk signs* (spam or Promotions or Social labels, a mailing-list header, out of office). The prompt says the content comes first: a request to pay from a mailing list is still Money.
+  - **The cost:** about 3p per 1,000 emails on gpt-6-luna, against missing a payment or an enquiry.
+  - **The acceptance line "Newsletters cost nothing"** becomes "newsletters cost a fraction of a penny, and nothing is hidden unread". Mike to confirm.
+- **3. Naming emails to sort** (`/analyze` with `message_ids`) now goes through the same locked, no-overwrite pass (`sort_pending(only_ids=…)`). The endpoint's own unlocked update path is gone, and the request's session is released before the pass runs.
+- **4.** Whitespace reads the same in Python and SQL (only spaces are trimmed, as SQL's `trim` does). The list sends whitespace-only values as "not sorted", never "fyi".
+- **5. The page:**
+  - its periods are the server's: the UK day, 7 days and 30 days;
+  - sync polls call the latest `loadEmails`, and only the latest request may set the list;
+  - the list reapplies the chosen category and "unread only" itself;
+  - it reloads when sorting has moved on.
+- **10–13 (hardening):**
+  - the lock takes the engine from a Connection-bound session;
+  - it runs on an autocommit connection, so no transaction stays open through the AI calls;
+  - it uses a 64-bit key from the business id;
+  - a failed unlock invalidates the connection rather than returning it to the pool;
+  - the status counts are grouped in the database.
+
+**Left as follow-ups (non-blocking):** the scheduler records a full sync as run when it is *scheduled*, not when it *completes*; and the SQLite lock is per process (tests and local only).
+
 **Found while building:** `test_followups_due_on_existing_enrolments_get_their_morning_card` started failing on its own on 24 Nov 2026, 28 days after its fixed date. The card's check reads the real clock, for the 28-day first-send deadline. The test now holds that clock. **Follow-up:** sweep the other tests with fixed autumn-2026 dates for the same kind of date bomb.
 
 **Next (ARIA-1b):** drafted replies for important email, learning from the owner's edits, and one-tap send.
