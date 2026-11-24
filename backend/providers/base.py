@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from typing import Collection  # ARIA-1a: skip_ids
 
 
 @dataclass
@@ -58,6 +59,7 @@ class BaseEmailProvider(ABC):
         *,
         account: Any,
         cursor: Dict[str, Any],
+        skip_ids: Optional[Collection[str]] = None,
     ) -> ProviderSyncResult:
         raise NotImplementedError
 

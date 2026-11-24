@@ -33,19 +33,20 @@ import {
 import {
   fetchEmailMessages,
   analyzeEmails,
+  fetchSortingStatus,
+  type SortingStatus,
   type EmailMessageItem,
 } from '@/lib/emailApi';
 import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
 import { TASK_CATEGORIES, TASK_PRIORITIES } from '@/lib/taskConstants';
+import { CATEGORY_BORDER, CATEGORY_CHIP, INBOX_CATEGORIES, categoryLabel, isImportant } from '@/lib/inboxCategories';
 
+// ARIA-1a: Mike's categories, plus All and Important (the one rule).
 const CATEGORIES = [
   { key: 'all', label: 'All' },
-  { key: 'action_required', label: 'Action Required' },
-  { key: 'awaiting_reply', label: 'Awaiting Reply' },
-  { key: 'fyi', label: 'FYI' },
-  { key: 'finance', label: 'Finance' },
-  { key: 'newsletter', label: 'Newsletters' },
+  { key: 'important', label: 'Important' },
+  ...INBOX_CATEGORIES,
 ];
 
 const TIME_RANGES = [
@@ -59,32 +60,6 @@ const TIME_RANGES = [
 // DB-backed list a few times so new mail appears without blocking the page.
 const POLL_INTERVAL_MS = 6000;
 const MAX_POLL_ATTEMPTS = 5;
-
-const PRIORITY_BORDERS: Record<string, string> = {
-  action_required: '#d32f2f',
-  awaiting_reply: '#ed6c02',
-  fyi: '#1976d2',
-  finance: '#1976d2',
-  scheduling: '#1976d2',
-  newsletter: '#9e9e9e',
-  marketing: '#9e9e9e',
-  spam: '#9e9e9e',
-};
-
-const CATEGORY_COLORS: Record<string, 'error' | 'warning' | 'info' | 'default' | 'primary' | 'success'> = {
-  action_required: 'error',
-  awaiting_reply: 'warning',
-  fyi: 'info',
-  finance: 'primary',
-  scheduling: 'info',
-  newsletter: 'default',
-  marketing: 'default',
-  spam: 'default',
-};
-
-function formatCategoryLabel(cat: string): string {
-  return cat.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-}
 
 function formatTimestamp(dateStr: string | null | undefined): string {
   if (!dateStr) return '';
@@ -140,6 +115,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
   });
   const hasDataRef = useRef(emails.length > 0);
   const [analyzing, setAnalyzing] = useState(false);
+  const [sorting, setSorting] = useState<SortingStatus | null>(null);
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [timeRange, setTimeRange] = useState('today');
   const [searchQuery, setSearchQuery] = useState('');
@@ -286,20 +262,33 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
     };
   }, [stopPolling]);
 
-  const handleAnalyze = async () => {
+  const loadSorting = useCallback(async () => {
+    try { setSorting(await fetchSortingStatus()); } catch { /* the line just stays as it was */ }
+  }, []);
+  useEffect(() => { loadSorting(); }, [loadSorting]);
+
+  // ARIA-1a: "Sort now" runs the same pass as the 15-minute check and says
+  // what it did. "Analyze All" found nothing (the background had sorted it)
+  // and looked as if it did nothing.
+  const handleSortNow = async () => {
     setAnalyzing(true);
     try {
-      const unanalyzed = emails.filter(e => !e.ai_category).map(e => e.id);
-      if (unanalyzed.length === 0) {
-        setSnackbar({ open: true, message: 'All emails already analyzed', severity: 'info' });
-        setAnalyzing(false);
-        return;
+      const result = await analyzeEmails();
+      const sorted = result.sorted_count ?? 0;
+      const free = result.skipped_count ?? 0;
+      if (result.failed) {
+        setSnackbar({ open: true, severity: 'error',
+          message: `Aria couldn't sort ${result.waiting_count || 'some'} email${result.waiting_count === 1 ? '' : 's'} just now. She'll try again at the next check.` });
+      } else if (sorted + free === 0) {
+        setSnackbar({ open: true, severity: 'info', message: 'Nothing new to sort: everything is sorted.' });
+      } else {
+        const parts = [`Sorted ${sorted + free} new email${sorted + free === 1 ? '' : 's'}`];
+        if (free) parts.push(`${free} newsletter${free === 1 ? '' : 's'}, promotion${free === 1 ? '' : 's'} or automated message${free === 1 ? '' : 's'} at no cost`);
+        setSnackbar({ open: true, severity: 'success', message: parts.join(', including ') + '.' });
       }
-      const result = await analyzeEmails(unanalyzed.slice(0, 30));
-      setSnackbar({ open: true, message: `Analyzed ${result.analyzed_count} emails`, severity: 'success' });
-      await loadEmails();
+      await Promise.all([loadEmails(), loadSorting()]);
     } catch {
-      setSnackbar({ open: true, message: 'Analysis failed', severity: 'error' });
+      setSnackbar({ open: true, message: "Couldn't reach Aria to sort just now. Try again in a moment.", severity: 'error' });
     } finally {
       setAnalyzing(false);
     }
@@ -318,7 +307,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
     setTaskForm({
       title: `Follow up: ${email.subject || '(no subject)'}`,
       category: 'email_followup',
-      priority: email.ai_category === 'action_required' ? 'high' : 'medium',
+      priority: isImportant(email.ai_category, email.ai_priority) ? 'high' : 'medium',
       due_at: tomorrow.toISOString().slice(0, 16),
       description: `Email from ${email.from_name || email.from_email || 'Unknown'}\nSubject: ${email.subject || ''}\n\n${email.ai_summary || ''}`,
       source: 'email',
@@ -367,15 +356,19 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
       );
     });
 
-  const counts = {
-    total: filteredEmails.length,
+  const counts: Record<string, number> = {
+    all: filteredEmails.length,
     unread: filteredEmails.filter(e => e.is_unread).length,
-    action_required: filteredEmails.filter(e => e.ai_category === 'action_required').length,
-    awaiting_reply: filteredEmails.filter(e => e.ai_category === 'awaiting_reply').length,
-    fyi: filteredEmails.filter(e => e.ai_category === 'fyi').length,
-    finance: filteredEmails.filter(e => e.ai_category === 'finance').length,
-    newsletter: filteredEmails.filter(e => e.ai_category === 'newsletter' || e.ai_category === 'marketing').length,
+    important: filteredEmails.filter(e => isImportant(e.ai_category, e.ai_priority)).length,
+    needsYou: filteredEmails.filter(e => e.is_unread && isImportant(e.ai_category, e.ai_priority)).length,
+    ...Object.fromEntries(INBOX_CATEGORIES.map(c => [c.key, filteredEmails.filter(e => e.ai_category === c.key).length])),
   };
+  const when = (iso?: string | null) => (iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : null);
+  const nextCheck = sorting?.next_check_at ? new Date(sorting.next_check_at) : null;
+  const nextCheckText = nextCheck
+    ? (nextCheck.toDateString() === new Date().toDateString() ? when(sorting!.next_check_at)
+      : nextCheck.toLocaleString('en-GB', { weekday: 'long', hour: '2-digit', minute: '2-digit' }))
+    : null;
 
   if (!hasEmailAccount) {
     return (
@@ -399,22 +392,26 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
 
   return (
     <Box>
-      {/* Header row: Sync + Analyze */}
+      {/* Header row: Aria's sorting, said plainly (ARIA-1a) */}
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 2 }}>
-        <Typography variant="h6" fontWeight={600}>
-          Inbox
-        </Typography>
-        <Box sx={{ display: 'flex', gap: 1 }}>
-          <Button
-            size="small"
-            variant="outlined"
-            startIcon={analyzing ? <CircularProgress size={16} /> : <AutoAwesomeIcon />}
-            onClick={handleAnalyze}
-            disabled={analyzing}
-          >
-            {analyzing ? 'Analyzing...' : 'Analyze All'}
-          </Button>
+        <Box sx={{ minWidth: 0 }}>
+          <Typography variant="h6" fontWeight={600}>Inbox</Typography>
+          <Typography variant="body2" color="text.secondary" data-testid="sorting-status">
+            Aria sorts new mail {sorting?.schedule ?? 'every 15 minutes, weekdays 7am to 7pm'}
+            {sorting?.last_sorted_at ? ` · last sorted ${when(sorting.last_sorted_at)}` : ''}
+            {nextCheckText ? ` · next check ${nextCheckText}` : ''}
+            {sorting && sorting.waiting > 0 ? ` · ${sorting.waiting} waiting` : ''}
+          </Typography>
         </Box>
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={analyzing ? <CircularProgress size={16} /> : <AutoAwesomeIcon />}
+          onClick={handleSortNow}
+          disabled={analyzing}
+        >
+          {analyzing ? 'Sorting…' : 'Sort now'}
+        </Button>
       </Box>
 
       {/* Sync period selector */}
@@ -467,26 +464,35 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
         ))}
       </div>
 
-      {/* Summary stat cards */}
+      {/* Summary stat cards: tap one to filter */}
       <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap' }}>
-        <Card sx={{ flex: '1 1 150px', p: 2, textAlign: 'center', border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-xs)' }}>
+        <Card
+          onClick={() => setCategoryFilter('important')}
+          sx={{ flex: '1 1 150px', p: 2, textAlign: 'center', cursor: 'pointer', border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-xs)' }}
+        >
           <Typography sx={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--color-danger-500)' }}>
-            {counts.action_required}
+            {counts.needsYou}
           </Typography>
           <Typography sx={{ fontSize: '0.6875rem', fontWeight: 500, color: 'var(--color-neutral-500)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
-            Action Required
+            Needs you
           </Typography>
         </Card>
-        <Card sx={{ flex: '1 1 150px', p: 2, textAlign: 'center', border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-xs)' }}>
-          <Typography sx={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--color-warning-500)' }}>
-            {counts.awaiting_reply}
-          </Typography>
-          <Typography sx={{ fontSize: '0.6875rem', fontWeight: 500, color: 'var(--color-neutral-500)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
-            Awaiting Reply
-          </Typography>
-        </Card>
-        <Card sx={{ flex: '1 1 150px', p: 2, textAlign: 'center', border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-xs)' }}>
+        <Card
+          onClick={() => setCategoryFilter('new_enquiry')}
+          sx={{ flex: '1 1 150px', p: 2, textAlign: 'center', cursor: 'pointer', border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-xs)' }}
+        >
           <Typography sx={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--color-primary-500)' }}>
+            {counts.new_enquiry}
+          </Typography>
+          <Typography sx={{ fontSize: '0.6875rem', fontWeight: 500, color: 'var(--color-neutral-500)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+            New enquiries
+          </Typography>
+        </Card>
+        <Card
+          onClick={() => setCategoryFilter('all')}
+          sx={{ flex: '1 1 150px', p: 2, textAlign: 'center', cursor: 'pointer', border: '1px solid var(--color-neutral-100)', boxShadow: 'var(--shadow-xs)' }}
+        >
+          <Typography sx={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--color-neutral-700)' }}>
             {counts.unread}
           </Typography>
           <Typography sx={{ fontSize: '0.6875rem', fontWeight: 500, color: 'var(--color-neutral-500)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
@@ -500,7 +506,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
         {CATEGORIES.map(cat => (
           <Chip
             key={cat.key}
-            label={`${cat.label} (${cat.key === 'all' ? counts.total : (counts as Record<string, number>)[cat.key] || 0})`}
+            label={`${cat.label} (${counts[cat.key] || 0})`}
             onClick={() => setCategoryFilter(cat.key)}
             color={categoryFilter === cat.key ? 'primary' : 'default'}
             variant={categoryFilter === cat.key ? 'filled' : 'outlined'}
@@ -577,8 +583,8 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
         <Box>
           {filteredEmails.map(email => {
             const category = email.ai_category || 'fyi';
-            const borderColor = PRIORITY_BORDERS[category] || '#9e9e9e';
-            const chipColor = CATEGORY_COLORS[category] || 'default';
+            const borderColor = CATEGORY_BORDER[category] || '#9e9e9e';
+            const chipColor = CATEGORY_CHIP[category] || 'default';
 
             return (
               <Card
@@ -640,7 +646,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
                       </Typography>
                       {email.ai_category && (
                         <Chip
-                          label={formatCategoryLabel(email.ai_category)}
+                          label={categoryLabel(email.ai_category)}
                           size="small"
                           color={chipColor}
                           variant="outlined"

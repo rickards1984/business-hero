@@ -19,16 +19,16 @@ BACKEND = Path(__file__).resolve().parents[1]
 # Exactly what each call site used before AI-1a (checked in code, 20 Nov 2026).
 TODAY = {
     "chat": [("openai", "gpt-5")],                    # assistant_chat.process_chat_message
-    "quote_chat": [("openai", "gpt-4o")],             # assistant_chat quote drafting
+    "quote_chat": [("openai", "gpt-6.1-sol")],        # assistant_chat quote drafting (ARIA-1a: Mike's choice)
     "quote": [("openai", "gpt-5.4")],                 # quoting_api (QUOTE_AI_MODEL)
-    "reply_draft": [("openai", "gpt-4o-mini")],       # app/email/service.generate_email_reply_draft
+    "reply_draft": [("openai", "gpt-6-luna"), ("openai", "gpt-4o-mini")],   # app/email/service (one draft)
     "reply_drafts": [("openai", "gpt-5")],            # app/email/service + assistant_tools (3 tones)
-    "inbox_classify": [("openai", "gpt-4o-mini")],    # app/email/service.analyze_email_batch
+    "inbox_classify": [("openai", "gpt-6-luna"), ("openai", "gpt-4o-mini")],   # analyze_email_batch
     "email_briefing": [("openai", "gpt-5")],          # app/email/service briefing
-    "briefing": [("openai", "gpt-4o")],               # services/briefing_generator
-    "meeting": [("openai", "gpt-5")],                 # executive_meeting_orchestrator / _prep
-    "support": [("openai", "gpt-4o")],                # support_api
-    "call_summary": [("openai", "gpt-4o-mini")],      # openai_utils
+    "briefing": [("openai", "gpt-5"), ("anthropic", "claude-sonnet-5-5")],   # services/briefing_generator
+    "meeting": [("anthropic", "claude-opus-5-5"), ("openai", "gpt-5")],     # executive_meeting_orchestrator
+    "support": [("openai", "gpt-5"), ("anthropic", "claude-sonnet-5-5")],    # support_api
+    "call_summary": [("openai", "gpt-6-luna"), ("openai", "gpt-4o-mini")],   # openai_utils
     "voice_aria": [("openai", "gpt-realtime-2")],     # realtime_voice
     "voice_receptionist": [("openai", "gpt-realtime-2")],
     "transcribe": [("openai", "whisper-1")],
@@ -75,7 +75,7 @@ def test_every_task_is_known(m):
 @pytest.mark.parametrize("task", sorted(TODAY))
 def test_with_no_choice_every_task_uses_todays_model(m, task):
     assert m.mod.resolve(task) == TODAY[task]
-    assert m.mod.openai_model(task) == TODAY[task][0][1]
+    assert m.mod.openai_model(task) == next(mo for p, mo in TODAY[task] if p == "openai")
 
 
 @pytest.mark.parametrize("task,env", sorted(LEGACY_ENV.items()))
@@ -103,10 +103,10 @@ def test_a_saved_choice_is_used(m):
 
 
 def test_a_choice_takes_effect_within_a_minute_without_a_deploy(m):
-    assert m.mod.resolve("briefing") == [("openai", "gpt-4o")]
+    assert m.mod.resolve("briefing") == TODAY["briefing"]
     choose(m, "briefing", [("openai", "gpt-5")])
     m.clock.t += 30
-    assert m.mod.resolve("briefing") == [("openai", "gpt-4o")]      # cached for up to a minute
+    assert m.mod.resolve("briefing") == TODAY["briefing"]      # cached for up to a minute
     m.clock.t += 31
     assert m.mod.resolve("briefing") == [("openai", "gpt-5")]
 
@@ -114,7 +114,7 @@ def test_a_choice_takes_effect_within_a_minute_without_a_deploy(m):
 def test_an_unpriced_choice_is_ignored_and_todays_model_used(m, caplog):
     choose(m, "briefing", [("openai", "gpt-made-up")])
     m.mod.invalidate()
-    assert m.mod.resolve("briefing") == [("openai", "gpt-4o")]
+    assert m.mod.resolve("briefing") == TODAY["briefing"]
     assert "gpt-made-up" in caplog.text
 
 
@@ -129,7 +129,7 @@ def test_a_choice_with_no_usable_entry_falls_back_to_today(m, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY")
     choose(m, "briefing", [("anthropic", "claude-opus-5-5")])
     m.mod.invalidate()
-    assert m.mod.resolve("briefing") == [("openai", "gpt-4o")]
+    assert m.mod.resolve("briefing") == TODAY["briefing"]
 
 
 @pytest.mark.parametrize("raw", ["not json", "{}", "[]", '[{"provider": "nope", "model": "x"}]',
@@ -138,7 +138,7 @@ def test_a_malformed_choice_is_ignored(m, raw):
     with m.engine.begin() as c:
         c.execute(text("INSERT INTO ai_model_choices (task, chain) VALUES ('briefing', :c)"), {"c": raw})
     m.mod.invalidate()
-    assert m.mod.resolve("briefing") == [("openai", "gpt-4o")]
+    assert m.mod.resolve("briefing") == TODAY["briefing"]
 
 
 def test_a_database_problem_never_stops_aria(m, monkeypatch):
@@ -160,7 +160,7 @@ def test_an_openai_call_site_uses_the_first_openai_choice(m):
 def test_an_openai_call_site_with_no_openai_choice_keeps_todays_model(m):
     choose(m, "briefing", [("anthropic", "claude-opus-5-5")])
     m.mod.invalidate()
-    assert m.mod.openai_model("briefing") == "gpt-4o"
+    assert m.mod.openai_model("briefing") == "gpt-5"
 
 
 @pytest.mark.parametrize("task,model", [("voice_aria", "gpt-5"), ("voice_aria", "gpt-realtime-3"),
@@ -321,7 +321,7 @@ def test_on_the_event_loop_the_database_is_never_read(m, monkeypatch):
         out = m.mod.resolve("briefing")
         return out, time.monotonic() - t0
     out, took = asyncio.run(on_loop())
-    assert out == [("openai", "gpt-4o")] and took < 0.1          # defaults at once, no wait
+    assert out == TODAY["briefing"] and took < 0.1               # defaults at once, no wait
     assert started.wait(2)                                         # the refresh started in a thread
     release.set()
     for _ in range(50):
@@ -372,7 +372,7 @@ def test_a_responses_only_model_is_never_chosen_for_a_chat_site(m, monkeypatch):
     monkeypatch.setenv("AI_PRICES_JSON", '{"openai/gpt-5-pro": [1000, 8000, 1]}')
     choose(m, "support", [("openai", "gpt-5-pro")])
     m.mod.invalidate()
-    assert m.mod.resolve("support") == [("openai", "gpt-4o")]
+    assert m.mod.resolve("support") == TODAY["support"]
 
 
 # ------------------------------------------- a stale load is never published ---

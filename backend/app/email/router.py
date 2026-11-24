@@ -19,6 +19,7 @@ import asyncio
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import func
+from sqlalchemy import text as sa_text
 from sqlmodel import Session, select
 
 from auth import get_user_business_context, require_feature
@@ -752,12 +753,18 @@ async def list_email_outbox(
     return EmailOutboxListResponse(emails=items, total=len(items))
 
 
+def inbox_sorting_label(value):
+    """A stored category as one of Mike's (an older value reads as its new one)."""
+    from services import inbox_sorting
+    return inbox_sorting.normalise(value) if value else None
+
+
 @router.get("/messages", response_model=EmailMessageListResponse)
-async def list_email_messages(
+def list_email_messages(   # ARIA-1a: plain def, so FastAPI runs its database work in a worker
     email_account_id: Optional[str] = Query(default=None),
     folder: Optional[str] = Query(default="INBOX"),
     unread_only: Optional[bool] = Query(default=None),
-    category: Optional[str] = Query(default=None, description="Filter by AI category"),
+    category: Optional[str] = Query(default=None, description="Filter by AI category, or 'important'"),
     priority_min: Optional[int] = Query(default=None, ge=1, le=5, description="Minimum AI priority"),
     sort_by: Optional[str] = Query(default="received_at", description="Sort by: received_at, ai_priority"),
     limit: int = Query(default=50, ge=1, le=200),
@@ -774,7 +781,14 @@ async def list_email_messages(
     if unread_only is True:
         statement = statement.where(EmailMessage.is_unread == True)
     if category:
-        statement = statement.where(EmailMessage.ai_category == category)
+        # ARIA-1a: Mike's categories, matching every value that reads as one
+        # (an older "finance" is Money); "important" is the one rule.
+        from services import inbox_sorting
+        if category == "important":
+            statement = statement.where(sa_text(inbox_sorting.IMPORTANT_SQL))
+        else:
+            wanted = inbox_sorting.normalise(category)
+            statement = statement.where(EmailMessage.ai_category.in_(inbox_sorting.stored_values({wanted})))
     if priority_min is not None:
         statement = statement.where(EmailMessage.ai_priority >= priority_min)
 
@@ -804,7 +818,7 @@ async def list_email_messages(
             is_unread=row.is_unread,
             has_attachments=row.has_attachments,
             labels=row.labels,
-            ai_category=row.ai_category,
+            ai_category=inbox_sorting_label(row.ai_category),
             ai_priority=row.ai_priority,
             ai_summary=row.ai_summary,
             ai_suggested_action=row.ai_suggested_action,
@@ -1248,21 +1262,19 @@ async def analyze_emails(
 
     business = get_business_by_id(session, auth_ctx["business_id"])
 
-    if data.message_ids:
-        statement = select(EmailMessage).where(
-            EmailMessage.business_id == business.id,
-            EmailMessage.id.in_(data.message_ids),
-        )
-    else:
-        statement = (
-            select(EmailMessage)
-            .where(
-                EmailMessage.business_id == business.id,
-                EmailMessage.ai_analyzed_at == None,
-            )
-            .order_by(EmailMessage.received_at.desc())
-            .limit(50)
-        )
+    if not data.message_ids:
+        # ARIA-1a "Sort now": the same pass as the background (free filters,
+        # then the AI), in its own session off the event loop, and it says
+        # what it did. It used to find nothing (the background had sorted it
+        # all) and look as if it did nothing.
+        out = await run_in_threadpool(_sort_now, str(business.id))
+        return EmailAnalyzeResponse(analyses=[], analyzed_count=out["sorted"] + out["skipped"],
+                                    sorted_count=out["sorted"], skipped_count=out["skipped"],
+                                    waiting_count=out["waiting"] or 0, failed=out["failed"])
+    statement = select(EmailMessage).where(
+        EmailMessage.business_id == business.id,
+        EmailMessage.id.in_(data.message_ids),
+    )
 
     messages = session.exec(statement).all()
     if not messages:
@@ -1298,6 +1310,61 @@ async def analyze_emails(
     session.commit()
 
     return EmailAnalyzeResponse(analyses=all_analyses, analyzed_count=len(all_analyses))
+
+
+def _last_quick_check():
+    try:
+        from services import briefing_scheduler
+        return briefing_scheduler._last_email_quick
+    except Exception:
+        return None
+
+
+def _sort_now(business_id: str) -> dict:
+    from db import get_session_context
+    from services import inbox_sorting
+    with get_session_context() as s:
+        return inbox_sorting.sort_pending(s, business_id, limit=50)
+
+
+@router.get("/sorting")
+def email_sorting_status(
+    auth_ctx=Depends(get_user_business_context),
+    session: Session = Depends(get_session),
+):
+    """ARIA-1a: what the Comms page says about Aria's sorting: how many are
+    waiting, when mail was last sorted and when she checks next, and the
+    count per category (last 30 days) for the filters."""
+    from sqlalchemy import text as sa_text
+    from services import inbox_schedule, inbox_sorting
+    bid = str(auth_ctx["business_id"])
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=30)
+    waiting = session.execute(sa_text(
+        "SELECT COUNT(*) FROM email_messages WHERE business_id = :b AND ai_analyzed_at IS NULL"), {"b": bid}).scalar()
+    last = session.execute(sa_text(
+        "SELECT MAX(ai_analyzed_at) FROM email_messages WHERE business_id = :b"), {"b": bid}).scalar()
+    counts = {key: 0 for key in inbox_sorting.CATEGORIES}
+    important = 0
+    rows = session.execute(sa_text(
+        "SELECT ai_category, ai_priority, is_unread FROM email_messages "
+        "WHERE business_id = :b AND ai_analyzed_at IS NOT NULL AND received_at >= :since"),
+        {"b": bid, "since": since}).fetchall()
+    for category, priority, unread in rows:
+        counts[inbox_sorting.normalise(category)] += 1
+        if unread and inbox_sorting.is_important(category, priority):
+            important += 1
+    session.rollback()
+    if isinstance(last, datetime) and last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return {
+        "waiting": int(waiting or 0),
+        "last_sorted_at": last.isoformat() if isinstance(last, datetime) else (str(last) if last else None),
+        "next_check_at": inbox_schedule.next_check(now, _last_quick_check()).isoformat(),
+        "schedule": inbox_schedule.DESCRIPTION,
+        "categories": [{"key": k, "label": v, "count": counts[k]} for k, v in inbox_sorting.CATEGORIES.items()],
+        "important_unread": important,
+    }
 
 
 @router.post("/drafts/generate-options", response_model=EmailDraftOptionsResponse)

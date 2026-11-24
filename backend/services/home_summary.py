@@ -96,16 +96,24 @@ def _iso(value) -> Optional[str]:
     return value.astimezone(timezone.utc).isoformat()
 
 
+def emails_needing_action(conn, business_id: str, since: datetime) -> int:
+    """ARIA-1a: the important mail received since `since`, by the one rule
+    (services.inbox_sorting). It counted ai_category = 'Action Required',
+    which nothing writes, so the dashboard always said 0."""
+    from services.inbox_sorting import IMPORTANT_SQL
+    return int(conn.execute(text(f"""
+        SELECT COUNT(*) FROM email_messages
+        WHERE business_id = :business_id AND {IMPORTANT_SQL}
+          AND received_at >= :since
+    """), {"business_id": str(business_id), "since": since}).scalar() or 0)
+
+
 def summary(conn, business_id: str, now: Optional[datetime] = None) -> dict:
     now = now or datetime.now(timezone.utc)
     today = uk_today(now)
     bid = str(business_id)
     since = now - timedelta(days=EMAIL_ACTION_WINDOW_DAYS)
-    action_required = conn.execute(text("""
-        SELECT COUNT(*) FROM email_messages
-        WHERE business_id = :business_id AND ai_category = 'Action Required'
-          AND received_at >= :since
-    """), {"business_id": bid, "since": since}).scalar()
+    action_required = emails_needing_action(conn, bid, since)
     email_synced = conn.execute(text("""
         SELECT MAX(s.last_synced_at) FROM email_sync_states s
         JOIN email_accounts a ON a.id = s.email_account_id

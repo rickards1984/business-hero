@@ -87,6 +87,26 @@ export interface EmailAnalysis {
 export interface EmailAnalyzeResponse {
   analyses: EmailAnalysis[];
   analyzed_count: number;
+  // ARIA-1a "Sort now": what actually happened.
+  sorted_count?: number;
+  skipped_count?: number;
+  waiting_count?: number;
+  failed?: boolean;
+}
+
+export interface SortingStatus {
+  waiting: number;
+  last_sorted_at: string | null;
+  next_check_at: string;
+  schedule: string;
+  categories: { key: string; label: string; count: number }[];
+  important_unread: number;
+}
+
+/** ARIA-1a: how Aria's sorting stands, for the Comms page. */
+export async function fetchSortingStatus(): Promise<SortingStatus> {
+  const response = await apiRequest('GET', '/v1/email/sorting');
+  return response.json();
 }
 
 export interface EmailDraftOptionsResponse {

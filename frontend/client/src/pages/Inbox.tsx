@@ -36,16 +36,13 @@ import {
   sendEmailDraft,
   analyzeEmails,
 } from '@/lib/emailApi';
+import { INBOX_CATEGORIES } from '@/lib/inboxCategories';
 
+// ARIA-1a: Mike's categories (lib/inboxCategories), plus All and Important.
 const CATEGORIES = [
   { key: '', label: 'All' },
-  { key: 'action_required', label: 'Action Required' },
-  { key: 'awaiting_reply', label: 'Awaiting Reply' },
-  { key: 'fyi', label: 'FYI' },
-  { key: 'finance', label: 'Finance' },
-  { key: 'marketing', label: 'Marketing' },
-  { key: 'scheduling', label: 'Scheduling' },
-  { key: 'spam', label: 'Spam' },
+  { key: 'important', label: 'Important' },
+  ...INBOX_CATEGORIES,
 ];
 
 const PRIORITY_COLORS: Record<number, string> = {
@@ -136,21 +133,21 @@ export default function Inbox() {
     }
   };
 
+  // ARIA-1a: the same pass as the 15-minute check, saying what it did.
   const handleAnalyzeAll = async () => {
     setAnalyzing(true);
     setError('');
     try {
-      const unanalyzed = messages.filter((m) => !m.ai_category).map((m) => m.id);
-      if (unanalyzed.length === 0) {
-        setSuccessMsg('All emails are already analyzed');
-        setAnalyzing(false);
-        return;
+      const result = await analyzeEmails();
+      const done = (result.sorted_count ?? 0) + (result.skipped_count ?? 0);
+      if (result.failed) {
+        setError("Aria couldn't sort some emails just now. She'll try again at the next check.");
+      } else {
+        setSuccessMsg(done ? `Sorted ${done} new email${done === 1 ? '' : 's'}` : 'Nothing new to sort: everything is sorted.');
       }
-      const result = await analyzeEmails(unanalyzed);
-      setSuccessMsg(`Analyzed ${result.analyzed_count} emails`);
       await loadMessages();
     } catch (err: any) {
-      setError(err.message || 'Failed to analyze emails');
+      setError(err.message || "Couldn't reach Aria to sort just now");
     } finally {
       setAnalyzing(false);
     }
@@ -246,7 +243,7 @@ export default function Inbox() {
               disabled={analyzing}
               size="small"
             >
-              Analyze All
+              Sort now
             </Button>
           </Box>
         </Box>

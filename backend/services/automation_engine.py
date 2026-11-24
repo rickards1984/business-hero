@@ -105,12 +105,15 @@ async def _check_rule_trigger(rule: dict, business_id: str) -> bool:
         return not bool(already)
 
     elif trigger_type == "email_action_required":
+        # ARIA-1a: the one rule for "needs the owner". The capitalised label
+        # it matched was never written, so this trigger could never fire.
+        from services import inbox_sorting
         with get_session_context() as session:
             row = session.execute(
-                text("""
+                text(f"""
                     SELECT id FROM email_messages
                     WHERE business_id = :business_id
-                      AND ai_category = 'Action Required'
+                      AND {inbox_sorting.IMPORTANT_SQL}
                       AND is_unread = true
                     LIMIT 1
                 """),

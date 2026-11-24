@@ -763,7 +763,13 @@ def test_a_role_is_verified_only_when_the_surname_matches(db):
     assert count(db, "SELECT fact_value FROM outreach_evidence WHERE business_id = :b AND fact_type = 'role_verified'") == "false"
 
 
-def test_followups_due_on_existing_enrolments_get_their_morning_card(db):
+def test_followups_due_on_existing_enrolments_get_their_morning_card(db, monkeypatch):
+    # The card's check reads outreach_send's clock: a contact found more than
+    # 28 days before "now" is past its first-send deadline (OUT-23). Held at
+    # the test's own date, or this test fails by itself from 24 Nov 2026,
+    # 28 days after NOW (found 24 Nov, while building ARIA-1a).
+    from services import outreach_send
+    monkeypatch.setattr(outreach_send, "now", lambda: NOW)
     biz, brand, lia, campaign = started(db)
     run(db, biz, lia, World([[person(1)]]))
     with db.begin() as c:

@@ -99,6 +99,43 @@
 - Newsletters cost nothing.
 - The dashboard count is correct.
 
+### ARIA-1a: sorting, as built (24 Nov)
+
+**Corrections to "What exists today":**
+- Sorting already ran in the background, after each 2-hourly sync (`background_sync._analyze_uncategorised_for_business`). It wasn't on demand only.
+- "Analyse all" wasn't broken. It found nothing unsorted, because the background had sorted it all, and it said so too faintly to notice.
+- The "Action Required" mismatch was in **three** places: the dashboard, the WhatsApp briefing's email counts (`briefing_data`, whose figures were all 0) and the automation trigger "email needs action", which could never fire.
+
+**Built:**
+- **`services/inbox_sorting.py`, the one definition.**
+  - Mike's categories, with `normalise` reading every stored value, old ones included (`finance` → money and so on), so no migration is needed.
+  - `is_important` and `IMPORTANT_SQL`: Money, New enquiry, Customer or Complaint, or priority 4 and above, and never Junk. They're used by the dashboard, the WhatsApp briefing, the automation trigger, the message list's "important" filter and the Comms page.
+- **Free filters before any AI:** the owner's own address, a reply to the business's outreach (left to Outreach → Replies), spam, Gmail promotions, social and forums, mailing-list headers, and automated mail.
+  - **A money email is never filtered away:** a subject that looks like money (invoice, payment, remittance, statement, a £ amount…) always goes to the AI, whatever its sender or headers.
+  - Chase replies are sorted, not skipped: they can't be told apart at sync time, and they belong in Money anyway.
+- **`sort_pending`**, one pass shared by the background and "Sort now".
+  - Newest first, in batches, costed to the business as `classify`.
+  - A failed batch stamps nothing and is reported.
+  - An answer about mail outside the batch is ignored.
+  - With no key for any chosen model, mail is left unsorted. It used to be stamped "fyi" for good.
+- **The schedule (`services/inbox_schedule.py`):** weekdays 07:00–19:00 UK. A **new-mail-only check every 15 minutes**: Gmail skips the metadata fetch for mail already stored. The **full sync every 2 hours** also refreshes read and unread state.
+  - The sync ran its Gmail calls and sorting **on the event loop**. Each business now syncs in a worker thread, and no two syncs overlap.
+  - The message list endpoint is now a plain `def`, so its DB work runs off the loop too.
+- **The Comms inbox:**
+  - A status line: "Aria sorts new mail every 15 minutes, weekdays 7am to 7pm · last sorted … · next check … · N waiting".
+  - **Sort now** says what it did: how many were sorted and how many sorted free, "nothing new", or "couldn't sort; she'll try again".
+  - Chips for each category plus Important; cards for "Needs you", "New enquiries" and "Unread", each tappable to filter; and colour per category.
+  - The older Inbox page uses the same categories. The page's rule is tested against the server's in every case.
+- **The AI defaults (`services/ai_models`):** no default on gpt-4o. Mike's 22 Nov choices are now the defaults, each with a fallback where the job can take one:
+  - CEO briefings and the help assistant: gpt-5, then Claude Sonnet 5.5;
+  - inbox sorting, the single reply draft and call summaries: gpt-6-luna, then gpt-4o-mini;
+  - the board meeting: Claude Opus 5.5, then gpt-5;
+  - quote chat: gpt-6.1-sol.
+
+**Found while building:** `test_followups_due_on_existing_enrolments_get_their_morning_card` started failing on its own on 24 Nov 2026, 28 days after its fixed date. The card's check reads the real clock, for the 28-day first-send deadline. The test now holds that clock. **Follow-up:** sweep the other tests with fixed autumn-2026 dates for the same kind of date bomb.
+
+**Next (ARIA-1b):** drafted replies for important email, learning from the owner's edits, and one-tap send.
+
 ## ARIA-2: the dashboard grid (AMBER; sending goes through ARIA-1 and OUT-27)
 
 This replaces the text "what Aria did" with a tidy grid of cards. It shows **at most 6**, the most urgent first:

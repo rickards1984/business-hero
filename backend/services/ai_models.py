@@ -68,22 +68,30 @@ def _t(label, *chain, **kw):
 # Defaults are what each call site used on 20 Nov 2026 (tests/test_ai_models.py TODAY).
 ONE_OPENAI = {"providers": ("openai",), "max_chain": 1}
 
+# ARIA-1a (24 Nov): no default on gpt-4o (dearer and weaker than gpt-5), Mike's
+# 22 Nov choices as the defaults, and a fallback for each where the call site
+# takes one, on another provider where it matters.
 TASKS = {
     "chat": _t("Aria chat: everyday questions", ("openai", "gpt-5"), ledger=("chat",)),
     "chat_complex": _t("Aria chat: complex jobs, money and analysis", ("openai", "gpt-5"), ledger=("chat_complex",)),
-    "quote_chat": _t("Quote drafting in chat", ("openai", "gpt-4o"), ledger=("quote",), **ONE_OPENAI),
+    "quote_chat": _t("Quote drafting in chat", ("openai", "gpt-6.1-sol"), ledger=("quote",), **ONE_OPENAI),
     "quote": _t("Quote estimator", ("openai", "gpt-5.4"), legacy_env="QUOTE_AI_MODEL", ledger=("quote",),
                 **ONE_OPENAI),
     # AI-1d: these call services.ai_text, so any provider and fallbacks.
-    "reply_draft": _t("Email reply draft (one)", ("openai", "gpt-4o-mini"), ledger=("draft",)),
+    "reply_draft": _t("Email reply draft (one)", ("openai", "gpt-6-luna"), ("openai", "gpt-4o-mini"),
+                      ledger=("draft",)),
     "reply_drafts": _t("Email reply drafts (three tones)", ("openai", "gpt-5"), ledger=("draft",)),
-    "inbox_classify": _t("Sorting the inbox", ("openai", "gpt-4o-mini"), ledger=("classify",)),
+    "inbox_classify": _t("Sorting the inbox", ("openai", "gpt-6-luna"), ("openai", "gpt-4o-mini"),
+                         ledger=("classify",)),
     "email_briefing": _t("Email briefing", ("openai", "gpt-5"), ledger=("briefing",)),
-    "briefing": _t("CEO briefings", ("openai", "gpt-4o"), ledger=("briefing",)),
-    "meeting": _t("Board meeting", ("openai", "gpt-5"), legacy_env="EXECUTIVE_MEETING_AI_MODEL",
+    "briefing": _t("CEO briefings", ("openai", "gpt-5"), ("anthropic", "claude-sonnet-5-5"), ledger=("briefing",)),
+    "meeting": _t("Board meeting", ("anthropic", "claude-opus-5-5"), ("openai", "gpt-5"),
+                  legacy_env="EXECUTIVE_MEETING_AI_MODEL",
                   ledger=("meeting",)),         # AI-1d part 2: services.ai_text, any provider
-    "support": _t("Help assistant", ("openai", "gpt-4o"), ledger=("chat", "support_draft")),
-    "call_summary": _t("Call summaries", ("openai", "gpt-4o-mini"), ledger=("call_summary",)),
+    "support": _t("Help assistant", ("openai", "gpt-5"), ("anthropic", "claude-sonnet-5-5"),
+                  ledger=("chat", "support_draft")),
+    "call_summary": _t("Call summaries", ("openai", "gpt-6-luna"), ("openai", "gpt-4o-mini"),
+                       ledger=("call_summary",)),
     "voice_aria": _t("Aria's voice (realtime)", ("openai", "gpt-realtime-2"), kind="voice",
                      legacy_env="ARIA_REALTIME_MODEL", openai_only=True, compatible=("gpt-realtime-2",), max_chain=1),
     "voice_receptionist": _t("Receptionist (realtime)", ("openai", "gpt-realtime-2"), kind="voice",

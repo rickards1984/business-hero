@@ -19,11 +19,32 @@ from sqlmodel import select
 logger = logging.getLogger("background_sync")
 
 
-async def background_email_sync_all():
+_email_sync_running = False
+
+
+async def background_email_sync_all(new_only: bool = False):
     """
     Sync emails for ALL businesses with a connected email account.
-    Each business gets its own isolated database session.
+    Each business gets its own isolated database session, in a worker thread
+    (ARIA-1a: the Gmail calls and the sorting ran on the event loop, and now
+    run every 15 minutes). Never two at once: a run still going when the next
+    is due means the next is skipped.
+
+    `new_only`: fetch only mail not already stored (the 15-minute check).
     """
+    global _email_sync_running
+    if _email_sync_running:
+        logger.info("[BackgroundSync] Email sync still running; skipping this one")
+        return
+    _email_sync_running = True
+    try:
+        await _email_sync_all(new_only)
+    finally:
+        _email_sync_running = False
+
+
+async def _email_sync_all(new_only: bool):
+    import asyncio
     from db import get_session_context
 
     # Step 1: Get list of businesses to sync (own session, closed immediately)
@@ -51,7 +72,7 @@ async def background_email_sync_all():
     synced = 0
     for bid in business_ids:
         try:
-            _sync_email_for_business(bid)
+            await asyncio.to_thread(_sync_email_for_business, bid, new_only)
             synced += 1
         except Exception as e:
             logger.warning(f"[BackgroundSync] Email sync failed for business {bid}: {e}")
@@ -59,8 +80,9 @@ async def background_email_sync_all():
     logger.info(f"[BackgroundSync] Email sync complete: {synced}/{len(business_ids)} businesses synced")
 
 
-def _sync_email_for_business(business_id: str):
-    """Sync emails for a single business using a fresh isolated session."""
+def _sync_email_for_business(business_id: str, new_only: bool = False):
+    """Sync emails for a single business using a fresh isolated session.
+    `new_only`: skip the metadata fetch for mail already stored."""
     from db import get_session_context
     from app.email.service import (
         get_business_by_id,
@@ -86,7 +108,15 @@ def _sync_email_for_business(business_id: str):
                 session.commit()
                 session.refresh(sync_state)
 
-            result = provider.sync_inbox_changes(account=account, cursor=sync_state.cursor or {})
+            known = None
+            if new_only:
+                known = {r[0] for r in session.execute(text("""
+                    SELECT provider_message_id FROM email_messages
+                    WHERE email_account_id = :a AND provider_message_id IS NOT NULL
+                    ORDER BY received_at DESC NULLS LAST
+                    LIMIT 500
+                """), {"a": str(account.id)})}
+            result = provider.sync_inbox_changes(account=account, cursor=sync_state.cursor or {}, skip_ids=known)
             msg_count = 0
 
             for msg in result.messages:
@@ -185,81 +215,29 @@ def _sync_email_for_business(business_id: str):
         )
 
 
-def _analyze_uncategorised_for_business(business_id: str):
-    """Categorise un-analysed emails for a business using its own session.
-
-    Reuses analyze_email_batch (the existing analyzer). Cost-capped at 30 rows
-    per run, in batches of 10 (so <= 3 OpenAI calls/run). Stamps ai_analyzed_at
-    only for message_ids actually returned by the analyzer — so on a hard
-    failure (analyze_email_batch returns an empty list, e.g. OpenAI 429/timeout)
-    nothing is stamped and those rows stay NULL to be retried on the next pass.
-    """
+def _analyze_uncategorised_for_business(business_id: str) -> dict:
+    """Sort the business's newly-fetched (and any backlog of) unsorted mail:
+    free filters first, then the AI (ARIA-1a: services.inbox_sorting). In its
+    own isolated session; never raises, so a sorting failure cannot affect
+    the sync that just completed. A failed AI batch stamps nothing, so those
+    rows are tried again next pass."""
     from db import get_session_context
-    from app.email.service import analyze_email_batch
-    from models import EmailMessage
+    from services import inbox_sorting
 
     with get_session_context() as session:
         try:
-            unanalyzed = session.exec(
-                select(EmailMessage)
-                .where(
-                    EmailMessage.business_id == business_id,
-                    EmailMessage.ai_analyzed_at == None,  # noqa: E711 (SQL NULL test)
-                )
-                .order_by(EmailMessage.received_at.desc())
-                .limit(30)
-            ).all()
-            if not unanalyzed:
-                return
-
-            batch_size = 10
-            analyzed = 0
-            for i in range(0, len(unanalyzed), batch_size):
-                batch = unanalyzed[i : i + batch_size]
-                analyses = analyze_email_batch(batch)
-                if not analyses:
-                    # Hard failure for this batch — do NOT stamp; leave rows
-                    # NULL for the next pass. Stop early to avoid burning
-                    # further OpenAI calls on a likely-persistent failure.
-                    logger.warning(
-                        f"[BackgroundSync] Analysis returned no results for business "
-                        f"{business_id} (batch {i // batch_size + 1}); leaving "
-                        f"{len(batch)} message(s) un-analysed for retry"
-                    )
-                    break
-                for analysis in analyses:
-                    session.execute(
-                        text("""
-                            UPDATE email_messages
-                            SET ai_category = :category, ai_priority = :priority,
-                                ai_summary = :summary, ai_suggested_action = :action,
-                                ai_analyzed_at = NOW()
-                            WHERE id = :id AND business_id = :business_id
-                        """),
-                        {
-                            "category": analysis.category,
-                            "priority": analysis.priority,
-                            "summary": analysis.summary,
-                            "action": analysis.suggested_action,
-                            "id": analysis.message_id,
-                            "business_id": str(business_id),
-                        },
-                    )
-                    analyzed += 1
-                session.commit()
-
-            if analyzed:
-                logger.info(
-                    f"[BackgroundSync] Categorised {analyzed} email(s) for business {business_id}"
-                )
+            out = inbox_sorting.sort_pending(session, business_id, limit=30)
+            if out["sorted"] or out["skipped"]:
+                logger.info(f"[BackgroundSync] Sorted {out['sorted']} email(s) with AI and {out['skipped']} "
+                            f"for free for business {business_id}; {out['waiting']} waiting")
+            return out
         except Exception as e:
-            logger.warning(
-                f"[BackgroundSync] Email analysis failed for business {business_id}: {e}"
-            )
+            logger.warning(f"[BackgroundSync] Sorting failed for business {business_id}: {e}")
             try:
                 session.rollback()
             except Exception:
                 pass
+            return {"sorted": 0, "skipped": 0, "waiting": None, "failed": True}
 
 
 async def background_financial_sync_all():

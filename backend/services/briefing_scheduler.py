@@ -20,6 +20,7 @@ _scheduler_running = False
 MAX_TEMPLATE_VAR_LENGTH = 500
 
 _last_email_sync: datetime | None = None
+_last_email_quick: datetime | None = None   # ARIA-1a: the 15-minute new-mail check
 _last_financial_sync: datetime | None = None
 _FINANCIAL_SYNC_HOURS = {7, 13, 19}
 _STARTUP_DELAY_MINUTES = 5
@@ -27,7 +28,7 @@ _STARTUP_DELAY_MINUTES = 5
 
 async def start_briefing_scheduler():
     """Start the background scheduler. Call this on app startup."""
-    global _scheduler_running, _last_email_sync, _last_financial_sync
+    global _scheduler_running, _last_email_sync, _last_email_quick, _last_financial_sync
     if _scheduler_running:
         return
     _scheduler_running = True
@@ -45,6 +46,7 @@ async def start_briefing_scheduler():
     # there before shortening either delay.
     now = datetime.now(timezone.utc)
     _last_email_sync = now - timedelta(minutes=120 - _STARTUP_DELAY_MINUTES)
+    _last_email_quick = now - timedelta(minutes=15 - _STARTUP_DELAY_MINUTES)
     _last_financial_sync = now
 
     logger.info("[Scheduler] Starting CEO briefing scheduler")
@@ -287,18 +289,20 @@ async def _scheduler_loop():
 
 def _run_background_sync_jobs_nonblocking():
     """Check if background sync jobs are due and fire them as non-blocking tasks."""
-    global _last_email_sync, _last_financial_sync
+    global _last_email_sync, _last_email_quick, _last_financial_sync
     now = datetime.now(timezone.utc)
 
-    # Email sync: every 2 hours during business hours (08–18), weekdays only
-    london_tz = pytz.timezone("Europe/London")
-    now_london = now.astimezone(london_tz)
-    is_business_hours = now_london.weekday() < 5 and 8 <= now_london.hour <= 18
-    if is_business_hours and (
-        _last_email_sync is None or (now - _last_email_sync).total_seconds() >= 7200
-    ):
-        _last_email_sync = now
-        asyncio.create_task(_safe_background_email_sync())
+    # ARIA-1a (services/inbox_schedule): weekdays 07:00-19:00 UK, a check for
+    # new mail every 15 minutes (fetched and sorted), and the full sync every
+    # 2 hours, which also refreshes read and unread state.
+    from services import inbox_schedule
+    run = inbox_schedule.due(now, _last_email_sync, _last_email_quick)
+    if run == "full":
+        _last_email_sync = _last_email_quick = now
+        asyncio.create_task(_safe_background_email_sync(new_only=False))
+    elif run == "quick":
+        _last_email_quick = now
+        asyncio.create_task(_safe_background_email_sync(new_only=True))
 
     # 3x daily financial sync (07:00, 13:00, 19:00 UTC)
     current_hour = now.hour
@@ -313,12 +317,12 @@ def _run_background_sync_jobs_nonblocking():
             asyncio.create_task(_safe_background_financial_sync())
 
 
-async def _safe_background_email_sync():
+async def _safe_background_email_sync(new_only: bool = False):
     """Run email sync in a fire-and-forget task with error handling."""
     try:
         from services.background_sync import background_email_sync_all
-        logger.info("[Scheduler] Starting hourly background email sync")
-        await background_email_sync_all()
+        logger.info("[Scheduler] Starting background email %s", "check for new mail" if new_only else "sync")
+        await background_email_sync_all(new_only=new_only)
     except Exception as e:
         logger.error(f"[Scheduler] Background email sync failed: {e}")
 

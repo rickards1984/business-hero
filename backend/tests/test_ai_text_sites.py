@@ -151,7 +151,7 @@ def test_inbox_sorting_reads_claude_s_fenced_json(ai):
                  '"summary": "Wants a roof quote", "suggested_action": "Reply with a quote"}]\n```')
     with profit_guard.attributed("b1", "classify"):
         out = service.analyze_email_batch([message()])
-    assert [(r.message_id, r.category, r.priority) for r in out] == [("m1", "action_required", 4)]
+    assert [(r.message_id, r.category, r.priority) for r in out] == [("m1", "customer", 4)]   # ARIA-1a: Mike's categories
     assert set(ai.tasks) == {"inbox_classify"} and costed(ai) == [("b1", "classify", "anthropic")]
 
 
@@ -286,7 +286,7 @@ THREE = json.dumps([{"tone": t, "subject": "Re: roof", "body_text": f"{t} reply"
 def test_inbox_sorting_reads_every_wrapper_it_read_before(ai, form):
     from app.email import service
     ai.answer = wrappers(CLASSIFY)[form]
-    assert [r.category for r in service.analyze_email_batch([message()])] == ["action_required"], form
+    assert [r.category for r in service.analyze_email_batch([message()])] == ["customer"], form   # ARIA-1a
 
 
 @pytest.mark.parametrize("form", wrappers("x"))
