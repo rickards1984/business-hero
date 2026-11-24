@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -209,11 +210,21 @@ def _base_model(model: str) -> str:
     return m.split(":")[1] if m.startswith("ft:") and ":" in m[3:] else m
 
 
+_GPT_FAMILY = re.compile(r"^gpt-(\d+)")
+
+
 def is_reasoning(model: str) -> bool:
-    """gpt-5 and the o-series refuse max_tokens and any non-default
-    temperature (BM-1); their -chat variants behave as ordinary chat models."""
+    """gpt-5 and later (gpt-6-luna, gpt-6.1-sol, ...) and the o-series refuse
+    max_tokens and any non-default temperature (BM-1); their -chat variants
+    behave as ordinary chat models. HK-2: gpt-6 was missed, so a gpt-6 model
+    chosen on the admin page was sent settings it refuses."""
     m = _base_model(model)
-    return (m.startswith("gpt-5") or (len(m) > 1 and m[0] == "o" and m[1].isdigit())) and "-chat" not in m
+    if "-chat" in m:
+        return False
+    family = _GPT_FAMILY.match(m)
+    if family:
+        return int(family.group(1)) >= 5
+    return len(m) > 1 and m[0] == "o" and m[1].isdigit()
 
 
 def chat_params(model: str, *, max_tokens: Optional[int] = None, temperature: Optional[float] = None) -> dict:
