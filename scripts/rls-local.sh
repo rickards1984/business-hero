@@ -94,8 +94,8 @@ ORDER=(
 )
 # Migrations not yet written (036 AUTO-2 chase replies, 037 OUT-3 outreach
 # core, 038 OUT-7 reply drafts) are replayed once they exist; absence must not skip their tests.
-# 040-045 appended (Codex OUT-28 fix review 1, finding 4): a fresh harness models production, 044 included.
-for optional in backend/migrations/036_chase_replies.sql backend/migrations/037_outreach_core.sql backend/migrations/038_outreach_replies.sql backend/migrations/039_platform_meters.sql backend/migrations/04[0-5]_*.sql; do
+# 040-046 appended (Codex OUT-28 fix review 1, finding 4): a fresh harness models production, 044 included.
+for optional in backend/migrations/036_chase_replies.sql backend/migrations/037_outreach_core.sql backend/migrations/038_outreach_replies.sql backend/migrations/039_platform_meters.sql backend/migrations/04[0-6]_*.sql; do
   if [ -f "$optional" ]; then
     ORDER+=("$optional")
   fi
