@@ -37,7 +37,12 @@ The models weren't short of intelligence. Nothing checked their answer against w
 
 ### 1. The most capable models, chosen on the admin page
 - `quote` and `quote_chat` move onto `services/ai_text`, like AI-1d. That gives any provider, with fallbacks and costing.
-- Mike's suggested defaults: **Claude Opus 5.5 first, GPT-6.1 as fallback**, confirmed at build time against the price table.
+- **The default chain (Mike, 22 Nov):** no gpt-5.4. The two strongest models first and second, on different providers, so one provider's outage or used-up credit never stops quoting:
+  1. **Claude Opus 5.5** or **GPT-6.1**, whichever Mike chooses as the default;
+  2. the other one, as the automatic fallback;
+  3. a third strong model as the last fallback. Recommended: a third provider, Grok's top model, once `XAI_API_KEY` is set. Without that key, Claude Sonnet 5.5 is a separate fallback model, but on Anthropic again.
+
+  Exact model IDs and prices are confirmed against the price table at build time. Mike can change any of it on the admin page.
 - "Test this model" gets an estimating set, built from jobs with known fair prices. Mike's EPDM roof is the first case.
 
 ### 2. The business's own rates, used as numbers, not prompt text

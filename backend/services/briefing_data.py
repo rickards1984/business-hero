@@ -135,7 +135,7 @@ async def gather_business_data(
     try:
         emails_rows = session.execute(
             text("""
-                SELECT id, ai_category, is_unread, received_at
+                SELECT id, ai_category, is_unread, received_at, ai_priority
                 FROM email_messages
                 WHERE business_id = :business_id
                   AND received_at >= :period_start
@@ -144,19 +144,23 @@ async def gather_business_data(
         ).fetchall()
 
         emails = [
-            {"id": str(r[0]), "ai_category": r[1], "is_read": not r[2] if r[2] is not None else True, "received_at": r[3]}
+            {"id": str(r[0]), "ai_category": r[1], "is_read": not r[2] if r[2] is not None else True, "received_at": r[3],
+             "ai_priority": r[4]}
             for r in emails_rows
         ]
 
+        # ARIA-1a: read through the one rule (services.inbox_sorting); these
+        # counted capitalised labels nothing writes, so every figure was 0.
+        from services import inbox_sorting
+        sorted_as = [inbox_sorting.normalise(e.get("ai_category")) for e in emails if e.get("ai_category")]
         data["emails"] = {
             "total_received": len(emails),
-            "action_required": len([e for e in emails if e.get("ai_category") == "Action Required"]),
-            "awaiting_reply": len([e for e in emails if e.get("ai_category") == "Awaiting Reply"]),
+            "action_required": len([e for e in emails
+                                    if inbox_sorting.is_important(e.get("ai_category"), e.get("ai_priority"))]),
             "unread": len([e for e in emails if e.get("is_read") is False]),
-            "fyi": len([e for e in emails if e.get("ai_category") == "FYI"]),
-            "newsletters": len(
-                [e for e in emails if e.get("ai_category") in ("Newsletter", "Marketing")]
-            ),
+            "by_category": {key: sorted_as.count(key) for key in inbox_sorting.CATEGORIES if key in sorted_as},
+            "fyi": sorted_as.count("fyi"),
+            "junk": sorted_as.count("junk"),
         }
     except Exception as e:
         logger.error(f"[Briefing Data] Failed to gather emails: {e}")

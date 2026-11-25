@@ -27,7 +27,7 @@ def engine():
             amount_due NUMERIC, amount_paid NUMERIC DEFAULT 0, paid_amount NUMERIC, status TEXT,
             due_date DATE, archived BOOLEAN DEFAULT 0, external_id TEXT)"""))
         c.execute(text("""CREATE TABLE email_messages (id INTEGER PRIMARY KEY, business_id TEXT,
-            ai_category TEXT, received_at TIMESTAMP)"""))
+            ai_category TEXT, ai_priority INTEGER, received_at TIMESTAMP)"""))
         c.execute(text("CREATE TABLE email_accounts (id TEXT, business_id TEXT)"))
         c.execute(text("CREATE TABLE email_sync_states (email_account_id TEXT, last_synced_at TIMESTAMP)"))
         c.execute(text("CREATE TABLE xero_connections (business_id TEXT, last_sync_at TIMESTAMP)"))
@@ -100,17 +100,19 @@ def test_due_today_is_not_yet_overdue(engine):
 
 
 def test_emails_needing_action_count_every_message_in_the_window(engine):
-    """Finding 5: all of them, not a sample of 200 — and the window is stated."""
+    """Finding 5: all of them, not a sample of 200 — and the window is stated.
+    ARIA-1a: with the value the sorter really writes; this test used the
+    capitalised label nothing writes, so it passed while the count was 0."""
     with engine.begin() as c:
         for i in range(250):
             c.execute(text("INSERT INTO email_messages (business_id, ai_category, received_at) "
-                           "VALUES (:b, 'Action Required', :r)"),
+                           "VALUES (:b, 'action_required', :r)"),
                       {"b": A, "r": datetime(2026, 10, 10, tzinfo=timezone.utc)})
         c.execute(text("INSERT INTO email_messages (business_id, ai_category, received_at) "
-                       "VALUES (:b, 'Action Required', :r)"),
+                       "VALUES (:b, 'action_required', :r)"),
                   {"b": A, "r": datetime(2026, 9, 1, tzinfo=timezone.utc)})  # outside the window
         c.execute(text("INSERT INTO email_messages (business_id, ai_category, received_at) "
-                       "VALUES (:b, 'Action Required', :r)"),
+                       "VALUES (:b, 'action_required', :r)"),
                   {"b": B, "r": datetime(2026, 10, 10, tzinfo=timezone.utc)})
     with engine.connect() as c:
         s = home_summary.summary(c, A, NOW)

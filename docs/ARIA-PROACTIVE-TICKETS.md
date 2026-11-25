@@ -99,6 +99,89 @@
 - Newsletters cost nothing.
 - The dashboard count is correct.
 
+### ARIA-1a: sorting, as built (24 Nov)
+
+**Corrections to "What exists today":**
+- Sorting already ran in the background, after each 2-hourly sync (`background_sync._analyze_uncategorised_for_business`). It wasn't on demand only.
+- "Analyse all" wasn't broken. It found nothing unsorted, because the background had sorted it all, and it said so too faintly to notice.
+- The "Action Required" mismatch was in **three** places: the dashboard, the WhatsApp briefing's email counts (`briefing_data`, whose figures were all 0) and the automation trigger "email needs action", which could never fire.
+
+**Built:**
+- **`services/inbox_sorting.py`, the one definition.**
+  - Mike's categories, with `normalise` reading every stored value, old ones included (`finance` → money and so on), so no migration is needed.
+  - `is_important` and `IMPORTANT_SQL`: Money, New enquiry, Customer or Complaint, or priority 4 and above, and never Junk. They're used by the dashboard, the WhatsApp briefing, the automation trigger, the message list's "important" filter and the Comms page.
+- **Free filters before any AI:** the owner's own address, a reply to the business's outreach (left to Outreach → Replies), spam, Gmail promotions, social and forums, mailing-list headers, and automated mail.
+  - **A money email is never filtered away:** a subject that looks like money (invoice, payment, remittance, statement, a £ amount…) always goes to the AI, whatever its sender or headers.
+  - Chase replies are sorted, not skipped: they can't be told apart at sync time, and they belong in Money anyway.
+- **`sort_pending`**, one pass shared by the background and "Sort now".
+  - Newest first, in batches, costed to the business as `classify`.
+  - A failed batch stamps nothing and is reported.
+  - An answer about mail outside the batch is ignored.
+  - With no key for any chosen model, mail is left unsorted. It used to be stamped "fyi" for good.
+- **The schedule (`services/inbox_schedule.py`):** weekdays 07:00–19:00 UK. A **new-mail-only check every 15 minutes**: Gmail skips the metadata fetch for mail already stored. The **full sync every 2 hours** also refreshes read and unread state.
+  - The sync ran its Gmail calls and sorting **on the event loop**. Each business now syncs in a worker thread, and no two syncs overlap.
+  - The message list endpoint is now a plain `def`, so its DB work runs off the loop too.
+- **The Comms inbox:**
+  - A status line: "Aria sorts new mail every 15 minutes, weekdays 7am to 7pm · last sorted … · next check … · N waiting".
+  - **Sort now** says what it did: how many were sorted and how many sorted free, "nothing new", or "couldn't sort; she'll try again".
+  - Chips for each category plus Important; cards for "Needs you", "New enquiries" and "Unread", each tappable to filter; and colour per category.
+  - The older Inbox page uses the same categories. The page's rule is tested against the server's in every case.
+- **The AI defaults (`services/ai_models`):** no default on gpt-4o. Mike's 22 Nov choices are now the defaults, each with a fallback where the job can take one:
+  - CEO briefings and the help assistant: gpt-5, then Claude Sonnet 5.5;
+  - inbox sorting, the single reply draft and call summaries: gpt-6-luna, then gpt-4o-mini;
+  - the board meeting: Claude Opus 5.5, then gpt-5;
+  - quote chat: gpt-6.1-sol.
+
+**Codex review 1** (`audits/ARIA-1A-CODEX-CODE-REVIEW-1.md`, REQUEST CHANGES; 5 blocking, 4 hardening), all fixed:
+1. **The sender alone hid real mail.** A booking form's no-reply address, a contact-form plugin sending from the business's own address, and "Fwd: Complaint" were all filtered as FYI. The free filters now skip **bulk mail only**: spam, promotions, social and forums, mailing lists, and out-of-office (`Auto-Submitted: auto-replied`). A no-reply sender, the owner's own address and auto-generated form mail all go to the AI.
+2. **"Money is never filtered away" wasn't true.** A promotion-labelled invoice, "£750 received" (the leading £ wasn't matched) and "Your mandate has been cancelled" were all filtered. Now a money, tax, account, enquiry, quote, complaint, booking or order signal in the **subject or the preview**, or a known money sender (HMRC, GoCardless, Stripe, PayPal, Xero, the main banks…), always goes to the AI. Promotions are checked after it.
+3. **Two passes sorted and paid for the same mail,** and the later overwrote the earlier. Now there's **one pass per business at a time**: a PostgreSQL session advisory lock on its own connection, or a process lock on SQLite. A pass that finds another running does nothing and says it's `busy` ("Aria is sorting your mail right now"). A stamp never overwrites mail already sorted.
+4. **Python and SQL read stored values differently.** "Finance" was important in Python but not in SQL, and "Junk" at priority 5 the other way round. `NORM_SQL` now reads a value as `normalise` does (trimmed, lower case, spaces and hyphens as underscores). `category_sql` and `IMPORTANT_SQL` are built from it; unknown values read as FYI in both; empty or NULL is "not sorted" and never important. A test checks 26 raw values × 5 priorities against Python.
+5. **Choosing a category showed every other count as 0.** The counts came from the filtered list on screen. They now come from `GET /v1/email/sorting?range=…` for the page's time range: total, unread, important and important unread, and per category. "Needs you" shows important unread mail and "Unread" shows unread mail, with an "Unread only" chip. The status refreshes every minute.
+6. A full sync skipped by the overlap guard was recorded as run. Now the scheduler records nothing while a sync is still running.
+7. "Next check" could show a time outside the window (Friday 18:55 said 19:05). Now it shows the next real check (Monday 07:00).
+8. A duplicate answer counted twice, and a partial answer said nothing. Each email is counted once, and a batch the model answered only in part is reported as `failed`; its missing mail stays unsorted.
+9. "Bank holiday offers" newsletters went to the AI. "Bank holiday" no longer reads as money.
+
+**Codex review 2** (`audits/ARIA-1A-CODEX-CODE-REVIEW-2.md`, REQUEST CHANGES; findings 2–5 still partly open, plus hardening). Fixed:
+- **2. A change of approach: no free filters.** Each keyword list still left a way to hide real mail unseen: "Please pay today" from a supplier's mailing list, a contact form saying "Can you fix our roof?" with a list header, "Invoice due" in spam.
+  - **The AI now reads every email,** except replies to the business's outreach (left to Outreach → Replies). Each email goes with its *bulk signs* (spam or Promotions or Social labels, a mailing-list header, out of office). The prompt says the content comes first: a request to pay from a mailing list is still Money.
+  - **The cost** (corrected in review 3, from published prices rather than measured): gpt-6-luna is $0.10/M input and $0.50/M output. At about 200 input and 100 output tokens an email, that's roughly 7 US cents per 1,000 emails; at the ceiling (6,000 completion tokens per batch of ten), about 30 cents per 1,000. The real figure shows on the profit page under `classify`.
+  - **The acceptance line "Newsletters cost nothing"** becomes "newsletters cost a fraction of a penny, and nothing is hidden unread". **Mike confirmed on 25 Nov.**
+- **3. Naming emails to sort** (`/analyze` with `message_ids`) now goes through the same locked, no-overwrite pass (`sort_pending(only_ids=…)`). The endpoint's own unlocked update path is gone, and the request's session is released before the pass runs.
+- **4.** Whitespace reads the same in Python and SQL (only spaces are trimmed, as SQL's `trim` does). The list sends whitespace-only values as "not sorted", never "fyi".
+- **5. The page:**
+  - its periods are the server's: the UK day, 7 days and 30 days;
+  - sync polls call the latest `loadEmails`, and only the latest request may set the list;
+  - the list reapplies the chosen category and "unread only" itself;
+  - it reloads when sorting has moved on.
+- **10–13 (hardening):**
+  - the lock takes the engine from a Connection-bound session;
+  - it runs on an autocommit connection, so no transaction stays open through the AI calls;
+  - it uses a 64-bit key from the business id;
+  - a failed unlock invalidates the connection rather than returning it to the pool;
+  - the status counts are grouped in the database.
+
+**Codex review 3** (`audits/ARIA-1A-CODEX-CODE-REVIEW-3.md`, REQUEST CHANGES). Nothing was left on the server; the three blockers were all the page's request ordering. This was the third cycle, so it was escalated to Mike. The blockers are fixed in `lib/inboxView.ts`, which is tested under Node:
+1. On a newly connected mailbox, the first sort after the page opened didn't reload the list (null → a time was ignored). Now "not seen yet" (`undefined`) is told apart from "seen, nothing sorted yet" (`null`).
+2. A late status answer for another time range could replace the counts. Only the latest status request may set them.
+3. A late failure could blank the list, and Sort now finishing after a category change reloaded the old view. Only the latest list request may change the list (success, failure or finally), and after an awaited action the page calls the current loader.
+
+**Codex review 4, narrow and final** (`audits/ARIA-1A-CODEX-CODE-REVIEW-4.md`): **APPROVE**. All three page blockers were closed, checked with the component's own callbacks and deferred responses. Follow-up: a rendered React test of those scenarios. The current tests prove the helpers, and that the component uses them.
+
+**Follow-ups from review 3 (non-blocking):**
+- Measure the sorting accuracy on a labelled corpus. The AI reads the subject and a 300-character preview, not the whole email.
+- Measure the real cost per 1,000 emails from the ledger.
+- Throughput is about 1,470 emails a weekday (30 per check); a busier mailbox builds a backlog, newest first.
+- Lock-connection loss and pool pressure under many simultaneous passes.
+- `/analyze` with message_ids no longer re-analyses mail already sorted; no current caller does that.
+
+**Left as follow-ups (non-blocking):** the scheduler records a full sync as run when it is *scheduled*, not when it *completes*; and the SQLite lock is per process (tests and local only).
+
+**Found while building:** `test_followups_due_on_existing_enrolments_get_their_morning_card` started failing on its own on 24 Nov 2026, 28 days after its fixed date. The card's check reads the real clock, for the 28-day first-send deadline. The test now holds that clock. **Follow-up:** sweep the other tests with fixed autumn-2026 dates for the same kind of date bomb.
+
+**Next (ARIA-1b):** drafted replies for important email, learning from the owner's edits, and one-tap send.
+
 ## ARIA-2: the dashboard grid (AMBER; sending goes through ARIA-1 and OUT-27)
 
 This replaces the text "what Aria did" with a tidy grid of cards. It shows **at most 6**, the most urgent first:

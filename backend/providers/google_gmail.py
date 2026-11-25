@@ -6,6 +6,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
+from typing import Collection  # ARIA-1a: skip_ids
 
 import httpx
 
@@ -118,6 +119,7 @@ class GoogleGmailProvider(BaseEmailProvider):
         *,
         account: Any,
         cursor: Dict[str, Any],
+        skip_ids: Optional[Collection[str]] = None,
     ) -> ProviderSyncResult:
         access_token = get_valid_access_token(account)
         headers = {"Authorization": f"Bearer {access_token}"}
@@ -131,6 +133,12 @@ class GoogleGmailProvider(BaseEmailProvider):
             data = response.json()
 
             ids = [item["id"] for item in (data.get("messages") or []) if item.get("id")]
+            listed = len(ids)
+            if skip_ids:
+                # ARIA-1a: the 15-minute check fetches new mail only; the 2-hourly
+                # full sync still refreshes every listed message's read state.
+                known = set(skip_ids)
+                ids = [mid for mid in ids if mid not in known]
 
             # Fan out the per-message metadata fetches with bounded concurrency.
             # The httpx.Client is shared across worker threads (thread-safe), and
@@ -153,7 +161,7 @@ class GoogleGmailProvider(BaseEmailProvider):
 
         _logger.info(
             f"[GmailSync] Fetched {len(messages)}/{len(ids)} INBOX messages "
-            f"({len(ids) - len(messages)} skipped)"
+            f"({len(ids) - len(messages)} skipped, {listed - len(ids)} already stored)"
         )
         return ProviderSyncResult(messages=messages, cursor=cursor or {})
 

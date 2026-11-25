@@ -2,6 +2,7 @@ import base64
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from typing import Collection  # ARIA-1a: skip_ids
 
 import httpx
 
@@ -176,6 +177,7 @@ class MicrosoftGraphProvider(BaseEmailProvider):
         *,
         account: Any,
         cursor: Dict[str, Any],
+        skip_ids: Optional[Collection[str]] = None,
     ) -> ProviderSyncResult:
         access_token = get_valid_access_token(account)
         headers = {"Authorization": f"Bearer {access_token}"}

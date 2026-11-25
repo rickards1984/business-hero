@@ -101,7 +101,7 @@ def db():
         c.execute(text("""CREATE TABLE email_messages (id TEXT PRIMARY KEY, business_id TEXT NOT NULL,
             email_account_id TEXT NOT NULL, provider_message_id TEXT NOT NULL,
             provider_thread_id TEXT, folder TEXT, from_email TEXT, from_name TEXT, to_emails TEXT,
-            cc_emails TEXT, raw_headers TEXT, subject TEXT, snippet TEXT, body_text TEXT, received_at TEXT, ai_category TEXT,
+            cc_emails TEXT, raw_headers TEXT, subject TEXT, snippet TEXT, body_text TEXT, received_at TEXT, ai_category TEXT, ai_priority INTEGER,
             created_at TEXT, updated_at TEXT)"""))
         c.execute(text("""CREATE TABLE email_sync_states (id TEXT PRIMARY KEY,
             email_account_id TEXT NOT NULL UNIQUE, cursor TEXT DEFAULT '{}', last_synced_at TEXT,

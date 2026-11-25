@@ -335,31 +335,40 @@ def _text_to_html(text: str) -> str:
     return safe.replace("\n", "<br>")
 
 
-CATEGORIZE_SYSTEM_PROMPT = """You are an email categorisation assistant for a business.
-Analyse each email and return a JSON array with one object per email.
+CATEGORIZE_SYSTEM_PROMPT = """You sort a small UK business's incoming email for its owner.
+Return a JSON array with one object per email.
 
 Categories (pick ONE):
-- action_required: Needs a response or action from the user
-- awaiting_reply: User already replied, waiting for the other party
-- fyi: Informational, no action needed
-- marketing: Newsletters, promotions, marketing emails
-- finance: Invoices, payments, receipts, bank notifications
-- scheduling: Meeting requests, calendar invites, appointment changes
-- spam: Junk, phishing, irrelevant
+- money: payments, remittances, invoices or bills received, bank, card or payout notices, refunds
+- new_enquiry: someone new asking about the business's services, prices or availability
+- customer: an existing customer's request, question or update
+- complaint: someone unhappy with the business's work or service
+- supplier: a supplier, contractor or tradesperson the business buys from
+- scheduling: meeting requests, calendar invites, appointment changes
+- fyi: informational, nothing to do
+- junk: promotions, cold sales pitches, spam, phishing
+
+Some emails come with "bulk signs" (a mailing-list header, a Promotions label, an
+automatic reply). Weigh them, but what the email says comes first: an invoice,
+a request to pay, an enquiry, a customer's question or a complaint is that
+category even when it came from a mailing list or a no-reply address. Newsletters
+and updates with nothing for the owner to do are fyi; promotions and spam are junk.
 
 Priority (1-5):
-- 5: Urgent - needs immediate attention (e.g. overdue payment, angry client)
-- 4: High - should handle today (e.g. client question, important request)
-- 3: Medium - handle this week (e.g. general business correspondence)
-- 2: Low - handle when convenient (e.g. FYI emails, non-urgent updates)
-- 1: Minimal - can ignore or archive (e.g. marketing, newsletters)
+- 5: urgent: today (an angry customer, a payment problem, a deadline today)
+- 4: high: today if possible (a new enquiry, a customer waiting on an answer)
+- 3: medium: this week
+- 2: low: when convenient
+- 1: minimal: can be ignored or archived
 
 Return ONLY a JSON array. No markdown, no explanation.
-Each object must have: message_id, category, priority, summary, suggested_action"""
+Each object must have: message_id, category, priority, summary (one short sentence), suggested_action (or null)"""
 
 
 def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
-    """Analyze a batch of emails using gpt-4o-mini for categorisation.
+    """Sort a batch of emails into Mike's categories (ARIA-1a), with the
+    model chosen for "inbox_classify". Only the batch's own messages come
+    back, each in one of services.inbox_sorting.CATEGORIES with a 1-5 priority.
 
     Failure contract: on a HARD failure (OpenAI 429/timeout/exception, or an
     unparseable response) this returns an EMPTY list rather than fabricated
@@ -376,17 +385,10 @@ def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
         return []
 
     if not ai_chat.available("inbox_classify"):   # AI-1d: any provider
-        from schemas import EmailAnalysis
-        return [
-            EmailAnalysis(
-                message_id=str(m.id),
-                category="fyi",
-                priority=2,
-                summary=m.subject or "No subject",
-                suggested_action=None,
-            )
-            for m in messages
-        ]
+        # ARIA-1a: no key is a failure, not a verdict. Stamping every email
+        # "fyi" froze it there for good; left unsorted, it is tried again.
+        _logger.warning("Email sorting skipped: no key for any model chosen for inbox sorting")
+        return []
 
     email_items = []
     for m in messages:
@@ -396,7 +398,8 @@ def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
             f"from_name: {m.from_name or 'Unknown'}\n"
             f"subject: {m.subject or '(no subject)'}\n"
             f"snippet: {(m.snippet or '')[:300]}\n"
-            f"received_at: {m.received_at.isoformat() if m.received_at else 'unknown'}"
+            f"received_at: {m.received_at.isoformat() if hasattr(m.received_at, 'isoformat') else (m.received_at or 'unknown')}"
+            + (f"\nbulk signs: {'; '.join(m.hints)}" if getattr(m, "hints", None) else "")
         )
 
     try:
@@ -407,15 +410,25 @@ def analyze_email_batch(messages: List[EmailMessageModel]) -> list:
         content = ai_text.strip_fences(reply.content)
 
         from schemas import EmailAnalysis
+        from services.inbox_sorting import normalise
         parsed = json.loads(content)
+        if isinstance(parsed, dict):           # some models wrap the array: {"emails": [...]}
+            parsed = next((v for v in parsed.values() if isinstance(v, list)), [])
+        wanted = {str(m.id) for m in messages}
         results = []
-        for item in parsed:
+        for item in parsed if isinstance(parsed, list) else []:
+            if not isinstance(item, dict) or str(item.get("message_id", "")) not in wanted:
+                continue                       # only this batch's own messages
+            try:
+                priority = max(1, min(5, int(item.get("priority", 2))))
+            except (TypeError, ValueError):
+                priority = 2
             results.append(
                 EmailAnalysis(
-                    message_id=item.get("message_id", ""),
-                    category=item.get("category", "fyi"),
-                    priority=max(1, min(5, int(item.get("priority", 2)))),
-                    summary=item.get("summary", ""),
+                    message_id=str(item["message_id"]),
+                    category=normalise(item.get("category")),
+                    priority=priority,
+                    summary=str(item.get("summary") or "")[:500],
                     suggested_action=item.get("suggested_action"),
                 )
             )

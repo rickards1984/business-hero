@@ -252,9 +252,12 @@ def test_a_pro_model_set_in_the_environment_is_never_sent(env, monkeypatch, capl
     from services import ai_models
     monkeypatch.setattr(ai_models, "resolve", lambda task: ai_models.default(task))     # no saved choice
     monkeypatch.setenv("EXECUTIVE_MEETING_AI_MODEL", name)
-    env.script = {name: "never"}
-    assert ask() == (None, 0)
-    assert env.calls == [] and env.recorded == [] and "EXECUTIVE_MEETING_AI_MODEL" in caplog.text
+    env.script = {name: "never", "gpt-5": "Fine."}
+    # ARIA-1a: the meeting's default chain now has a fallback, so gpt-5 answers;
+    # the -pro model itself is never sent or billed.
+    assert ask()[0] == "Fine."
+    assert [c.model for c in env.calls] == ["gpt-5"] and "EXECUTIVE_MEETING_AI_MODEL" in caplog.text
+    assert all(kw["model"] == "gpt-5" for _, kw in env.recorded)
 
 
 def test_a_pro_model_is_skipped_for_the_next_in_the_chain(env, caplog):
