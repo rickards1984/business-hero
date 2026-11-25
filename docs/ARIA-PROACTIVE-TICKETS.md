@@ -167,6 +167,8 @@
 2. A late status answer for another time range could replace the counts. Only the latest status request may set them.
 3. A late failure could blank the list, and Sort now finishing after a category change reloaded the old view. Only the latest list request may change the list (success, failure or finally), and after an awaited action the page calls the current loader.
 
+**Codex review 4, narrow and final** (`audits/ARIA-1A-CODEX-CODE-REVIEW-4.md`): **APPROVE**. All three page blockers were closed, checked with the component's own callbacks and deferred responses. Follow-up: a rendered React test of those scenarios. The current tests prove the helpers, and that the component uses them.
+
 **Follow-ups from review 3 (non-blocking):**
 - Measure the sorting accuracy on a labelled corpus. The AI reads the subject and a 300-character preview, not the whole email.
 - Measure the real cost per 1,000 emails from the ledger.
