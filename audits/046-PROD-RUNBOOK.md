@@ -6,11 +6,21 @@
 - Each time you **send** one of Aria's drafted replies, ARIA-1b stores the draft she wrote and the reply you actually sent, edited or not, with the category of the email it answered.
 - The few most recent are shown to her as examples of how you write.
 - Nothing is stored for a draft you didn't send. You'll be able to see and delete them, and the backend keeps at most 20 per category.
+- Deleting a business, or the email a reply answered, deletes those rows too, copied text included.
 - No browser can read or write it.
 - **While it's empty, nothing changes**, and it changes no existing row.
 
+**Codex review 1** (`audits/046-CODEX-CODE-REVIEW-1.md`) asked for changes, all made:
+- the harness's `test` command now runs every PostgreSQL suite, 045's and 046's included;
+- the 046 test refuses any database that isn't on this machine;
+- each rule is checked against its own database error;
+- the email link now **deletes** an example when its email is deleted, where before it kept the copied text.
+
+The fifth point, that an example's email must belong to the same business, is checked in ARIA-1b's code: the database can't enforce it without changing `email_messages`.
+
 **Rehearsed locally** on the PostgreSQL harness (`scripts/rls-local.sh`, which now replays 040–046), 25 Nov 2026:
 - created by `up`: row-level security on, no client grants, 10 columns, 0 rows;
+- `scripts/rls-local.sh test`: 394 passed, including `test_inbox_reply_examples_pg.py` (17), which covers each rule, its limits, unknown business or email, and deleting the business or the email;
 - applied again: nothing changed;
 - ROLLBACK, then applied again: back as before.
 

@@ -304,8 +304,9 @@ census() {
 }
 
 test_() {
-  # Every Postgres suite: the tenant isolation suite and each migration's own.
-  .venv/bin/python -m pytest backend/tests/test_*rls*.py -v -p no:warnings "$@"
+  # Every Postgres suite: the tenant isolation suite and each migration's own
+  # (test_*_pg.py too: 045's and 046's were left out, Codex 046 review 1).
+  .venv/bin/python -m pytest backend/tests/test_*rls*.py backend/tests/test_*_pg.py -v -p no:warnings "$@"
 }
 
 down() { docker rm -f "$CONTAINER" >/dev/null 2>&1 && echo "removed $CONTAINER" || true; }
