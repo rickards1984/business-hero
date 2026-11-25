@@ -147,7 +147,7 @@
 - **2. A change of approach: no free filters.** Each keyword list still left a way to hide real mail unseen: "Please pay today" from a supplier's mailing list, a contact form saying "Can you fix our roof?" with a list header, "Invoice due" in spam.
   - **The AI now reads every email,** except replies to the business's outreach (left to Outreach → Replies). Each email goes with its *bulk signs* (spam or Promotions or Social labels, a mailing-list header, out of office). The prompt says the content comes first: a request to pay from a mailing list is still Money.
   - **The cost** (corrected in review 3, from published prices rather than measured): gpt-6-luna is $0.10/M input and $0.50/M output. At about 200 input and 100 output tokens an email, that's roughly 7 US cents per 1,000 emails; at the ceiling (6,000 completion tokens per batch of ten), about 30 cents per 1,000. The real figure shows on the profit page under `classify`.
-  - **The acceptance line "Newsletters cost nothing"** becomes "newsletters cost a fraction of a penny, and nothing is hidden unread". Mike to confirm.
+  - **The acceptance line "Newsletters cost nothing"** becomes "newsletters cost a fraction of a penny, and nothing is hidden unread". **Mike confirmed on 25 Nov.**
 - **3. Naming emails to sort** (`/analyze` with `message_ids`) now goes through the same locked, no-overwrite pass (`sort_pending(only_ids=…)`). The endpoint's own unlocked update path is gone, and the request's session is released before the pass runs.
 - **4.** Whitespace reads the same in Python and SQL (only spaces are trimmed, as SQL's `trim` does). The list sends whitespace-only values as "not sorted", never "fyi".
 - **5. The page:**
