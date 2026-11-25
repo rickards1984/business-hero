@@ -11,8 +11,12 @@ One sorting pass, used by the background sync and by "Sort now":
 - **Why no free filters** (Codex ARIA-1a reviews 1 and 2). Every keyword list
   left a way to hide real mail unseen: "Please pay today" from a supplier's
   mailing list, a contact form saying "Can you fix our roof?" with a list
-  header, a no-reply booking form. Reading them all costs about 3p per 1,000
-  emails on gpt-6-luna. Missing a payment or an enquiry costs far more.
+  header, a no-reply booking form. Reading them all is cheap: at gpt-6-luna's
+  published $0.10/M input and $0.50/M output, about 200 input and 100 output
+  tokens an email is roughly 7 US cents per 1,000 emails; the ceiling (6,000
+  completion tokens per batch of ten) is about 30 cents per 1,000. The real
+  figure shows on the profit page under "classify". Missing a payment or an
+  enquiry costs far more.
 
 **One pass at a time per business.** On PostgreSQL that's a session advisory
 lock (a 64-bit key from the business id) on its own connection for the pass,

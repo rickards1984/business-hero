@@ -297,7 +297,7 @@ def test_the_page_never_shows_a_stale_view():
     timezone differed from the server's; the list didn't follow the counts."""
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "frontend/client/src/components/EmailsTab.tsx").read_text()
-    assert "await loadEmailsRef.current();" in src and "if (request !== requestRef.current)" in src
+    assert "await loadEmailsRef.current();" in src and "listRequests.isCurrent(request)" in src   # review 3: lib/inboxView
     assert "timeZone: 'Europe/London'" in src and "range === 'week' ? 7 : 30" in src
     assert ".filter(e => !unreadOnly || e.is_unread)" in src
-    assert "next.last_sorted_at !== lastSortedRef.current" in src
+    assert "sortingMovedOn(lastSortedRef.current, next.last_sorted_at)" in src

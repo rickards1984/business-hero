@@ -41,6 +41,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { supabase } from '@/lib/supabase';
 import { TASK_CATEGORIES, TASK_PRIORITIES } from '@/lib/taskConstants';
 import { CATEGORY_BORDER, CATEGORY_CHIP, INBOX_CATEGORIES, categoryLabel, isImportant } from '@/lib/inboxCategories';
+import { latestOnly, sortingMovedOn } from '@/lib/inboxView';
 
 // ARIA-1a: Mike's categories, plus All and Important (the one rule).
 const CATEGORIES = [
@@ -136,9 +137,11 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
     source_id: '',
   });
 
-  const requestRef = useRef(0);
+  // Only the latest request may change the list, on success or failure
+  // (Codex ARIA-1a review 3, finding 3).
+  const listRequests = useRef(latestOnly()).current;
   const loadEmails = useCallback(async (): Promise<number> => {
-    const request = ++requestRef.current;     // only the latest request may set the list
+    const request = listRequests.begin();
     try {
       if (!hasDataRef.current) setLoading(true);
       const params: { limit?: number; category?: string; sortBy?: string; unreadOnly?: boolean } = {
@@ -151,13 +154,14 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
       }
       const data = await fetchEmailMessages(params);
       const result = data.messages || [];
-      if (request !== requestRef.current) return result.length;   // a newer view was asked for
+      if (!listRequests.isCurrent(request)) return result.length;   // a newer view was asked for
       setEmails(result);
       hasDataRef.current = true;
       setHasEmailAccount(true);
       try { sessionStorage.setItem(`bh_emails_${businessId}`, JSON.stringify(result)); } catch {}
       return result.length;
     } catch (err: unknown) {
+      if (!listRequests.isCurrent(request)) return 0;   // an old request's failure changes nothing
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes('No email account') || message.includes('404') || message.includes('email feature')) {
         setHasEmailAccount(false);
@@ -165,9 +169,9 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
       setEmails([]);
       return 0;
     } finally {
-      setLoading(false);
+      if (listRequests.isCurrent(request)) setLoading(false);
     }
-  }, [categoryFilter, unreadOnly, businessId]);
+  }, [categoryFilter, unreadOnly, businessId, listRequests]);
 
   // Keep a ref of the current email count so timers can read it without
   // re-subscribing on every change.
@@ -225,7 +229,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
         // 'fresh' (cache current) or no account connected — nothing scheduled.
         setIsSyncing(false);
         if (opts?.showToast) {
-          loadEmails();
+          loadEmailsRef.current();   // after the await: the current view's loader
           setSnackbar({ open: true, message: 'Your inbox is up to date', severity: 'success' });
         }
       }
@@ -265,17 +269,23 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
   // The counts come from the server for the page's time range, never from the
   // (filtered, 50 at most) list on screen (Codex ARIA-1a review 1, finding 5),
   // and refresh each minute so "next check" never sits in the past.
-  const lastSortedRef = useRef<string | null>(null);
+  // undefined: no status seen yet; null: seen, nothing sorted yet (review 3, finding 1).
+  const lastSortedRef = useRef<string | null | undefined>(undefined);
+  const statusRequests = useRef(latestOnly()).current;
   const loadSorting = useCallback(async () => {
+    const request = statusRequests.begin();
     try {
       const next = await fetchSortingStatus(timeRange);
+      if (!statusRequests.isCurrent(request)) return;   // a late answer for another range (finding 2)
       setSorting(next);
       // Sorting has moved on since the list was loaded: reload it, so a count
       // never sits beside a list that doesn't show those emails yet.
-      if (lastSortedRef.current !== null && next.last_sorted_at !== lastSortedRef.current) loadEmailsRef.current();
+      if (sortingMovedOn(lastSortedRef.current, next.last_sorted_at)) loadEmailsRef.current();
       lastSortedRef.current = next.last_sorted_at;
     } catch { /* the line just stays as it was */ }
-  }, [timeRange]);
+  }, [timeRange, statusRequests]);
+  const loadSortingRef = useRef(loadSorting);
+  useEffect(() => { loadSortingRef.current = loadSorting; }, [loadSorting]);
   useEffect(() => {
     loadSorting();
     const timer = setInterval(loadSorting, 60000);
@@ -304,7 +314,7 @@ export default function EmailsTab({ businessId }: EmailsTabProps) {
         if (free) parts.push(`${free} newsletter${free === 1 ? '' : 's'}, promotion${free === 1 ? '' : 's'} or automated message${free === 1 ? '' : 's'} at no cost`);
         setSnackbar({ open: true, severity: 'success', message: parts.join(', including ') + '.' });
       }
-      await Promise.all([loadEmails(), loadSorting()]);
+      await Promise.all([loadEmailsRef.current(), loadSortingRef.current()]);
     } catch {
       setSnackbar({ open: true, message: "Couldn't reach Aria to sort just now. Try again in a moment.", severity: 'error' });
     } finally {

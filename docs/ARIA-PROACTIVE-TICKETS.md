@@ -146,7 +146,7 @@
 **Codex review 2** (`audits/ARIA-1A-CODEX-CODE-REVIEW-2.md`, REQUEST CHANGES; findings 2–5 still partly open, plus hardening). Fixed:
 - **2. A change of approach: no free filters.** Each keyword list still left a way to hide real mail unseen: "Please pay today" from a supplier's mailing list, a contact form saying "Can you fix our roof?" with a list header, "Invoice due" in spam.
   - **The AI now reads every email,** except replies to the business's outreach (left to Outreach → Replies). Each email goes with its *bulk signs* (spam or Promotions or Social labels, a mailing-list header, out of office). The prompt says the content comes first: a request to pay from a mailing list is still Money.
-  - **The cost:** about 3p per 1,000 emails on gpt-6-luna, against missing a payment or an enquiry.
+  - **The cost** (corrected in review 3, from published prices rather than measured): gpt-6-luna is $0.10/M input and $0.50/M output. At about 200 input and 100 output tokens an email, that's roughly 7 US cents per 1,000 emails; at the ceiling (6,000 completion tokens per batch of ten), about 30 cents per 1,000. The real figure shows on the profit page under `classify`.
   - **The acceptance line "Newsletters cost nothing"** becomes "newsletters cost a fraction of a penny, and nothing is hidden unread". Mike to confirm.
 - **3. Naming emails to sort** (`/analyze` with `message_ids`) now goes through the same locked, no-overwrite pass (`sort_pending(only_ids=…)`). The endpoint's own unlocked update path is gone, and the request's session is released before the pass runs.
 - **4.** Whitespace reads the same in Python and SQL (only spaces are trimmed, as SQL's `trim` does). The list sends whitespace-only values as "not sorted", never "fyi".
@@ -161,6 +161,18 @@
   - it uses a 64-bit key from the business id;
   - a failed unlock invalidates the connection rather than returning it to the pool;
   - the status counts are grouped in the database.
+
+**Codex review 3** (`audits/ARIA-1A-CODEX-CODE-REVIEW-3.md`, REQUEST CHANGES). Nothing was left on the server; the three blockers were all the page's request ordering. This was the third cycle, so it was escalated to Mike. The blockers are fixed in `lib/inboxView.ts`, which is tested under Node:
+1. On a newly connected mailbox, the first sort after the page opened didn't reload the list (null → a time was ignored). Now "not seen yet" (`undefined`) is told apart from "seen, nothing sorted yet" (`null`).
+2. A late status answer for another time range could replace the counts. Only the latest status request may set them.
+3. A late failure could blank the list, and Sort now finishing after a category change reloaded the old view. Only the latest list request may change the list (success, failure or finally), and after an awaited action the page calls the current loader.
+
+**Follow-ups from review 3 (non-blocking):**
+- Measure the sorting accuracy on a labelled corpus. The AI reads the subject and a 300-character preview, not the whole email.
+- Measure the real cost per 1,000 emails from the ledger.
+- Throughput is about 1,470 emails a weekday (30 per check); a busier mailbox builds a backlog, newest first.
+- Lock-connection loss and pool pressure under many simultaneous passes.
+- `/analyze` with message_ids no longer re-analyses mail already sorted; no current caller does that.
 
 **Left as follow-ups (non-blocking):** the scheduler records a full sync as run when it is *scheduled*, not when it *completes*; and the SQLite lock is per process (tests and local only).
 
