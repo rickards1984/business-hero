@@ -14,12 +14,13 @@ import { errorDetail } from '@/components/ReceptionistNumberRequest';
 // runs the task's test set side by side with what it uses now and saves nothing.
 
 interface Pair { provider: string; model: string }
-interface Option extends Pair { usable: boolean; reason: string | null; price_in_pence: number | null; price_out_pence: number | null }
+interface Option extends Pair { usable: boolean; reason: string | null; price_in_pence: number | null; price_out_pence: number | null; retires_on: string | null }
 interface TaskRow {
   task: string; label: string; kind: string; openai_only: boolean;
   default: Pair[]; choice: Pair[] | null; previous: Pair[] | null; changed_by: string | null; changed_at: string | null;
   effective: Pair[]; max_chain: number; spent_pence: number | null; recorded_as: string[]; shared_with: string[];
   testable: boolean; options: Option[];
+  retiring: (Pair & { retires_on: string })[];
 }
 interface Overview { period: string; tasks: TaskRow[]; providers: Record<string, boolean> }
 interface CaseResult { name: string; passed: boolean; why: string; answer: string; seconds: number; pence: number }
@@ -31,6 +32,8 @@ const pounds = (pence: number) => `£${(pence / 100).toFixed(2)}`;
 const perMillion = (o: Option) => (o.price_in_pence == null ? 'priced by the minute'
   : `${pounds(o.price_in_pence)} in · ${pounds(o.price_out_pence || 0)} out per million tokens`);
 const FIRST = ['chat', 'chat_complex'];
+// HK-3: when OpenAI stops serving a model.
+const stops = (iso: string) => `Stops working ${new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
 
 function ModelChips({ chain }: { chain: Pair[] }) {
   return (
@@ -96,6 +99,9 @@ export default function AdminAIModels() {
                 <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
                   <Typography sx={{ fontWeight: 700, color: 'text.primary' }}>{row.label}</Typography>
                   {row.choice ? <Chip size="small" label="your choice" /> : <Chip size="small" variant="outlined" label="default" />}
+                  {row.retiring.map((r) => (
+                    <Chip key={key(r)} size="small" color="warning" label={`${r.model}: ${stops(r.retires_on)}. Change it`} />
+                  ))}
                   {row.openai_only && <Chip size="small" variant="outlined" label="OpenAI only" />}
                 </Stack>
                 <ModelChips chain={row.effective} />
@@ -177,7 +183,7 @@ function ChangeDialog({ row, onClose, onSaved }: { row: TaskRow; onClose: () => 
                 {usable.map((o) => (
                   <MenuItem key={key(o)} value={key(o)}>
                     <Stack>
-                      <span>{NAMES[o.provider] || o.provider}: {o.model}</span>
+                      <span>{NAMES[o.provider] || o.provider}: {o.model}{o.retires_on ? ` (${stops(o.retires_on)})` : ''}</span>
                       <Typography variant="caption">{perMillion(o)}</Typography>
                     </Stack>
                   </MenuItem>

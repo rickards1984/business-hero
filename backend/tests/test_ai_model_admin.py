@@ -78,11 +78,11 @@ def test_the_overview_lists_every_task_with_its_default_and_choice(db):
     from services import ai_models
     assert set(rows) == set(ai_models.TASKS)
     complex_row = rows["chat_complex"]
-    assert complex_row["default"] == chain(("openai", "gpt-5"))
+    assert complex_row["default"] == chain(*ai_models.default("chat_complex"))
     assert complex_row["choice"] == chain(("anthropic", "claude-opus-5-5"), ("openai", "gpt-5"))
     assert complex_row["changed_by"] == MIKE and complex_row["changed_at"]
     assert complex_row["effective"] == chain(("anthropic", "claude-opus-5-5"), ("openai", "gpt-5"))
-    assert rows["chat"]["choice"] is None and rows["chat"]["effective"] == chain(("openai", "gpt-5"))
+    assert rows["chat"]["choice"] is None and rows["chat"]["effective"] == chain(*ai_models.default("chat"))
 
 
 def test_the_overview_offers_each_task_only_what_it_can_use_with_prices(db):
@@ -127,7 +127,7 @@ def test_the_overview_shows_this_month_s_spend_per_task(db):
 
 def test_a_choice_is_saved_with_who_and_takes_effect_at_once(db):
     from services import ai_models
-    assert ai_models.resolve("chat_complex") == [("openai", "gpt-5")]      # the choices are now cached
+    assert ai_models.resolve("chat_complex") == ai_models.default("chat_complex")   # the choices are now cached
     with Session(db) as s:
         admin().choose(s, "chat_complex", chain(("anthropic", "claude-opus-5-5"), ("openai", "gpt-5")), MIKE)
     assert saved(db, "chat_complex") == (chain(("anthropic", "claude-opus-5-5"), ("openai", "gpt-5")), MIKE, None)
@@ -172,7 +172,7 @@ def test_revert_of_a_first_choice_goes_back_to_the_default(db):
     with Session(db) as s:
         admin().choose(s, "chat_complex", chain(("anthropic", "claude-opus-5-5")), MIKE)
         admin().revert(s, "chat_complex", MIKE)
-    assert saved(db, "chat_complex") is None and ai_models.resolve("chat_complex") == [("openai", "gpt-5")]
+    assert saved(db, "chat_complex") is None and ai_models.resolve("chat_complex") == ai_models.default("chat_complex")
 
 
 def test_revert_with_nothing_to_revert_is_refused(db):
@@ -183,11 +183,13 @@ def test_revert_with_nothing_to_revert_is_refused(db):
 
 
 def test_reset_goes_back_to_the_default_and_can_be_reverted(db):
+    from services import ai_models
     with Session(db) as s:
         admin().choose(s, "chat_complex", chain(("anthropic", "claude-opus-5-5")), MIKE)
         admin().reset(s, "chat_complex", MIKE)
         assert admin().overview(s)["tasks"][0]  # still readable
-    assert saved(db, "chat_complex") == (chain(("openai", "gpt-5")), MIKE, chain(("anthropic", "claude-opus-5-5")))
+    assert saved(db, "chat_complex") == (chain(*ai_models.default("chat_complex")), MIKE,
+                                         chain(("anthropic", "claude-opus-5-5")))
     with Session(db) as s:
         admin().revert(s, "chat_complex", MIKE)
     assert saved(db, "chat_complex")[0] == chain(("anthropic", "claude-opus-5-5"))
@@ -230,13 +232,13 @@ def poor(messages, tools):
 
 def test_testing_a_model_compares_it_with_the_current_one_and_saves_nothing(db, monkeypatch):
     from services import ai_chat, ai_eval
-    fake = Fake({("anthropic", "claude-opus-5-5"): good, ("openai", "gpt-5"): poor})
+    fake = Fake({("openai", "gpt-5.4"): good, ("anthropic", "claude-opus-5-5"): poor})
     monkeypatch.setattr(ai_chat, "_ADAPTERS", {"openai": fake, "anthropic": fake, "xai": fake})
     recorded = []
     monkeypatch.setattr(ai_chat, "_record", lambda business_id, **kw: recorded.append((business_id, kw)) or True)
-    with Session(db) as s:
-        out = admin().test(s, "chat_complex", "anthropic", "claude-opus-5-5")
-    assert out["candidate"]["model"] == "anthropic/claude-opus-5-5" and out["current"]["model"] == "openai/gpt-5"
+    with Session(db) as s:                       # HK-3: the default is Claude Opus, then GPT-5.4
+        out = admin().test(s, "chat_complex", "openai", "gpt-5.4")
+    assert out["candidate"]["model"] == "openai/gpt-5.4" and out["current"]["model"] == "anthropic/claude-opus-5-5"
     assert out["candidate"]["passed"] == out["candidate"]["cases"] == len(ai_eval.CASES["chat"])
     assert out["current"]["passed"] < out["current"]["cases"]
     failed = [c for c in out["current"]["results"] if not c["passed"]]

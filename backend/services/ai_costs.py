@@ -51,6 +51,9 @@ DEFAULT_PRICES = {
     # $25/1k for non-reasoning models.
     # GPT-6.1 Sol and GPT-6 Luna: 2× input and 1.5× output above 272k input tokens.
     "openai/gpt-6.1-sol": (157, 787, 1, 272_000, 314, 1181),
+    # HK-3: GPT-6.2 Sol, $2 / $10 per 1M (OpenAI model page, read 25 Nov 2026), for Mike to choose on the
+    # admin page. Its long-context rate isn't published there, so the 6.1 Sol rates are assumed.
+    "openai/gpt-6.2-sol": (157, 787, 1, 272_000, 314, 1181),
     "openai/gpt-6-luna": (8, 39, 1, 272_000, 16, 59),
     "openai/gpt-4.1": (157, 630, 2),
     "openai/gpt-4o": (197, 787, 2),
@@ -58,6 +61,9 @@ DEFAULT_PRICES = {
     # AI-1a: gpt-5 ($1.25 / $10), Aria's chat model, had no price, so every chat
     # was recorded at the "unknown model" rate, about 16x too high.
     "openai/gpt-5": (98, 787, 1),
+    # HK-3: $2.50 / $15 per 1M (OpenAI model page, read 25 Nov 2026), at the
+    # table's rate (gpt-5's $1.25 / $10 is 98p / 787p).
+    "openai/gpt-5.4": (197, 1181, 1),
     # xAI (docs.x.ai/developers/pricing): doubles above 200k tokens; web search $5/1k.
     "xai/grok-4.20-0309-reasoning": (98, 197, 0.4, 200_000, 197, 394),
     "xai/grok-4.20-0309-non-reasoning": (98, 197, 0.4, 200_000, 197, 394),

@@ -37,7 +37,7 @@ def pg(monkeypatch):
 
 def test_an_empty_table_changes_nothing(pg):
     _, m = pg
-    assert m.resolve("chat_complex") == [("openai", "gpt-5")]
+    assert m.resolve("chat_complex") == m.default("chat_complex")      # HK-3: whatever the default is
 
 
 def test_a_saved_jsonb_choice_is_read(pg):
@@ -86,7 +86,7 @@ def test_the_admin_page_saves_reverts_and_resets_on_postgres(pg):
     assert m.resolve("chat_complex") == [("anthropic", "claude-opus-5-5"), ("openai", "gpt-5")]
     with Session(engine) as s:
         ai_model_admin.reset(s, "chat_complex", mike)
-    assert m.resolve("chat_complex") == [("openai", "gpt-5")]
+    assert m.resolve("chat_complex") == m.default("chat_complex")      # HK-3: whatever the default is
     with Session(engine) as s:
         ai_model_admin.revert(s, "chat_complex", mike)
         rows = {r["task"]: r for r in ai_model_admin.overview(s)["tasks"]}

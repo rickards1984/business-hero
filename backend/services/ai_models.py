@@ -28,6 +28,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -72,25 +73,36 @@ ONE_OPENAI = {"providers": ("openai",), "max_chain": 1}
 # 22 Nov choices as the defaults, and a fallback for each where the call site
 # takes one, on another provider where it matters.
 TASKS = {
-    "chat": _t("Aria chat: everyday questions", ("openai", "gpt-5"), ledger=("chat",)),
-    "chat_complex": _t("Aria chat: complex jobs, money and analysis", ("openai", "gpt-5"), ledger=("chat_complex",)),
+    # HK-3: Claude first for the jobs that use tools (gpt-6.1-sol's tool calls
+    # need the Responses API: AI-1e), gpt-5.4 as fallback (tools work: its
+    # reasoning effort defaults to none). gpt-5 retires on 11 Dec 2026.
+    "chat": _t("Aria chat: everyday questions", ("anthropic", "claude-sonnet-5-5"), ("openai", "gpt-5.4"),
+               ledger=("chat",)),
+    "chat_complex": _t("Aria chat: complex jobs, money and analysis", ("anthropic", "claude-opus-5-5"),
+                       ("openai", "gpt-5.4"), ledger=("chat_complex",)),
     "quote_chat": _t("Quote drafting in chat", ("openai", "gpt-6.1-sol"), ledger=("quote",), **ONE_OPENAI),
     "quote": _t("Quote estimator", ("openai", "gpt-5.4"), legacy_env="QUOTE_AI_MODEL", ledger=("quote",),
                 **ONE_OPENAI),
     # AI-1d: these call services.ai_text, so any provider and fallbacks.
-    "reply_draft": _t("Email reply draft (one)", ("openai", "gpt-6-luna"), ("openai", "gpt-4o-mini"),
+    # HK-3: text-only jobs on gpt-6.1-sol (OpenAI's named replacement for
+    # gpt-5), the small ones on gpt-6-luna; Claude Sonnet 5.5 behind each in
+    # place of gpt-4o-mini (retiring 14 Jan 2027).
+    "reply_draft": _t("Email reply draft (one)", ("openai", "gpt-6-luna"), ("anthropic", "claude-sonnet-5-5"),
                       ledger=("draft",)),
-    "reply_drafts": _t("Email reply drafts (three tones)", ("openai", "gpt-5"), ledger=("draft",)),
-    "inbox_classify": _t("Sorting the inbox", ("openai", "gpt-6-luna"), ("openai", "gpt-4o-mini"),
+    "reply_drafts": _t("Email reply drafts (three tones)", ("openai", "gpt-6.1-sol"),
+                       ("anthropic", "claude-sonnet-5-5"), ledger=("draft",)),
+    "inbox_classify": _t("Sorting the inbox", ("openai", "gpt-6-luna"), ("anthropic", "claude-sonnet-5-5"),
                          ledger=("classify",)),
-    "email_briefing": _t("Email briefing", ("openai", "gpt-5"), ledger=("briefing",)),
-    "briefing": _t("CEO briefings", ("openai", "gpt-5"), ("anthropic", "claude-sonnet-5-5"), ledger=("briefing",)),
-    "meeting": _t("Board meeting", ("anthropic", "claude-opus-5-5"), ("openai", "gpt-5"),
+    "email_briefing": _t("Email briefing", ("openai", "gpt-6.1-sol"), ("anthropic", "claude-sonnet-5-5"),
+                         ledger=("briefing",)),
+    "briefing": _t("CEO briefings", ("openai", "gpt-6.1-sol"), ("anthropic", "claude-sonnet-5-5"),
+                   ledger=("briefing",)),
+    "meeting": _t("Board meeting", ("anthropic", "claude-opus-5-5"), ("openai", "gpt-5.4"),
                   legacy_env="EXECUTIVE_MEETING_AI_MODEL",
                   ledger=("meeting",)),         # AI-1d part 2: services.ai_text, any provider
-    "support": _t("Help assistant", ("openai", "gpt-5"), ("anthropic", "claude-sonnet-5-5"),
+    "support": _t("Help assistant", ("openai", "gpt-6.1-sol"), ("anthropic", "claude-sonnet-5-5"),
                   ledger=("chat", "support_draft")),
-    "call_summary": _t("Call summaries", ("openai", "gpt-6-luna"), ("openai", "gpt-4o-mini"),
+    "call_summary": _t("Call summaries", ("openai", "gpt-6-luna"), ("anthropic", "claude-sonnet-5-5"),
                        ledger=("call_summary",)),
     "voice_aria": _t("Aria's voice (realtime)", ("openai", "gpt-realtime-2"), kind="voice",
                      legacy_env="ARIA_REALTIME_MODEL", openai_only=True, compatible=("gpt-realtime-2",), max_chain=1),
@@ -264,6 +276,36 @@ def responses_only(model: str) -> bool:
     return is_reasoning(model) and "-pro" in _base_model(model)
 
 
+# HK-3: OpenAI's shutdown dates (developers.openai.com/api/docs/deprecations,
+# read 25 Nov 2026). From its date a model is never sent: the job falls to its
+# next model rather than failing every time. The admin page warns before.
+RETIRING = {
+    date(2026, 12, 11): ("gpt-5", "gpt-5-2025-08-07", "gpt-5-mini", "gpt-5-mini-2025-08-07", "gpt-5-nano",
+                         "gpt-5-nano-2025-08-07", "gpt-5-pro", "gpt-5-pro-2025-10-06", "o3", "o3-2025-04-16",
+                         "o3-pro", "o3-pro-2025-06-10"),
+    # The snapshots retire; the plain names point to them.
+    date(2027, 1, 14): ("gpt-4o", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20", "gpt-4o-mini", "gpt-4o-mini-2024-07-18",
+                        "gpt-4.1", "gpt-4.1-2025-04-14", "gpt-4.1-mini", "gpt-4.1-mini-2025-04-14"),
+}
+_RETIRES = {m: d for d, models in RETIRING.items() for m in models}
+
+
+def _today() -> date:
+    return datetime.now(timezone.utc).date()
+
+
+def retires_on(provider: str, model: str) -> Optional[date]:
+    """The date OpenAI stops serving this model, or None."""
+    if provider != "openai":
+        return None
+    return _RETIRES.get(_base_model(model))
+
+
+def retired(provider: str, model: str) -> bool:
+    on = retires_on(provider, model)
+    return on is not None and _today() >= on
+
+
 def why_unusable(task_name: str, provider: str, model: str) -> Optional[str]:
     """None when the task can use this provider and model now; otherwise why
     not, in words for the admin page (AI-1c)."""
@@ -274,6 +316,9 @@ def why_unusable(task_name: str, provider: str, model: str) -> Optional[str]:
         return f"{provider} can't serve this task (OpenAI only)"
     if task.compatible is not None and model not in task.compatible:
         return f"{model} is not one this task can use (only {', '.join(task.compatible)})"
+    if retired(provider, model):
+        on = retires_on(provider, model)
+        return f"{model} stopped working on {on.day} {on.strftime('%B %Y')} (OpenAI retired it)"
     if task.kind == "text" and provider == "openai" and responses_only(model):
         return f"{model} answers only through the Responses API, which this task doesn't use"
     if not os.environ.get(KEYS[provider]):
@@ -322,7 +367,11 @@ def resolve(task_name: str) -> list:
     """(provider, model) pairs to use for the task, best first."""
     if task_name not in TASKS:
         raise KeyError(f"Unknown AI task {task_name!r}")
-    return choice(task_name) or default(task_name)
+    chain = choice(task_name) or default(task_name)
+    # HK-3: a retired model set through an environment variable (a default
+    # can carry one) is dropped too, unless nothing would be left.
+    live = [(p, m) for p, m in chain if not retired(p, m)]
+    return live or chain
 
 
 def openai_models(task_name: str) -> list:
