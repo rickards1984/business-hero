@@ -319,6 +319,13 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     3. gpt-5.4 lacked its long-context tier (2× input and 1.5× output above 272k). It's added; gpt-6.2-sol's is published and matches.
     4. A retiring model set by an environment variable got no warning. With no saved choice, the admin page now warns about what the defaults and settings give.
     5. Speech retires too: `tts-1`, `tts-1-hd` and `gpt-4o-mini-tts` on **6 Jan 2027**, and `whisper-1` on **26 Feb 2027** (`gpt-realtime-2` isn't affected). They're in `RETIRING`, so the admin page warns; the migration itself is VOICE-MIG.
+  - **Codex review 2** (`audits/HK-3-CODEX-CODE-REVIEW-2.md`): **APPROVE**. Follow-ups, non-blocking:
+    - the admin page doesn't yet warn about a retiring model set through *outreach's* settings (`ARIA_*_MODEL`, `AI_MODELS_JSON`);
+    - one test sets JSON while `ARIA_DRAFT_MODEL` still wins, so its JSON check is weak;
+    - the "has been retired" error is logged on every resolution: log it once per model;
+    - routing tests at the January boundaries.
+
+    A chain where everything has retired, as speech will be after 6 Jan, stays as it is and fails honestly. That's why VOICE-MIG must land first.
 - **VOICE-MIG (follow-up, due before 6 Jan 2027): move speech off the retiring models.** OpenAI names `gpt-realtime-2.1-mini` for text-to-speech, which is a different API from `/audio/speech`, and `gpt-transcribe` / `gpt-live-transcribe` for transcription (whisper-1, by 26 Feb 2027). This covers `/v1/tts` (`speak`), the receptionist's voice previews (`voice_preview`) and transcription (`transcribe`).
 - **AI-1e (follow-up): the Responses API for tool calls,** so gpt-6.1-sol (or 6.2-sol) can drive Aria's chat and the meeting. It would replace gpt-5.4 as their OpenAI fallback, and serve QUOTE-1 if the estimator uses tools.
 
