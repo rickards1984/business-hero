@@ -123,7 +123,11 @@ def overview(session, moment: Optional[datetime] = None) -> dict:
             # HK-3: anything the job is set to use that OpenAI is retiring.
             "retiring": [{"provider": p, "model": m, "retires_on": ai_models.retires_on(p, m).isoformat()}
                          for p, m in ((e["provider"], e["model"]) for e in (row["chain"] if row else []))
-                         if ai_models.retires_on(p, m)],
+                         if ai_models.retires_on(p, m)]
+                        # with no saved choice, what the defaults and environment settings give
+                        # (review 1, finding 4: EXECUTIVE_MEETING_AI_MODEL=gpt-5 had no warning)
+                        or [{"provider": p, "model": m, "retires_on": ai_models.retires_on(p, m).isoformat()}
+                            for p, m in ([] if row else ai_models.default(name)) if ai_models.retires_on(p, m)],
             **_spend(session, name, period),
             "testable": ai_eval.has_cases(name),
             "options": _options(name),

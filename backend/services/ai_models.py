@@ -286,6 +286,12 @@ RETIRING = {
     # The snapshots retire; the plain names point to them.
     date(2027, 1, 14): ("gpt-4o", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20", "gpt-4o-mini", "gpt-4o-mini-2024-07-18",
                         "gpt-4.1", "gpt-4.1-2025-04-14", "gpt-4.1-mini", "gpt-4.1-mini-2025-04-14"),
+    # Speech (Codex HK-3 review 1, finding 5). These need a migration of their
+    # own (VOICE-MIG): their replacements use other APIs. Listed so the admin
+    # page warns in time; gpt-realtime-2 is not affected.
+    date(2027, 1, 6): ("tts-1", "tts-1-hd", "gpt-4o-mini-tts", "gpt-4o-mini-tts-2025-03-20",
+                       "gpt-4o-mini-tts-2025-12-15"),
+    date(2027, 2, 26): ("whisper-1",),
 }
 _RETIRES = {m: d for d, models in RETIRING.items() for m in models}
 
@@ -369,15 +375,25 @@ def resolve(task_name: str) -> list:
         raise KeyError(f"Unknown AI task {task_name!r}")
     chain = choice(task_name) or default(task_name)
     # HK-3: a retired model set through an environment variable (a default
-    # can carry one) is dropped too, unless nothing would be left.
+    # can carry one) is dropped too. If that leaves nothing, the task's own
+    # built-in defaults that still work, never the retired model (Codex HK-3
+    # review 1, finding 1: QUOTE_AI_MODEL=gpt-5 kept calling gpt-5).
     live = [(p, m) for p, m in chain if not retired(p, m)]
-    return live or chain
+    if live:
+        return live
+    built_in = [(p, m) for p, m in TASKS[task_name].default if not retired(p, m)]
+    if built_in:
+        logger.error("[AI] %s: every model set for it has been retired; using %s", task_name,
+                     ", ".join(f"{p}/{m}" for p, m in built_in))
+        return built_in
+    return chain                      # nothing works: the call fails honestly, and the admin page says why
 
 
 def openai_models(task_name: str) -> list:
     """The OpenAI models for a call site that only speaks OpenAI's API."""
     chosen = [m for p, m in resolve(task_name) if p == "openai"]
-    return chosen or [m for p, m in default(task_name) if p == "openai"]
+    return chosen or [m for p, m in default(task_name) if p == "openai" and not retired(p, m)] or \
+        [m for p, m in default(task_name) if p == "openai"]
 
 
 def openai_model(task_name: str) -> str:

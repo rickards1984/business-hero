@@ -313,6 +313,13 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
   - **Priced:** gpt-5.4 ($2.50 / $15) and gpt-6.2-sol ($2 / $10, so Mike can choose it; not a default until tested).
   - **Tests run on a fixed date** (`conftest._models_on_a_fixed_date`), so sample data using gpt-5 doesn't start failing by itself on 11 Dec.
   - **Mike's saved CEO-briefing choice is gpt-5 alone.** He should change it on the admin page; from 11 Dec it would fall to the default anyway.
+  - **Codex review 1** (`audits/HK-3-CODEX-CODE-REVIEW-1.md`, REQUEST CHANGES), all fixed:
+    1. A chain whose only model was retired was restored, so `QUOTE_AI_MODEL=gpt-5` kept quotes on gpt-5. Now the task's own built-in defaults that still work are used, and `openai_models` never falls back to a retired default.
+    2. Outreach's own settings (`AI_MODELS_JSON`, `ARIA_*_MODEL`) skipped the check. `ai_router.chain` now swaps a retired model for that provider's built-in one.
+    3. gpt-5.4 lacked its long-context tier (2× input and 1.5× output above 272k). It's added; gpt-6.2-sol's is published and matches.
+    4. A retiring model set by an environment variable got no warning. With no saved choice, the admin page now warns about what the defaults and settings give.
+    5. Speech retires too: `tts-1`, `tts-1-hd` and `gpt-4o-mini-tts` on **6 Jan 2027**, and `whisper-1` on **26 Feb 2027** (`gpt-realtime-2` isn't affected). They're in `RETIRING`, so the admin page warns; the migration itself is VOICE-MIG.
+- **VOICE-MIG (follow-up, due before 6 Jan 2027): move speech off the retiring models.** OpenAI names `gpt-realtime-2.1-mini` for text-to-speech, which is a different API from `/audio/speech`, and `gpt-transcribe` / `gpt-live-transcribe` for transcription (whisper-1, by 26 Feb 2027). This covers `/v1/tts` (`speak`), the receptionist's voice previews (`voice_preview`) and transcription (`transcribe`).
 - **AI-1e (follow-up): the Responses API for tool calls,** so gpt-6.1-sol (or 6.2-sol) can drive Aria's chat and the meeting. It would replace gpt-5.4 as their OpenAI fallback, and serve QUOTE-1 if the estimator uses tools.
 
 ## Out of scope
