@@ -96,8 +96,10 @@ def _options(task: str) -> list:
             price_in, price_out = price[0], price[1]
         except ai_costs.Unpriced:
             price_in = price_out = None
+        on = ai_models.retires_on(provider, model)
         out.append({"provider": provider, "model": model, "usable": why is None, "reason": why,
-                    "price_in_pence": price_in, "price_out_pence": price_out})
+                    "price_in_pence": price_in, "price_out_pence": price_out,
+                    "retires_on": on.isoformat() if on else None})
     return sorted(out, key=lambda o: (not o["usable"], o["provider"], o["model"]))
 
 
@@ -118,6 +120,14 @@ def overview(session, moment: Optional[datetime] = None) -> dict:
             "changed_at": row["changed_at"] if row else None,
             "effective": _pairs(ai_models.resolve(name)),
             "max_chain": t.max_chain,
+            # HK-3: anything the job is set to use that OpenAI is retiring.
+            "retiring": [{"provider": p, "model": m, "retires_on": ai_models.retires_on(p, m).isoformat()}
+                         for p, m in ((e["provider"], e["model"]) for e in (row["chain"] if row else []))
+                         if ai_models.retires_on(p, m)]
+                        # with no saved choice, what the defaults and environment settings give
+                        # (review 1, finding 4: EXECUTIVE_MEETING_AI_MODEL=gpt-5 had no warning)
+                        or [{"provider": p, "model": m, "retires_on": ai_models.retires_on(p, m).isoformat()}
+                            for p, m in ([] if row else ai_models.default(name)) if ai_models.retires_on(p, m)],
             **_spend(session, name, period),
             "testable": ai_eval.has_cases(name),
             "options": _options(name),

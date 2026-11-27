@@ -25,13 +25,17 @@ def chat(monkeypatch):
         monkeypatch.setenv(key, "test-key")
     recorded = []
     monkeypatch.setattr(ai_chat, "_record", lambda business_id, **kw: recorded.append(kw))
-    monkeypatch.setattr(ai_models, "_choices", lambda: {})
+    # The chat loop's tests run on OpenAI, as they did before HK-3 put Claude
+    # first by default (test_hk3_model_retirement covers the defaults).
+    monkeypatch.setattr(ai_models, "_choices", lambda: {"chat": [("openai", "gpt-5")],
+                                                       "chat_complex": [("openai", "gpt-5")]})
     yield SimpleNamespace(m=ai_chat, recorded=recorded, models=ai_models, router=ai_router)
     ai_router.reset_breakers()
 
 
 def choose(chat, monkeypatch, task, pairs):
-    monkeypatch.setattr(chat.models, "_choices", lambda: {task: list(pairs)})
+    base = {"chat": [("openai", "gpt-5")], "chat_complex": [("openai", "gpt-5")]}   # as the fixture (HK-3)
+    monkeypatch.setattr(chat.models, "_choices", lambda: {**base, task: list(pairs)})
 
 
 class FakeOpenAI:

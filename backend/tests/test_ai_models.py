@@ -18,17 +18,17 @@ BACKEND = Path(__file__).resolve().parents[1]
 
 # Exactly what each call site used before AI-1a (checked in code, 20 Nov 2026).
 TODAY = {
-    "chat": [("openai", "gpt-5")],                    # assistant_chat.process_chat_message
+    "chat": [("anthropic", "claude-sonnet-5-5"), ("openai", "gpt-5.4")],      # HK-3: Claude first (tools)
     "quote_chat": [("openai", "gpt-6.1-sol")],        # assistant_chat quote drafting (ARIA-1a: Mike's choice)
     "quote": [("openai", "gpt-5.4")],                 # quoting_api (QUOTE_AI_MODEL)
-    "reply_draft": [("openai", "gpt-6-luna"), ("openai", "gpt-4o-mini")],   # app/email/service (one draft)
-    "reply_drafts": [("openai", "gpt-5")],            # app/email/service + assistant_tools (3 tones)
-    "inbox_classify": [("openai", "gpt-6-luna"), ("openai", "gpt-4o-mini")],   # analyze_email_batch
-    "email_briefing": [("openai", "gpt-5")],          # app/email/service briefing
-    "briefing": [("openai", "gpt-5"), ("anthropic", "claude-sonnet-5-5")],   # services/briefing_generator
-    "meeting": [("anthropic", "claude-opus-5-5"), ("openai", "gpt-5")],     # executive_meeting_orchestrator
-    "support": [("openai", "gpt-5"), ("anthropic", "claude-sonnet-5-5")],    # support_api
-    "call_summary": [("openai", "gpt-6-luna"), ("openai", "gpt-4o-mini")],   # openai_utils
+    "reply_draft": [("openai", "gpt-6-luna"), ("anthropic", "claude-sonnet-5-5")],   # app/email/service (one draft)
+    "reply_drafts": [("openai", "gpt-6.1-sol"), ("anthropic", "claude-sonnet-5-5")],   # 3 tones
+    "inbox_classify": [("openai", "gpt-6-luna"), ("anthropic", "claude-sonnet-5-5")],   # analyze_email_batch
+    "email_briefing": [("openai", "gpt-6.1-sol"), ("anthropic", "claude-sonnet-5-5")],   # email briefing
+    "briefing": [("openai", "gpt-6.1-sol"), ("anthropic", "claude-sonnet-5-5")],   # services/briefing_generator
+    "meeting": [("anthropic", "claude-opus-5-5"), ("openai", "gpt-5.4")],   # executive_meeting_orchestrator
+    "support": [("openai", "gpt-6.1-sol"), ("anthropic", "claude-sonnet-5-5")],   # support_api
+    "call_summary": [("openai", "gpt-6-luna"), ("anthropic", "claude-sonnet-5-5")],   # openai_utils
     "voice_aria": [("openai", "gpt-realtime-2")],     # realtime_voice
     "voice_receptionist": [("openai", "gpt-realtime-2")],
     "transcribe": [("openai", "whisper-1")],
@@ -146,7 +146,7 @@ def test_a_database_problem_never_stops_aria(m, monkeypatch):
         raise RuntimeError("database down")
     monkeypatch.setattr(m.mod, "_engine", broken)
     m.mod.invalidate()
-    assert m.mod.resolve("chat") == [("openai", "gpt-5")]
+    assert m.mod.resolve("chat") == TODAY["chat"]
 
 
 def test_an_openai_call_site_uses_the_first_openai_choice(m):
@@ -160,7 +160,7 @@ def test_an_openai_call_site_uses_the_first_openai_choice(m):
 def test_an_openai_call_site_with_no_openai_choice_keeps_todays_model(m):
     choose(m, "briefing", [("anthropic", "claude-opus-5-5")])
     m.mod.invalidate()
-    assert m.mod.openai_model("briefing") == "gpt-5"
+    assert m.mod.openai_model("briefing") == "gpt-6.1-sol"                 # HK-3: the default's OpenAI model
 
 
 @pytest.mark.parametrize("task,model", [("voice_aria", "gpt-5"), ("voice_aria", "gpt-realtime-3"),

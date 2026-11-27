@@ -299,6 +299,36 @@ Upgrading Aria today means a code change in about 14 files. Outside outreach, no
     - **AI-1e, the Responses API for tool calls.** Per OpenAI's documentation, cited by Codex, gpt-6.1-sol's function calls need the Responses API, and it refuses reasoning effort `none`. So a task that uses tools fails over on it: Aria's chat (`chat`, `chat_complex`) and typed meeting turns. This was already true before HK-2. gpt-6-luna recovers in the meeting through BM-5's retry, but not in chat. Until AI-1e, don't choose gpt-6.1-sol for chat or the meeting; it's fine for text-only jobs. QUOTE-1, whose suggested chain includes GPT-6.1, needs this if it uses tools.
     - **Tests:** add exact-limit assertions, and gpt-6 cases for the meeting's tool branch and the `-pro` skip.
 
+- **HK-3 (25 Nov): OpenAI retires gpt-5 on 11 Dec 2026.** From OpenAI's deprecations page, read 25 Nov:
+  - **11 Dec 2026:** gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-pro, o3 and o3-pro;
+  - **14 Jan 2027:** the gpt-4o, gpt-4o-mini, gpt-4.1 and gpt-4.1-mini snapshots;
+  - gpt-5.4, gpt-5.5 and gpt-5.6 aren't on it, and there is no gpt-6.1-luna.
+
+  Mike chose the following.
+  - **Defaults:**
+    - text-only jobs (briefings, the help assistant, the email briefing, three-tone drafts): **gpt-6.1-sol**, then Claude Sonnet 5.5;
+    - the small jobs (sorting, single drafts, call summaries): gpt-6-luna, then **Claude Sonnet 5.5** in place of gpt-4o-mini;
+    - the jobs that use tools: **Claude first** (Sonnet 5.5 for chat; Opus 5.5 for complex chat and the meeting), then **gpt-5.4**. gpt-6.1-sol's tool calls need the Responses API (AI-1e). gpt-5.4 ($2.50 / $15 per 1M) does tools in Chat Completions, with its reasoning effort defaulting to none. gpt-5.5 was ruled out at $5 / $30.
+  - **`ai_models.RETIRING`** holds OpenAI's dates. From a model's date, `why_unusable` refuses it ("stopped working on 11 December 2026") and `resolve` drops it from any chain, including one set by an environment variable, so a job falls to its next model. The admin page warns beforehand: "gpt-5: Stops working 11 Dec 2026. Change it".
+  - **Priced:** gpt-5.4 ($2.50 / $15) and gpt-6.2-sol ($2 / $10, so Mike can choose it; not a default until tested).
+  - **Tests run on a fixed date** (`conftest._models_on_a_fixed_date`), so sample data using gpt-5 doesn't start failing by itself on 11 Dec.
+  - **Mike's saved CEO-briefing choice is gpt-5 alone.** He should change it on the admin page; from 11 Dec it would fall to the default anyway.
+  - **Codex review 1** (`audits/HK-3-CODEX-CODE-REVIEW-1.md`, REQUEST CHANGES), all fixed:
+    1. A chain whose only model was retired was restored, so `QUOTE_AI_MODEL=gpt-5` kept quotes on gpt-5. Now the task's own built-in defaults that still work are used, and `openai_models` never falls back to a retired default.
+    2. Outreach's own settings (`AI_MODELS_JSON`, `ARIA_*_MODEL`) skipped the check. `ai_router.chain` now swaps a retired model for that provider's built-in one.
+    3. gpt-5.4 lacked its long-context tier (2× input and 1.5× output above 272k). It's added; gpt-6.2-sol's is published and matches.
+    4. A retiring model set by an environment variable got no warning. With no saved choice, the admin page now warns about what the defaults and settings give.
+    5. Speech retires too: `tts-1`, `tts-1-hd` and `gpt-4o-mini-tts` on **6 Jan 2027**, and `whisper-1` on **26 Feb 2027** (`gpt-realtime-2` isn't affected). They're in `RETIRING`, so the admin page warns; the migration itself is VOICE-MIG.
+  - **Codex review 2** (`audits/HK-3-CODEX-CODE-REVIEW-2.md`): **APPROVE**. Follow-ups, non-blocking:
+    - the admin page doesn't yet warn about a retiring model set through *outreach's* settings (`ARIA_*_MODEL`, `AI_MODELS_JSON`);
+    - one test sets JSON while `ARIA_DRAFT_MODEL` still wins, so its JSON check is weak;
+    - the "has been retired" error is logged on every resolution: log it once per model;
+    - routing tests at the January boundaries.
+
+    A chain where everything has retired, as speech will be after 6 Jan, stays as it is and fails honestly. That's why VOICE-MIG must land first.
+- **VOICE-MIG (follow-up, due before 6 Jan 2027): move speech off the retiring models.** OpenAI names `gpt-realtime-2.1-mini` for text-to-speech, which is a different API from `/audio/speech`, and `gpt-transcribe` / `gpt-live-transcribe` for transcription (whisper-1, by 26 Feb 2027). This covers `/v1/tts` (`speak`), the receptionist's voice previews (`voice_preview`) and transcription (`transcribe`).
+- **AI-1e (follow-up): the Responses API for tool calls,** so gpt-6.1-sol (or 6.2-sol) can drive Aria's chat and the meeting. It would replace gpt-5.4 as their OpenAI fallback, and serve QUOTE-1 if the estimator uses tools.
+
 ## Out of scope
 
 - Choosing models per business, which is platform-wide for now.

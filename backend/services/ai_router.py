@@ -155,6 +155,12 @@ def chain(purpose: str, *, include_down: bool = False) -> list:
     out = []
     for p in order():
         model = chosen.get(p)
+        if model and ai_models.retired(p, model):
+            # HK-3 (review 1, finding 2): a retired model set by AI_MODELS_JSON or
+            # ARIA_*_MODEL is never sent; the built-in model for that provider is.
+            fallback = DEFAULT_MODELS.get(purpose, {}).get(p)
+            logger.error("[AI] %s: %s/%s has been retired; using %s", purpose, p, model, fallback or "nothing")
+            model = fallback if fallback and not ai_models.retired(p, fallback) else None
         if model and os.environ.get(KEYS[p]) and _priced(p, model) and (include_down or not _is_down(p)):
             out.append((p, model))
     return out
