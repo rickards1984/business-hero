@@ -1,6 +1,6 @@
-# MSG — Aria Messenger: our own messaging app (DESIGN, v2)
+# MSG — Aria Messenger: our own messaging app (DESIGN, v3)
 
-**Status:** proposed, design only. v2 answers Codex design review 1 (`audits/MSG-1-CODEX-DESIGN-REVIEW-1.md`, REQUEST CHANGES, 16 × P1, 2 × P2); §10 maps each finding to its answer. Next: Codex design review 2, then Mike accepts the boundary (CLAUDE.md: no large implementation stream begins before both). Each ticket then gets its own AGENTS.md §6 task packet (`docs/MSG-n-TICKET.md`) with negative acceptance criteria, required tests and verification commands, reviewed before it starts.
+**Status:** proposed, design only. v2 answered Codex design review 1 (`audits/MSG-1-CODEX-DESIGN-REVIEW-1.md`); v3 answers review 2 (`audits/MSG-1-CODEX-DESIGN-REVIEW-2.md`, REQUEST CHANGES, 8 × P1, 1 × P2, no P0). §10 maps every finding to its answer. Next: Codex design review 3, then Mike accepts the boundary (CLAUDE.md: no large implementation stream begins before both). Each ticket then gets its own AGENTS.md §6 task packet (`docs/MSG-n-TICKET.md`) with negative acceptance criteria, required tests and verification commands, reviewed before it starts.
 **Owner:** Mike. **Author:** Claude Code. **Date:** 27 Nov 2026.
 **Builds on:** NS-B10 (approval cards, `services/aria_actions.py`), AI-1 (router), ARIA-1/1b (inbox, reply learning, 046), BH-012 (metering), PROFIT-1 (`profit_guard`), BRIEF-1 (`services/whatsapp_briefings.py`), OUT top-ups (`services/outreach_billing.py`), the Capacitor shell (commit 357b324).
 
@@ -85,7 +85,7 @@ Server-enforced, each with tests; prompt wording is never the control (`test_ari
 
 ### 4.4 Renaming the assistant
 
-- `business_settings.settings.assistant_name` (a JSON key, no migration), default "Aria", 1–24 characters (letters, spaces, apostrophes, hyphens), trimmed; refused list for profanity and obvious impersonation. Set in Settings or onboarding; asked in chat, it shows a confirm card (and jobs can't do it).
+- `business_settings.settings.assistant_name` (a JSON key, no migration), default "Aria", 1–24 characters (letters, spaces, apostrophes, hyphens), trimmed; refused list for profanity and obvious impersonation. Set in Settings or onboarding only, by the business owner. Asked in chat, Aria replies with a link to that setting: no rename tool and no new card type, so MSG-2 needs no migration and can run in parallel.
 - Used by the system prompt, all UI strings, cards, push, the brief, and the receptionist's greeting, which still says it's an automated assistant. Voice unchanged.
 
 ## 5 · How it's built
@@ -96,7 +96,8 @@ Server-enforced, each with tests; prompt wording is never the control (`test_ari
 - **Records Aria creates belong to the business** (draft quotes, documents, tasks) and record `created_by_user_id` and the conversation they came from.
 - **Every link is validated server-side**: a message, attachment, card, document or job referenced by id must belong to the same business, and where it is conversation-scoped, to the same user. Membership is rechecked on every request and every job step; a revoked member loses access immediately.
 - **Device storage** (cache, offline queue, drafts) is keyed by user id **and** business id, encrypted where the platform offers it (Capacitor Preferences/secure storage), and purged on sign-out, account switch and business switch. A queued message is revalidated against the current session before it is submitted, and dropped (with a notice) if the user or business changed.
-- **Tests:** cross-business, same-business/different-user, revoked membership, account switch with a pending queue.
+- **Approval cards follow their conversation.** Today `aria_actions` cards are business-wide (`_scoped`, `list_open`, the approval API, and the 035 RLS policy that lets business members read). Migration 047 adds `conversation_id` and `owner_user_id` to `aria_actions`. A card **with** a conversation is private: only `owner_user_id` can list, get, edit, approve or dismiss it, on every existing card endpoint (not only the messenger's), and the RLS read policy is narrowed to match (business member **and** (no conversation **or** owner)). Cards without a conversation (today's dashboard cards, outreach) keep current behaviour. A private Drive card uses only its owner's storage connection.
+- **Tests:** cross-business, same-business/different-user (API **and** a database client with the `authenticated` role against RLS), revoked membership, account switch with a pending queue.
 
 ### 5.2 Conversations, turns and idempotency
 
@@ -104,24 +105,37 @@ Server-enforced, each with tests; prompt wording is never the control (`test_ari
 
 **Durable turns.** New `assistant_turns`: id, business_id, user_id, conversation_id, `client_turn_id` (UNIQUE per user + conversation), request fingerprint (hash of text + attachment ids), state (`claimed`, `running`, `done`, `failed`, `unknown`), reserved credits, settled credits, result message id, timestamps.
 - Submitting claims the turn atomically. A repeat with the same `client_turn_id` and fingerprint replays the stored result (or attaches to the running stream); the same id with a different fingerprint is refused.
-- Every side effect in a turn carries an operation key (`turn_id:tool_call_index`), checked by a unique constraint where it writes: a reconnect can't create a second card, quote, document or task.
+- Every side effect carries an **operation key** = `turn_id` (or `job_id`) + hash of the tool name and its canonical arguments, stored in `assistant_tool_calls` (turn/job id, sequence, tool, argument fingerprint, state `started|committed|failed|unknown`, result ref) and on the written row itself under a unique constraint (`aria_actions`, `tasks`, `quotes`, `business_documents` each gain `operation_key` and `created_via` = turn or job id). A repeat of the same operation returns the stored result; it is never written twice.
 - A turn that dies mid-run is marked `unknown` by a sweeper; its effects are reported from their operation keys, never re-run.
 - Two turns can't run at once in one conversation (the second waits or is refused with "still answering").
 
 ### 5.3 Capabilities: interactive turns vs jobs (R1–R3)
 
-Two server-side tool sets, chosen by the endpoint, not the model:
-- **Interactive:** all read tools; card tools; owner-requested internal writes (create task, create document, create draft quote, rename confirm card).
-- **Job:** read tools; card tools; internal writes only of the kinds the owner named when starting the job (stored on the job); no rename, settings, connection, job-creation or schedule-changing tools.
-- **Internal writes need the owner's request in this turn:** the tool call must cite the owner's message; the server checks the turn was started by the owner (not a brief or job) and the write's kind matches the request classifier for that message. A write prompted only by fetched text is turned into a suggestion chip ("Add 'call Bob back' as a task?"), never performed.
-- Tool results are passed to the model wrapped as quoted data with their source.
-- **Injection tests**, one per tool family: an email asking to add a recipient, substitute bank details, change an amount, create a task or document, book a meeting, or schedule a job; a poisoned summary; text inside an image. Each must yield no write and no card that the owner didn't ask for.
+**Two tool sets, chosen by the endpoint, not the model:**
+- **Interactive turn:** read tools; card tools; internal writes (task, document, draft quote). No settings, rename, connection or billing tools.
+- **Job run:** read tools; card tools; internal writes only as its stored authorisation allows; no settings, rename, connection, billing, job-creation or schedule tools.
+
+**A server-held authorisation for each turn and job (argument-level, not just kind):**
+- At the start of an interactive turn, before any tool runs, a separate, tool-less model call reads **only the owner's message** (plus the ids of records the owner tapped or attached, never fetched text) and returns a structured **turn authorisation**: the operations requested (`read`, `draft_reply`, `chase`, `book`, `create_task`, `create_document`, `create_quote`, `save_to_drive`), for each a maximum count, and the **targets** the owner named (people, emails, invoices, customers, jobs, dates, amounts). It is stored on the turn. Because it never sees fetched content, injected text can't change it.
+- Every write and every card is checked against it by the server:
+  - its operation must be in the authorisation and within its count;
+  - its target must resolve to a target the owner named, or to a record the owner tapped, or, for a reply, to the email being replied to;
+  - **recipients** must be the sender (and existing correspondents) of the email being replied to, an address the owner typed, or a contact the owner named; any other address is refused;
+  - **amounts and dates** on chases and bookings come from the stored invoice or the owner's message, never from fetched text;
+  - nothing ever carries bank details (R1).
+- Anything outside the authorisation becomes a **suggestion chip** ("Add 'call Bob back' as a task?"); tapping it is a new owner instruction, starting a new turn with its own authorisation.
+- **Jobs** get their authorisation once, from the owner's creating turn, stored on the schedule/run: operations, targets or target rule (e.g. "enquiries received today"), maximum counts. Each run is checked against that stored authorisation. Jobs are never "owner turns", and don't need to be: the stored authorisation is their authority.
+- Tool results reach the model as quoted data with their source.
+- **Injection tests** cover unsolicited kinds **and substitutions within an authorised kind**: owner asks for one reply, the email asks to add a recipient or a second reply; owner asks to chase one invoice, the email asks to chase another or change the amount; owner asks for a document, the source text asks for a second document or for bank details in it; a job's fetched email asks to widen its target; a poisoned summary; text inside an image. Each must produce no write and no card beyond the authorisation.
 
 ### 5.4 Streaming (provider layer first)
 
 - `ai_router` gains a streaming call with typed events: `text_delta`, `tool_call_complete`, `usage`, `done`, `error`. A tool call is executed only on `tool_call_complete` with fully parsed arguments.
-- Fallback after partial output: the partial text is discarded from the stored message, the user sees "trying again", and the fallback model's answer replaces it; usage from both is settled.
-- Cancellation (user taps stop or disconnects) stops the provider stream; usage so far is settled.
+- **Execution boundary.** Each completed tool call is persisted (`assistant_tool_calls`) with its argument fingerprint and result **before** its result is given back to the model. The turn's transcript (owner message, model text, tool calls, results) is therefore durable at every step.
+- **Fallback:** if a provider fails *before any tool committed*, the fallback model starts the turn afresh (partial text discarded). If it fails *after* one or more tools committed, the fallback model **continues from the stored transcript**, with the committed calls and results already in it; it can't re-run them, because a call with the same operation key returns the stored result, and any new call is checked against the turn authorisation like any other.
+- **Cancellation** (stop button, disconnect, deletion) is terminal: no new tool call starts; a call already running finishes and is recorded; the turn ends `cancelled`.
+- **Usage settlement:** provider-reported usage is recorded per attempt; if an attempt's usage is unknown, the platform records its maximum estimated cost to `ai_pence` (our cost) and the customer is charged only for the credits of operations that committed (§5.9).
+- Tests: provider failure immediately after a committed tool call; reconnect during a running tool; cancel during a tool.
 - `POST /v1/assistant/conversations/{id}/turns` returns Server-Sent Events from the turn; reconnecting with the same `client_turn_id` resumes from the stored state. The old JSON endpoint stays until the messenger replaces `AssistantChat.tsx`.
 - **Cost controls:** prompt caching on the system prompt and tool definitions; images downscaled and re-encoded; history window plus a stored running summary (the summary is data under R3); cheap-model routing for simple turns once AI-1e is in.
 
@@ -142,7 +156,7 @@ Two server-side tool sets, chosen by the endpoint, not the model:
 ### 5.7 Documents and Drive / OneDrive
 
 - `business_documents` (business-owned; `created_by_user_id`, conversation id, title, kind, body markdown, `revision`, timestamps). Tools: `create_document`, `list_documents`, `get_document`, `update_document` (owner-requested). A Documents page to open, edit, download, delete.
-- **Drive connections are their own credential.** `storage_connections` (business_id, user_id, provider `google_drive` | `onedrive`, provider account id and email, scopes granted, encrypted tokens, status, connected_at, revoked_at). Google: a **separate OAuth client** in the same Google Cloud project, so its grant and revocation are independent of the Gmail/Calendar grant (Google revokes scopes of one client's combined grant together). Scope `drive.file` only. Microsoft: `Files.ReadWrite` (delegated), because `Files.ReadWrite.AppFolder` is personal-account-only and most businesses use work accounts. Own callback route and state, own refresh path (not `email_accounts`).
+- **Drive connections are their own credential.** `storage_connections` (business_id, user_id, provider `google_drive` | `onedrive`, provider account id and email, scopes granted, encrypted tokens, status, connected_at, revoked_at). Google: an OAuth client in a **separate Google Cloud project** used only for Drive, because revoking a token removes the grants of *every* client in the same project, so a shared project would disconnect Gmail/Calendar too. That project has its own consent screen and its own verification. Scope `drive.file` only. Test: the same Google account connected to both email and Drive; connect, refresh and disconnect Drive; Gmail/Calendar keep working. Microsoft: `Files.ReadWrite` (delegated), because `Files.ReadWrite.AppFolder` is personal-account-only and most businesses use work accounts. Own callback route and state, own refresh path (not `email_accounts`).
 - **Save card** binds connection id, provider account, destination folder and the document or quote revision. If the connection was replaced or reconnected to another account since, the card is refused and shows again for the new account.
 - Folder "Business Hero/Documents" and "Business Hero/Quotes". Disconnect revokes at the provider and marks the row revoked. Files already saved stay in the owner's Drive (their copy); Business Hero keeps only the file id.
 
@@ -158,10 +172,13 @@ Two server-side tool sets, chosen by the endpoint, not the model:
 
 ### 5.9 Allowance, credits and top-ups
 
-- **Unit: fixed credits per action**, never variable pence: chat turn 1, photo quote 3, document 3, job tool call 1, morning brief 0. The owner sees credits left. Our *cost* is tracked separately in `ai_pence` (platform accounting); a per-turn cost ceiling stops a single credit from costing us more than it earns.
-- **Admission:** every billable turn, quote, document and job run reserves its credits atomically (a single statement on the business's credit balance, the same pattern as `ai_chat.turn`'s `budget_business` reservation) **before** any provider call, and settles after. Not enough credits: refused before starting, never cut off mid-turn. Concurrent turns can't overspend.
-- **Ledger:** `aria_credit_ledger` (business_id, entry type `allowance` | `topup` | `consume` | `refund` | `adjust`, credits, source id, created_at) and `aria_credit_purchases` (immutable terms at purchase: credits, price, currency, Stripe session, status). Consumption order: this month's allowance first, then top-ups oldest first. Allowance doesn't carry over; top-ups last 12 months. Plan change mid-month: the new allowance applies from the change, prorated. Refunds/disputes claw back unspent credits; spent credits are written off, recorded.
-- **Purchase:** follows `outreach_billing.start_topup` / `apply_page_event`: reserve, verify session ownership and amount, credit once on the paid webhook, replay-safe, daily reconciliation. Purchases are never one of Aria's tools.
+- **Unit: fixed credits per committed operation**, never variable pence, and they stack: a chat turn 1, plus 3 for each draft quote and 3 for each document it creates; a job run 1 per tool call plus the same creation charges; a morning brief 0. The owner sees credits left.
+- **Bounds and quote:** an interactive turn may create at most 2 quotes/documents, so its maximum is **7 credits**; a job run's maximum is 15 + 3 × its authorised creations (at most 3), so **24**. That maximum is reserved before the first provider call; a turn that would need more is refused at the start with the reason, never cut off mid-turn.
+- **Durable reservations** (new; the existing `ai_chat._Reservations` is an in-memory, per-attempt guard of *our* AI spend, and it stays as that): `aria_credit_reservations` (id, business_id, turn or job id UNIQUE, credits reserved, the lots it holds, state `held|settled|released`, created_at, expires_at). Reserving is one transaction under a per-business row lock on `aria_credit_balances`: available = allowance left + purchased left − held; the reservation records which lots it holds (allowance first, then purchased oldest first), so an allowance that ends at month-end while the turn runs is still the lot charged.
+- **Settlement exactly once**, keyed by the reservation id: charge the credits of operations that **committed** (from `assistant_tool_calls`), release the rest. Failed, cancelled and `unknown` operations are not charged to the customer (an unknown outcome is our cost, recorded in `ai_pence`). A sweeper settles reservations whose turn or job ended without settling, and releases those past `expires_at` (30 minutes).
+- **Our spend is bounded separately:** a per-turn ceiling of `ai_pence` across all tool rounds, summaries and fallback attempts, and a per-job ceiling, enforced in the router on top of the existing `_Reservations` guard. The kill switch (`profit_guard`) is platform-wide only.
+- **Ledger:** `aria_credit_ledger` (business_id, entry `allowance|purchase|consume|release|refund|adjust`, credits, lot id, reservation id or purchase id, created_at). Allowance resets each UK month and doesn't carry over. **Purchased credits never expire** (Apple §3.1.1 forbids expiry for in-app purchases; we apply one rule to all purchases). Plan change mid-month: the new allowance from that date, prorated. A refund or chargeback removes the purchase's unspent credits; any already spent are recorded as written off.
+- **Purchase sources:** `aria_credit_purchases` (immutable terms at purchase: credits, price, currency, `source` `stripe|apple`, the provider's unique transaction id under a unique constraint, status). **Stripe** follows `outreach_billing.start_topup` / `apply_page_event`: reserved purchase, verified session ownership and amount, credited once on the paid webhook, replay-safe. **Apple** (if D9(a)): consumable in-app purchase; the app sends the signed transaction to the backend, which verifies it with the App Store Server API, checks the transaction belongs to this user's account token and credits it once; App Store Server Notifications (refund, revoke) remove unspent credits. Daily reconciliation against Stripe and Apple. Purchases are never one of Aria's tools.
 - **Pricing (D6):** priced from explicit margins (target ≥ 60% gross after Stripe fees at the measured cost per credit), not from my earlier estimate. The v1 example (250 for £5 at 2p) had no margin; that's withdrawn.
 
 ### 5.10 App-store payments (D9, decided before MSG-5 and MSG-7)
@@ -178,6 +195,11 @@ Two server-side tool sets, chosen by the endpoint, not the model:
 ### 5.12 Account deletion (RED, its own ticket)
 
 - "Delete my account" in the app and a **public web deletion-request page** (Google requires one outside the app). Authenticated, confirmed, retryable workflow.
+- **Barrier first.** Confirming writes a durable `account_deletions` row (state `requested → draining → purging → done`). From that moment the server refuses, for that user: new turns, uploads, brief generation, job runs, card approvals and edits, new purchases, and sign-ins. All their sessions are revoked (Supabase admin sign-out, refresh tokens invalidated).
+- **Drain:** running turns are cancelled (§5.4, terminal) and awaited up to the turn time limit; running jobs are fenced (leases revoked, so a still-running worker can't write) and their schedules cancelled; the user's open cards are expired, so none can be approved afterwards. A card already mid-approval completes or fails under its existing durable claim before purge begins; it can't start after the barrier.
+- **Purge:** the private data below, storage connections revoked at Google/Microsoft, push tokens, attachment objects (retried until the store confirms), then the **Supabase authentication identity** itself, via the admin API. Each step is idempotent and retried; the row records progress, so a crash resumes where it stopped.
+- **All memberships:** every business the user belongs to is processed; sole-owner businesses need the choice below before the barrier is set.
+- Tests: deletion racing a running turn, an approval tap, a job run and an upload; crash mid-purge then resume.
 - **Account ≠ business.** Deleting a user removes their private conversations, briefs, attachments, push tokens, storage connections and device data, and their membership. If they're the **sole owner**, they choose: delete the business (all its records, jobs, schedules, documents, subscription cancelled) or hand ownership to another member first. Business records they created stay with the business if it continues.
 - Retention exceptions (accounting/tax records the law requires, payment records) are listed and justified. Files already saved to the owner's Drive are theirs and are not touched; the deletion confirmation says so.
 
@@ -188,20 +210,28 @@ Two server-side tool sets, chosen by the endpoint, not the model:
 - **Store checklist:** not a bare website (4.2: push, camera, offline, the messenger); in-app account deletion (§5.12); first-launch AI disclosure and consent before personal data goes to an outside AI provider, recorded; privacy labels and Data safety form matching reality; "Report this reply" on Aria's messages; a reviewer demo account on a seeded demo business.
 - **Mike's accounts, start now:** Apple Developer Program as an organisation (needs the company's D-U-N-S number, days to weeks) and a Google Play Console organisation account (a new personal account must run a 12-tester, 14-day closed test before publishing).
 
-## 6 · Schema changes, in order (one migration in flight at a time)
+### 5.14 Grounding through history (R5)
 
-| # | Ticket | Change | Risk |
-|---|---|---|---|
-| 046 | ARIA-1b | `inbox_reply_examples` (in flight) | RED |
-| 047 | MSG-1 | alter `assistant_conversations`, `assistant_messages`; create `assistant_turns` | RED |
-| 048 | MSG-3 | `aria_credit_ledger`, `aria_credit_purchases`, balance | RED |
-| 049 | MSG-4 | `assistant_attachments` + private bucket and storage policies; `quotes.source`, `quote_revision`, `reviewed_revision` | RED |
-| 050 | MSG-6 | `push_devices` | AMBER (by migration, rehearsed) |
-| 051 | MSG-7 | account-deletion support (deletion requests, audit) | RED |
-| 052 | MSG-9 | `business_documents`, `storage_connections` | RED |
-| 053 | MSG-10 | `aria_job_schedules`, `aria_jobs` | RED |
+- Every rich message stores **typed source references** in `payload.sources`: `{type, id, revision or as_of}` (e.g. `quote:…:rev 4`, `invoice:…`, `xero_summary as_of 2026-11-27T07:30Z`).
+- When history is trimmed, the running summary keeps a `sources` list alongside its text; the source refs of trimmed messages are carried into it, never dropped.
+- **Historical vs current:** a figure from history is shown as "as of {time}". A question about the current state ("what's owed now?") always calls the tools again; Aria never answers it from history or summary.
+- **Access revalidated:** each source ref is re-resolved through the tenant-scoped read tool before Aria uses it; a deleted record or a lost permission turns it into "no longer available".
+- Tests: a quote edited after summarisation (the old total isn't presented as current); a source deleted; access revoked; a brief's figures matching the database.
 
-Each: live-schema check, staging rehearsal with rollback, RLS on, no client grants, verified before the code that uses it is switched on. `assistant_name` is a JSON key (no migration).
+## 6 · Schema changes, in delivery order (one migration in flight at a time; every migration RED)
+
+| # | Ticket | Change |
+|---|---|---|
+| 046 | ARIA-1b | `inbox_reply_examples` (in flight) |
+| 047 | MSG-1 | alter `assistant_conversations` (title, pinned, archived_at, last_message_at, kind), `assistant_messages` (kind, payload); create `assistant_turns`, `assistant_tool_calls`; alter `aria_actions` (conversation_id, owner_user_id, operation_key UNIQUE, created_via) and narrow its RLS read policy (§5.1); alter `tasks` (operation_key UNIQUE, created_via) |
+| 048 | MSG-3 | `aria_credit_balances`, `aria_credit_reservations`, `aria_credit_ledger`, `aria_credit_purchases` |
+| 049 | MSG-4 | `assistant_attachments`, private bucket and storage policies; alter `quotes` (source, quote_revision, reviewed_revision, operation_key UNIQUE, created_via) |
+| 050 | MSG-7 | `account_deletions` |
+| 051 | MSG-6 | `push_devices` |
+| 052 | MSG-9 | `business_documents` (with operation_key, created_via), `storage_connections`; extend `aria_actions_type_chk` (today set in 037) with `save_to_drive` |
+| 053 | MSG-10 | `aria_job_schedules`, `aria_jobs`; `assistant_tool_calls` reused for job steps |
+
+Each: live-schema check, staging rehearsal with rollback, RLS on, no client grants (except the narrowed `aria_actions` policy), verified on production **before** the code that uses it is switched on. MSG-2 needs no migration (`assistant_name` is a JSON key and there's no rename card).
 
 ## 7 · Tickets
 
@@ -213,7 +243,7 @@ Each: live-schema check, staging rehearsal with rollback, RLS on, no client gran
 | MSG-3 | Credits | ledger, admission/settlement, allowances, top-ups on web, credits-left UI | RED | M | MSG-1; **required before the gate is lifted** |
 | MSG-4 | Photos → draft quote | attachments §5.6, router vision quote, review rule §5.5 | RED | M | MSG-1 |
 | MSG-5 | Installable web app | manifest, service worker, icons; Mike's beta begins | GREEN | S | MSG-1 |
-| MSG-6 | Push + morning brief | push devices, brief §4.3 | AMBER | M | MSG-5 |
+| MSG-6 | Push + morning brief | push devices, brief §4.3 | RED (migration 051) | M | MSG-5 |
 | MSG-7 | Account deletion | §5.12 | RED | M | MSG-1 |
 | MSG-8 | App store release | Capacitor, native build flag §5.10, consent screen, report-a-reply, demo business, listings, TestFlight / Play internal test; D9 settled; iOS in-app top-ups if D9(a) | AMBER (RED where billing) | M | MSG-3, MSG-6, MSG-7, Mike's accounts |
 | MSG-9 | Documents + Google Drive | §5.7 | RED | L | MSG-1, MSG-4 |
@@ -222,7 +252,7 @@ Each: live-schema check, staging rehearsal with rollback, RLS on, no client gran
 
 Each ticket adds the Aria read tools for its own data and grounding tests for every figure it shows (R5). Builder ≠ reviewer; `./check.sh full`; Codex reviews until approved.
 
-**Fastest safe path to the stores:** MSG-0 + MSG-2 → MSG-1 → MSG-5 (beta) → MSG-3 + MSG-4 + MSG-7 → MSG-6 → MSG-8. Documents/Drive and jobs ship as app updates.
+**Fastest safe path to the stores** (matches the migration order in §6): MSG-0 + MSG-2 → MSG-1 (047) → MSG-5 (beta, no migration) → MSG-3 (048) → MSG-4 (049) → MSG-7 (050) → MSG-6 (051) → MSG-8. Code work for later tickets can start in parallel, but each migration lands, and is verified on production, in this order. Documents/Drive (052) and jobs (053) ship as app updates. All tickets with a migration are RED.
 
 **Alongside:** 046 + PR 118; HK-3 (PR 119); VOICE-MIG before 6 Jan 2027; AI-1e (cheap-model tool use).
 
@@ -267,3 +297,17 @@ Each ticket adds the Aria read tools for its own data and grounding tests for ev
 | 15 Briefing baseline | §3, §4.3 (BRIEF-1 is the current baseline; daily pulse already retired), D7 |
 | 16 Dependencies and migrations | §6 inventory; §7 beta gate in MSG-1, MSG-3 before the gate lifts, deletion RED; task packets per ticket |
 | 17 Streaming provider layer | §5.4, MSG-0 |
+
+### Codex review 2
+
+| Finding | Answer |
+|---|---|
+| 1 Private cards reachable via business-wide paths | §5.1: `aria_actions` gains conversation and owner; every existing card endpoint and the RLS read policy enforce it; tests on API and RLS |
+| 2 Kind classifier can't enforce argument authority; job conflict | §5.3: server-held turn authorisation from the owner's message alone (operations, counts, targets); recipient, amount and target rules; jobs carry a stored authorisation; substitution tests |
+| 3 Same-project revocation | §5.7: Drive in a separate Google Cloud project; cross-integration test |
+| 4 Fallback after a committed tool | §5.4: calls persisted before results return; fallback resumes from the stored transcript; operation keys bound to argument fingerprints; terminal cancel; usage settlement |
+| 5 Reservation for compound work | §5.9: stacking charges, per-turn (7) and per-job (24) maximums reserved up front, durable reservations holding named lots, exactly-once settlement of committed operations only, sweeper; our spend capped separately. v2's description of `_Reservations` corrected |
+| 6 IAP expiry | §5.9: purchased credits never expire; Apple purchases verified with the App Store Server API, unique transaction ids, refund notifications |
+| 7 Deletion barrier and identity | §5.12: durable barrier, sessions revoked, drain and fencing, expired cards, idempotent purge including the Supabase identity, race tests |
+| 8 Migration inventory and order | §6 now includes the `aria_actions`, `tasks`, `quotes` alterations and the type constraint; delivery order matches the numbers; all RED; MSG-2 genuinely needs none |
+| 9 Grounding through trimming | §5.14 typed source refs, carried into summaries, current-state questions re-fetched, access revalidated, tests |
