@@ -86,7 +86,7 @@ Server-enforced, each with tests; prompt wording is never the control (`test_ari
 ### 4.4 Renaming the assistant
 
 - `business_settings.settings.assistant_name` (a JSON key, no migration), default "Aria", 1–24 characters (letters, spaces, apostrophes, hyphens), trimmed; refused list for profanity and obvious impersonation. Set in Settings or onboarding only, by the business owner. Asked in chat, Aria replies with a link to that setting: no rename tool and no new card type, so MSG-2 needs no migration and can run in parallel.
-- Used by the system prompt, all UI strings, cards, push, the brief, and the receptionist's greeting, which still says it's an automated assistant. Voice unchanged.
+- Used by the system prompt, all UI strings, cards, push, the brief, and the receptionist's identity. The receptionist keeps today's disclosure rule exactly (it says it's an AI when asked, `receptionist_api.py:1242`), now giving its name; the greeting stays the owner's own text. (Corrected 27 Nov from MSG-2 packet review 1; a proactive disclosure would be a separate decision for Mike.) Voice unchanged.
 
 ## 5 · How it's built
 
