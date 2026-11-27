@@ -1,201 +1,269 @@
-# MSG — Aria Messenger: our own messaging app (DESIGN)
+# MSG — Aria Messenger: our own messaging app (DESIGN, v2)
 
-**Status:** proposed, design only, for Codex design review and then Mike's acceptance of the boundary (CLAUDE.md: no large implementation stream begins before both).
+**Status:** proposed, design only. v2 answers Codex design review 1 (`audits/MSG-1-CODEX-DESIGN-REVIEW-1.md`, REQUEST CHANGES, 16 × P1, 2 × P2); §10 maps each finding to its answer. Next: Codex design review 2, then Mike accepts the boundary (CLAUDE.md: no large implementation stream begins before both). Each ticket then gets its own AGENTS.md §6 task packet (`docs/MSG-n-TICKET.md`) with negative acceptance criteria, required tests and verification commands, reviewed before it starts.
 **Owner:** Mike. **Author:** Claude Code. **Date:** 27 Nov 2026.
-**Builds on:** NS-B10 (approval cards, `aria_actions`), AI-1 (model router), ARIA-1/1b (inbox, reply learning, migration 046), BH-012 (metering), PROFIT-1 (`profit_guard`), HK-3 (model retirement), the Capacitor shell (`frontend/client/capacitor.config.ts`, commit 357b324).
+**Builds on:** NS-B10 (approval cards, `services/aria_actions.py`), AI-1 (router), ARIA-1/1b (inbox, reply learning, 046), BH-012 (metering), PROFIT-1 (`profit_guard`), BRIEF-1 (`services/whatsapp_briefings.py`), OUT top-ups (`services/outreach_billing.py`), the Capacitor shell (commit 357b324).
 
 ---
 
 ## 1 · Mike's decisions (27 Nov 2026)
 
-1. **Our own messaging app.** One messenger, ours, that looks and feels like Grok / WhatsApp: no WhatsApp or Telegram channel, because third-party platforms (Meta's 15 Jan 2026 AI-provider rule is the example) can change the terms under us.
-2. **App stores as soon as possible** (the listing is advertising in itself), with an installable web app first for Mike and the beta testers. One codebase for all three.
-3. **Aria is agentic.** She chats naturally *and* takes tasks: drafts email replies to approve, checks finances, adds tasks, creates documents, drafts quotes from job photos, and saves things into Business Hero and into the owner's Google Drive or OneDrive as the task needs.
-4. **The assistant can be renamed**, for the whole product (chat, app, briefings, the phone receptionist's greeting). A personalisation; "Aria" stays the default.
-5. **Documents:** Aria can create whatever document the business needs (letters, method statements, risk assessments, notes, policies…). **Quotes** are different: Aria saves a *draft* quote in Business Hero; the owner reviews it there, and only then can it go to Drive/OneDrive as a PDF, by download or by asking Aria.
+1. **Our own messaging app**, Grok/WhatsApp-style. No WhatsApp or Telegram channel: third-party platforms can change their terms under us (Meta's 15 Jan 2026 AI-provider rule).
+2. **App stores as soon as possible** (the listing is advertising), with an installable web app first for Mike and beta testers. One codebase.
+3. **Aria is agentic:** natural chat *and* tasks — drafts replies to approve, checks finances, adds tasks, creates documents, drafts quotes from photos, saves into Business Hero and the owner's Google Drive / OneDrive.
+4. **The assistant can be renamed** for the whole product, including the receptionist's greeting. "Aria" stays the default.
+5. **Documents:** any document the business needs. **Quotes:** Aria saves a *draft*; the owner reviews it in Business Hero; only a reviewed quote goes to Drive/OneDrive as a PDF.
 6. **Google Drive first, then OneDrive.**
-7. **All tiers** get the messenger. Starter has a smaller monthly allowance, with paid top-ups when it runs out.
-8. **A morning brief every day**, Grok-style: emails, calls, money, diary, then "what would you like me to do?". It replaces the current WhatsApp pulse/briefings, which Mike says don't help.
+7. **All tiers**; Starter has a smaller allowance, with paid top-ups.
+8. **A daily morning brief**, then "what would you like me to do?".
 
-## 2 · What must not happen (unchanged North Star rules, restated for this stream)
+## 2 · Rules this stream must not break
 
-- **Aria never moves money.** No payments, transfers, refunds or bank actions, by any tool, ever.
-- **Nothing leaves the business without a tap.** Every outward action (email, invoice chase, quote send, calendar invite to a third party, file shared outside the owner's own Drive) is an approval card. A background job may *prepare* cards; it never approves them.
-- **Business data stays tenant-scoped.** Every new table carries `business_id`, is backend-only (RLS on, no client grants, as 045/046), and every tool resolves records through the caller's business.
-- **Text from outside is data, not instructions.** Email bodies, call transcripts, uploaded images and document contents can't widen what Aria may do (prompt injection). An instruction found in an email ("send the bank details to…") never becomes an action without the owner asking and approving.
-- **No financial detail on a lock screen.** Push notifications say *that* something needs you, not the figures or the customer's words.
-- **Not a general-purpose chatbot.** Aria answers about *this* business; documents she writes are for the business.
+Server-enforced, each with tests; prompt wording is never the control (`test_aria_no_unapproved_actions.py` is the precedent).
 
-## 3 · What already exists (so we extend, not rebuild)
+- **R1 — Aria never moves money.** No payment, transfer, refund, bank-detail change or payout tool exists in any capability set, card type or job. Not even behind an approval card.
+- **R2 — Nothing outward without a tap.** Email, invoice chase, calendar invite, and any save to the owner's Drive/OneDrive is an approval card, approved by the owner on exactly the content and destination shown (the versioned, durable claim in `aria_actions.approve`). There is no "always allow" setting. Quote *sending* stays on the Quotes page as today (`_send_quote_via_aria` already directs the owner there); a chat send-quote card is out of this stream's scope.
+- **R3 — Authority comes only from the owner's own message.** Text fetched by tools (emails, transcripts, documents, image text, earlier summaries) is data. It can't add a recipient, change bank details or amounts, create, schedule or alter anything, or widen a job. Mutations in a turn must trace to the owner's message in that turn (§5.3).
+- **R4 — Tenant and user isolation** for every row, link, file, cache and queued item (§5.1).
+- **R5 — Every figure Aria states comes from a tool or a stored record**, with grounding tests (North Star §8).
+- **R6 — No financial detail or customer text on a lock screen.**
+- **R7 — Not a general-purpose chatbot.** Aria works on *this* business.
+
+## 3 · What exists today (checked on 08761b6)
 
 | Piece | Where | State |
 |---|---|---|
-| Tool-using chat, ~30 tools (accounting, Xero, invoices, cash flow, emails, calls, calendar, tasks, quotes, outreach) | `backend/assistant_tools.py`, `backend/assistant_chat.py`, `POST /v1/assistant/chat` (`main.py:2443`) | Live; one JSON response per turn, no streaming |
-| Approval cards: `send_email`, `send_invoice_chase`, `create_calendar_event`, `create_task` | `aria_actions` + `backend/aria_actions_api.py` | Live (NS-B10) |
-| Conversation history | `assistant_messages` (conversation_id, role, content) | Text only; no conversation list, titles or attachments |
-| Chat UI | `frontend/client/src/pages/AssistantChat.tsx` (531 lines) | Desktop-first page inside the app shell |
-| Quote from photos (vision, up to 5 images) | `quoting_api.generate_ai_quote` (`quoting_api.py:1146`) | Quotes page only |
-| Chat's quote tool | `assistant_chat.py:176` | Text only, calls OpenAI directly **outside the AI router**, and returns the quote without saving a draft |
-| Model router, prices, per-business AI spend | `services/ai_router.py`, `services/ai_costs.py` (`ai_pence`) | Live |
-| Generic usage meter (allowance, overage, caps) | `services/metering.py`, `usage_meters` | Live for receptionist minutes |
-| Briefing scheduler + data | `services/briefing_scheduler.py`, `services/briefing_data.py` | Live (WhatsApp/email briefings) |
-| Google OAuth (Gmail, Calendar) and Microsoft Graph (Mail) | `backend/app/email/router.py`, `providers/oauth_utils.py` | No Drive / Files scopes yet |
-| Capacitor iOS/Android shell, push plugin configured | `frontend/client/{ios,android}`, `capacitor.config.ts` | One early commit; stale; no push tokens stored anywhere |
-| Login | email + password (Supabase) | No social sign-in, so Apple's "Sign in with Apple" rule (4.8) doesn't apply |
+| Tool chat, ~30 tools | `assistant_tools.py`, `assistant_chat.process_chat_message`, `POST /v1/assistant/chat` | One JSON response per turn; the user message, provider calls, tools and reply are separate steps (not idempotent) |
+| Conversations | `assistant_conversations` (id, business_id, user_id, created_at, updated_at), `assistant_messages` (role, content) | Exist. `resolve_conversation` / `load_conversation_history` scope by user **and** business. Text only |
+| Approval cards | `aria_actions.CHAT_ACTION_TYPES`: `send_email`, `send_invoice_chase`, `create_calendar_event`, `create_task` | Versioned, durable claim on approve |
+| Chat quote tool | `assistant_chat.py:176` | Calls OpenAI directly, outside the router; doesn't save a draft |
+| Quotes from photos | `quoting_api.generate_ai_quote` | An endpoint that consumes images; not an attachment store |
+| Quote PDF | `quoting_api._get_quote_pdf_data`, `POST /v1/quotes/{id}/generate-pdf` | Reads the *current* quote and company settings |
+| Router, prices, spend | `ai_router`, `ai_costs` (`ai_pence`, all purposes, includes estimates); `ai_chat.turn` reserves budget only when `budget_business` is given | `require_priced` checks a price exists, nothing more |
+| Meter | `metering.py`, `usage_meters` | Receptionist minutes |
+| Top-up precedent | `outreach_billing.start_topup` / `apply_page_event` | Reserved purchase, verified paid session, credited once |
+| Briefings | BRIEF-1 `whatsapp_briefings.py` via `briefing_scheduler` | Daily pulse already retired; weekly (Fri) and monthly (1st) WhatsApp summaries, no AI; task reminders and alerts are separate |
+| Settings | `business_settings.settings` JSONB (`models.BusinessSettings`) | |
+| OAuth | Gmail/Calendar and Graph Mail, tokens in `email_accounts`, refreshed by `oauth_utils.get_valid_access_token` | No Drive/Files |
+| Sign-out | `AuthContext.signOut` | Signs out only; no cache cleanup |
+| Capacitor | `frontend/client/{ios,android}` | Stale, no push tokens stored |
+| Login | email + password | No social sign-in (Apple 4.8 n/a) |
+| `db.init_db` | calls `create_all()` | New tables must still come by numbered migration, not by model |
 
 ## 4 · The product
 
-### 4.1 The messenger (what the owner sees)
+### 4.1 What the owner sees
 
-- **Full-screen, chat-first**, opening straight into the latest conversation, the way WhatsApp opens. A conversation list (titles Aria writes, pin, search, delete). A clean composer with **📷 camera**, **🖼 gallery**, **📎 file**, and send.
-- **Replies stream in** word by word, with a typing indicator, and a short status line while she works ("Checking Xero…", "Reading 3 emails…").
-- **Rich messages inside the chat:** approval cards (Approve / Edit / Dismiss), draft-quote cards ("Draft quote £2,340 saved, open to review"), document cards (open, save to Drive), task cards, small finance tables, and suggestion chips under her replies ("Chase the 3 overdue", "Reply to Smith").
-- **Natural conversation:** short, plain, warm replies by default; she asks one follow-up question when something is ambiguous, rather than guessing; she remembers the thread; she uses the owner's own reply style when drafting (ARIA-1b, migration 046).
-- **Works with poor signal:** the last conversations are cached; messages typed offline are queued and sent when the phone reconnects, clearly marked as "waiting to send".
-- **The same conversations on phone, web and desktop.** The messenger is a route of the existing React app (`/m`), so the full Business Hero is one tap away for reviewing quotes, documents and finances in detail.
-- **The assistant's name and avatar** appear everywhere: header, cards, notifications, the morning brief.
+- **Full-screen, chat-first** route `/m`, opening into the latest conversation. A conversation list (Aria writes titles; pin, search, archive, delete). Composer with camera, gallery, file, send.
+- **Streaming replies** with a typing indicator and *safe* status labels ("Checking your accounts…"), never raw tool inputs or results.
+- **Rich messages:** approval cards, draft-quote cards, document cards, task cards with Undo, small finance tables, suggestion chips.
+- **Natural style:** short, warm, plain English; one clarifying question rather than a guess; the owner's own reply style when drafting (ARIA-1b).
+- **Poor signal:** recent conversations cached; plain text messages typed offline are queued and sent on reconnect, marked "waiting to send". Taps on cards are **never** queued: offline, the buttons are disabled.
+- **Same conversations on phone, web and desktop.** Full Business Hero is one tap away.
+- **The assistant's name** throughout, including notifications and the brief.
 
-### 4.2 What Aria can do from the messenger
+### 4.2 What Aria can do
 
-| Ask | What happens | Approval |
+| Ask | Result | Control |
 |---|---|---|
-| "How are we doing this month?" / "Who owes me money?" | Reads accounting/Xero/invoice tools; answers with figures from the tools only | none (read-only) |
-| "Reply to the Smith email, say Tuesday works" | Drafts in the owner's style | **card**: send email |
-| "Chase anything over 30 days" | Prepares one chase card per invoice | **card** each |
-| "Add a task to order the skip" | Task created in Business Hero | see decision D3 |
-| "Book the Jones survey Thursday 10am" | Checks availability, proposes booking | **card** |
-| *photos* + "quote for this bathroom refit" | Vision quote through the router, **saved as a draft quote** in Business Hero; a card links to it | none to save the draft (it's a draft); **card** to send it, as today |
-| "Write a risk assessment for the Hill Street job" | Document created and stored in Business Hero (§5.4); a card offers *Save to Drive* | none to create internally; **card** to save to Drive (D4) |
-| "Put the Smith quote in my Drive as a PDF" | Only if the quote has been **reviewed** in Business Hero (§5.3) | **card** |
-| "Every Friday, tell me who hasn't paid" / "Go through my inbox and draft replies to the enquiries" | A background job (§5.6) that messages back when done, with cards for anything outward | job runs on ask; outward steps are cards |
+| "How are we doing this month?" | Figures from tools only | read-only |
+| "Reply to Smith, Tuesday works" | Draft in the owner's style | card |
+| "Chase anything over 30 days" | One chase card per invoice | card each |
+| "Add a task to order the skip" | Task created, with Undo (D3) | owner-requested internal write |
+| *photos* + "quote this bathroom" | Vision quote via the router, saved as a **draft** quote; card links to it | owner-requested internal write; send stays on the Quotes page |
+| "Write a risk assessment for Hill Street" | Document stored in Business Hero; card offers Save to Drive | internal write; Drive save is a card |
+| "Put the Smith quote in my Drive" | Only a quote reviewed at its current revision (§5.5) | card bound to that revision and destination |
+| "Draft replies to today's enquiries and tell me when done" / "every Friday, who hasn't paid?" | Background job (§5.8) | job capability set; outward steps become cards; ends when cards are prepared |
 
 ### 4.3 The morning brief
 
-- At the time each user chooses (default 07:30, UK time), Aria writes the brief **into the messenger** as a new message, and a push notification says "Your morning brief is ready" (no figures on the lock screen).
-- Content: emails needing a reply (with draft-reply chips), missed calls, money in yesterday / due today / overdue, today's diary, open tasks due. Then "What would you like me to do?" with 3–4 suggested actions as chips.
-- Built on `briefing_data.py` and `briefing_scheduler.py`. Opening the app before the scheduled time can show it early.
-- The current WhatsApp pulse and briefings are switched off for a business once its owner uses the messenger brief (D7).
+- **New**, per user, at the user's chosen local time (default 07:30, the business time zone), posted into a "Morning brief" conversation; push: "Your morning brief is ready".
+- Content from `briefing_data` and tools: emails needing a reply, missed calls, money in / due / overdue, diary, tasks due; then "What would you like me to do?" with chips.
+- One brief per user per local date (unique key); opening the app early generates it once and the scheduled run then skips. Figures carry an "as of" time; a brief older than 12 hours says so.
+- Independent of `whatsapp_configs`. BRIEF-1's weekly/monthly WhatsApp summaries, task reminders and alerts keep running unchanged; whether to retire them later is D7.
+- Brief model cost is free to the customer but recorded in platform metering and capped per business per day.
 
 ### 4.4 Renaming the assistant
 
-- `business_settings.assistant_name` (default "Aria"), 1–24 characters, letters/spaces/apostrophes/hyphens, trimmed; plus an optional avatar choice from a small built-in set (no uploads at first).
-- Used by: the chat system prompt ("You are {name}…"), every UI string that says Aria, approval cards, push notifications, the morning brief, and the **receptionist's greeting** to callers (Mike: "as a whole"). The receptionist's *voice* doesn't change.
-- Refused names: names of real public figures or brands we can detect cheaply, names that claim to be a human member of staff on the phone ("I'm Sarah from accounts" on the receptionist still discloses it's an automated assistant, as today), and profanity.
-- The user sets it in Settings and in onboarding; Aria can also be asked in chat ("call yourself Max"), which shows a confirm card.
+- `business_settings.settings.assistant_name` (a JSON key, no migration), default "Aria", 1–24 characters (letters, spaces, apostrophes, hyphens), trimmed; refused list for profanity and obvious impersonation. Set in Settings or onboarding; asked in chat, it shows a confirm card (and jobs can't do it).
+- Used by the system prompt, all UI strings, cards, push, the brief, and the receptionist's greeting, which still says it's an automated assistant. Voice unchanged.
 
 ## 5 · How it's built
 
-### 5.1 Conversations and messages (migration 047, after 046 lands)
+### 5.1 Ownership model (R4)
 
-One migration in flight at a time (AGENTS.md §7), so 047 waits for 046 on production.
+- **Conversations are private to the user who started them, within one business** (as `resolve_conversation` does now). Morning briefs are private to their user.
+- **Records Aria creates belong to the business** (draft quotes, documents, tasks) and record `created_by_user_id` and the conversation they came from.
+- **Every link is validated server-side**: a message, attachment, card, document or job referenced by id must belong to the same business, and where it is conversation-scoped, to the same user. Membership is rechecked on every request and every job step; a revoked member loses access immediately.
+- **Device storage** (cache, offline queue, drafts) is keyed by user id **and** business id, encrypted where the platform offers it (Capacitor Preferences/secure storage), and purged on sign-out, account switch and business switch. A queued message is revalidated against the current session before it is submitted, and dropped (with a notice) if the user or business changed.
+- **Tests:** cross-business, same-business/different-user, revoked membership, account switch with a pending queue.
 
-- `assistant_conversations` (id, business_id, user_id, title, pinned, archived, last_message_at, created_at). Backend-only.
-- `assistant_messages` gains `kind` (`text`, `card`, `quote_draft`, `document`, `brief`, `job_update`), `payload jsonb` (card ids, quote id, document id, chips), and `client_message_id` (idempotency for the offline queue: a re-sent message is stored once).
-- `assistant_attachments` (id, business_id, message_id, storage path, mime, bytes, width, height, sha256, created_at). Images are stored in a **private** Supabase Storage bucket, path-prefixed by business id, served to the app only through short-lived signed URLs the backend issues after the tenant check.
-- Existing conversations are backfilled into `assistant_conversations` from `assistant_messages.conversation_id`.
+### 5.2 Conversations, turns and idempotency
 
-### 5.2 Streaming and the chat turn
+**Migration A (alter, not create).** `assistant_conversations` gains `title`, `pinned`, `archived_at`, `last_message_at`, `kind` (`chat` | `brief`). `assistant_messages` gains `kind` (`text`, `card`, `quote_draft`, `document`, `brief`, `job_update`) and `payload jsonb` (ids only, never signed URLs). Existing rows keep their ids and stay readable by the old endpoint. Backfill only `last_message_at`, from the newest message, after checking for orphan messages (reported, not deleted). Live-schema check first, staging rehearsal with rollback, RLS on and no client grants confirmed on every touched table.
 
-- New `POST /v1/assistant/conversations/{id}/messages` returning **Server-Sent Events**: status lines, text deltas, then the final message with its cards. The current JSON endpoint stays for the existing page until the messenger replaces it.
-- The tool loop stays in `assistant_chat.py`; tool rounds are capped (existing rule) and the whole turn is priced against the business's allowance (§5.7) **before** the model is called, as `require_priced` does now.
-- **Cost controls built in from the start:** prompt caching for the system prompt and tool definitions (the largest, repeated part of every turn); images downscaled to ≤1568 px on the long edge and re-encoded (which also strips EXIF/location); simple conversational turns routed to the cheaper model once AI-1e gives it tool use; history trimmed to the recent window plus a running summary.
+**Durable turns.** New `assistant_turns`: id, business_id, user_id, conversation_id, `client_turn_id` (UNIQUE per user + conversation), request fingerprint (hash of text + attachment ids), state (`claimed`, `running`, `done`, `failed`, `unknown`), reserved credits, settled credits, result message id, timestamps.
+- Submitting claims the turn atomically. A repeat with the same `client_turn_id` and fingerprint replays the stored result (or attaches to the running stream); the same id with a different fingerprint is refused.
+- Every side effect in a turn carries an operation key (`turn_id:tool_call_index`), checked by a unique constraint where it writes: a reconnect can't create a second card, quote, document or task.
+- A turn that dies mid-run is marked `unknown` by a sweeper; its effects are reported from their operation keys, never re-run.
+- Two turns can't run at once in one conversation (the second waits or is refused with "still answering").
 
-### 5.3 Photo quotes from chat
+### 5.3 Capabilities: interactive turns vs jobs (R1–R3)
 
-- The chat's `generate_ai_quote` is rebuilt to (a) go **through the AI router** like everything else (today it calls OpenAI directly), (b) accept the message's image attachments (max 5, as the Quotes page), and (c) **save a draft quote** (`status = draft`, `source = aria_chat`, linked to the conversation) using the same code path as the Quotes page, so drafts look identical wherever they were made.
-- The chat shows a draft-quote card: total, line count, "Open to review". Nothing is sent to the customer from chat without the existing `send_quote` card.
-- **Reviewed before Drive:** a quote gets `reviewed_at` / `reviewed_by` when the owner opens and saves (or explicitly marks reviewed) it in Business Hero. *Save quote to Drive* and *download PDF* are refused for a draft that hasn't been reviewed, and Aria says why. The PDF is the existing quote PDF (`quoting_api._get_quote_pdf_data`, `POST /v1/quotes/{id}/generate-pdf`).
+Two server-side tool sets, chosen by the endpoint, not the model:
+- **Interactive:** all read tools; card tools; owner-requested internal writes (create task, create document, create draft quote, rename confirm card).
+- **Job:** read tools; card tools; internal writes only of the kinds the owner named when starting the job (stored on the job); no rename, settings, connection, job-creation or schedule-changing tools.
+- **Internal writes need the owner's request in this turn:** the tool call must cite the owner's message; the server checks the turn was started by the owner (not a brief or job) and the write's kind matches the request classifier for that message. A write prompted only by fetched text is turned into a suggestion chip ("Add 'call Bob back' as a task?"), never performed.
+- Tool results are passed to the model wrapped as quoted data with their source.
+- **Injection tests**, one per tool family: an email asking to add a recipient, substitute bank details, change an amount, create a task or document, book a meeting, or schedule a job; a poisoned summary; text inside an image. Each must yield no write and no card that the owner didn't ask for.
 
-### 5.4 Documents
+### 5.4 Streaming (provider layer first)
 
-- `business_documents` (id, business_id, title, kind, body_markdown, created_by `aria|user`, conversation_id, source_refs, created_at, updated_at, drive_file_id, drive_provider). Backend-only.
-- Tool `create_document(title, kind, outline/instructions)`: Aria writes the document from the business's own data where relevant (customer, job, quote), stores it in Business Hero, and returns a document card. Owners can open, edit and download it (DOCX and PDF rendered server-side from the stored markdown).
-- A **Documents** section in Business Hero lists them; documents are deletable; deletion of the business cascades.
-- Documents are business documents. Aria declines to make documents that aren't about the business (consistent with §2) and never puts bank details into a document from an email alone.
+- `ai_router` gains a streaming call with typed events: `text_delta`, `tool_call_complete`, `usage`, `done`, `error`. A tool call is executed only on `tool_call_complete` with fully parsed arguments.
+- Fallback after partial output: the partial text is discarded from the stored message, the user sees "trying again", and the fallback model's answer replaces it; usage from both is settled.
+- Cancellation (user taps stop or disconnects) stops the provider stream; usage so far is settled.
+- `POST /v1/assistant/conversations/{id}/turns` returns Server-Sent Events from the turn; reconnecting with the same `client_turn_id` resumes from the stored state. The old JSON endpoint stays until the messenger replaces `AssistantChat.tsx`.
+- **Cost controls:** prompt caching on the system prompt and tool definitions; images downscaled and re-encoded; history window plus a stored running summary (the summary is data under R3); cheap-model routing for simple turns once AI-1e is in.
 
-### 5.5 Google Drive, then OneDrive
+### 5.5 Photo quotes and the review rule
 
-- **Separate connection**, its own "Connect Google Drive" button: never added silently to the existing Gmail/Calendar consent, so existing users aren't forced to re-consent to keep email working.
-- **Narrowest scopes:** Google `drive.file` (only files Business Hero creates or the user picks; not the whole Drive). Microsoft `Files.ReadWrite.AppFolder` if its folder location is acceptable to Mike, else `Files.ReadWrite` (decision D5).
-- Files go into a **"Business Hero"** folder, with subfolders `Documents` and `Quotes`. Documents are saved as Google Docs (Drive) / DOCX (OneDrive); quotes as PDF.
-- Tool `save_to_drive(document_id | quote_id)` creates an approval card (D4). Tokens are stored encrypted like the existing provider tokens; a revoked token is reported once and the card fails clearly.
+- The chat quote tool is rebuilt: through the router; using the turn's image attachments (max 5); saving the draft with `create_quote`'s own code path (server-calculated totals) with `source = aria_chat`. The card shows totals read back from the saved quote (grounding test).
+- **Review bound to content.** `quote_revision` (incremented on any material change: line items, prices, customer, terms, VAT, and the company details the PDF prints) and `reviewed_revision`. Reviewing (Save / Mark reviewed on the Quotes page) sets `reviewed_revision = quote_revision`. A material edit raises `quote_revision`, so the review lapses.
+- PDF download, generate-pdf and Save-to-Drive for an `aria_chat` quote are refused unless `reviewed_revision = quote_revision`. The Drive card stores the revision; approving a card whose revision is stale is refused ("the quote changed, review it again"). Quotes the owner built by hand are their own work and keep today's behaviour.
 
-### 5.6 Background jobs (agentic tasks)
+### 5.6 Attachments
 
-- `aria_jobs` (id, business_id, user_id, conversation_id, instruction, status `queued|running|waiting_approval|done|failed|cancelled`, steps_used, pence_used, budget_steps, budget_pence, schedule (optional cron for recurring asks), result_message_id, error, timestamps). Backend-only.
-- A worker (same process pattern as `briefing_scheduler`, with a DB claim so two instances never run the same job) runs the job as a tool loop with **hard limits**: ≤ 15 tool steps and ≤ a pence budget per job (default 25p), read tools free to use, outward tools only produce cards. On finish it posts a `job_update` message into the conversation and sends a push.
-- The owner sees running jobs in the chat ("Working on: drafting replies to 6 enquiries — 3 done") and can cancel.
-- Recurring asks ("every Friday…") are jobs with a schedule; each run is charged to the allowance; the owner can list and stop them by asking or in Settings.
+- **Upload:** the app asks for an upload slot (`POST /attachments`, with type and size); the server checks membership, limits and quotas, creates a `pending` row with a server-generated immutable key (`{business_id}/{attachment_id}`) and returns a short signed upload URL. The client uploads; `POST /attachments/{id}/finalise` makes the server fetch, decode and validate it (real MIME from content; images ≤ 10 MB, ≤ 40 MP, re-encoded to ≤ 1568 px, metadata stripped; PDF/DOCX ≤ 10 MB with page/decompressed-size limits and a parser timeout), then marks it `ready`. Only `ready` attachments owned by the same user and business can be attached to a turn.
+- **Storage:** private bucket; storage policies deny all direct client access; reads only via a fresh short-lived signed URL issued per request after the tenant check. Messages store attachment ids, never URLs.
+- **Quotas:** per message (5), per day, per business total; abandoned `pending` uploads deleted after 24 hours.
+- **Deletion** removes the row and the object; deleting a conversation or the business deletes its attachments.
+- **Rendering:** documents are rendered from stored markdown to DOCX/PDF on the server with no remote fetches, no scripts, no embedded active content.
 
-### 5.7 Allowance, credits and top-ups
+### 5.7 Documents and Drive / OneDrive
 
-- A new meter `aria_ai` on `usage_meters`, counted in **AI pence** from `ai_costs` (true cost), shown to the owner as **messages left** (a "message" = 1 credit ≈ an average turn's cost, e.g. 2p; the conversion is one constant so we can re-price without migration).
-- Allowance per tier per month (D6 for numbers). When the allowance is used up: read-only answers that cost nothing (cached brief, lists) still work; new AI turns ask the owner to top up; nothing is cut off mid-turn.
-- **Top-ups bought on the website** (Stripe, existing billing in `backend/app/billing`), never inside the iOS/Android app, so Apple/Google take no cut (App Store guideline 3.1.3(b), multiplatform services). The app doesn't link to or advertise the web purchase (Apple's rule); it says "You've used this month's messages".
-- `profit_guard` kill switch still pauses non-essential AI platform-wide.
+- `business_documents` (business-owned; `created_by_user_id`, conversation id, title, kind, body markdown, `revision`, timestamps). Tools: `create_document`, `list_documents`, `get_document`, `update_document` (owner-requested). A Documents page to open, edit, download, delete.
+- **Drive connections are their own credential.** `storage_connections` (business_id, user_id, provider `google_drive` | `onedrive`, provider account id and email, scopes granted, encrypted tokens, status, connected_at, revoked_at). Google: a **separate OAuth client** in the same Google Cloud project, so its grant and revocation are independent of the Gmail/Calendar grant (Google revokes scopes of one client's combined grant together). Scope `drive.file` only. Microsoft: `Files.ReadWrite` (delegated), because `Files.ReadWrite.AppFolder` is personal-account-only and most businesses use work accounts. Own callback route and state, own refresh path (not `email_accounts`).
+- **Save card** binds connection id, provider account, destination folder and the document or quote revision. If the connection was replaced or reconnected to another account since, the card is refused and shows again for the new account.
+- Folder "Business Hero/Documents" and "Business Hero/Quotes". Disconnect revokes at the provider and marks the row revoked. Files already saved stay in the owner's Drive (their copy); Business Hero keeps only the file id.
 
-### 5.8 Push notifications
+### 5.8 Background jobs
 
-- `push_devices` (id, business_id, user_id, platform `ios|android|web`, token, created_at, last_seen_at, disabled_at). Backend-only.
-- iOS via APNs and Android via FCM through Capacitor's PushNotifications plugin; installed web app via Web Push (VAPID). iOS web push works only once the web app is added to the Home Screen (iOS 16.4+), which is fine for the beta.
-- Sent for: morning brief ready, job finished, a card waiting, an urgent email or missed call (ARIA-PROACTIVE rules). Quiet hours per user. Generic wording, no figures or customer text (§2).
+- **Schedules and runs are separate.** `aria_job_schedules` (owner-created recurring asks: instruction, allowed write kinds, cadence in the business time zone, next_run_at, paused). `aria_jobs` (one run: instruction, allowed write kinds, schedule id + scheduled-for key, UNIQUE (schedule_id, scheduled_for), state, attempt, lease_owner, lease_expires_at, heartbeat_at, fencing token, checkpoint jsonb, tool_calls_used, credits reserved/used, elapsed, result message id, error).
+- **Execution:** claim with a lease and fencing token; heartbeat; each step checkpointed with its operation key before and after; a worker whose lease expired can't write (fencing). Attempt limit 3; a step whose outcome is unknown is never repeated, and the job ends `needs_review`.
+- **Limits:** ≤ 15 individual tool calls, ≤ 5 minutes elapsed, tool results truncated to a size cap, a credit reservation per run. Cancellation is checked between every tool call.
+- **Before each run and step:** membership, plan entitlement, allowance and provider connection are rechecked.
+- **Approval ends the run:** a job's outward steps prepare cards; the run then finishes `done` with a summary message listing the cards. It never waits for or resumes on approval.
+- **DST:** schedules are local-time; a non-existent local time runs at the next valid minute, a repeated one once; a missed run (downtime) runs once on recovery if it's within 6 hours, else is skipped and noted.
+- **Tools for Aria:** `list_jobs`, `get_job`, `cancel_job`, `list_schedules`, `pause_schedule` (owner-requested only).
 
-### 5.9 The app (installable web app → App Store / Google Play)
+### 5.9 Allowance, credits and top-ups
 
-- **Web install first:** web app manifest + service worker (icons, splash, offline cache of the shell) on the existing Vercel frontend. Mike and testers add it to the Home Screen.
-- **Stores straight after:** refresh the Capacitor shell, build the same web bundle into it, add camera/photos permissions with plain-English reasons, push, and app icons/splash.
-- Store requirements we must meet:
-  - **Not just a website in a wrapper** (Apple 4.2): native push, camera, offline cache and the messenger itself cover this.
-  - **Account deletion inside the app** (Apple 5.1.1(v)): a "Delete my account" flow that starts real deletion, not just a link to email support.
-  - **Disclosing AI and third-party AI processing** to users with consent before personal data is sent to an outside AI provider (Apple's guidelines as updated in 2025; Google's AI-generated content policy): one clear screen at first launch, recorded.
-  - **Privacy labels / Data safety form** matching what we actually collect (emails, financial data, photos, contacts).
-  - **Reporting offensive AI output** in-app (Google Play AI policy): a "Report this reply" action on Aria's messages.
-  - **Reviewer test account** with demo data (a seeded demo business), since reviewers can't connect Xero/Gmail.
-- **Mike's accounts (start now, they take time):** Apple Developer Program as an **organisation** (needs a D-U-N-S number for the company, which can take days to weeks) and a Google Play Console **organisation** account (a new *personal* Play account must first run a closed test with at least 12 testers for 14 days before it can publish; an organisation account avoids that).
+- **Unit: fixed credits per action**, never variable pence: chat turn 1, photo quote 3, document 3, job tool call 1, morning brief 0. The owner sees credits left. Our *cost* is tracked separately in `ai_pence` (platform accounting); a per-turn cost ceiling stops a single credit from costing us more than it earns.
+- **Admission:** every billable turn, quote, document and job run reserves its credits atomically (a single statement on the business's credit balance, the same pattern as `ai_chat.turn`'s `budget_business` reservation) **before** any provider call, and settles after. Not enough credits: refused before starting, never cut off mid-turn. Concurrent turns can't overspend.
+- **Ledger:** `aria_credit_ledger` (business_id, entry type `allowance` | `topup` | `consume` | `refund` | `adjust`, credits, source id, created_at) and `aria_credit_purchases` (immutable terms at purchase: credits, price, currency, Stripe session, status). Consumption order: this month's allowance first, then top-ups oldest first. Allowance doesn't carry over; top-ups last 12 months. Plan change mid-month: the new allowance applies from the change, prorated. Refunds/disputes claw back unspent credits; spent credits are written off, recorded.
+- **Purchase:** follows `outreach_billing.start_topup` / `apply_page_event`: reserve, verify session ownership and amount, credit once on the paid webhook, replay-safe, daily reconciliation. Purchases are never one of Aria's tools.
+- **Pricing (D6):** priced from explicit margins (target ≥ 60% gross after Stripe fees at the measured cost per credit), not from my earlier estimate. The v1 example (250 for £5 at 2p) had no margin; that's withdrawn.
 
-### 5.10 Security review points (for Codex to attack)
+### 5.10 App-store payments (D9, decided before MSG-5 and MSG-7)
 
-- Signed URL lifetime and tenant check on every attachment read; no public bucket.
-- Upload limits: images only for quotes (JPEG/PNG/HEIC/WebP), ≤ 10 MB each before downscale, ≤ 5 per message; files (PDF/DOCX) for "read this" requests ≤ 10 MB.
-- Prompt injection from emails, call transcripts, documents and image text: these are passed as quoted data; the outward-action boundary (cards) is the hard control; a test per outward tool proves an injected instruction yields at most a card.
-- Background jobs can't approve cards, can't change settings, can't rename the assistant, can't connect or disconnect providers, can't exceed budget.
-- Drive scope minimisation; disconnect revokes the token at Google/Microsoft.
-- Push tokens deleted on logout and on repeated delivery failure.
+- **Apple:** §3.1.3(b) lets the app use credits bought elsewhere **only if they're also offered by in-app purchase**. The compliant paths are: (a) offer top-ups by Apple in-app purchase in the iOS app too (Small Business Programme 15%), priced to keep the margin; or (b) a different, justified basis, which I haven't found for this case. Recommended: (a).
+- **Google:** a consumption-only Android app (no purchase or purchase links in the app) is permitted; Play Billing is needed only if we sell inside the app. Recommended: consumption-only on Android at first.
+- **The native bundle** must not reach Stripe checkout or the billing portal (`BillingSettings.tsx` redirects there): a build flag removes those routes and links in the native apps; an audit test lists every route in the native build.
 
-## 6 · Tickets (each its own branch, builder ≠ reviewer, `./check.sh full`, Codex review cycles)
+### 5.11 Push notifications
+
+- `push_devices` (user_id, business_id, platform, token, created_at, last_seen_at, disabled_at). APNs and FCM via Capacitor; Web Push (VAPID) for the installed web app (iOS 16.4+ after Add to Home Screen).
+- For: brief ready, job finished, card waiting, urgent email or missed call. Quiet hours. Generic wording (R6). Tokens deleted on sign-out, account deletion, and after repeated failures.
+
+### 5.12 Account deletion (RED, its own ticket)
+
+- "Delete my account" in the app and a **public web deletion-request page** (Google requires one outside the app). Authenticated, confirmed, retryable workflow.
+- **Account ≠ business.** Deleting a user removes their private conversations, briefs, attachments, push tokens, storage connections and device data, and their membership. If they're the **sole owner**, they choose: delete the business (all its records, jobs, schedules, documents, subscription cancelled) or hand ownership to another member first. Business records they created stay with the business if it continues.
+- Retention exceptions (accounting/tax records the law requires, payment records) are listed and justified. Files already saved to the owner's Drive are theirs and are not touched; the deletion confirmation says so.
+
+### 5.13 The app
+
+- **Installable web app:** manifest, service worker (shell cache only; no business data in the service-worker cache), icons.
+- **Stores:** refreshed Capacitor shell; camera/photos permissions with plain reasons; push; native-only build flag (§5.10).
+- **Store checklist:** not a bare website (4.2: push, camera, offline, the messenger); in-app account deletion (§5.12); first-launch AI disclosure and consent before personal data goes to an outside AI provider, recorded; privacy labels and Data safety form matching reality; "Report this reply" on Aria's messages; a reviewer demo account on a seeded demo business.
+- **Mike's accounts, start now:** Apple Developer Program as an organisation (needs the company's D-U-N-S number, days to weeks) and a Google Play Console organisation account (a new personal account must run a 12-tester, 14-day closed test before publishing).
+
+## 6 · Schema changes, in order (one migration in flight at a time)
+
+| # | Ticket | Change | Risk |
+|---|---|---|---|
+| 046 | ARIA-1b | `inbox_reply_examples` (in flight) | RED |
+| 047 | MSG-1 | alter `assistant_conversations`, `assistant_messages`; create `assistant_turns` | RED |
+| 048 | MSG-3 | `aria_credit_ledger`, `aria_credit_purchases`, balance | RED |
+| 049 | MSG-4 | `assistant_attachments` + private bucket and storage policies; `quotes.source`, `quote_revision`, `reviewed_revision` | RED |
+| 050 | MSG-6 | `push_devices` | AMBER (by migration, rehearsed) |
+| 051 | MSG-7 | account-deletion support (deletion requests, audit) | RED |
+| 052 | MSG-9 | `business_documents`, `storage_connections` | RED |
+| 053 | MSG-10 | `aria_job_schedules`, `aria_jobs` | RED |
+
+Each: live-schema check, staging rehearsal with rollback, RLS on, no client grants, verified before the code that uses it is switched on. `assistant_name` is a JSON key (no migration).
+
+## 7 · Tickets
 
 | # | Ticket | Contents | Risk | Band | Depends on |
 |---|---|---|---|---|---|
-| MSG-1 | Messenger core | `/m` route, conversation list, streaming endpoint, rich message kinds, chips, offline queue, migration 047 | RED (migration) | L | 046 on prod |
-| MSG-2 | Rename the assistant | setting, validation, prompt/UI/cards/receptionist greeting | AMBER | S | — (parallel with MSG-1) |
-| MSG-3 | Installable web app | manifest, service worker, icons; Mike's beta begins here | GREEN | S | MSG-1 |
-| MSG-4 | Photos → draft quote | attachments + storage, router-based vision quote, draft save, reviewed flag | RED (storage, migration) | M | MSG-1 |
-| MSG-5 | Allowance and top-ups | `aria_ai` meter, tier allowances, web top-ups, messages-left UI | RED (billing) | M | MSG-1 |
-| MSG-6 | Push + morning brief | `push_devices`, APNs/FCM/Web Push, brief in messenger, retire WhatsApp pulse per business | AMBER | M | MSG-3 |
-| MSG-7 | App store release | Capacitor refresh, permissions, account deletion, AI consent screen, report-a-reply, demo business, store listings, TestFlight / Play internal test | AMBER | M | MSG-3, MSG-6, Mike's accounts |
-| MSG-8 | Documents + Google Drive | `business_documents`, create/edit/download, Drive connection (`drive.file`), save-to-Drive cards, quote PDF to Drive after review | RED (OAuth, migration) | L | MSG-1, MSG-4 |
-| MSG-9 | Background jobs | `aria_jobs`, worker with claims and budgets, recurring asks, job messages, cancel | RED | L | MSG-1, MSG-5, MSG-6 |
-| MSG-10 | OneDrive | Graph Files scope, same cards | AMBER | M | MSG-8 |
+| MSG-0 | Streaming in the router | typed streaming events, fallback, cancel, usage | AMBER | M | — |
+| MSG-1 | Messenger core | `/m`, conversations, durable turns, SSE, rich kinds, chips, offline queue with §5.1 rules, capability sets §5.3, **beta gate** (feature flag for named businesses + a hard daily credit cap per business, so beta traffic is bounded before MSG-3) | RED | L | MSG-0, 046 on prod |
+| MSG-2 | Rename the assistant | JSON key, validation, every surface, receptionist greeting | AMBER | S | parallel with MSG-0/1 |
+| MSG-3 | Credits | ledger, admission/settlement, allowances, top-ups on web, credits-left UI | RED | M | MSG-1; **required before the gate is lifted** |
+| MSG-4 | Photos → draft quote | attachments §5.6, router vision quote, review rule §5.5 | RED | M | MSG-1 |
+| MSG-5 | Installable web app | manifest, service worker, icons; Mike's beta begins | GREEN | S | MSG-1 |
+| MSG-6 | Push + morning brief | push devices, brief §4.3 | AMBER | M | MSG-5 |
+| MSG-7 | Account deletion | §5.12 | RED | M | MSG-1 |
+| MSG-8 | App store release | Capacitor, native build flag §5.10, consent screen, report-a-reply, demo business, listings, TestFlight / Play internal test; D9 settled; iOS in-app top-ups if D9(a) | AMBER (RED where billing) | M | MSG-3, MSG-6, MSG-7, Mike's accounts |
+| MSG-9 | Documents + Google Drive | §5.7 | RED | L | MSG-1, MSG-4 |
+| MSG-10 | Background jobs | §5.8 | RED | L | MSG-1, MSG-3, MSG-6 |
+| MSG-11 | OneDrive | Graph `Files.ReadWrite`, same cards | AMBER | M | MSG-9 |
 
-**Order and parallelism:** MSG-1 and MSG-2 start together (different files). Then MSG-3 (beta), MSG-4 and MSG-5. MSG-7 starts as soon as MSG-6 is in, so the store submission isn't waiting on documents or jobs; MSG-8/9/10 ship as app updates. Migrations go one at a time: 047 (MSG-1), then MSG-4's, MSG-5's, MSG-8's, MSG-9's, in that order.
+Each ticket adds the Aria read tools for its own data and grounding tests for every figure it shows (R5). Builder ≠ reviewer; `./check.sh full`; Codex reviews until approved.
 
-**Other in-flight work that comes first or alongside:** 046 on production and PR 118; HK-3 (PR 119); VOICE-MIG before 6 Jan 2027 (tts-1 retires; whisper-1 on 26 Feb), which also unlocks voice notes in the messenger later; AI-1e (Responses API), which unlocks cheap-model tool use for §5.2.
+**Fastest safe path to the stores:** MSG-0 + MSG-2 → MSG-1 → MSG-5 (beta) → MSG-3 + MSG-4 + MSG-7 → MSG-6 → MSG-8. Documents/Drive and jobs ship as app updates.
 
-## 7 · Decisions for Mike
+**Alongside:** 046 + PR 118; HK-3 (PR 119); VOICE-MIG before 6 Jan 2027; AI-1e (cheap-model tool use).
 
-- **D1 — The messenger's place:** a new `/m` route that opens straight into chat on phones (recommended), while desktop keeps the current dashboard with the messenger one click away. Or chat-first on desktop too.
-- **D2 — Conversation threads:** several titled conversations like ChatGPT/Grok (recommended), or one continuous thread like WhatsApp.
-- **D3 — Tasks:** today `create_task` is an approval card. Recommended: internal, reversible things (task, internal document, draft quote) happen directly with an **Undo** on the message; only outward things are cards. Or keep task cards.
-- **D4 — Save to your own Drive:** recommended as a one-tap card the first time per document, with an "always allow saving to my Drive" setting. Or always direct.
-- **D5 — OneDrive folder:** the app folder (`Apps/Business Hero`, narrowest permission, recommended) or a top-level "Business Hero" folder (needs full Files permission).
-- **D6 — Allowances and top-up price:** proposed starting point, to be tuned from beta data: Starter 300 messages/month, Pro 1,500, Business 4,000; top-up 250 messages for £5. Morning briefs don't count against the allowance.
-- **D7 — WhatsApp briefings:** switch off per business once the messenger brief is on (recommended), or keep both for a period.
-- **D8 — Store name:** "Business Hero" for the app, with the assistant's name inside it (recommended), or the assistant's name in the store title.
+## 8 · Decisions for Mike
 
-## 8 · Risks
+- **D1 — Layout:** `/m` opens straight into chat on phones; desktop keeps the dashboard with the messenger one click away (recommended).
+- **D2 — Threads:** several titled conversations like Grok (recommended), or one continuous thread.
+- **D3 — Tasks from chat:** created directly when *you* ask, with Undo (recommended); or keep the current approval card.
+- **D6 — Allowances and top-up price:** set from beta cost data at ≥ 60% margin. Starting proposal to be confirmed after two weeks' beta: Starter 300 credits/month, Pro 1,500, Business 4,000.
+- **D7 — BRIEF-1 WhatsApp summaries:** keep running alongside the messenger brief for now (recommended), and decide after the beta.
+- **D8 — Store name:** "Business Hero", the assistant's name inside (recommended).
+- **D9 — iOS payments:** offer top-ups by Apple in-app purchase too, 15% to Apple (recommended); Android consumption-only at first.
 
-- **Store review delays** (first submissions are often rejected once). Mitigation: §5.9 checklist before submitting; TestFlight and Play internal testing first.
-- **AI cost** above allowance assumptions. Mitigation: metering from day one, caching, downscaling, budgets on jobs, `profit_guard`.
-- **Google OAuth verification** for the new Drive client. `drive.file` is a non-sensitive scope, but the app's consent screen and privacy policy must be up to date; verification can take days.
-- **Prompt injection** via emails and documents. Mitigation: §2 and §5.10; outward actions always cards; tests.
-- **Scope creep**: each ticket keeps its own acceptance criteria; anything new is a new ticket, not a bigger one.
+(v1's D4 "always allow saving to Drive" and D5 "OneDrive app folder" are withdrawn: R2 forbids the first; the second doesn't work for work accounts.)
+
+## 9 · Risks
+
+- Store rejection on first submission: §5.13 checklist; TestFlight / internal test first.
+- AI cost above credit price: per-turn cost ceiling, caching, downscaling, job limits, reconciliation of `ai_pence` against credits sold, `profit_guard`.
+- Google OAuth verification of the new Drive client and consent screen.
+- Prompt injection: R3 and §5.3 tests.
+- Scope creep: each ticket keeps its own acceptance criteria.
+
+## 10 · Codex review 1: where each finding is answered
+
+| Finding | Answer |
+|---|---|
+| 1 Existing `assistant_conversations` | §5.2 migration A alters it; ids kept; backfill only `last_message_at`; orphans reported |
+| 2 Isolation of links and device storage | §5.1 |
+| 3 Idempotent turns | §5.2 durable turns, operation keys, `unknown` state; §4.1 card taps never queued |
+| 4 No quote-send card; Drive approval | R2: quote send stays on the Quotes page; Drive saves always exact cards; D4 withdrawn |
+| 5 Injection criterion | R3, §5.3 capability sets, owner-request rule, test list; R1 excludes money tools from cards too |
+| 6 Review bound to content | §5.5 revisions; stale approvals refused; hand-built quotes unchanged |
+| 7 Attachment lifecycle | §5.6 |
+| 8 Separate Drive credential | §5.7 `storage_connections`, separate Google client, Graph `Files.ReadWrite`; card bound to connection |
+| 9 Job recovery | §5.8 leases, fencing, checkpoints, schedules vs runs, DST, approval ends the run |
+| 10 Admission | §5.9 atomic reservation and settlement before any provider call; allowance separate from `ai_pence` |
+| 11 Credit unit and settlement | §5.9 fixed credits, ledger, purchase terms, `outreach_billing` pattern, margin rule |
+| 12 Apple 3.1.3(b) | §5.10, D9; native build flag removes Stripe routes |
+| 13 Account deletion | §5.12, RED ticket MSG-7, public web route |
+| 14 Read tools and grounding | R5; each ticket adds its read tools and grounding tests |
+| 15 Briefing baseline | §3, §4.3 (BRIEF-1 is the current baseline; daily pulse already retired), D7 |
+| 16 Dependencies and migrations | §6 inventory; §7 beta gate in MSG-1, MSG-3 before the gate lifts, deletion RED; task packets per ticket |
+| 17 Streaming provider layer | §5.4, MSG-0 |
