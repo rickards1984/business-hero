@@ -336,3 +336,14 @@ Each is an acceptance criterion or required test in the named ticket's AGENTS.md
 - **MSG-3 / MSG-10 implementation review (Codex review 4):** fencing must also cover writes already in flight when recovery starts; the fence check and the commit are serialised (same lock or a fencing-token check inside the committing transaction).
 
 **Design status:** Codex design review 4 **APPROVED** (`audits/MSG-1-CODEX-DESIGN-REVIEW-4.md`). Awaiting Mike's acceptance of the boundary and decisions D1–D9 (§8).
+
+## 12 · Mike's acceptance (27 Nov 2026)
+
+Mike accepted the boundary and decided:
+- **D1** agreed: `/m` opens into chat on phones; desktop keeps the dashboard with the messenger one click away.
+- **D2** named conversations.
+- **D3** agreed: tasks Mike asks for are created directly, with Undo.
+- **D6** agreed for now (Starter 300 / Pro 1,500 / Business 4,000 credits a month); reviewed after the beta.
+- **D7** agreed: BRIEF-1 WhatsApp summaries keep running; decided after the beta.
+- **D8** "Business Hero" for now; open to a more tempting store title/subtitle (proposals go in MSG-8's packet).
+- **D9** agreed: iOS offers top-ups by Apple in-app purchase too; Android is consumption-only at first (top-ups bought on the website).
