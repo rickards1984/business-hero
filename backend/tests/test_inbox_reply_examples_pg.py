@@ -90,8 +90,39 @@ def test_the_limits_themselves_are_allowed(c, kw):
 def test_an_unknown_business_or_email_is_refused(c):
     biz = business(c)
     refused(c, "00000000-0000-4000-8000-000000000000", FK_VIOLATION, "inbox_reply_examples_business_id_fkey")
-    refused(c, biz, FK_VIOLATION, "inbox_reply_examples_email_message_id_fkey",
+    refused(c, biz, FK_VIOLATION, "inbox_reply_examples_email_fkey",
             email_message_id="00000000-0000-4000-8000-000000000000")
+
+
+def an_email(c, biz, tag):
+    user = c.execute(text("INSERT INTO auth.users (id, email) VALUES (gen_random_uuid(), :m) RETURNING id"),
+                     {"m": f"owner-{tag}@046.example"}).scalar()
+    account = c.execute(text("INSERT INTO email_accounts (business_id, user_id, provider, email_address) "
+                             "VALUES (:b, :u, 'google', :m) RETURNING id"),
+                        {"b": biz, "u": user, "m": f"owner-{tag}@046.example"}).scalar()
+    return c.execute(text("INSERT INTO email_messages (business_id, email_account_id, provider_message_id) "
+                          "VALUES (:b, :a, :p) RETURNING id"), {"b": biz, "a": account, "p": f"pm-046-{tag}"}).scalar()
+
+
+def test_another_businesss_email_is_refused(c):
+    """Staging fix (27 Nov 2026): the link is (business_id, email_message_id), so an
+    example can't point at another business's email: the database enforces what the
+    runbook had left to an ARIA-1b lookup."""
+    mine, theirs = business(c), business(c)
+    refused(c, mine, FK_VIOLATION, "inbox_reply_examples_email_fkey", email_message_id=an_email(c, theirs, "theirs"))
+    assert example(c, mine, email_message_id=an_email(c, mine, "mine"))
+
+
+def test_the_email_link_does_not_need_email_messages_primary_key(c):
+    """Staging's email_messages has no primary key (as 036 found): the link must use
+    037's UNIQUE (business_id, id), which both databases have (Mike's check, 27 Nov)."""
+    row = c.execute(text("""
+        SELECT ix.relname, pg_get_constraintdef(con.oid)
+          FROM pg_constraint con JOIN pg_class ix ON ix.oid = con.conindid
+         WHERE con.conname = 'inbox_reply_examples_email_fkey'""")).one()
+    assert row[0] == "email_messages_out3_business_id_key"
+    assert row[1] == ("FOREIGN KEY (business_id, email_message_id) "
+                      "REFERENCES email_messages(business_id, id) ON DELETE CASCADE")
 
 
 def test_deleting_the_business_deletes_its_examples(c):
@@ -105,13 +136,7 @@ def test_deleting_the_email_deletes_its_copied_text(c):
     """Codex 046 review 1, finding 4: SET NULL left the copied subject,
     excerpt and reply bodies behind."""
     biz = business(c)
-    user = c.execute(text("INSERT INTO auth.users (id, email) VALUES (gen_random_uuid(), 'owner@046.example') "
-                          "RETURNING id")).scalar()
-    account = c.execute(text("INSERT INTO email_accounts (business_id, user_id, provider, email_address) "
-                             "VALUES (:b, :u, 'google', 'owner@046.example') RETURNING id"),
-                        {"b": biz, "u": user}).scalar()
-    email = c.execute(text("INSERT INTO email_messages (business_id, email_account_id, provider_message_id) "
-                           "VALUES (:b, :a, 'pm-046') RETURNING id"), {"b": biz, "a": account}).scalar()
+    email = an_email(c, biz, "deleted")
     example(c, biz, email_message_id=email)
     c.execute(text("DELETE FROM email_messages WHERE id = :e"), {"e": email})
     assert c.execute(text("SELECT count(*) FROM inbox_reply_examples WHERE business_id = :b"), {"b": biz}).scalar() == 0
