@@ -1,6 +1,6 @@
-# MSG — Aria Messenger: our own messaging app (DESIGN, v3)
+# MSG — Aria Messenger: our own messaging app (DESIGN, v4)
 
-**Status:** proposed, design only. v2 answered Codex design review 1 (`audits/MSG-1-CODEX-DESIGN-REVIEW-1.md`); v3 answers review 2 (`audits/MSG-1-CODEX-DESIGN-REVIEW-2.md`, REQUEST CHANGES, 8 × P1, 1 × P2, no P0). §10 maps every finding to its answer. Next: Codex design review 3, then Mike accepts the boundary (CLAUDE.md: no large implementation stream begins before both). Each ticket then gets its own AGENTS.md §6 task packet (`docs/MSG-n-TICKET.md`) with negative acceptance criteria, required tests and verification commands, reviewed before it starts.
+**Status:** proposed, design only. v2 answered Codex design review 1 (`audits/MSG-1-CODEX-DESIGN-REVIEW-1.md`); v3 answered review 2; v4 answers review 3 (`audits/MSG-1-CODEX-DESIGN-REVIEW-3.md`, one P1). §10 maps every finding to its answer; §11 lists what review 3 carried into the task packets. Next: Codex design review 4, then Mike accepts the boundary (CLAUDE.md: no large implementation stream begins before both). Each ticket then gets its own AGENTS.md §6 task packet (`docs/MSG-n-TICKET.md`) with negative acceptance criteria, required tests and verification commands, reviewed before it starts.
 **Owner:** Mike. **Author:** Claude Code. **Date:** 27 Nov 2026.
 **Builds on:** NS-B10 (approval cards, `services/aria_actions.py`), AI-1 (router), ARIA-1/1b (inbox, reply learning, 046), BH-012 (metering), PROFIT-1 (`profit_guard`), BRIEF-1 (`services/whatsapp_briefings.py`), OUT top-ups (`services/outreach_billing.py`), the Capacitor shell (commit 357b324).
 
@@ -175,7 +175,13 @@ Server-enforced, each with tests; prompt wording is never the control (`test_ari
 - **Unit: fixed credits per committed operation**, never variable pence, and they stack: a chat turn 1, plus 3 for each draft quote and 3 for each document it creates; a job run 1 per tool call plus the same creation charges; a morning brief 0. The owner sees credits left.
 - **Bounds and quote:** an interactive turn may create at most 2 quotes/documents, so its maximum is **7 credits**; a job run's maximum is 15 + 3 × its authorised creations (at most 3), so **24**. That maximum is reserved before the first provider call; a turn that would need more is refused at the start with the reason, never cut off mid-turn.
 - **Durable reservations** (new; the existing `ai_chat._Reservations` is an in-memory, per-attempt guard of *our* AI spend, and it stays as that): `aria_credit_reservations` (id, business_id, turn or job id UNIQUE, credits reserved, the lots it holds, state `held|settled|released`, created_at, expires_at). Reserving is one transaction under a per-business row lock on `aria_credit_balances`: available = allowance left + purchased left − held; the reservation records which lots it holds (allowance first, then purchased oldest first), so an allowance that ends at month-end while the turn runs is still the lot charged.
-- **Settlement exactly once**, keyed by the reservation id: charge the credits of operations that **committed** (from `assistant_tool_calls`), release the rest. Failed, cancelled and `unknown` operations are not charged to the customer (an unknown outcome is our cost, recorded in `ai_pence`). A sweeper settles reservations whose turn or job ended without settling, and releases those past `expires_at` (30 minutes).
+- **Settlement exactly once**, keyed by the reservation id: charge the credits of operations that **committed** (from `assistant_tool_calls`), release the rest. Failed, cancelled and `unknown` operations are not charged to the customer (an unknown outcome is our cost, recorded in `ai_pence`). 
+- **Expiry triggers recovery, never a blind release.** A reservation still `held` past `expires_at` (30 minutes), or whose turn/job ended without settling, is recovered by a sweeper in this order, all under the reservation's row lock:
+  1. **Fence the work:** mark the turn `cancelled` / revoke the job's lease and fencing token, so no further operation can commit against this reservation (a still-running worker's next write is refused).
+  2. **Reconcile:** read the operations persisted in `assistant_tool_calls` for that turn/job. `committed` ones are charged; `started` ones are resolved by their operation key on the written row (row present → committed, absent → not committed); any still undeterminable are `unknown` (no charge, our cost).
+  3. **Settle exactly once:** one settlement entry for the committed charges, then release only the unused remainder. Settlement and recovery share the same reservation id and the same lock, so a late normal settlement and the sweeper can't both settle: whichever runs second sees `settled` and does nothing.
+  4. A reservation is released in full only when reconciliation finds nothing chargeable committed.
+  Credits stay held (not available to other turns) until step 3 completes. Tests: a document commits, the worker crashes, recovery after expiry charges it once; expiry racing a normal settlement settles once; a fenced worker's late write is refused.
 - **Our spend is bounded separately:** a per-turn ceiling of `ai_pence` across all tool rounds, summaries and fallback attempts, and a per-job ceiling, enforced in the router on top of the existing `_Reservations` guard. The kill switch (`profit_guard`) is platform-wide only.
 - **Ledger:** `aria_credit_ledger` (business_id, entry `allowance|purchase|consume|release|refund|adjust`, credits, lot id, reservation id or purchase id, created_at). Allowance resets each UK month and doesn't carry over. **Purchased credits never expire** (Apple §3.1.1 forbids expiry for in-app purchases; we apply one rule to all purchases). Plan change mid-month: the new allowance from that date, prorated. A refund or chargeback removes the purchase's unspent credits; any already spent are recorded as written off.
 - **Purchase sources:** `aria_credit_purchases` (immutable terms at purchase: credits, price, currency, `source` `stripe|apple`, the provider's unique transaction id under a unique constraint, status). **Stripe** follows `outreach_billing.start_topup` / `apply_page_event`: reserved purchase, verified session ownership and amount, credited once on the paid webhook, replay-safe. **Apple** (if D9(a)): consumable in-app purchase; the app sends the signed transaction to the backend, which verifies it with the App Store Server API, checks the transaction belongs to this user's account token and credits it once; App Store Server Notifications (refund, revoke) remove unspent credits. Daily reconciliation against Stripe and Apple. Purchases are never one of Aria's tools.
@@ -311,3 +317,19 @@ Each ticket adds the Aria read tools for its own data and grounding tests for ev
 | 7 Deletion barrier and identity | §5.12: durable barrier, sessions revoked, drain and fencing, expired cards, idempotent purge including the Supabase identity, race tests |
 | 8 Migration inventory and order | §6 now includes the `aria_actions`, `tasks`, `quotes` alterations and the type constraint; delivery order matches the numbers; all RED; MSG-2 genuinely needs none |
 | 9 Grounding through trimming | §5.14 typed source refs, carried into summaries, current-state questions re-fetched, access revalidated, tests |
+
+### Codex review 3
+
+| Finding | Answer |
+|---|---|
+| 1 Expiry can release committed work | §5.9: expiry fences the work, reconciles persisted operations, settles once under the reservation lock, releases only the remainder; tests |
+
+## 11 · Carried into the task packets (Codex review 3, not design blockers)
+
+Each is an acceptance criterion or required test in the named ticket's AGENTS.md §6 packet, reviewed before the ticket starts.
+
+- **MSG-0/1:** `cancelled` in the turn state machine; disconnect/reconnect behaviour; authorisation counts cumulative across fallback; full operation vocabulary (document updates, job and schedule controls).
+- **MSG-3:** the durable event that earns the base 1-credit chat charge (including a reply with no tool calls); refunds against lots held by a reservation.
+- **MSG-4/9:** every PDF/export path enumerated, including `send_quote_email` (which generates PDFs directly), all checking the review revision; atomic revision checks against concurrent edits and company-setting changes.
+- **MSG-7:** concrete race tests for legacy endpoints, in-flight uploads and signed upload URLs, brief generation, and workers that outlive cancellation.
+- **Every migration packet:** exact columns, constraints, ownership backfills, grants and rollback evidence, including the §5.1 provenance.
