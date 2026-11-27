@@ -333,3 +333,6 @@ Each is an acceptance criterion or required test in the named ticket's AGENTS.md
 - **MSG-4/9:** every PDF/export path enumerated, including `send_quote_email` (which generates PDFs directly), all checking the review revision; atomic revision checks against concurrent edits and company-setting changes.
 - **MSG-7:** concrete race tests for legacy endpoints, in-flight uploads and signed upload URLs, brief generation, and workers that outlive cancellation.
 - **Every migration packet:** exact columns, constraints, ownership backfills, grants and rollback evidence, including the §5.1 provenance.
+- **MSG-3 / MSG-10 implementation review (Codex review 4):** fencing must also cover writes already in flight when recovery starts; the fence check and the commit are serialised (same lock or a fencing-token check inside the committing transaction).
+
+**Design status:** Codex design review 4 **APPROVED** (`audits/MSG-1-CODEX-DESIGN-REVIEW-4.md`). Awaiting Mike's acceptance of the boundary and decisions D1–D9 (§8).
