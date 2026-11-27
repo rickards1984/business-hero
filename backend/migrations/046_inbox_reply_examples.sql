@@ -18,13 +18,19 @@ CREATE TABLE IF NOT EXISTS public.inbox_reply_examples (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   business_id uuid NOT NULL REFERENCES public.businesses(id) ON DELETE CASCADE,
   category text NOT NULL CHECK (category IN ('new_enquiry', 'customer', 'complaint')),
-  email_message_id uuid REFERENCES public.email_messages(id) ON DELETE CASCADE,   -- the email gone: its copied text goes too
+  email_message_id uuid,   -- linked below: same business, and the email gone takes its copied text
   incoming_subject text CHECK (incoming_subject IS NULL OR char_length(incoming_subject) <= 500),
   incoming_excerpt text CHECK (incoming_excerpt IS NULL OR char_length(incoming_excerpt) <= 2000),
   draft_body text NOT NULL CHECK (char_length(draft_body) BETWEEN 1 AND 10000),
   sent_body text NOT NULL CHECK (char_length(sent_body) BETWEEN 1 AND 10000),
   edited boolean NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  -- To email_messages' UNIQUE (business_id, id) (037, email_messages_out3_business_id_key),
+  -- not to its id: staging's email_messages has no primary key (found 27 Nov 2026,
+  -- as 036 found on 19 Oct), while both databases have this key. It also means
+  -- an example can only point at an email of the SAME business.
+  CONSTRAINT inbox_reply_examples_email_fkey FOREIGN KEY (business_id, email_message_id)
+    REFERENCES public.email_messages (business_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS inbox_reply_examples_recent

@@ -19,11 +19,18 @@
 **Prerequisites for ARIA-1b, before it uses the table** (review 2). Each must be built **and tested** there:
 - the owner can see and delete their examples;
 - the 20-per-category cap is enforced on every insert;
-- an example's email must belong to the same business: a tenant-scoped lookup, with a test that rejects another business's email. The database can't enforce this without changing `email_messages`.
+- an example's email must belong to the same business. **The database now enforces this** (staging fix below); ARIA-1b still looks the email up within the business, so the owner gets a clear error rather than a database one.
+
+**Staging fix, 27 Nov 2026.** The first staging run of STEP 1 failed with `there is no unique constraint matching given keys for referenced table "email_messages"`. Being one transaction, nothing changed. Staging's `email_messages` has no primary key (the drift 036 found on 19 Oct); production has one. Both have 037's `UNIQUE (business_id, id)` (Mike's check of both, 27 Nov). So the email link is now `(business_id, email_message_id) → email_messages (business_id, id) ON DELETE CASCADE`:
+- it doesn't need the primary key, so it works on both databases;
+- deleting an email still deletes its examples, copied text included;
+- an example can't point at another business's email.
+
+Rehearsed locally on a copy with `email_messages`' primary key removed, as on staging: the old link reproduces the staging error; the new one applies. Codex review 4 (`audits/046-CODEX-CODE-REVIEW-4.md`) covers the change.
 
 **Rehearsed locally** on the PostgreSQL harness (`scripts/rls-local.sh`, which now replays 040–046), 25 Nov 2026:
 - created by `up`: row-level security on, no client grants, 10 columns, 0 rows;
-- `scripts/rls-local.sh test`: 394 passed, including `test_inbox_reply_examples_pg.py` (17), which covers each rule, its limits, unknown business or email, and deleting the business or the email;
+- `scripts/rls-local.sh test`: 396 passed (after the staging fix), including `test_inbox_reply_examples_pg.py` (19), which covers each rule, its limits, unknown business or email, another business's email, the link not needing the primary key, and deleting the business or the email;
 - applied again: nothing changed;
 - ROLLBACK, then applied again: back as before.
 
